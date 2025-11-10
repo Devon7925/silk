@@ -1,9 +1,11 @@
 #[derive(Clone)]
-pub struct Identifier(String);
+pub struct Identifier(pub String);
 
 #[derive(Clone)]
 pub enum BindingPattern {
     Identifier(Identifier),
+    Struct(Vec<(Identifier, BindingPattern)>),
+    TypeHint(Box<BindingPattern>, Box<Expression>),
 }
 
 #[derive(Clone)]
@@ -12,7 +14,37 @@ pub enum ExpressionLiteral {
 }
 
 #[derive(Clone)]
+pub enum IntrinsicType {
+    I32,
+    Type,
+}
+
+#[derive(Clone)]
+pub enum IntrinsicOperation {
+    Add(Box<Expression>, Box<Expression>),
+    Subtract(Box<Expression>, Box<Expression>),
+    Multiply(Box<Expression>, Box<Expression>),
+    Divide(Box<Expression>, Box<Expression>),
+}
+
+#[derive(Clone)]
 pub enum Expression {
+    IntrinsicType(IntrinsicType),
+    IntrinsicOperation(IntrinsicOperation),
+    AttachImplementation {
+        type_expr: Box<Expression>,
+        implementation: Box<Expression>,
+    },
+    Function {
+        parameter: BindingPattern,
+        return_type: Box<Expression>,
+        body: Box<Expression>,
+    },
+    FunctionType {
+        parameter: BindingPattern,
+        return_type: Box<Expression>,
+    },
+    Struct(Vec<(Identifier, Expression)>),
     Literal(ExpressionLiteral),
     Identifier(Identifier),
     Operation {
@@ -30,9 +62,8 @@ pub enum Expression {
 
 #[derive(Clone)]
 pub struct Binding {
-    pattern: BindingPattern,
-    type_hint: Option<Expression>,
-    expr: Expression,
+    pub pattern: BindingPattern,
+    pub expr: Expression,
 }
 
 pub fn parse_let(file: &str) -> Option<&str> {
@@ -93,7 +124,7 @@ pub fn parse_literal(file: &str) -> Option<(ExpressionLiteral, &str)> {
     Some((ExpressionLiteral::Number(number), remaining))
 }
 
-pub fn parse_binding_pattern(file: &str) -> Result<(BindingPattern, &str), String> {
+pub fn parse_simple_binding_pattern(file: &str) -> Result<(BindingPattern, &str), String> {
     if let Some((identifier, remaining)) = parse_identifier(file) {
         return Ok((BindingPattern::Identifier(identifier), remaining));
     }
@@ -106,6 +137,19 @@ pub fn parse_type_hint(file: &str) -> Option<Result<(Expression, &str), String>>
     let file = parse_optional_whitespace(file);
 
     Some(parse_operation_expression(file))
+}
+
+pub fn parse_binding_pattern(file: &str) -> Result<(BindingPattern, &str), String> {
+    let (pattern, file) = parse_simple_binding_pattern(file)?;
+    if let Some(type_hint_parse) = parse_type_hint(file) {
+        let (type_expr, remaining) = type_hint_parse?;
+        return Ok((
+            BindingPattern::TypeHint(Box::new(pattern), Box::new(type_expr)),
+            remaining,
+        ));
+    }
+
+    Ok((pattern, file))
 }
 
 pub fn parse_grouping_expression(file: &str) -> Option<(Expression, &str)> {
@@ -255,9 +299,6 @@ pub fn parse_binding(file: &str) -> Option<Result<(Binding, &str), String>> {
     fn parse_binding(file: &str) -> Result<(Binding, &str), String> {
         let file = parse_whitespace(file).ok_or("Expected whitespace after let".to_string())?;
         let (pattern, file) = parse_binding_pattern(file)?;
-        let (type_hint, file) = parse_type_hint(file)
-            .map(|h| h.map(|(expr, file)| (Some(expr), file)))
-            .unwrap_or(Ok((None, file)))?;
         let file = parse_optional_whitespace(file);
         let file = parse_eq(file).ok_or("Expected = after binding pattern".to_string())?;
         let file = parse_optional_whitespace(file);
@@ -266,7 +307,6 @@ pub fn parse_binding(file: &str) -> Option<Result<(Binding, &str), String>> {
         Ok((
             Binding {
                 pattern,
-                type_hint,
                 expr,
             },
             file,
@@ -340,15 +380,15 @@ let y: i32 = x
         panic!()
     };
     assert_eq!(
-        matches!(binding2.pattern, BindingPattern::Identifier(ref id) if id.0 == "y"),
-        true
-    );
-    assert_eq!(
-        matches!(binding2.type_hint, Some(Expression::Identifier(ref hint)) if hint.0 == "i32"),
-        true
-    );
-    assert_eq!(
         matches!(binding2.expr, Expression::Identifier(ref lit) if lit.0 == "x"),
+        true
+    );
+    let BindingPattern::TypeHint(binding2, binding2_type) = &binding2.pattern else {
+        panic!()
+    };
+    assert!(matches!(**binding2, BindingPattern::Identifier(ref hint) if hint.0 == "y"));
+    assert_eq!(
+        matches!(**binding2_type, Expression::Identifier(ref hint) if hint.0 == "i32"),
         true
     );
 }
