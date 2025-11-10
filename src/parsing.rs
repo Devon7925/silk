@@ -1,13 +1,17 @@
+#[derive(Clone)]
 pub struct Identifier(String);
 
+#[derive(Clone)]
 pub enum BindingPattern {
     Identifier(Identifier),
 }
 
+#[derive(Clone)]
 pub enum ExpressionLiteral {
     Number(i32),
 }
 
+#[derive(Clone)]
 pub enum Expression {
     Literal(ExpressionLiteral),
     Identifier(Identifier),
@@ -20,6 +24,7 @@ pub enum Expression {
     Block(Vec<Expression>),
 }
 
+#[derive(Clone)]
 pub struct Binding {
     pattern: BindingPattern,
     type_hint: Option<Expression>,
