@@ -20,6 +20,10 @@ pub enum Expression {
         left: Box<Expression>,
         right: Box<Expression>,
     },
+    FunctionCall {
+        function: Box<Expression>,
+        argument: Box<Expression>,
+    },
     Binding(Box<Binding>),
     Block(Vec<Expression>),
 }
@@ -152,16 +156,37 @@ pub fn parse_isolated_expression(file: &str) -> Result<(Expression, &str), Strin
     ))
 }
 
+pub fn parse_function_call(file: &str) -> Result<(Expression, &str), String> {
+    let mut exprs = vec![];
+    let (function_expr, mut remaining) = parse_isolated_expression(file)?;
+    remaining = parse_optional_whitespace(remaining);
+    exprs.push(function_expr);
+    while let Ok((argument_expr, rest)) = parse_isolated_expression(remaining) {
+        remaining = parse_optional_whitespace(rest);
+        exprs.push(argument_expr);
+    }
+    Ok((
+        exprs
+            .into_iter()
+            .reduce(|function, argument| Expression::FunctionCall {
+                function: Box::new(function),
+                argument: Box::new(argument),
+            })
+            .unwrap(),
+        remaining,
+    ))
+}
+
 pub fn parse_operation_expression(file: &str) -> Result<(Expression, &str), String> {
     fn parse_operations(file: &str) -> Result<(Vec<Expression>, Vec<String>, &str), String> {
         let mut expressions: Vec<Expression> = Vec::new();
         let mut operators: Vec<String> = Vec::new();
-        let (expression, mut remaining) = parse_isolated_expression(file)?;
+        let (expression, mut remaining) = parse_function_call(file)?;
         remaining = parse_optional_whitespace(remaining);
         expressions.push(expression);
         while let Some((operator, rest)) = parse_operator(remaining) {
             let rest = parse_optional_whitespace(rest);
-            let (next_expression, rest) = parse_isolated_expression(rest)?;
+            let (next_expression, rest) = parse_function_call(rest)?;
             let rest = parse_optional_whitespace(rest);
             operators.push(operator);
             expressions.push(next_expression);
@@ -252,7 +277,8 @@ pub fn parse_binding(file: &str) -> Option<Result<(Binding, &str), String>> {
 
 pub fn parse_individual_expression(file: &str) -> Result<(Expression, &str), String> {
     if let Some(binding_parse) = parse_binding(file) {
-        return binding_parse.map(|(binding, remaining)| (Expression::Binding(Box::new(binding)), remaining));
+        return binding_parse
+            .map(|(binding, remaining)| (Expression::Binding(Box::new(binding)), remaining));
     }
     parse_operation_expression(file)
 }

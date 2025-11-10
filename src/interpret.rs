@@ -11,5 +11,6 @@ fn interpret_expression(expr: Expression, context: &Context) -> Result<Expressio
         Expression::Operation { operator, left, right } => todo!(),
         Expression::Binding(binding) => todo!(),
         Expression::Block(expressions) => todo!(),
+        Expression::FunctionCall { function, argument } => todo!(),
     }
 }
