@@ -145,7 +145,12 @@ pub fn parse_type_hint(file: &str) -> Option<Result<(Expression, &str), String>>
 }
 
 pub fn parse_binding_pattern(file: &str) -> Result<(BindingPattern, &str), String> {
-    let (pattern, file) = parse_simple_binding_pattern(file)?;
+    let file = parse_optional_whitespace(file);
+    let (pattern, file) = if file.starts_with("{") {
+        parse_struct_binding_pattern(file)?
+    } else {
+        parse_simple_binding_pattern(file)?
+    };
     if let Some(type_hint_parse) = parse_type_hint(file) {
         let (type_expr, remaining) = type_hint_parse?;
         return Ok((
@@ -157,11 +162,53 @@ pub fn parse_binding_pattern(file: &str) -> Result<(BindingPattern, &str), Strin
     Ok((pattern, file))
 }
 
+fn parse_struct_binding_pattern(file: &str) -> Result<(BindingPattern, &str), String> {
+    let mut remaining = file
+        .strip_prefix("{")
+        .ok_or_else(|| "Expected { to start struct binding pattern".to_string())?;
+    let mut fields = Vec::new();
+    let mut tuple_index = 0usize;
+
+    loop {
+        remaining = parse_optional_whitespace(remaining);
+
+        if let Some(rest) = remaining.strip_prefix("}") {
+            return Ok((BindingPattern::Struct(fields), rest));
+        }
+
+        if let Some((field_identifier, after_identifier)) = parse_identifier(remaining) {
+            let after_ws = parse_optional_whitespace(after_identifier);
+            if let Some(rest_after_equals) = after_ws.strip_prefix("=") {
+                let rest_after_equals = parse_optional_whitespace(rest_after_equals);
+                let (field_pattern, rest) = parse_binding_pattern(rest_after_equals)?;
+                fields.push((field_identifier, field_pattern));
+                remaining = parse_optional_whitespace(rest);
+            } else {
+                let (field_pattern, rest) = parse_binding_pattern(remaining)?;
+                fields.push((Identifier(tuple_index.to_string()), field_pattern));
+                tuple_index += 1;
+                remaining = parse_optional_whitespace(rest);
+            }
+        } else {
+            let (field_pattern, rest) = parse_binding_pattern(remaining)?;
+            fields.push((Identifier(tuple_index.to_string()), field_pattern));
+            tuple_index += 1;
+            remaining = parse_optional_whitespace(rest);
+        }
+
+        if let Some(rest) = remaining.strip_prefix("}") {
+            return Ok((BindingPattern::Struct(fields), rest));
+        }
+
+        remaining = remaining
+            .strip_prefix(",")
+            .ok_or_else(|| "Expected , or } in struct binding pattern".to_string())?;
+    }
+}
+
 pub fn parse_grouping_expression(file: &str) -> Option<(Expression, &str)> {
     let file = file.strip_prefix("(")?;
-    let file = parse_optional_whitespace(file);
-    let (expr, file) = parse_block(file).ok()?;
-    let file = parse_optional_whitespace(file);
+    let (expr, file) = parse_block_with_terminators(file, &[')']).ok()?;
     let file = file.strip_prefix(")")?;
     Some((expr, file))
 }
@@ -189,9 +236,132 @@ fn operator_precedence(operator: &str) -> u8 {
     }
 }
 
+fn parse_function_literal(file: &str) -> Option<Result<(Expression, &str), String>> {
+    fn parse_function_literal_inner(file: &str) -> Result<(Expression, &str), String> {
+        let file = parse_optional_whitespace(file);
+        let (parameter, file) = parse_function_parameter(file)?;
+        let file = parse_optional_whitespace(file);
+        let file = file
+            .strip_prefix("->")
+            .ok_or_else(|| "Expected -> after function parameter".to_string())?;
+        let file = parse_optional_whitespace(file);
+        let (return_type, file) = parse_operation_expression(file)?;
+        let file = parse_optional_whitespace(file);
+        let (return_type, body, file) = if file.starts_with("(") {
+            let (body, file) = parse_grouping_expression(file)
+                .ok_or_else(|| "Expected function body expression".to_string())?;
+            (return_type, body, file)
+        } else {
+            match return_type {
+                Expression::FunctionCall { function, argument } => (*function, *argument, file),
+                _ => return Err("Expected function body expression".to_string()),
+            }
+        };
+        Ok((
+            Expression::Function {
+                parameter,
+                return_type: Box::new(return_type),
+                body: Box::new(body),
+            },
+            file,
+        ))
+    }
+
+    let remaining = file.strip_prefix("fn")?;
+    if remaining
+        .chars()
+        .next()
+        .filter(|c| c.is_alphanumeric() || *c == '_')
+        .is_some()
+    {
+        return None;
+    }
+    Some(parse_function_literal_inner(remaining))
+}
+
+fn parse_function_parameter(file: &str) -> Result<(BindingPattern, &str), String> {
+    let file = parse_optional_whitespace(file);
+    if let Some(remaining) = file.strip_prefix("(") {
+        let remaining = parse_optional_whitespace(remaining);
+        let (pattern, remaining) = parse_binding_pattern(remaining)?;
+        let remaining = parse_optional_whitespace(remaining);
+        let remaining = remaining
+            .strip_prefix(")")
+            .ok_or_else(|| "Expected ) after function parameter".to_string())?;
+        Ok((pattern, remaining))
+    } else if file.starts_with("{") {
+        parse_struct_binding_pattern(file)
+    } else {
+        Err("Expected function parameter after fn".to_string())
+    }
+}
+
+fn parse_struct_expression(file: &str) -> Option<Result<(Expression, &str), String>> {
+    fn parse_struct_expression_inner(file: &str) -> Result<(Expression, &str), String> {
+        let mut remaining = file
+            .strip_prefix("{")
+            .ok_or_else(|| "Expected { to start struct literal".to_string())?;
+        let mut items = Vec::new();
+        let mut tuple_index = 0usize;
+
+        loop {
+            remaining = parse_optional_whitespace(remaining);
+
+            if let Some(rest) = remaining.strip_prefix("}") {
+                return Ok((Expression::Struct(items), rest));
+            }
+
+            if let Some((identifier, after_identifier)) = parse_identifier(remaining) {
+                let after_ws = parse_optional_whitespace(after_identifier);
+                if let Some(after_equals) = after_ws.strip_prefix("=") {
+                    let after_ws = parse_optional_whitespace(after_equals);
+                    let (value_expr, rest) = parse_operation_expression(after_ws)?;
+                    items.push((identifier, value_expr));
+                    remaining = rest;
+                    remaining = parse_optional_whitespace(remaining);
+
+                    if let Some(rest) = remaining.strip_prefix("}") {
+                        return Ok((Expression::Struct(items), rest));
+                    }
+
+                    remaining = remaining
+                        .strip_prefix(",")
+                        .ok_or_else(|| "Expected , or } in struct literal".to_string())?;
+                    continue;
+                }
+            }
+
+            let (value_expr, rest) = parse_operation_expression(remaining)?;
+            items.push((Identifier(tuple_index.to_string()), value_expr));
+            tuple_index += 1;
+            remaining = rest;
+            remaining = parse_optional_whitespace(remaining);
+
+            if let Some(rest) = remaining.strip_prefix("}") {
+                return Ok((Expression::Struct(items), rest));
+            }
+
+            remaining = remaining
+                .strip_prefix(",")
+                .ok_or_else(|| "Expected , or } in struct literal".to_string())?;
+        }
+    }
+
+    if !file.starts_with("{") {
+        return None;
+    }
+    Some(parse_struct_expression_inner(file))
+}
+
 pub fn parse_isolated_expression(file: &str) -> Result<(Expression, &str), String> {
+    if let Some(function_parse) = parse_function_literal(file) {
+        return function_parse;
+    }
     if let Some((expr, remaining)) = parse_grouping_expression(file) {
         return Ok((expr, remaining));
+    }
+    if let Some(struct_parse) = parse_struct_expression(file) {
+        return struct_parse;
     }
     if let Some((identifier, remaining)) = parse_identifier(file) {
         return Ok((Expression::Identifier(identifier), remaining));
@@ -329,29 +499,54 @@ pub fn parse_individual_expression(file: &str) -> Result<(Expression, &str), Str
 }
 
 pub fn parse_block(file: &str) -> Result<(Expression, &str), String> {
+    parse_block_with_terminators(file, &[])
+}
+
+fn parse_block_with_terminators<'a>(
+    file: &'a str,
+    terminators: &[char],
+) -> Result<(Expression, &'a str), String> {
     let mut expressions = Vec::new();
-    let mut remaining = file;
-    remaining = parse_optional_whitespace(remaining);
+    let mut remaining = parse_optional_whitespace(file);
 
-    let (expression, rest) = parse_individual_expression(remaining)?;
-    expressions.push(expression);
-    remaining = rest;
-    remaining = parse_optional_whitespace(remaining);
+    loop {
+        if remaining.is_empty() {
+            break;
+        }
 
-    while !remaining.trim().is_empty() {
-        let rest = parse_semicolon(remaining)?;
-        let rest = parse_optional_whitespace(rest);
-        let (expression, rest) = parse_individual_expression(rest)?;
+        if let Some(ch) = remaining.chars().next() {
+            if terminators.contains(&ch) {
+                break;
+            }
+        }
+
+        let (expression, rest) = parse_individual_expression(remaining)?;
         expressions.push(expression);
-        remaining = rest;
-        remaining = parse_optional_whitespace(remaining);
+        remaining = parse_optional_whitespace(rest);
+
+        if remaining.is_empty() {
+            break;
+        }
+
+        if let Some(ch) = remaining.chars().next() {
+            if terminators.contains(&ch) {
+                break;
+            }
+        }
+
+        let rest = parse_semicolon(remaining)?;
+        remaining = parse_optional_whitespace(rest);
+    }
+
+    if expressions.is_empty() {
+        return Err("Cannot parse empty block".to_string());
     }
 
     if expressions.len() == 1 {
-        return Ok((expressions.into_iter().next().unwrap(), remaining));
+        Ok((expressions.into_iter().next().unwrap(), remaining))
+    } else {
+        Ok((Expression::Block(expressions), remaining))
     }
-
-    Ok((Expression::Block(expressions), remaining))
 }
 
 #[test]
@@ -461,4 +656,150 @@ fn parse_operation_expression_precedence() {
         *right,
         Expression::Literal(ExpressionLiteral::Number(3))
     ));
+}
+
+#[test]
+fn parse_function_binding_and_call() {
+    let (expr, remaining) = parse_block(
+        "
+let foo = fn(bar: i32) -> i32 (
+    bar + 1
+);
+foo(123)
+    ",
+    )
+    .unwrap();
+
+    assert!(remaining.trim().is_empty());
+
+    let Expression::Block(items) = expr else {
+        panic!("expected block with binding and call");
+    };
+    assert_eq!(items.len(), 2);
+
+    let Expression::Binding(binding) = &items[0] else {
+        panic!("first expression should be binding");
+    };
+    assert!(matches!(
+        binding.pattern,
+        BindingPattern::Identifier(Identifier(ref name)) if name == "foo"
+    ));
+
+    let Expression::Function {
+        parameter,
+        return_type,
+        body,
+    } = &binding.expr
+    else {
+        panic!("binding should store function expression");
+    };
+
+    let BindingPattern::TypeHint(inner, type_hint) = parameter else {
+        panic!("parameter should include type hint");
+    };
+    assert!(matches!(
+        **inner,
+        BindingPattern::Identifier(Identifier(ref name)) if name == "bar"
+    ));
+    assert!(matches!(
+        **type_hint,
+        Expression::Identifier(Identifier(ref name)) if name == "i32"
+    ));
+    assert!(matches!(
+        **return_type,
+        Expression::Identifier(Identifier(ref name)) if name == "i32"
+    ));
+    assert!(matches!(
+        **body,
+        Expression::Operation {
+            operator: ref op,
+            ..
+        } if op == "+"
+    ));
+
+    let Expression::FunctionCall { function, argument } = &items[1] else {
+        panic!("expected function call as second expression");
+    };
+    assert!(matches!(
+        **function,
+        Expression::Identifier(Identifier(ref name)) if name == "foo"
+    ));
+    assert!(matches!(
+        **argument,
+        Expression::Literal(ExpressionLiteral::Number(123))
+    ));
+}
+
+#[test]
+fn parse_function_struct_parameter_pattern() {
+    let (expr, remaining) = parse_isolated_expression(
+        "fn{bar1: i32, bar2: i32} -> i32 (
+    bar1 + bar2
+)
+    ",
+    )
+    .unwrap();
+    assert!(remaining.trim().is_empty());
+
+    let Expression::Function { parameter, .. } = expr else {
+        panic!("expected function expression");
+    };
+    let BindingPattern::Struct(fields) = parameter else {
+        panic!("expected struct binding pattern for function parameter");
+    };
+    assert_eq!(fields.len(), 2);
+
+    let (first_name, first_pattern) = &fields[0];
+    assert_eq!(first_name.0, "0");
+    let BindingPattern::TypeHint(first_inner, first_type) = first_pattern else {
+        panic!("expected type hint for first parameter");
+    };
+    assert!(matches!(
+        **first_inner,
+        BindingPattern::Identifier(Identifier(ref name)) if name == "bar1"
+    ));
+    assert!(matches!(
+        **first_type,
+        Expression::Identifier(Identifier(ref name)) if name == "i32"
+    ));
+
+    let (second_name, second_pattern) = &fields[1];
+    assert_eq!(second_name.0, "1");
+    let BindingPattern::TypeHint(second_inner, second_type) = second_pattern else {
+        panic!("expected type hint for second parameter");
+    };
+    assert!(matches!(
+        **second_inner,
+        BindingPattern::Identifier(Identifier(ref name)) if name == "bar2"
+    ));
+    assert!(matches!(
+        **second_type,
+        Expression::Identifier(Identifier(ref name)) if name == "i32"
+    ));
+}
+
+#[test]
+fn parse_struct_literal_named_and_tuple_fields() {
+    let (expr, remaining) = parse_isolated_expression("{foo = 10, 20, bar = 30}").unwrap();
+    assert!(remaining.trim().is_empty());
+    let Expression::Struct(items) = expr else {
+        panic!("expected struct literal");
+    };
+    assert_eq!(items.len(), 3);
+    assert_eq!(items[0].0 .0, "foo");
+    assert_eq!(items[1].0 .0, "0");
+    assert_eq!(items[2].0 .0, "bar");
+}
+
+#[test]
+fn parse_struct_binding_pattern_named_fields() {
+    let (pattern, remaining) =
+        parse_struct_binding_pattern("{foo = first: i32, second: i32}").expect("pattern parse");
+    assert!(remaining.trim().is_empty());
+    let BindingPattern::Struct(fields) = pattern else {
+        panic!("expected struct pattern");
+    };
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0].0 .0, "foo");
+    assert_eq!(fields[1].0 .0, "0");
 }

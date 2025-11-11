@@ -4,11 +4,11 @@ use crate::parsing::{
 };
 
 #[derive(Clone)]
-struct Context {
+pub struct Context {
     bindings: std::collections::HashMap<String, Option<Expression>>,
 }
 
-fn interpret_expression(expr: Expression, context: &mut Context) -> Result<Expression, String> {
+pub fn interpret_expression(expr: Expression, context: &mut Context) -> Result<Expression, String> {
     match expr {
         expr @ (Expression::Literal(_) | Expression::IntrinsicType(_)) => Ok(expr),
         Expression::Identifier(identifier) => {
@@ -29,6 +29,15 @@ fn interpret_expression(expr: Expression, context: &mut Context) -> Result<Expre
         } => {
             let left_evaluated = interpret_expression(*left, context)?;
             let right_evaluated = interpret_expression(*right, context)?;
+            if !is_resolved_constant(&left_evaluated)
+                || !is_resolved_constant(&right_evaluated)
+            {
+                return Ok(Expression::Operation {
+                    operator,
+                    left: Box::new(left_evaluated),
+                    right: Box::new(right_evaluated),
+                });
+            }
             let left_type = get_type_of_expression(&left_evaluated, context)?;
 
             let operator_type = get_operator_of_type(&left_type, &operator)?;
@@ -240,7 +249,7 @@ fn bind_pattern_blanks(pattern: BindingPattern, context: &mut Context) -> Result
             Ok(())
         }
         BindingPattern::Struct(pattern_items) => {
-            for (field_identifier, field_pattern) in pattern_items {
+            for (_, field_pattern) in pattern_items {
                 bind_pattern_blanks(field_pattern, context)?;
             }
 
@@ -269,10 +278,10 @@ fn bind_pattern_from_value(
                 let field_value = struct_items
                     .iter()
                     .find(|(value_identifier, _)| value_identifier.0 == field_identifier.0)
-                    .map(|(_, expr)| expr.clone())
+                    .map(|(_, expr)| expr)
                     .ok_or_else(|| format!("Missing field {}", field_identifier.0))?;
 
-                bind_pattern_from_value(field_pattern, &field_value, context)?;
+                bind_pattern_from_value(field_pattern, field_value, context)?;
             }
 
             Ok(())
@@ -319,7 +328,7 @@ fn is_resolved_constant(expr: &Expression) -> bool {
     }
 }
 
-fn intrinsic_context() -> Context {
+pub fn intrinsic_context() -> Context {
     let mut context = Context {
         bindings: std::collections::HashMap::new(),
     };
@@ -452,4 +461,26 @@ fn test_basic_addition_interpretation() {
     } else {
         panic!("Expected a number literal as result");
     }
+}
+
+#[test]
+fn interpret_text_user_defined_function() {
+    let program = "
+let foo = fn(bar: i32) -> i32 (
+    bar + 1
+);
+foo(123)
+    ";
+    assert_eq!(evaluate_text_to_number(program), 124);
+}
+
+#[test]
+fn interpret_text_user_defined_tuple_arguments() {
+    let program = "
+let foo2 = fn{bar1: i32, bar2: i32} -> i32 (
+    bar1 + bar2
+);
+foo2{100, 24}
+    ";
+    assert_eq!(evaluate_text_to_number(program), 124);
 }
