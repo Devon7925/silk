@@ -1,33 +1,38 @@
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Identifier(pub String);
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum BindingPattern {
     Identifier(Identifier),
     Struct(Vec<(Identifier, BindingPattern)>),
     TypeHint(Box<BindingPattern>, Box<Expression>),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum ExpressionLiteral {
     Number(i32),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum IntrinsicType {
     I32,
     Type,
 }
 
-#[derive(Clone)]
-pub enum IntrinsicOperation {
-    Add(Box<Expression>, Box<Expression>),
-    Subtract(Box<Expression>, Box<Expression>),
-    Multiply(Box<Expression>, Box<Expression>),
-    Divide(Box<Expression>, Box<Expression>),
+#[derive(Clone, Debug)]
+pub enum BinaryIntrinsicOperator {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
+pub enum IntrinsicOperation {
+    Binary(Box<Expression>, Box<Expression>, BinaryIntrinsicOperator),
+}
+
+#[derive(Clone, Debug)]
 pub enum Expression {
     IntrinsicType(IntrinsicType),
     IntrinsicOperation(IntrinsicOperation),
@@ -60,7 +65,7 @@ pub enum Expression {
     Block(Vec<Expression>),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Binding {
     pub pattern: BindingPattern,
     pub expr: Expression,
