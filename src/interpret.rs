@@ -306,42 +306,72 @@ fn intrinsic_context() -> Context {
         bindings: std::collections::HashMap::new(),
     };
 
+    fn i32_binary_intrinsic(
+        symbol: &str,
+        operator: BinaryIntrinsicOperator,
+    ) -> (Identifier, Expression) {
+        let typed_pattern = |name: &str| {
+            BindingPattern::TypeHint(
+                Box::new(BindingPattern::Identifier(Identifier(name.to_string()))),
+                Box::new(Expression::IntrinsicType(IntrinsicType::I32)),
+            )
+        };
+        let identifier_expr =
+            |name: &str| Expression::Identifier(Identifier(name.to_string()));
+
+        (
+            Identifier(symbol.to_string()),
+            Expression::Function {
+                parameter: typed_pattern("self"),
+                return_type: Box::new(Expression::FunctionType {
+                    parameter: typed_pattern("other"),
+                    return_type: Box::new(Expression::IntrinsicType(IntrinsicType::I32)),
+                }),
+                body: Box::new(Expression::Function {
+                    parameter: typed_pattern("other"),
+                    return_type: Box::new(Expression::IntrinsicType(IntrinsicType::I32)),
+                    body: Box::new(Expression::IntrinsicOperation(IntrinsicOperation::Binary(
+                        Box::new(identifier_expr("self")),
+                        Box::new(identifier_expr("other")),
+                        operator,
+                    ))),
+                }),
+            },
+        )
+    }
+
     context.bindings.insert(
         "i32".to_string(),
         Some(Expression::AttachImplementation {
             type_expr: Box::new(Expression::IntrinsicType(IntrinsicType::I32)),
-            implementation: Box::new(Expression::Struct(vec![(
-                Identifier("+".to_string()),
-                Expression::Function {
-                    parameter: BindingPattern::TypeHint(
-                        Box::new(BindingPattern::Identifier(Identifier("self".to_string()))),
-                        Box::new(Expression::IntrinsicType(IntrinsicType::I32)),
-                    ),
-                    return_type: Box::new(Expression::FunctionType {
-                        parameter: BindingPattern::TypeHint(
-                            Box::new(BindingPattern::Identifier(Identifier("other".to_string()))),
-                            Box::new(Expression::IntrinsicType(IntrinsicType::I32)),
-                        ),
-                        return_type: Box::new(Expression::IntrinsicType(IntrinsicType::I32)),
-                    }),
-                    body: Box::new(Expression::Function {
-                        parameter: BindingPattern::TypeHint(
-                            Box::new(BindingPattern::Identifier(Identifier("other".to_string()))),
-                            Box::new(Expression::IntrinsicType(IntrinsicType::I32)),
-                        ),
-                        return_type: Box::new(Expression::IntrinsicType(IntrinsicType::I32)),
-                        body: Box::new(Expression::IntrinsicOperation(IntrinsicOperation::Binary(
-                            Box::new(Expression::Identifier(Identifier("self".to_string()))),
-                            Box::new(Expression::Identifier(Identifier("other".to_string()))),
-                            BinaryIntrinsicOperator::Add,
-                        ))),
-                    }),
-                },
-            )])),
+            implementation: Box::new(Expression::Struct(vec![
+                i32_binary_intrinsic("+", BinaryIntrinsicOperator::Add),
+                i32_binary_intrinsic("-", BinaryIntrinsicOperator::Subtract),
+                i32_binary_intrinsic("*", BinaryIntrinsicOperator::Multiply),
+                i32_binary_intrinsic("/", BinaryIntrinsicOperator::Divide),
+            ])),
         }),
     );
 
     context
+}
+
+#[cfg(test)]
+fn evaluate_text_to_number(program: &str) -> i32 {
+    let (expression, remaining) =
+        crate::parsing::parse_block(program).expect("Failed to parse program text");
+    assert!(
+        remaining.trim().is_empty(),
+        "Parser did not consume entire input, remaining: {remaining:?}"
+    );
+
+    let mut context = intrinsic_context();
+    match interpret_expression(expression, &mut context)
+        .expect("Failed to interpret parsed expression")
+    {
+        Expression::Literal(ExpressionLiteral::Number(value)) => value,
+        other => panic!("Expected numeric literal after interpretation, got {:?}", other),
+    }
 }
 
 #[test]
@@ -365,6 +395,25 @@ fn test_basic_binding_interpretation() {
         assert_eq!(value, 5);
     } else {
         panic!("Expected a number literal as result");
+    }
+}
+
+#[test]
+fn interpret_text_basic_operations() {
+    let cases = [
+        ("5 + 10", 15),
+        ("12 - 7", 5),
+        ("3 * 4", 12),
+        ("20 / 5", 4),
+        ("2 + 3 * 4", 14),
+    ];
+
+    for (program, expected) in cases {
+        assert_eq!(
+            evaluate_text_to_number(program),
+            expected,
+            "program `{program}` produced unexpected value"
+        );
     }
 }
 
