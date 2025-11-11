@@ -379,12 +379,33 @@ pub fn parse_isolated_expression(file: &str) -> Result<(Expression, &str), Strin
     ))
 }
 
+pub fn parse_property_access(file: &str) -> Result<(Expression, &str), String> {
+    let (mut expr, mut remaining) = parse_isolated_expression(file)?;
+
+    loop {
+        let lookahead = parse_optional_whitespace(remaining);
+        let Some(after_dot) = lookahead.strip_prefix(".") else {
+            break;
+        };
+        let after_dot = parse_optional_whitespace(after_dot);
+        let (property_identifier, rest) = parse_identifier(after_dot)
+            .ok_or_else(|| "Expected identifier after . in property access".to_string())?;
+        expr = Expression::PropertyAccess {
+            object: Box::new(expr),
+            property: property_identifier.0,
+        };
+        remaining = rest;
+    }
+
+    Ok((expr, remaining))
+}
+
 pub fn parse_function_call(file: &str) -> Result<(Expression, &str), String> {
     let mut exprs = vec![];
-    let (function_expr, mut remaining) = parse_isolated_expression(file)?;
+    let (function_expr, mut remaining) = parse_property_access(file)?;
     remaining = parse_optional_whitespace(remaining);
     exprs.push(function_expr);
-    while let Ok((argument_expr, rest)) = parse_isolated_expression(remaining) {
+    while let Ok((argument_expr, rest)) = parse_property_access(remaining) {
         remaining = parse_optional_whitespace(rest);
         exprs.push(argument_expr);
     }
@@ -806,4 +827,50 @@ fn parse_struct_binding_pattern_named_fields() {
     assert_eq!(fields.len(), 2);
     assert_eq!(fields[0].0 .0, "foo");
     assert_eq!(fields[1].0 .0, "0");
+}
+
+#[test]
+fn parse_struct_property_access_chain() {
+    let (expr, remaining) = parse_operation_expression("foo.bar.baz").expect("parse");
+    assert!(remaining.trim().is_empty());
+
+    let Expression::PropertyAccess { object, property } = expr else {
+        panic!("expected outer property access");
+    };
+    assert_eq!(property, "baz");
+
+    let Expression::PropertyAccess {
+        object: inner_object,
+        property: inner_property,
+    } = *object
+    else {
+        panic!("expected inner property access");
+    };
+    assert_eq!(inner_property, "bar");
+    assert!(matches!(
+        *inner_object,
+        Expression::Identifier(Identifier(ref name)) if name == "foo"
+    ));
+}
+
+#[test]
+fn parse_struct_property_access_then_call() {
+    let (expr, remaining) = parse_operation_expression("foo.bar baz").expect("parse");
+    assert!(remaining.trim().is_empty());
+
+    let Expression::FunctionCall { function, argument } = expr else {
+        panic!("expected function call");
+    };
+    assert!(matches!(
+        *argument,
+        Expression::Identifier(Identifier(ref name)) if name == "baz"
+    ));
+    let Expression::PropertyAccess { object, property } = *function else {
+        panic!("expected property access as function part");
+    };
+    assert_eq!(property, "bar");
+    assert!(matches!(
+        *object,
+        Expression::Identifier(Identifier(ref name)) if name == "foo"
+    ));
 }

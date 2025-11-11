@@ -515,3 +515,25 @@ foo2{100, 24}
     ";
     assert_eq!(evaluate_text_to_number(program), 124);
 }
+
+#[test]
+fn interpret_text_struct_property_access() {
+    let program = "
+let point = { x = 5, y = 10 };
+point.x
+    ";
+    assert_eq!(evaluate_text_to_number(program), 5);
+}
+
+#[test]
+fn interpret_text_struct_property_call() {
+    let program = "
+let container = {
+    inc = fn(value: i32) -> i32 (
+        value + 1
+    )
+};
+container.inc(41)
+    ";
+    assert_eq!(evaluate_text_to_number(program), 42);
+}
