@@ -1,4 +1,4 @@
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct SourceSpan {
     start: usize,
     len: usize,
@@ -21,16 +21,19 @@ impl SourceSpan {
         self.start.saturating_add(self.len)
     }
 
+    pub fn merge(&self, other: &SourceSpan) -> SourceSpan {
+        let start = self.start.min(other.start);
+        let end = self.end().max(other.end());
+        SourceSpan::new(start, end.saturating_sub(start))
+    }
+
     fn clamped_start(&self, source: &str) -> usize {
         self.start.min(source.len())
     }
 
     fn line_bounds(&self, source: &str) -> (usize, usize) {
         let start = self.clamped_start(source);
-        let line_start = source[..start]
-            .rfind('\n')
-            .map(|idx| idx + 1)
-            .unwrap_or(0);
+        let line_start = source[..start].rfind('\n').map(|idx| idx + 1).unwrap_or(0);
         let line_end = source[start..]
             .find('\n')
             .map(|idx| start + idx)

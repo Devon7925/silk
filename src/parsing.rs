@@ -5,9 +5,19 @@ pub struct Identifier(pub String);
 
 #[derive(Clone, Debug)]
 pub enum BindingPattern {
-    Identifier(Identifier),
-    Struct(Vec<(Identifier, BindingPattern)>),
-    TypeHint(Box<BindingPattern>, Box<Expression>),
+    Identifier(Identifier, SourceSpan),
+    Struct(Vec<(Identifier, BindingPattern)>, SourceSpan),
+    TypeHint(Box<BindingPattern>, Box<Expression>, SourceSpan),
+}
+
+impl BindingPattern {
+    pub fn span(&self) -> SourceSpan {
+        match self {
+            BindingPattern::Identifier(_, span)
+            | BindingPattern::Struct(_, span)
+            | BindingPattern::TypeHint(_, _, span) => *span,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -36,39 +46,65 @@ pub enum IntrinsicOperation {
 
 #[derive(Clone, Debug)]
 pub enum Expression {
-    IntrinsicType(IntrinsicType),
-    IntrinsicOperation(IntrinsicOperation),
+    IntrinsicType(IntrinsicType, SourceSpan),
+    IntrinsicOperation(IntrinsicOperation, SourceSpan),
     AttachImplementation {
         type_expr: Box<Expression>,
         implementation: Box<Expression>,
+        span: SourceSpan,
     },
     Function {
         parameter: BindingPattern,
         return_type: Box<Expression>,
         body: Box<Expression>,
+        span: SourceSpan,
     },
     FunctionType {
         parameter: Box<Expression>,
         return_type: Box<Expression>,
+        span: SourceSpan,
     },
-    Struct(Vec<(Identifier, Expression)>),
-    Literal(ExpressionLiteral),
-    Identifier(Identifier),
+    Struct(Vec<(Identifier, Expression)>, SourceSpan),
+    Literal(ExpressionLiteral, SourceSpan),
+    Identifier(Identifier, SourceSpan),
     Operation {
         operator: String,
         left: Box<Expression>,
         right: Box<Expression>,
+        span: SourceSpan,
     },
     FunctionCall {
         function: Box<Expression>,
         argument: Box<Expression>,
+        span: SourceSpan,
     },
     PropertyAccess {
         object: Box<Expression>,
         property: String,
+        span: SourceSpan,
     },
-    Binding(Box<Binding>),
-    Block(Vec<Expression>),
+    Binding(Box<Binding>, SourceSpan),
+    Block(Vec<Expression>, SourceSpan),
+}
+
+impl Expression {
+    pub fn span(&self) -> SourceSpan {
+        match self {
+            Expression::IntrinsicType(_, span)
+            | Expression::IntrinsicOperation(_, span)
+            | Expression::Struct(_, span)
+            | Expression::Literal(_, span)
+            | Expression::Identifier(_, span)
+            | Expression::Binding(_, span)
+            | Expression::Block(_, span) => *span,
+            Expression::AttachImplementation { span, .. }
+            | Expression::Function { span, .. }
+            | Expression::FunctionType { span, .. }
+            | Expression::Operation { span, .. }
+            | Expression::FunctionCall { span, .. }
+            | Expression::PropertyAccess { span, .. } => *span,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -85,6 +121,18 @@ fn remainder_span(source: &str, remaining: &str, len: usize) -> SourceSpan {
     let available = source.len().saturating_sub(start);
     let clamped_len = len.min(available);
     SourceSpan::new(start, clamped_len)
+}
+
+fn consumed_span(source: &str, before: &str, after: &str) -> SourceSpan {
+    let start = source
+        .len()
+        .checked_sub(before.len())
+        .expect("slice should originate from source");
+    let end = source
+        .len()
+        .checked_sub(after.len())
+        .expect("slice should originate from source");
+    SourceSpan::new(start, end.saturating_sub(start))
 }
 
 fn diagnostic_here(
@@ -114,8 +162,7 @@ pub fn parse_type_decl(file: &str) -> Option<&str> {
 }
 
 fn parse_semicolon<'a>(source: &'a str, file: &'a str) -> Result<&'a str, Diagnostic> {
-    file
-        .strip_prefix(";")
+    file.strip_prefix(";")
         .ok_or_else(|| diagnostic_here(source, file, 1, "Expected ;"))
 }
 
@@ -166,7 +213,8 @@ fn parse_simple_binding_pattern<'a>(
     file: &'a str,
 ) -> Result<(BindingPattern, &'a str), Diagnostic> {
     if let Some((identifier, remaining)) = parse_identifier(file) {
-        return Ok((BindingPattern::Identifier(identifier), remaining));
+        let span = consumed_span(source, file, remaining);
+        return Ok((BindingPattern::Identifier(identifier, span), remaining));
     }
     Err(diagnostic_here(source, file, 1, "Expected binding pattern"))
 }
@@ -194,8 +242,9 @@ fn parse_binding_pattern_with_source<'a>(
     };
     if let Some(type_hint_parse) = parse_type_hint(source, file) {
         let (type_expr, remaining) = type_hint_parse?;
+        let span = pattern.span().merge(&type_expr.span());
         return Ok((
-            BindingPattern::TypeHint(Box::new(pattern), Box::new(type_expr)),
+            BindingPattern::TypeHint(Box::new(pattern), Box::new(type_expr), span),
             remaining,
         ));
     }
@@ -212,9 +261,15 @@ fn parse_struct_binding_pattern_with_source<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Result<(BindingPattern, &'a str), Diagnostic> {
-    let mut remaining = file
-        .strip_prefix("{")
-        .ok_or_else(|| diagnostic_here(source, file, 1, "Expected { to start struct binding pattern"))?;
+    let start_slice = file;
+    let mut remaining = file.strip_prefix("{").ok_or_else(|| {
+        diagnostic_here(
+            source,
+            file,
+            1,
+            "Expected { to start struct binding pattern",
+        )
+    })?;
     let mut fields = Vec::new();
     let mut tuple_index = 0usize;
 
@@ -222,19 +277,20 @@ fn parse_struct_binding_pattern_with_source<'a>(
         remaining = parse_optional_whitespace(remaining);
 
         if let Some(rest) = remaining.strip_prefix("}") {
-            return Ok((BindingPattern::Struct(fields), rest));
+            let span = consumed_span(source, start_slice, rest);
+            return Ok((BindingPattern::Struct(fields, span), rest));
         }
 
         if let Some((field_identifier, after_identifier)) = parse_identifier(remaining) {
             let after_ws = parse_optional_whitespace(after_identifier);
             if let Some(rest_after_equals) = after_ws.strip_prefix("=") {
                 let rest_after_equals = parse_optional_whitespace(rest_after_equals);
-                let (field_pattern, rest) = parse_binding_pattern_with_source(source, rest_after_equals)?;
+                let (field_pattern, rest) =
+                    parse_binding_pattern_with_source(source, rest_after_equals)?;
                 fields.push((field_identifier, field_pattern));
                 remaining = parse_optional_whitespace(rest);
             } else {
-                let (field_pattern, rest) =
-                    parse_binding_pattern_with_source(source, remaining)?;
+                let (field_pattern, rest) = parse_binding_pattern_with_source(source, remaining)?;
                 fields.push((Identifier(tuple_index.to_string()), field_pattern));
                 tuple_index += 1;
                 remaining = parse_optional_whitespace(rest);
@@ -247,19 +303,18 @@ fn parse_struct_binding_pattern_with_source<'a>(
         }
 
         if let Some(rest) = remaining.strip_prefix("}") {
-            return Ok((BindingPattern::Struct(fields), rest));
+            let span = consumed_span(source, start_slice, rest);
+            return Ok((BindingPattern::Struct(fields, span), rest));
         }
 
-        remaining = remaining
-            .strip_prefix(",")
-            .ok_or_else(|| {
-                diagnostic_here(
-                    source,
-                    remaining,
-                    1,
-                    "Expected , or } in struct binding pattern",
-                )
-            })?;
+        remaining = remaining.strip_prefix(",").ok_or_else(|| {
+            diagnostic_here(
+                source,
+                remaining,
+                1,
+                "Expected , or } in struct binding pattern",
+            )
+        })?;
     }
 }
 
@@ -314,6 +369,10 @@ fn parse_function_literal<'a>(
         source: &'a str,
         file: &'a str,
     ) -> Result<(Expression, &'a str), Diagnostic> {
+        let start_slice = file;
+        let file = file
+            .strip_prefix("fn")
+            .ok_or_else(|| diagnostic_here(source, file, 2, "Expected fn"))?;
         let file = parse_optional_whitespace(file);
         let (parameter, file) = parse_function_parameter(source, file)?;
         let file = parse_optional_whitespace(file);
@@ -333,34 +392,43 @@ fn parse_function_literal<'a>(
                         file,
                         1,
                         "Expected function body expression",
-                    ))
+                    ));
                 }
             }
         } else {
             match return_type {
-                Expression::FunctionCall { function, argument } => (*function, *argument, file),
+                Expression::FunctionCall {
+                    function,
+                    argument,
+                    span: _,
+                } => (*function, *argument, file),
                 _ => {
                     return Err(diagnostic_here(
                         source,
                         file,
                         1,
                         "Expected function body expression",
-                    ))
+                    ));
                 }
             }
         };
+        let span = consumed_span(source, start_slice, file);
         Ok((
             Expression::Function {
                 parameter,
                 return_type: Box::new(return_type),
                 body: Box::new(body),
+                span,
             },
             file,
         ))
     }
 
-    let remaining = file.strip_prefix("fn")?;
-    if remaining
+    if !file.starts_with("fn") {
+        return None;
+    }
+    let after_fn = &file[2..];
+    if after_fn
         .chars()
         .next()
         .filter(|c| c.is_alphanumeric() || *c == '_')
@@ -368,7 +436,7 @@ fn parse_function_literal<'a>(
     {
         return None;
     }
-    Some(parse_function_literal_inner(source, remaining))
+    Some(parse_function_literal_inner(source, file))
 }
 
 fn parse_function_parameter<'a>(
@@ -404,6 +472,7 @@ fn parse_struct_expression<'a>(
         source: &'a str,
         file: &'a str,
     ) -> Result<(Expression, &'a str), Diagnostic> {
+        let start_slice = file;
         let mut remaining = file.strip_prefix("{").ok_or_else(|| {
             diagnostic_here(source, file, 1, "Expected { to start struct literal")
         })?;
@@ -414,29 +483,27 @@ fn parse_struct_expression<'a>(
             remaining = parse_optional_whitespace(remaining);
 
             if let Some(rest) = remaining.strip_prefix("}") {
-                return Ok((Expression::Struct(items), rest));
+                let span = consumed_span(source, start_slice, rest);
+                return Ok((Expression::Struct(items, span), rest));
             }
 
             if let Some((identifier, after_identifier)) = parse_identifier(remaining) {
                 let after_ws = parse_optional_whitespace(after_identifier);
                 if let Some(after_equals) = after_ws.strip_prefix("=") {
                     let after_ws = parse_optional_whitespace(after_equals);
-                    let (value_expr, rest) = parse_operation_expression_with_source(source, after_ws)?;
+                    let (value_expr, rest) =
+                        parse_operation_expression_with_source(source, after_ws)?;
                     items.push((identifier, value_expr));
                     remaining = rest;
                     remaining = parse_optional_whitespace(remaining);
 
                     if let Some(rest) = remaining.strip_prefix("}") {
-                        return Ok((Expression::Struct(items), rest));
+                        let span = consumed_span(source, start_slice, rest);
+                        return Ok((Expression::Struct(items, span), rest));
                     }
 
                     remaining = remaining.strip_prefix(",").ok_or_else(|| {
-                        diagnostic_here(
-                            source,
-                            remaining,
-                            1,
-                            "Expected , or } in struct literal",
-                        )
+                        diagnostic_here(source, remaining, 1, "Expected , or } in struct literal")
                     })?;
                     continue;
                 }
@@ -449,16 +516,12 @@ fn parse_struct_expression<'a>(
             remaining = parse_optional_whitespace(remaining);
 
             if let Some(rest) = remaining.strip_prefix("}") {
-                return Ok((Expression::Struct(items), rest));
+                let span = consumed_span(source, start_slice, rest);
+                return Ok((Expression::Struct(items, span), rest));
             }
 
             remaining = remaining.strip_prefix(",").ok_or_else(|| {
-                diagnostic_here(
-                    source,
-                    remaining,
-                    1,
-                    "Expected , or } in struct literal",
-                )
+                diagnostic_here(source, remaining, 1, "Expected , or } in struct literal")
             })?;
         }
     }
@@ -488,10 +551,12 @@ fn parse_isolated_expression_with_source<'a>(
         return struct_parse;
     }
     if let Some((identifier, remaining)) = parse_identifier(file) {
-        return Ok((Expression::Identifier(identifier), remaining));
+        let span = consumed_span(source, file, remaining);
+        return Ok((Expression::Identifier(identifier, span), remaining));
     }
     if let Some((literal, remaining)) = parse_literal(file) {
-        return Ok((Expression::Literal(literal), remaining));
+        let span = consumed_span(source, file, remaining);
+        return Ok((Expression::Literal(literal, span), remaining));
     }
     let preview = file.chars().take(10).collect::<String>();
     if file.is_empty() {
@@ -513,6 +578,7 @@ fn parse_property_access<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Result<(Expression, &'a str), Diagnostic> {
+    let expression_start = file;
     let (mut expr, mut remaining) = parse_isolated_expression_with_source(source, file)?;
 
     loop {
@@ -525,17 +591,15 @@ fn parse_property_access<'a>(
             diagnostic_here(
                 source,
                 after_dot,
-                after_dot
-                    .chars()
-                    .next()
-                    .map(|c| c.len_utf8())
-                    .unwrap_or(1),
+                after_dot.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
                 "Expected identifier after . in property access",
             )
         })?;
+        let span = consumed_span(source, expression_start, rest);
         expr = Expression::PropertyAccess {
             object: Box::new(expr),
             property: property_identifier.0,
+            span,
         };
         remaining = rest;
     }
@@ -558,9 +622,13 @@ fn parse_function_call<'a>(
     Ok((
         exprs
             .into_iter()
-            .reduce(|function, argument| Expression::FunctionCall {
-                function: Box::new(function),
-                argument: Box::new(argument),
+            .reduce(|function, argument| {
+                let span = function.span().merge(&argument.span());
+                Expression::FunctionCall {
+                    function: Box::new(function),
+                    argument: Box::new(argument),
+                    span,
+                }
             })
             .unwrap(),
         remaining,
@@ -603,23 +671,21 @@ fn parse_operation_expression_with_source<'a>(
         operator_stack: &mut Vec<String>,
         source: &str,
     ) -> Result<(), Diagnostic> {
-        let operator = operator_stack
-            .pop()
-            .ok_or_else(|| diagnostic_at_eof(source, "Expected operator when reducing operation"))?;
-        let right = operand_stack
-            .pop()
-            .ok_or_else(|| {
-                diagnostic_at_eof(source, "Expected right operand when reducing operation")
-            })?;
-        let left = operand_stack
-            .pop()
-            .ok_or_else(|| {
-                diagnostic_at_eof(source, "Expected left operand when reducing operation")
-            })?;
+        let operator = operator_stack.pop().ok_or_else(|| {
+            diagnostic_at_eof(source, "Expected operator when reducing operation")
+        })?;
+        let right = operand_stack.pop().ok_or_else(|| {
+            diagnostic_at_eof(source, "Expected right operand when reducing operation")
+        })?;
+        let left = operand_stack.pop().ok_or_else(|| {
+            diagnostic_at_eof(source, "Expected left operand when reducing operation")
+        })?;
+        let span = left.span().merge(&right.span());
         operand_stack.push(Expression::Operation {
             operator,
             left: Box::new(left),
             right: Box::new(right),
+            span,
         });
         Ok(())
     }
@@ -628,9 +694,9 @@ fn parse_operation_expression_with_source<'a>(
     let mut operator_stack: Vec<String> = Vec::new();
 
     let mut expression_iter = expressions.into_iter();
-    let first_expression = expression_iter
-        .next()
-        .ok_or_else(|| diagnostic_at_eof(source, "Expected expression to start parsing operation"))?;
+    let first_expression = expression_iter.next().ok_or_else(|| {
+        diagnostic_at_eof(source, "Expected expression to start parsing operation")
+    })?;
     operand_stack.push(first_expression);
 
     for operator in operators {
@@ -659,8 +725,10 @@ fn parse_operation_expression_with_source<'a>(
 fn parse_binding<'a>(
     source: &'a str,
     file: &'a str,
-) -> Option<Result<(Binding, &'a str), Diagnostic>> {
+) -> Option<Result<(Expression, &'a str), Diagnostic>> {
+    let start_slice = file;
     let file = parse_let(file)?;
+
     fn parse_binding_inner<'a>(
         source: &'a str,
         file: &'a str,
@@ -674,15 +742,15 @@ fn parse_binding<'a>(
         let file = parse_optional_whitespace(file);
         let (expr, file) = parse_isolated_expression_with_source(source, file)?;
 
-        Ok((
-            Binding {
-                pattern,
-                expr,
-            },
-            file,
-        ))
+        Ok((Binding { pattern, expr }, file))
     }
-    Some(parse_binding_inner(source, file))
+
+    Some(
+        parse_binding_inner(source, file).map(|(binding, remaining)| {
+            let span = consumed_span(source, start_slice, remaining);
+            (Expression::Binding(Box::new(binding), span), remaining)
+        }),
+    )
 }
 
 fn parse_individual_expression_with_source<'a>(
@@ -690,8 +758,7 @@ fn parse_individual_expression_with_source<'a>(
     file: &'a str,
 ) -> Result<(Expression, &'a str), Diagnostic> {
     if let Some(binding_parse) = parse_binding(source, file) {
-        let (binding, remaining) = binding_parse?;
-        return Ok((Expression::Binding(Box::new(binding)), remaining));
+        return binding_parse;
     }
     parse_operation_expression_with_source(source, file)
 }
@@ -749,7 +816,11 @@ fn parse_block_with_terminators<'a>(
     if expressions.len() == 1 {
         Ok((expressions.into_iter().next().unwrap(), remaining))
     } else {
-        Ok((Expression::Block(expressions), remaining))
+        let span = expressions
+            .iter()
+            .skip(1)
+            .fold(expressions[0].span(), |acc, expr| acc.merge(&expr.span()));
+        Ok((Expression::Block(expressions, span), remaining))
     }
 }
 
@@ -763,36 +834,36 @@ let y: i32 = x
     )
     .unwrap();
 
-    let (Expression::Block(parsed), "") = parsed else {
+    let (Expression::Block(parsed, _), "") = parsed else {
         panic!()
     };
     assert_eq!(parsed.len(), 2);
 
-    let Expression::Binding(binding1) = &parsed[0] else {
+    let Expression::Binding(binding1, _) = &parsed[0] else {
         panic!()
     };
     assert_eq!(
-        matches!(binding1.pattern, BindingPattern::Identifier(ref id) if id.0 == "x"),
+        matches!(binding1.pattern, BindingPattern::Identifier(ref id, _) if id.0 == "x"),
         true
     );
     assert_eq!(
-        matches!(binding1.expr, Expression::Literal(ExpressionLiteral::Number(lit)) if lit == 42),
+        matches!(binding1.expr, Expression::Literal(ExpressionLiteral::Number(lit), _) if lit == 42),
         true
     );
 
-    let Expression::Binding(binding2) = &parsed[1] else {
+    let Expression::Binding(binding2, _) = &parsed[1] else {
         panic!()
     };
     assert_eq!(
-        matches!(binding2.expr, Expression::Identifier(ref lit) if lit.0 == "x"),
+        matches!(binding2.expr, Expression::Identifier(ref lit, _) if lit.0 == "x"),
         true
     );
-    let BindingPattern::TypeHint(binding2, binding2_type) = &binding2.pattern else {
+    let BindingPattern::TypeHint(binding2, binding2_type, _) = &binding2.pattern else {
         panic!()
     };
-    assert!(matches!(**binding2, BindingPattern::Identifier(ref hint) if hint.0 == "y"));
+    assert!(matches!(**binding2, BindingPattern::Identifier(ref hint, _) if hint.0 == "y"));
     assert_eq!(
-        matches!(**binding2_type, Expression::Identifier(ref hint) if hint.0 == "i32"),
+        matches!(**binding2_type, Expression::Identifier(ref hint, _) if hint.0 == "i32"),
         true
     );
 }
@@ -805,6 +876,7 @@ fn parse_operation_expression_precedence() {
         operator,
         left,
         right,
+        span: _,
     } = expr
     else {
         panic!()
@@ -812,13 +884,14 @@ fn parse_operation_expression_precedence() {
     assert_eq!(operator, "-");
     assert!(matches!(
         *right,
-        Expression::Literal(ExpressionLiteral::Number(5))
+        Expression::Literal(ExpressionLiteral::Number(5), _)
     ));
 
     let Expression::Operation {
         operator,
         left,
         right,
+        span: _,
     } = *left
     else {
         panic!();
@@ -826,13 +899,14 @@ fn parse_operation_expression_precedence() {
     assert_eq!(operator, "+");
     assert!(matches!(
         *left,
-        Expression::Literal(ExpressionLiteral::Number(1))
+        Expression::Literal(ExpressionLiteral::Number(1), _)
     ));
 
     let Expression::Operation {
         operator,
         left,
         right,
+        span: _,
     } = *right
     else {
         panic!();
@@ -840,13 +914,14 @@ fn parse_operation_expression_precedence() {
     assert_eq!(operator, "/");
     assert!(matches!(
         *right,
-        Expression::Literal(ExpressionLiteral::Number(4))
+        Expression::Literal(ExpressionLiteral::Number(4), _)
     ));
 
     let Expression::Operation {
         operator,
         left,
         right,
+        span: _,
     } = *left
     else {
         panic!();
@@ -854,11 +929,11 @@ fn parse_operation_expression_precedence() {
     assert_eq!(operator, "*");
     assert!(matches!(
         *left,
-        Expression::Literal(ExpressionLiteral::Number(2))
+        Expression::Literal(ExpressionLiteral::Number(2), _)
     ));
     assert!(matches!(
         *right,
-        Expression::Literal(ExpressionLiteral::Number(3))
+        Expression::Literal(ExpressionLiteral::Number(3), _)
     ));
 }
 
@@ -876,42 +951,43 @@ foo(123)
 
     assert!(remaining.trim().is_empty());
 
-    let Expression::Block(items) = expr else {
+    let Expression::Block(items, _) = expr else {
         panic!("expected block with binding and call");
     };
     assert_eq!(items.len(), 2);
 
-    let Expression::Binding(binding) = &items[0] else {
+    let Expression::Binding(binding, _) = &items[0] else {
         panic!("first expression should be binding");
     };
     assert!(matches!(
         binding.pattern,
-        BindingPattern::Identifier(Identifier(ref name)) if name == "foo"
+        BindingPattern::Identifier(Identifier(ref name), _) if name == "foo"
     ));
 
     let Expression::Function {
         parameter,
         return_type,
         body,
+        span: _,
     } = &binding.expr
     else {
         panic!("binding should store function expression");
     };
 
-    let BindingPattern::TypeHint(inner, type_hint) = parameter else {
+    let BindingPattern::TypeHint(inner, type_hint, _) = parameter else {
         panic!("parameter should include type hint");
     };
     assert!(matches!(
         **inner,
-        BindingPattern::Identifier(Identifier(ref name)) if name == "bar"
+        BindingPattern::Identifier(Identifier(ref name), _) if name == "bar"
     ));
     assert!(matches!(
         **type_hint,
-        Expression::Identifier(Identifier(ref name)) if name == "i32"
+        Expression::Identifier(Identifier(ref name), _) if name == "i32"
     ));
     assert!(matches!(
         **return_type,
-        Expression::Identifier(Identifier(ref name)) if name == "i32"
+        Expression::Identifier(Identifier(ref name), _) if name == "i32"
     ));
     assert!(matches!(
         **body,
@@ -921,16 +997,21 @@ foo(123)
         } if op == "+"
     ));
 
-    let Expression::FunctionCall { function, argument } = &items[1] else {
+    let Expression::FunctionCall {
+        function,
+        argument,
+        span: _,
+    } = &items[1]
+    else {
         panic!("expected function call as second expression");
     };
     assert!(matches!(
         **function,
-        Expression::Identifier(Identifier(ref name)) if name == "foo"
+        Expression::Identifier(Identifier(ref name), _) if name == "foo"
     ));
     assert!(matches!(
         **argument,
-        Expression::Literal(ExpressionLiteral::Number(123))
+        Expression::Literal(ExpressionLiteral::Number(123), _)
     ));
 }
 
@@ -948,37 +1029,37 @@ fn parse_function_struct_parameter_pattern() {
     let Expression::Function { parameter, .. } = expr else {
         panic!("expected function expression");
     };
-    let BindingPattern::Struct(fields) = parameter else {
+    let BindingPattern::Struct(fields, _) = parameter else {
         panic!("expected struct binding pattern for function parameter");
     };
     assert_eq!(fields.len(), 2);
 
     let (first_name, first_pattern) = &fields[0];
     assert_eq!(first_name.0, "0");
-    let BindingPattern::TypeHint(first_inner, first_type) = first_pattern else {
+    let BindingPattern::TypeHint(first_inner, first_type, _) = first_pattern else {
         panic!("expected type hint for first parameter");
     };
     assert!(matches!(
         **first_inner,
-        BindingPattern::Identifier(Identifier(ref name)) if name == "bar1"
+        BindingPattern::Identifier(Identifier(ref name), _) if name == "bar1"
     ));
     assert!(matches!(
         **first_type,
-        Expression::Identifier(Identifier(ref name)) if name == "i32"
+        Expression::Identifier(Identifier(ref name), _) if name == "i32"
     ));
 
     let (second_name, second_pattern) = &fields[1];
     assert_eq!(second_name.0, "1");
-    let BindingPattern::TypeHint(second_inner, second_type) = second_pattern else {
+    let BindingPattern::TypeHint(second_inner, second_type, _) = second_pattern else {
         panic!("expected type hint for second parameter");
     };
     assert!(matches!(
         **second_inner,
-        BindingPattern::Identifier(Identifier(ref name)) if name == "bar2"
+        BindingPattern::Identifier(Identifier(ref name), _) if name == "bar2"
     ));
     assert!(matches!(
         **second_type,
-        Expression::Identifier(Identifier(ref name)) if name == "i32"
+        Expression::Identifier(Identifier(ref name), _) if name == "i32"
     ));
 }
 
@@ -986,13 +1067,13 @@ fn parse_function_struct_parameter_pattern() {
 fn parse_struct_literal_named_and_tuple_fields() {
     let (expr, remaining) = parse_isolated_expression("{foo = 10, 20, bar = 30}").unwrap();
     assert!(remaining.trim().is_empty());
-    let Expression::Struct(items) = expr else {
+    let Expression::Struct(items, _) = expr else {
         panic!("expected struct literal");
     };
     assert_eq!(items.len(), 3);
-    assert_eq!(items[0].0 .0, "foo");
-    assert_eq!(items[1].0 .0, "0");
-    assert_eq!(items[2].0 .0, "bar");
+    assert_eq!(items[0].0.0, "foo");
+    assert_eq!(items[1].0.0, "0");
+    assert_eq!(items[2].0.0, "bar");
 }
 
 #[test]
@@ -1000,12 +1081,12 @@ fn parse_struct_binding_pattern_named_fields() {
     let (pattern, remaining) =
         parse_struct_binding_pattern("{foo = first: i32, second: i32}").expect("pattern parse");
     assert!(remaining.trim().is_empty());
-    let BindingPattern::Struct(fields) = pattern else {
+    let BindingPattern::Struct(fields, _) = pattern else {
         panic!("expected struct pattern");
     };
     assert_eq!(fields.len(), 2);
-    assert_eq!(fields[0].0 .0, "foo");
-    assert_eq!(fields[1].0 .0, "0");
+    assert_eq!(fields[0].0.0, "foo");
+    assert_eq!(fields[1].0.0, "0");
 }
 
 #[test]
@@ -1013,7 +1094,12 @@ fn parse_struct_property_access_chain() {
     let (expr, remaining) = parse_operation_expression("foo.bar.baz").expect("parse");
     assert!(remaining.trim().is_empty());
 
-    let Expression::PropertyAccess { object, property } = expr else {
+    let Expression::PropertyAccess {
+        object,
+        property,
+        span: _,
+    } = expr
+    else {
         panic!("expected outer property access");
     };
     assert_eq!(property, "baz");
@@ -1021,6 +1107,7 @@ fn parse_struct_property_access_chain() {
     let Expression::PropertyAccess {
         object: inner_object,
         property: inner_property,
+        span: _,
     } = *object
     else {
         panic!("expected inner property access");
@@ -1028,7 +1115,7 @@ fn parse_struct_property_access_chain() {
     assert_eq!(inner_property, "bar");
     assert!(matches!(
         *inner_object,
-        Expression::Identifier(Identifier(ref name)) if name == "foo"
+        Expression::Identifier(Identifier(ref name), _) if name == "foo"
     ));
 }
 
@@ -1037,20 +1124,30 @@ fn parse_struct_property_access_then_call() {
     let (expr, remaining) = parse_operation_expression("foo.bar baz").expect("parse");
     assert!(remaining.trim().is_empty());
 
-    let Expression::FunctionCall { function, argument } = expr else {
+    let Expression::FunctionCall {
+        function,
+        argument,
+        span: _,
+    } = expr
+    else {
         panic!("expected function call");
     };
     assert!(matches!(
         *argument,
-        Expression::Identifier(Identifier(ref name)) if name == "baz"
+        Expression::Identifier(Identifier(ref name), _) if name == "baz"
     ));
-    let Expression::PropertyAccess { object, property } = *function else {
+    let Expression::PropertyAccess {
+        object,
+        property,
+        span: _,
+    } = *function
+    else {
         panic!("expected property access as function part");
     };
     assert_eq!(property, "bar");
     assert!(matches!(
         *object,
-        Expression::Identifier(Identifier(ref name)) if name == "foo"
+        Expression::Identifier(Identifier(ref name), _) if name == "foo"
     ));
 }
 

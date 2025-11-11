@@ -1,7 +1,10 @@
-use crate::{interpret, parsing::{
-    BinaryIntrinsicOperator, Binding, BindingPattern, Expression, ExpressionLiteral, Identifier,
-    IntrinsicOperation, IntrinsicType,
-}};
+use crate::{
+    diagnostics::{Diagnostic, SourceSpan},
+    parsing::{
+        BinaryIntrinsicOperator, Binding, BindingPattern, Expression, ExpressionLiteral,
+        Identifier, IntrinsicOperation, IntrinsicType,
+    },
+};
 
 #[derive(Clone, Debug)]
 pub enum BindingContext {
@@ -15,37 +18,71 @@ pub struct Context {
     bindings: std::collections::HashMap<String, BindingContext>,
 }
 
-pub fn interpret_expression(expr: Expression, context: &mut Context) -> Result<Expression, String> {
+fn diagnostic(message: impl Into<String>, span: SourceSpan) -> Diagnostic {
+    Diagnostic::new(message).with_span(span)
+}
+
+fn dummy_span() -> SourceSpan {
+    SourceSpan::default()
+}
+
+fn identifier_expr(name: &str) -> Expression {
+    Expression::Identifier(Identifier(name.to_string()), dummy_span())
+}
+
+fn intrinsic_type_expr(ty: IntrinsicType) -> Expression {
+    Expression::IntrinsicType(ty, dummy_span())
+}
+
+#[cfg(test)]
+fn literal_number_expr(value: i32) -> Expression {
+    Expression::Literal(ExpressionLiteral::Number(value), dummy_span())
+}
+
+pub fn interpret_expression(
+    expr: Expression,
+    context: &mut Context,
+) -> Result<Expression, Diagnostic> {
     match expr {
-        expr @ (Expression::Literal(_) | Expression::IntrinsicType(_)) => Ok(expr),
-        Expression::Identifier(identifier) => {
+        expr @ (Expression::Literal(_, _) | Expression::IntrinsicType(_, _)) => Ok(expr),
+        Expression::Identifier(identifier, span) => {
             if let Some(binding) = context.bindings.get(&identifier.0) {
                 if let BindingContext::Bound(expr) = binding {
                     Ok(expr.clone())
                 } else {
-                    Ok(Expression::Identifier(identifier))
+                    Ok(Expression::Identifier(identifier, span))
                 }
             } else {
-                Err(format!("Unbound identifier: {}", identifier.0))
+                Err(diagnostic(
+                    format!("Unbound identifier: {}", identifier.0),
+                    span,
+                ))
             }
         }
         Expression::Operation {
             operator,
             left,
             right,
+            span,
         } => interpret_expression(
             Expression::FunctionCall {
                 function: Box::new(Expression::PropertyAccess {
                     object: left,
                     property: operator.clone(),
+                    span,
                 }),
                 argument: right,
+                span,
             },
             context,
         ),
-        Expression::Binding(binding) => interpret_binding(*binding, context),
-        Expression::Block(expressions) => interpret_block(expressions, context),
-        Expression::FunctionCall { function, argument } => {
+        Expression::Binding(binding, _) => interpret_binding(*binding, context),
+        Expression::Block(expressions, span) => interpret_block(expressions, span, context),
+        Expression::FunctionCall {
+            function,
+            argument,
+            span,
+        } => {
             let function_value = interpret_expression(*function, context)?;
             let argument_value = interpret_expression(*argument, context)?;
             match function_value {
@@ -53,25 +90,29 @@ pub fn interpret_expression(expr: Expression, context: &mut Context) -> Result<E
                     parameter,
                     return_type: _,
                     body,
+                    span: _,
                 } => {
                     let mut call_context = context.clone();
                     bind_pattern_from_value(parameter, &argument_value, &mut call_context)?;
                     interpret_expression(*body, &mut call_context)
                 }
-                _ => Err("Attempted to call a non-function value".to_string()),
+                _ => Err(diagnostic("Attempted to call a non-function value", span)),
             }
         }
         Expression::AttachImplementation {
             type_expr,
             implementation,
+            span,
         } => Ok(Expression::AttachImplementation {
             type_expr: Box::new(interpret_expression(*type_expr, context)?),
             implementation: Box::new(interpret_expression(*implementation, context)?),
+            span,
         }),
         Expression::Function {
             parameter,
             return_type,
             body,
+            span,
         } => {
             let mut body_context = context.clone();
 
@@ -81,39 +122,46 @@ pub fn interpret_expression(expr: Expression, context: &mut Context) -> Result<E
                 parameter,
                 return_type,
                 body: Box::new(interpret_expression(*body, &mut body_context)?),
+                span,
             })
         }
-        Expression::Struct(items) => {
+        Expression::Struct(items, span) => {
             let mut evaluated_items = Vec::with_capacity(items.len());
             for (identifier, value_expr) in items {
                 let evaluated_value = interpret_expression(value_expr, context)?;
                 evaluated_items.push((identifier, evaluated_value));
             }
-            Ok(Expression::Struct(evaluated_items))
+            Ok(Expression::Struct(evaluated_items, span))
         }
         Expression::FunctionType {
             parameter,
             return_type,
+            span,
         } => Ok(Expression::FunctionType {
             parameter,
             return_type,
+            span,
         }),
-        Expression::IntrinsicOperation(intrinsic_operation) => match intrinsic_operation {
+        Expression::IntrinsicOperation(intrinsic_operation, span) => match intrinsic_operation {
             IntrinsicOperation::Binary(left, right, operator) => {
                 let evaluated_left = interpret_expression(*left, context)?;
                 let evaluated_right = interpret_expression(*right, context)?;
                 if !is_resolved_constant(&evaluated_left) || !is_resolved_constant(&evaluated_right)
                 {
-                    return Ok(Expression::IntrinsicOperation(IntrinsicOperation::Binary(
-                        Box::new(evaluated_left),
-                        Box::new(evaluated_right),
-                        operator,
-                    )));
+                    return Ok(Expression::IntrinsicOperation(
+                        IntrinsicOperation::Binary(
+                            Box::new(evaluated_left),
+                            Box::new(evaluated_right),
+                            operator,
+                        ),
+                        span,
+                    ));
                 }
                 interpret_numeric_intrinsic(
                     evaluated_left,
                     evaluated_right,
                     context,
+                    span,
                     match operator {
                         BinaryIntrinsicOperator::Add => |l, r| l + r,
                         BinaryIntrinsicOperator::Subtract => |l, r| l - r,
@@ -123,11 +171,13 @@ pub fn interpret_expression(expr: Expression, context: &mut Context) -> Result<E
                 )
             }
         },
-        Expression::IntrinsicType(intrinsic_type) => todo!(),
-        Expression::Literal(expression_literal) => todo!(),
-        Expression::PropertyAccess { object, property } => {
+        Expression::PropertyAccess {
+            object,
+            property,
+            span,
+        } => {
             let evaluated_object = interpret_expression(*object, context)?;
-            if let Expression::Struct(items) = &evaluated_object {
+            if let Expression::Struct(items, _) = &evaluated_object {
                 for (item_id, item_expr) in items {
                     if item_id.0 == property {
                         return Ok(item_expr.clone());
@@ -136,11 +186,12 @@ pub fn interpret_expression(expr: Expression, context: &mut Context) -> Result<E
             }
 
             let object_type = get_type_of_expression(&evaluated_object, context)?;
-            let trait_prop = get_trait_prop_of_type(&object_type, &property)?;
+            let trait_prop = get_trait_prop_of_type(&object_type, &property, span)?;
             interpret_expression(
                 Expression::FunctionCall {
                     function: Box::new(trait_prop),
                     argument: Box::new(evaluated_object),
+                    span,
                 },
                 context,
             )
@@ -148,88 +199,97 @@ pub fn interpret_expression(expr: Expression, context: &mut Context) -> Result<E
     }
 }
 
-fn get_type_of_expression(expr: &Expression, context: &mut Context) -> Result<Expression, String> {
+fn get_type_of_expression(
+    expr: &Expression,
+    context: &mut Context,
+) -> Result<Expression, Diagnostic> {
     match expr {
-        Expression::Literal(lit) => match lit {
-            ExpressionLiteral::Number(_) => Ok(interpret_expression(
-                Expression::Identifier(Identifier("i32".to_string())),
-                context,
-            )?),
+        Expression::Literal(lit, _) => match lit {
+            ExpressionLiteral::Number(_) => interpret_expression(identifier_expr("i32"), context),
         },
-        Expression::Identifier(identifier) => {
-            let bound_value = context.bindings
+        Expression::Identifier(identifier, span) => {
+            let bound_value = context
+                .bindings
                 .get(&identifier.0)
-                .ok_or_else(|| format!("Unbound identifier: {}", identifier.0))?
+                .ok_or_else(|| diagnostic(format!("Unbound identifier: {}", identifier.0), *span))?
                 .clone();
-            
+
             match bound_value {
                 BindingContext::Bound(value) => get_type_of_expression(&value, context),
-                BindingContext::UnboundWithType(type_expr) => Ok(interpret_expression(type_expr.clone(), context)?),
-                BindingContext::UnboundWithoutType => Err(format!("Cannot determine type of unbound identifier: {}", identifier.0)),
+                BindingContext::UnboundWithType(type_expr) => {
+                    interpret_expression(type_expr.clone(), context)
+                }
+                BindingContext::UnboundWithoutType => Err(diagnostic(
+                    format!(
+                        "Cannot determine type of unbound identifier: {}",
+                        identifier.0
+                    ),
+                    *span,
+                )),
             }
         }
-        Expression::Operation {
-            operator,
-            left,
-            right,
-        } => todo!(),
-        Expression::Binding(binding) => todo!(),
-        Expression::Block(expressions) => todo!(),
-        Expression::FunctionCall { function, argument } => todo!(),
-        Expression::IntrinsicType(intrinsic_type) => match intrinsic_type {
+        Expression::Operation { .. } => todo!(),
+        Expression::Binding(..) => todo!(),
+        Expression::Block(..) => todo!(),
+        Expression::FunctionCall { .. } => todo!(),
+        Expression::IntrinsicType(intrinsic_type, span) => match intrinsic_type {
             IntrinsicType::I32 | IntrinsicType::Type => {
-                Ok(Expression::IntrinsicType(IntrinsicType::Type))
+                Ok(Expression::IntrinsicType(IntrinsicType::Type, *span))
             }
         },
-        Expression::AttachImplementation {
-            type_expr,
-            implementation,
-        } => todo!(),
+        Expression::AttachImplementation { .. } => todo!(),
         Expression::Function {
             parameter,
             return_type,
-            body,
+            span,
+            ..
         } => Ok(Expression::FunctionType {
             parameter: Box::new(get_type_of_binding_pattern(&parameter, context)?),
             return_type: return_type.clone(),
+            span: *span,
         }),
-        Expression::Struct(items) => todo!(),
-        Expression::FunctionType {
-            parameter,
-            return_type,
-        } => Ok(Expression::IntrinsicType(IntrinsicType::Type)),
-        Expression::IntrinsicOperation(intrinsic_operation) => todo!(),
-        Expression::PropertyAccess { object, property } => todo!(),
+        Expression::Struct(..) => todo!(),
+        Expression::FunctionType { span, .. } => {
+            Ok(Expression::IntrinsicType(IntrinsicType::Type, *span))
+        }
+        Expression::IntrinsicOperation(..) => todo!(),
+        Expression::PropertyAccess { .. } => todo!(),
     }
 }
 
 fn get_type_of_binding_pattern(
     pattern: &BindingPattern,
     context: &mut Context,
-) -> Result<Expression, String> {
+) -> Result<Expression, Diagnostic> {
     match pattern {
-        BindingPattern::Identifier(_) => {
-            Err("Cannot determine type of untyped identifier".to_string())
-        }
-        BindingPattern::Struct(pattern_items) => {
+        BindingPattern::Identifier(_, span) => Err(diagnostic(
+            "Cannot determine type of untyped identifier",
+            *span,
+        )),
+        BindingPattern::Struct(pattern_items, span) => {
             let mut struct_items = Vec::with_capacity(pattern_items.len());
             for (field_identifier, field_pattern) in pattern_items {
                 let field_type = get_type_of_binding_pattern(field_pattern, context)?;
                 struct_items.push((field_identifier.clone(), field_type));
             }
-            Ok(Expression::Struct(struct_items))
+            Ok(Expression::Struct(struct_items, *span))
         }
-        BindingPattern::TypeHint(_, type_expr) => Ok(*type_expr.clone()),
+        BindingPattern::TypeHint(_, type_expr, _) => Ok(*type_expr.clone()),
     }
 }
 
-fn get_trait_prop_of_type(value_type: &Expression, trait_prop: &str) -> Result<Expression, String> {
+fn get_trait_prop_of_type(
+    value_type: &Expression,
+    trait_prop: &str,
+    span: SourceSpan,
+) -> Result<Expression, Diagnostic> {
     match value_type {
         Expression::AttachImplementation {
             type_expr,
             implementation,
+            ..
         } => {
-            if let Expression::Struct(ref items) = **implementation {
+            if let Expression::Struct(ref items, _) = **implementation {
                 for (item_id, item_expr) in items {
                     if item_id.0 == trait_prop {
                         return Ok(item_expr.clone());
@@ -237,54 +297,71 @@ fn get_trait_prop_of_type(value_type: &Expression, trait_prop: &str) -> Result<E
                 }
             }
 
-            get_trait_prop_of_type(type_expr, trait_prop)
+            get_trait_prop_of_type(type_expr, trait_prop, span)
         }
-        unrecognized => Err(format!("Unsupported value type {:?} for operator lookup", unrecognized)),
+        _ => Err(diagnostic(
+            format!(
+                "Unsupported value type for `{}` operator lookup",
+                trait_prop
+            ),
+            span,
+        )),
     }
 }
 
 fn interpret_block(
     expressions: Vec<Expression>,
+    span: SourceSpan,
     context: &mut Context,
-) -> Result<Expression, String> {
+) -> Result<Expression, Diagnostic> {
     let mut block_context = context.clone();
     let mut last_value: Option<Expression> = None;
 
     for expression in expressions {
         let value = match expression {
-            Expression::Binding(binding) => interpret_binding(*binding, &mut block_context)?,
+            Expression::Binding(binding, _) => interpret_binding(*binding, &mut block_context)?,
             other => interpret_expression(other, &mut block_context)?,
         };
         last_value = Some(value);
     }
 
-    last_value.ok_or_else(|| "Cannot evaluate empty block".to_string())
+    last_value.ok_or_else(|| diagnostic("Cannot evaluate empty block", span))
 }
 
-fn interpret_binding(binding: Binding, context: &mut Context) -> Result<Expression, String> {
+fn interpret_binding(binding: Binding, context: &mut Context) -> Result<Expression, Diagnostic> {
     let value = interpret_expression(binding.expr, context)?;
     bind_pattern_from_value(binding.pattern, &value, context)?;
     Ok(value)
 }
 
-fn bind_pattern_blanks(pattern: BindingPattern, context: &mut Context, type_hint: Option<Expression>) -> Result<(), String> {
+fn bind_pattern_blanks(
+    pattern: BindingPattern,
+    context: &mut Context,
+    type_hint: Option<Expression>,
+) -> Result<(), Diagnostic> {
     match pattern {
-        BindingPattern::Identifier(identifier) => {
+        BindingPattern::Identifier(identifier, _) => {
             if let Some(type_expr) = type_hint {
-                context.bindings.insert(identifier.0, BindingContext::UnboundWithType(type_expr));
+                context
+                    .bindings
+                    .insert(identifier.0, BindingContext::UnboundWithType(type_expr));
             } else {
-                context.bindings.insert(identifier.0, BindingContext::UnboundWithoutType);
+                context
+                    .bindings
+                    .insert(identifier.0, BindingContext::UnboundWithoutType);
             }
             Ok(())
         }
-        BindingPattern::Struct(pattern_items) => {
+        BindingPattern::Struct(pattern_items, _) => {
             for (_, field_pattern) in pattern_items {
                 bind_pattern_blanks(field_pattern, context, None)?;
             }
 
             Ok(())
         }
-        BindingPattern::TypeHint(inner, type_hint) => bind_pattern_blanks(*inner, context, Some(*type_hint)),
+        BindingPattern::TypeHint(inner, type_hint, _) => {
+            bind_pattern_blanks(*inner, context, Some(*type_hint))
+        }
     }
 }
 
@@ -292,30 +369,35 @@ fn bind_pattern_from_value(
     pattern: BindingPattern,
     value: &Expression,
     context: &mut Context,
-) -> Result<(), String> {
+) -> Result<(), Diagnostic> {
     match pattern {
-        BindingPattern::Identifier(identifier) => {
-            context.bindings.insert(identifier.0, BindingContext::Bound(value.clone()));
+        BindingPattern::Identifier(identifier, _) => {
+            context
+                .bindings
+                .insert(identifier.0, BindingContext::Bound(value.clone()));
             Ok(())
         }
-        BindingPattern::Struct(pattern_items) => {
-            let Expression::Struct(struct_items) = value else {
-                return Err("Struct pattern requires struct value".to_string());
+        BindingPattern::Struct(pattern_items, span) => {
+            let Expression::Struct(struct_items, _) = value else {
+                return Err(diagnostic("Struct pattern requires struct value", span));
             };
 
             for (field_identifier, field_pattern) in pattern_items {
+                let field_span = field_pattern.span();
                 let field_value = struct_items
                     .iter()
                     .find(|(value_identifier, _)| value_identifier.0 == field_identifier.0)
                     .map(|(_, expr)| expr)
-                    .ok_or_else(|| format!("Missing field {}", field_identifier.0))?;
+                    .ok_or_else(|| {
+                        diagnostic(format!("Missing field {}", field_identifier.0), field_span)
+                    })?;
 
                 bind_pattern_from_value(field_pattern, field_value, context)?;
             }
 
             Ok(())
         }
-        BindingPattern::TypeHint(inner, _) => bind_pattern_from_value(*inner, value, context),
+        BindingPattern::TypeHint(inner, _, _) => bind_pattern_from_value(*inner, value, context),
     }
 }
 
@@ -323,34 +405,36 @@ fn interpret_numeric_intrinsic<F>(
     left: Expression,
     right: Expression,
     context: &mut Context,
+    span: SourceSpan,
     op: F,
-) -> Result<Expression, String>
+) -> Result<Expression, Diagnostic>
 where
     F: Fn(i32, i32) -> i32,
 {
     let left_value = evaluate_numeric_operand(left, context)?;
     let right_value = evaluate_numeric_operand(right, context)?;
-    Ok(Expression::Literal(ExpressionLiteral::Number(op(
-        left_value,
-        right_value,
-    ))))
+    Ok(Expression::Literal(
+        ExpressionLiteral::Number(op(left_value, right_value)),
+        span,
+    ))
 }
 
-fn evaluate_numeric_operand(expr: Expression, context: &mut Context) -> Result<i32, String> {
+fn evaluate_numeric_operand(expr: Expression, context: &mut Context) -> Result<i32, Diagnostic> {
+    let operand_span = expr.span();
     let evaluated = interpret_expression(expr, context)?;
     match evaluated {
-        Expression::Literal(ExpressionLiteral::Number(value)) => Ok(value),
-        expr => Err(format!(
-            "Expected numeric literal during intrinsic operation, got {:?}",
-            expr
+        Expression::Literal(ExpressionLiteral::Number(value), _) => Ok(value),
+        _ => Err(diagnostic(
+            "Expected numeric literal during intrinsic operation",
+            operand_span,
         )),
     }
 }
 
 fn is_resolved_constant(expr: &Expression) -> bool {
     match expr {
-        Expression::Literal(_) | Expression::IntrinsicType(_) => true,
-        Expression::Struct(items) => items
+        Expression::Literal(_, _) | Expression::IntrinsicType(_, _) => true,
+        Expression::Struct(items, _) => items
             .iter()
             .all(|(_, value_expr)| is_resolved_constant(value_expr)),
         _ => false,
@@ -368,29 +452,38 @@ pub fn intrinsic_context() -> Context {
     ) -> (Identifier, Expression) {
         let typed_pattern = |name: &str| {
             BindingPattern::TypeHint(
-                Box::new(BindingPattern::Identifier(Identifier(name.to_string()))),
-                Box::new(Expression::IntrinsicType(IntrinsicType::I32)),
+                Box::new(BindingPattern::Identifier(
+                    Identifier(name.to_string()),
+                    dummy_span(),
+                )),
+                Box::new(intrinsic_type_expr(IntrinsicType::I32)),
+                dummy_span(),
             )
         };
-        let identifier_expr = |name: &str| Expression::Identifier(Identifier(name.to_string()));
 
         (
             Identifier(symbol.to_string()),
             Expression::Function {
                 parameter: typed_pattern("self"),
                 return_type: Box::new(Expression::FunctionType {
-                    parameter: Box::new(Expression::IntrinsicType(IntrinsicType::I32)),
-                    return_type: Box::new(Expression::IntrinsicType(IntrinsicType::I32)),
+                    parameter: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
+                    return_type: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
+                    span: dummy_span(),
                 }),
                 body: Box::new(Expression::Function {
                     parameter: typed_pattern("other"),
-                    return_type: Box::new(Expression::IntrinsicType(IntrinsicType::I32)),
-                    body: Box::new(Expression::IntrinsicOperation(IntrinsicOperation::Binary(
-                        Box::new(identifier_expr("self")),
-                        Box::new(identifier_expr("other")),
-                        operator,
-                    ))),
+                    return_type: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
+                    body: Box::new(Expression::IntrinsicOperation(
+                        IntrinsicOperation::Binary(
+                            Box::new(identifier_expr("self")),
+                            Box::new(identifier_expr("other")),
+                            operator,
+                        ),
+                        dummy_span(),
+                    )),
+                    span: dummy_span(),
                 }),
+                span: dummy_span(),
             },
         )
     }
@@ -398,13 +491,17 @@ pub fn intrinsic_context() -> Context {
     context.bindings.insert(
         "i32".to_string(),
         BindingContext::Bound(Expression::AttachImplementation {
-            type_expr: Box::new(Expression::IntrinsicType(IntrinsicType::I32)),
-            implementation: Box::new(Expression::Struct(vec![
-                i32_binary_intrinsic("+", BinaryIntrinsicOperator::Add),
-                i32_binary_intrinsic("-", BinaryIntrinsicOperator::Subtract),
-                i32_binary_intrinsic("*", BinaryIntrinsicOperator::Multiply),
-                i32_binary_intrinsic("/", BinaryIntrinsicOperator::Divide),
-            ])),
+            type_expr: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
+            implementation: Box::new(Expression::Struct(
+                vec![
+                    i32_binary_intrinsic("+", BinaryIntrinsicOperator::Add),
+                    i32_binary_intrinsic("-", BinaryIntrinsicOperator::Subtract),
+                    i32_binary_intrinsic("*", BinaryIntrinsicOperator::Multiply),
+                    i32_binary_intrinsic("/", BinaryIntrinsicOperator::Divide),
+                ],
+                dummy_span(),
+            )),
+            span: dummy_span(),
         }),
     );
 
@@ -424,7 +521,7 @@ fn evaluate_text_to_number(program: &str) -> i32 {
     match interpret_expression(expression, &mut context)
         .expect("Failed to interpret parsed expression")
     {
-        Expression::Literal(ExpressionLiteral::Number(value)) => value,
+        Expression::Literal(ExpressionLiteral::Number(value), _) => value,
         other => panic!(
             "Expected numeric literal after interpretation, got {:?}",
             other
@@ -436,20 +533,30 @@ fn evaluate_text_to_number(program: &str) -> i32 {
 fn test_basic_binding_interpretation() {
     let mut context = intrinsic_context();
 
-    let expr = Expression::Block(vec![
-        Expression::Binding(Box::new(Binding {
-            pattern: BindingPattern::TypeHint(
-                Box::new(BindingPattern::Identifier(Identifier("x".to_string()))),
-                Box::new(Expression::IntrinsicType(IntrinsicType::I32)),
+    let expr = Expression::Block(
+        vec![
+            Expression::Binding(
+                Box::new(Binding {
+                    pattern: BindingPattern::TypeHint(
+                        Box::new(BindingPattern::Identifier(
+                            Identifier("x".to_string()),
+                            dummy_span(),
+                        )),
+                        Box::new(intrinsic_type_expr(IntrinsicType::I32)),
+                        dummy_span(),
+                    ),
+                    expr: literal_number_expr(5),
+                }),
+                dummy_span(),
             ),
-            expr: Expression::Literal(ExpressionLiteral::Number(5)),
-        })),
-        Expression::Identifier(Identifier("x".to_string())),
-    ]);
+            identifier_expr("x"),
+        ],
+        dummy_span(),
+    );
 
     let result = interpret_expression(expr, &mut context).unwrap();
 
-    if let Expression::Literal(ExpressionLiteral::Number(value)) = result {
+    if let Expression::Literal(ExpressionLiteral::Number(value), _) = result {
         assert_eq!(value, 5);
     } else {
         panic!("Expected a number literal as result");
@@ -481,13 +588,14 @@ fn test_basic_addition_interpretation() {
 
     let expr = Expression::Operation {
         operator: "+".to_string(),
-        left: Box::new(Expression::Literal(ExpressionLiteral::Number(5))),
-        right: Box::new(Expression::Literal(ExpressionLiteral::Number(10))),
+        left: Box::new(literal_number_expr(5)),
+        right: Box::new(literal_number_expr(10)),
+        span: dummy_span(),
     };
 
     let result = interpret_expression(expr, &mut context).unwrap();
 
-    if let Expression::Literal(ExpressionLiteral::Number(value)) = result {
+    if let Expression::Literal(ExpressionLiteral::Number(value), _) = result {
         assert_eq!(value, 15);
     } else {
         panic!("Expected a number literal as result");
@@ -536,4 +644,28 @@ let container = {
 container.inc(41)
     ";
     assert_eq!(evaluate_text_to_number(program), 42);
+}
+
+#[test]
+fn interpret_reports_unbound_identifier_span() {
+    let source = "unknown";
+    let (expr, remaining) = crate::parsing::parse_block(source).expect("parse should succeed");
+    assert!(remaining.trim().is_empty());
+    let mut context = intrinsic_context();
+    let err = interpret_expression(expr, &mut context).expect_err("expected unbound identifier");
+    let rendered = err.render_with_source(source);
+    assert!(rendered.contains("Unbound identifier: unknown"));
+    assert!(rendered.contains("line 1, column 1"));
+}
+
+#[test]
+fn interpret_reports_calling_non_function_span() {
+    let source = "5(1)";
+    let (expr, remaining) = crate::parsing::parse_block(source).expect("parse should succeed");
+    assert!(remaining.trim().is_empty());
+    let mut context = intrinsic_context();
+    let err = interpret_expression(expr, &mut context).expect_err("expected non-function call");
+    let rendered = err.render_with_source(source);
+    assert!(rendered.contains("Attempted to call a non-function value"));
+    assert!(rendered.contains("line 1, column 1"));
 }

@@ -14,15 +14,11 @@ pub fn compile(file: String) -> Result<Vec<u8>, Diagnostic> {
             .map(|c| c.len_utf8())
             .sum::<usize>()
             .max(1);
-        let start = file
-            .len()
-            .checked_sub(leftover.len())
-            .unwrap_or(0);
+        let start = file.len().checked_sub(leftover.len()).unwrap_or(0);
         let span = SourceSpan::new(start, token_len);
         return Err(Diagnostic::new("Unexpected trailing input").with_span(span));
     }
     let mut context = interpret::intrinsic_context();
-    interpret::interpret_expression(ast, &mut context)
-        .map_err(Diagnostic::new)?;
+    interpret::interpret_expression(ast, &mut context)?;
     Ok(vec![])
 }
