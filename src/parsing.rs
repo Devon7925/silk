@@ -1,3 +1,5 @@
+use crate::diagnostics::{Diagnostic, SourceSpan};
+
 #[derive(Clone, Debug)]
 pub struct Identifier(pub String);
 
@@ -75,6 +77,30 @@ pub struct Binding {
     pub expr: Expression,
 }
 
+fn remainder_span(source: &str, remaining: &str, len: usize) -> SourceSpan {
+    let start = source
+        .len()
+        .checked_sub(remaining.len())
+        .expect("remaining slice should originate from source");
+    let available = source.len().saturating_sub(start);
+    let clamped_len = len.min(available);
+    SourceSpan::new(start, clamped_len)
+}
+
+fn diagnostic_here(
+    source: &str,
+    remaining: &str,
+    len: usize,
+    message: impl Into<String>,
+) -> Diagnostic {
+    Diagnostic::new(message).with_span(remainder_span(source, remaining, len))
+}
+
+fn diagnostic_at_eof(source: &str, message: impl Into<String>) -> Diagnostic {
+    let eof = &source[source.len()..];
+    diagnostic_here(source, eof, 0, message)
+}
+
 pub fn parse_let(file: &str) -> Option<&str> {
     file.strip_prefix("let")
 }
@@ -87,8 +113,10 @@ pub fn parse_type_decl(file: &str) -> Option<&str> {
     file.strip_prefix(":")
 }
 
-fn parse_semicolon(file: &str) -> Result<&str, String> {
-    file.strip_prefix(";").ok_or("Expected ;".to_string())
+fn parse_semicolon<'a>(source: &'a str, file: &'a str) -> Result<&'a str, Diagnostic> {
+    file
+        .strip_prefix(";")
+        .ok_or_else(|| diagnostic_here(source, file, 1, "Expected ;"))
 }
 
 pub fn parse_whitespace(file: &str) -> Option<&str> {
@@ -133,29 +161,38 @@ pub fn parse_literal(file: &str) -> Option<(ExpressionLiteral, &str)> {
     Some((ExpressionLiteral::Number(number), remaining))
 }
 
-pub fn parse_simple_binding_pattern(file: &str) -> Result<(BindingPattern, &str), String> {
+fn parse_simple_binding_pattern<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Result<(BindingPattern, &'a str), Diagnostic> {
     if let Some((identifier, remaining)) = parse_identifier(file) {
         return Ok((BindingPattern::Identifier(identifier), remaining));
     }
-    Err("Expected binding pattern".to_string())
+    Err(diagnostic_here(source, file, 1, "Expected binding pattern"))
 }
 
-pub fn parse_type_hint(file: &str) -> Option<Result<(Expression, &str), String>> {
+fn parse_type_hint<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Option<Result<(Expression, &'a str), Diagnostic>> {
     let file = parse_optional_whitespace(file);
     let file = parse_type_decl(file)?;
     let file = parse_optional_whitespace(file);
 
-    Some(parse_operation_expression(file))
+    Some(parse_operation_expression_with_source(source, file))
 }
 
-pub fn parse_binding_pattern(file: &str) -> Result<(BindingPattern, &str), String> {
+fn parse_binding_pattern_with_source<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Result<(BindingPattern, &'a str), Diagnostic> {
     let file = parse_optional_whitespace(file);
     let (pattern, file) = if file.starts_with("{") {
-        parse_struct_binding_pattern(file)?
+        parse_struct_binding_pattern_with_source(source, file)?
     } else {
-        parse_simple_binding_pattern(file)?
+        parse_simple_binding_pattern(source, file)?
     };
-    if let Some(type_hint_parse) = parse_type_hint(file) {
+    if let Some(type_hint_parse) = parse_type_hint(source, file) {
         let (type_expr, remaining) = type_hint_parse?;
         return Ok((
             BindingPattern::TypeHint(Box::new(pattern), Box::new(type_expr)),
@@ -166,10 +203,18 @@ pub fn parse_binding_pattern(file: &str) -> Result<(BindingPattern, &str), Strin
     Ok((pattern, file))
 }
 
-fn parse_struct_binding_pattern(file: &str) -> Result<(BindingPattern, &str), String> {
+#[cfg(test)]
+pub fn parse_struct_binding_pattern(file: &str) -> Result<(BindingPattern, &str), Diagnostic> {
+    parse_struct_binding_pattern_with_source(file, file)
+}
+
+fn parse_struct_binding_pattern_with_source<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Result<(BindingPattern, &'a str), Diagnostic> {
     let mut remaining = file
         .strip_prefix("{")
-        .ok_or_else(|| "Expected { to start struct binding pattern".to_string())?;
+        .ok_or_else(|| diagnostic_here(source, file, 1, "Expected { to start struct binding pattern"))?;
     let mut fields = Vec::new();
     let mut tuple_index = 0usize;
 
@@ -184,17 +229,18 @@ fn parse_struct_binding_pattern(file: &str) -> Result<(BindingPattern, &str), St
             let after_ws = parse_optional_whitespace(after_identifier);
             if let Some(rest_after_equals) = after_ws.strip_prefix("=") {
                 let rest_after_equals = parse_optional_whitespace(rest_after_equals);
-                let (field_pattern, rest) = parse_binding_pattern(rest_after_equals)?;
+                let (field_pattern, rest) = parse_binding_pattern_with_source(source, rest_after_equals)?;
                 fields.push((field_identifier, field_pattern));
                 remaining = parse_optional_whitespace(rest);
             } else {
-                let (field_pattern, rest) = parse_binding_pattern(remaining)?;
+                let (field_pattern, rest) =
+                    parse_binding_pattern_with_source(source, remaining)?;
                 fields.push((Identifier(tuple_index.to_string()), field_pattern));
                 tuple_index += 1;
                 remaining = parse_optional_whitespace(rest);
             }
         } else {
-            let (field_pattern, rest) = parse_binding_pattern(remaining)?;
+            let (field_pattern, rest) = parse_binding_pattern_with_source(source, remaining)?;
             fields.push((Identifier(tuple_index.to_string()), field_pattern));
             tuple_index += 1;
             remaining = parse_optional_whitespace(rest);
@@ -206,15 +252,35 @@ fn parse_struct_binding_pattern(file: &str) -> Result<(BindingPattern, &str), St
 
         remaining = remaining
             .strip_prefix(",")
-            .ok_or_else(|| "Expected , or } in struct binding pattern".to_string())?;
+            .ok_or_else(|| {
+                diagnostic_here(
+                    source,
+                    remaining,
+                    1,
+                    "Expected , or } in struct binding pattern",
+                )
+            })?;
     }
 }
 
-pub fn parse_grouping_expression(file: &str) -> Option<(Expression, &str)> {
+fn parse_grouping_expression_with_source<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Option<Result<(Expression, &'a str), Diagnostic>> {
     let file = file.strip_prefix("(")?;
-    let (expr, file) = parse_block_with_terminators(file, &[')']).ok()?;
-    let file = file.strip_prefix(")")?;
-    Some((expr, file))
+    let (expr, file) = match parse_block_with_terminators(source, file, &[')']) {
+        Ok(result) => result,
+        Err(err) => return Some(Err(err)),
+    };
+    let Some(file) = file.strip_prefix(")") else {
+        return Some(Err(diagnostic_here(
+            source,
+            file,
+            1,
+            "Expected ) to close grouping expression",
+        )));
+    };
+    Some(Ok((expr, file)))
 }
 
 pub fn parse_operator(file: &str) -> Option<(String, &str)> {
@@ -240,25 +306,47 @@ fn operator_precedence(operator: &str) -> u8 {
     }
 }
 
-fn parse_function_literal(file: &str) -> Option<Result<(Expression, &str), String>> {
-    fn parse_function_literal_inner(file: &str) -> Result<(Expression, &str), String> {
+fn parse_function_literal<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Option<Result<(Expression, &'a str), Diagnostic>> {
+    fn parse_function_literal_inner<'a>(
+        source: &'a str,
+        file: &'a str,
+    ) -> Result<(Expression, &'a str), Diagnostic> {
         let file = parse_optional_whitespace(file);
-        let (parameter, file) = parse_function_parameter(file)?;
+        let (parameter, file) = parse_function_parameter(source, file)?;
         let file = parse_optional_whitespace(file);
-        let file = file
-            .strip_prefix("->")
-            .ok_or_else(|| "Expected -> after function parameter".to_string())?;
+        let file = file.strip_prefix("->").ok_or_else(|| {
+            diagnostic_here(source, file, 2, "Expected -> after function parameter")
+        })?;
         let file = parse_optional_whitespace(file);
-        let (return_type, file) = parse_operation_expression(file)?;
+        let (return_type, file) = parse_operation_expression_with_source(source, file)?;
         let file = parse_optional_whitespace(file);
         let (return_type, body, file) = if file.starts_with("(") {
-            let (body, file) = parse_grouping_expression(file)
-                .ok_or_else(|| "Expected function body expression".to_string())?;
-            (return_type, body, file)
+            match parse_grouping_expression_with_source(source, file) {
+                Some(Ok((body, file))) => (return_type, body, file),
+                Some(Err(err)) => return Err(err),
+                None => {
+                    return Err(diagnostic_here(
+                        source,
+                        file,
+                        1,
+                        "Expected function body expression",
+                    ))
+                }
+            }
         } else {
             match return_type {
                 Expression::FunctionCall { function, argument } => (*function, *argument, file),
-                _ => return Err("Expected function body expression".to_string()),
+                _ => {
+                    return Err(diagnostic_here(
+                        source,
+                        file,
+                        1,
+                        "Expected function body expression",
+                    ))
+                }
             }
         };
         Ok((
@@ -280,31 +368,45 @@ fn parse_function_literal(file: &str) -> Option<Result<(Expression, &str), Strin
     {
         return None;
     }
-    Some(parse_function_literal_inner(remaining))
+    Some(parse_function_literal_inner(source, remaining))
 }
 
-fn parse_function_parameter(file: &str) -> Result<(BindingPattern, &str), String> {
+fn parse_function_parameter<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Result<(BindingPattern, &'a str), Diagnostic> {
     let file = parse_optional_whitespace(file);
     if let Some(remaining) = file.strip_prefix("(") {
         let remaining = parse_optional_whitespace(remaining);
-        let (pattern, remaining) = parse_binding_pattern(remaining)?;
+        let (pattern, remaining) = parse_binding_pattern_with_source(source, remaining)?;
         let remaining = parse_optional_whitespace(remaining);
-        let remaining = remaining
-            .strip_prefix(")")
-            .ok_or_else(|| "Expected ) after function parameter".to_string())?;
+        let remaining = remaining.strip_prefix(")").ok_or_else(|| {
+            diagnostic_here(source, remaining, 1, "Expected ) after function parameter")
+        })?;
         Ok((pattern, remaining))
     } else if file.starts_with("{") {
-        parse_struct_binding_pattern(file)
+        parse_struct_binding_pattern_with_source(source, file)
     } else {
-        Err("Expected function parameter after fn".to_string())
+        Err(diagnostic_here(
+            source,
+            file,
+            2,
+            "Expected function parameter after fn",
+        ))
     }
 }
 
-fn parse_struct_expression(file: &str) -> Option<Result<(Expression, &str), String>> {
-    fn parse_struct_expression_inner(file: &str) -> Result<(Expression, &str), String> {
-        let mut remaining = file
-            .strip_prefix("{")
-            .ok_or_else(|| "Expected { to start struct literal".to_string())?;
+fn parse_struct_expression<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Option<Result<(Expression, &'a str), Diagnostic>> {
+    fn parse_struct_expression_inner<'a>(
+        source: &'a str,
+        file: &'a str,
+    ) -> Result<(Expression, &'a str), Diagnostic> {
+        let mut remaining = file.strip_prefix("{").ok_or_else(|| {
+            diagnostic_here(source, file, 1, "Expected { to start struct literal")
+        })?;
         let mut items = Vec::new();
         let mut tuple_index = 0usize;
 
@@ -319,7 +421,7 @@ fn parse_struct_expression(file: &str) -> Option<Result<(Expression, &str), Stri
                 let after_ws = parse_optional_whitespace(after_identifier);
                 if let Some(after_equals) = after_ws.strip_prefix("=") {
                     let after_ws = parse_optional_whitespace(after_equals);
-                    let (value_expr, rest) = parse_operation_expression(after_ws)?;
+                    let (value_expr, rest) = parse_operation_expression_with_source(source, after_ws)?;
                     items.push((identifier, value_expr));
                     remaining = rest;
                     remaining = parse_optional_whitespace(remaining);
@@ -328,14 +430,19 @@ fn parse_struct_expression(file: &str) -> Option<Result<(Expression, &str), Stri
                         return Ok((Expression::Struct(items), rest));
                     }
 
-                    remaining = remaining
-                        .strip_prefix(",")
-                        .ok_or_else(|| "Expected , or } in struct literal".to_string())?;
+                    remaining = remaining.strip_prefix(",").ok_or_else(|| {
+                        diagnostic_here(
+                            source,
+                            remaining,
+                            1,
+                            "Expected , or } in struct literal",
+                        )
+                    })?;
                     continue;
                 }
             }
 
-            let (value_expr, rest) = parse_operation_expression(remaining)?;
+            let (value_expr, rest) = parse_operation_expression_with_source(source, remaining)?;
             items.push((Identifier(tuple_index.to_string()), value_expr));
             tuple_index += 1;
             remaining = rest;
@@ -345,26 +452,39 @@ fn parse_struct_expression(file: &str) -> Option<Result<(Expression, &str), Stri
                 return Ok((Expression::Struct(items), rest));
             }
 
-            remaining = remaining
-                .strip_prefix(",")
-                .ok_or_else(|| "Expected , or } in struct literal".to_string())?;
+            remaining = remaining.strip_prefix(",").ok_or_else(|| {
+                diagnostic_here(
+                    source,
+                    remaining,
+                    1,
+                    "Expected , or } in struct literal",
+                )
+            })?;
         }
     }
 
     if !file.starts_with("{") {
         return None;
     }
-    Some(parse_struct_expression_inner(file))
+    Some(parse_struct_expression_inner(source, file))
 }
 
-pub fn parse_isolated_expression(file: &str) -> Result<(Expression, &str), String> {
-    if let Some(function_parse) = parse_function_literal(file) {
+#[cfg(test)]
+pub fn parse_isolated_expression(file: &str) -> Result<(Expression, &str), Diagnostic> {
+    parse_isolated_expression_with_source(file, file)
+}
+
+fn parse_isolated_expression_with_source<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Result<(Expression, &'a str), Diagnostic> {
+    if let Some(function_parse) = parse_function_literal(source, file) {
         return function_parse;
     }
-    if let Some((expr, remaining)) = parse_grouping_expression(file) {
-        return Ok((expr, remaining));
+    if let Some(group_parse) = parse_grouping_expression_with_source(source, file) {
+        return group_parse;
     }
-    if let Some(struct_parse) = parse_struct_expression(file) {
+    if let Some(struct_parse) = parse_struct_expression(source, file) {
         return struct_parse;
     }
     if let Some((identifier, remaining)) = parse_identifier(file) {
@@ -373,14 +493,27 @@ pub fn parse_isolated_expression(file: &str) -> Result<(Expression, &str), Strin
     if let Some((literal, remaining)) = parse_literal(file) {
         return Ok((Expression::Literal(literal), remaining));
     }
-    Err(format!(
-        "Expected expression at: {}",
-        file.chars().take(10).collect::<String>()
-    ))
+    let preview = file.chars().take(10).collect::<String>();
+    if file.is_empty() {
+        Err(diagnostic_at_eof(
+            source,
+            format!("Expected expression near end of input"),
+        ))
+    } else {
+        Err(diagnostic_here(
+            source,
+            file,
+            file.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
+            format!("Expected expression at: {preview}"),
+        ))
+    }
 }
 
-pub fn parse_property_access(file: &str) -> Result<(Expression, &str), String> {
-    let (mut expr, mut remaining) = parse_isolated_expression(file)?;
+fn parse_property_access<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Result<(Expression, &'a str), Diagnostic> {
+    let (mut expr, mut remaining) = parse_isolated_expression_with_source(source, file)?;
 
     loop {
         let lookahead = parse_optional_whitespace(remaining);
@@ -388,8 +521,18 @@ pub fn parse_property_access(file: &str) -> Result<(Expression, &str), String> {
             break;
         };
         let after_dot = parse_optional_whitespace(after_dot);
-        let (property_identifier, rest) = parse_identifier(after_dot)
-            .ok_or_else(|| "Expected identifier after . in property access".to_string())?;
+        let (property_identifier, rest) = parse_identifier(after_dot).ok_or_else(|| {
+            diagnostic_here(
+                source,
+                after_dot,
+                after_dot
+                    .chars()
+                    .next()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(1),
+                "Expected identifier after . in property access",
+            )
+        })?;
         expr = Expression::PropertyAccess {
             object: Box::new(expr),
             property: property_identifier.0,
@@ -400,12 +543,15 @@ pub fn parse_property_access(file: &str) -> Result<(Expression, &str), String> {
     Ok((expr, remaining))
 }
 
-pub fn parse_function_call(file: &str) -> Result<(Expression, &str), String> {
+fn parse_function_call<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Result<(Expression, &'a str), Diagnostic> {
     let mut exprs = vec![];
-    let (function_expr, mut remaining) = parse_property_access(file)?;
+    let (function_expr, mut remaining) = parse_property_access(source, file)?;
     remaining = parse_optional_whitespace(remaining);
     exprs.push(function_expr);
-    while let Ok((argument_expr, rest)) = parse_property_access(remaining) {
+    while let Ok((argument_expr, rest)) = parse_property_access(source, remaining) {
         remaining = parse_optional_whitespace(rest);
         exprs.push(argument_expr);
     }
@@ -421,16 +567,27 @@ pub fn parse_function_call(file: &str) -> Result<(Expression, &str), String> {
     ))
 }
 
-pub fn parse_operation_expression(file: &str) -> Result<(Expression, &str), String> {
-    fn parse_operations(file: &str) -> Result<(Vec<Expression>, Vec<String>, &str), String> {
+#[cfg(test)]
+pub fn parse_operation_expression(file: &str) -> Result<(Expression, &str), Diagnostic> {
+    parse_operation_expression_with_source(file, file)
+}
+
+fn parse_operation_expression_with_source<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Result<(Expression, &'a str), Diagnostic> {
+    fn parse_operations<'a>(
+        source: &'a str,
+        file: &'a str,
+    ) -> Result<(Vec<Expression>, Vec<String>, &'a str), Diagnostic> {
         let mut expressions: Vec<Expression> = Vec::new();
         let mut operators: Vec<String> = Vec::new();
-        let (expression, mut remaining) = parse_function_call(file)?;
+        let (expression, mut remaining) = parse_function_call(source, file)?;
         remaining = parse_optional_whitespace(remaining);
         expressions.push(expression);
         while let Some((operator, rest)) = parse_operator(remaining) {
             let rest = parse_optional_whitespace(rest);
-            let (next_expression, rest) = parse_function_call(rest)?;
+            let (next_expression, rest) = parse_function_call(source, rest)?;
             let rest = parse_optional_whitespace(rest);
             operators.push(operator);
             expressions.push(next_expression);
@@ -439,21 +596,26 @@ pub fn parse_operation_expression(file: &str) -> Result<(Expression, &str), Stri
         Ok((expressions, operators, remaining))
     }
 
-    let (expressions, operators, remaining) = parse_operations(file)?;
+    let (expressions, operators, remaining) = parse_operations(source, file)?;
 
     fn reduce_stacks(
         operand_stack: &mut Vec<Expression>,
         operator_stack: &mut Vec<String>,
-    ) -> Result<(), String> {
+        source: &str,
+    ) -> Result<(), Diagnostic> {
         let operator = operator_stack
             .pop()
-            .ok_or_else(|| "Expected operator when reducing operation".to_string())?;
+            .ok_or_else(|| diagnostic_at_eof(source, "Expected operator when reducing operation"))?;
         let right = operand_stack
             .pop()
-            .ok_or_else(|| "Expected right operand when reducing operation".to_string())?;
+            .ok_or_else(|| {
+                diagnostic_at_eof(source, "Expected right operand when reducing operation")
+            })?;
         let left = operand_stack
             .pop()
-            .ok_or_else(|| "Expected left operand when reducing operation".to_string())?;
+            .ok_or_else(|| {
+                diagnostic_at_eof(source, "Expected left operand when reducing operation")
+            })?;
         operand_stack.push(Expression::Operation {
             operator,
             left: Box::new(left),
@@ -468,41 +630,49 @@ pub fn parse_operation_expression(file: &str) -> Result<(Expression, &str), Stri
     let mut expression_iter = expressions.into_iter();
     let first_expression = expression_iter
         .next()
-        .ok_or_else(|| "Expected expression to start parsing operation".to_string())?;
+        .ok_or_else(|| diagnostic_at_eof(source, "Expected expression to start parsing operation"))?;
     operand_stack.push(first_expression);
 
     for operator in operators {
         let next_expression = expression_iter
             .next()
-            .ok_or_else(|| "Expected expression after operator".to_string())?;
+            .ok_or_else(|| diagnostic_at_eof(source, "Expected expression after operator"))?;
         while operator_stack.last().map_or(false, |existing| {
             operator_precedence(existing) >= operator_precedence(&operator)
         }) {
-            reduce_stacks(&mut operand_stack, &mut operator_stack)?;
+            reduce_stacks(&mut operand_stack, &mut operator_stack, source)?;
         }
         operator_stack.push(operator);
         operand_stack.push(next_expression);
     }
 
     while !operator_stack.is_empty() {
-        reduce_stacks(&mut operand_stack, &mut operator_stack)?;
+        reduce_stacks(&mut operand_stack, &mut operator_stack, source)?;
     }
 
     let final_expression = operand_stack
         .pop()
-        .ok_or_else(|| "Expected expression after parsing operations".to_string())?;
+        .ok_or_else(|| diagnostic_at_eof(source, "Expected expression after parsing operations"))?;
     Ok((final_expression, remaining))
 }
 
-pub fn parse_binding(file: &str) -> Option<Result<(Binding, &str), String>> {
+fn parse_binding<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Option<Result<(Binding, &'a str), Diagnostic>> {
     let file = parse_let(file)?;
-    fn parse_binding(file: &str) -> Result<(Binding, &str), String> {
-        let file = parse_whitespace(file).ok_or("Expected whitespace after let".to_string())?;
-        let (pattern, file) = parse_binding_pattern(file)?;
+    fn parse_binding_inner<'a>(
+        source: &'a str,
+        file: &'a str,
+    ) -> Result<(Binding, &'a str), Diagnostic> {
+        let file = parse_whitespace(file)
+            .ok_or_else(|| diagnostic_here(source, file, 1, "Expected whitespace after let"))?;
+        let (pattern, file) = parse_binding_pattern_with_source(source, file)?;
         let file = parse_optional_whitespace(file);
-        let file = parse_eq(file).ok_or("Expected = after binding pattern".to_string())?;
+        let file = parse_eq(file)
+            .ok_or_else(|| diagnostic_here(source, file, 1, "Expected = after binding pattern"))?;
         let file = parse_optional_whitespace(file);
-        let (expr, file) = parse_isolated_expression(file)?;
+        let (expr, file) = parse_isolated_expression_with_source(source, file)?;
 
         Ok((
             Binding {
@@ -512,25 +682,29 @@ pub fn parse_binding(file: &str) -> Option<Result<(Binding, &str), String>> {
             file,
         ))
     }
-    Some(parse_binding(file))
+    Some(parse_binding_inner(source, file))
 }
 
-pub fn parse_individual_expression(file: &str) -> Result<(Expression, &str), String> {
-    if let Some(binding_parse) = parse_binding(file) {
-        return binding_parse
-            .map(|(binding, remaining)| (Expression::Binding(Box::new(binding)), remaining));
+fn parse_individual_expression_with_source<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Result<(Expression, &'a str), Diagnostic> {
+    if let Some(binding_parse) = parse_binding(source, file) {
+        let (binding, remaining) = binding_parse?;
+        return Ok((Expression::Binding(Box::new(binding)), remaining));
     }
-    parse_operation_expression(file)
+    parse_operation_expression_with_source(source, file)
 }
 
-pub fn parse_block(file: &str) -> Result<(Expression, &str), String> {
-    parse_block_with_terminators(file, &[])
+pub fn parse_block(file: &str) -> Result<(Expression, &str), Diagnostic> {
+    parse_block_with_terminators(file, file, &[])
 }
 
 fn parse_block_with_terminators<'a>(
+    source: &'a str,
     file: &'a str,
     terminators: &[char],
-) -> Result<(Expression, &'a str), String> {
+) -> Result<(Expression, &'a str), Diagnostic> {
     let mut expressions = Vec::new();
     let mut remaining = parse_optional_whitespace(file);
 
@@ -545,7 +719,7 @@ fn parse_block_with_terminators<'a>(
             }
         }
 
-        let (expression, rest) = parse_individual_expression(remaining)?;
+        let (expression, rest) = parse_individual_expression_with_source(source, remaining)?;
         expressions.push(expression);
         remaining = parse_optional_whitespace(rest);
 
@@ -559,12 +733,17 @@ fn parse_block_with_terminators<'a>(
             }
         }
 
-        let rest = parse_semicolon(remaining)?;
+        let rest = parse_semicolon(source, remaining)?;
         remaining = parse_optional_whitespace(rest);
     }
 
     if expressions.is_empty() {
-        return Err("Cannot parse empty block".to_string());
+        return Err(diagnostic_here(
+            source,
+            remaining,
+            remaining.chars().next().map(|c| c.len_utf8()).unwrap_or(0),
+            "Cannot parse empty block",
+        ));
     }
 
     if expressions.len() == 1 {
@@ -873,4 +1052,24 @@ fn parse_struct_property_access_then_call() {
         *object,
         Expression::Identifier(Identifier(ref name)) if name == "foo"
     ));
+}
+
+#[test]
+fn diagnostics_include_binding_pattern_source_reference() {
+    let source = "let = 5;";
+    let err = parse_block(source).expect_err("binding should fail");
+    let rendered = err.render_with_source(source);
+    assert!(rendered.contains("Expected binding pattern"));
+    assert!(rendered.contains("line 1, column 5"));
+    assert!(rendered.contains("^"));
+}
+
+#[test]
+fn diagnostics_include_grouping_closure_reference() {
+    let source = "(1 + 2";
+    let err = parse_isolated_expression(source).expect_err("missing ) should fail");
+    let rendered = err.render_with_source(source);
+    assert!(rendered.contains("Expected ) to close grouping expression"));
+    assert!(rendered.contains("line 1, column 7"));
+    assert!(rendered.contains("^"));
 }
