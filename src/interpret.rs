@@ -1,11 +1,18 @@
-use crate::parsing::{
+use crate::{interpret, parsing::{
     BinaryIntrinsicOperator, Binding, BindingPattern, Expression, ExpressionLiteral, Identifier,
     IntrinsicOperation, IntrinsicType,
-};
+}};
+
+#[derive(Clone, Debug)]
+pub enum BindingContext {
+    Bound(Expression),
+    UnboundWithType(Expression),
+    UnboundWithoutType,
+}
 
 #[derive(Clone)]
 pub struct Context {
-    bindings: std::collections::HashMap<String, Option<Expression>>,
+    bindings: std::collections::HashMap<String, BindingContext>,
 }
 
 pub fn interpret_expression(expr: Expression, context: &mut Context) -> Result<Expression, String> {
@@ -13,7 +20,7 @@ pub fn interpret_expression(expr: Expression, context: &mut Context) -> Result<E
         expr @ (Expression::Literal(_) | Expression::IntrinsicType(_)) => Ok(expr),
         Expression::Identifier(identifier) => {
             if let Some(binding) = context.bindings.get(&identifier.0) {
-                if let Some(expr) = binding {
+                if let BindingContext::Bound(expr) = binding {
                     Ok(expr.clone())
                 } else {
                     Ok(Expression::Identifier(identifier))
@@ -26,32 +33,16 @@ pub fn interpret_expression(expr: Expression, context: &mut Context) -> Result<E
             operator,
             left,
             right,
-        } => {
-            let left_evaluated = interpret_expression(*left, context)?;
-            let right_evaluated = interpret_expression(*right, context)?;
-            if !is_resolved_constant(&left_evaluated)
-                || !is_resolved_constant(&right_evaluated)
-            {
-                return Ok(Expression::Operation {
-                    operator,
-                    left: Box::new(left_evaluated),
-                    right: Box::new(right_evaluated),
-                });
-            }
-            let left_type = get_type_of_expression(&left_evaluated, context)?;
-
-            let operator_type = get_operator_of_type(&left_type, &operator)?;
-            interpret_expression(
-                Expression::FunctionCall {
-                    function: Box::new(Expression::FunctionCall {
-                        function: Box::new(operator_type),
-                        argument: Box::new(left_evaluated),
-                    }),
-                    argument: Box::new(right_evaluated),
-                },
-                context,
-            )
-        }
+        } => interpret_expression(
+            Expression::FunctionCall {
+                function: Box::new(Expression::PropertyAccess {
+                    object: left,
+                    property: operator.clone(),
+                }),
+                argument: right,
+            },
+            context,
+        ),
         Expression::Binding(binding) => interpret_binding(*binding, context),
         Expression::Block(expressions) => interpret_block(expressions, context),
         Expression::FunctionCall { function, argument } => {
@@ -84,7 +75,7 @@ pub fn interpret_expression(expr: Expression, context: &mut Context) -> Result<E
         } => {
             let mut body_context = context.clone();
 
-            bind_pattern_blanks(parameter.clone(), &mut body_context)?;
+            bind_pattern_blanks(parameter.clone(), &mut body_context, None)?;
 
             Ok(Expression::Function {
                 parameter,
@@ -132,6 +123,28 @@ pub fn interpret_expression(expr: Expression, context: &mut Context) -> Result<E
                 )
             }
         },
+        Expression::IntrinsicType(intrinsic_type) => todo!(),
+        Expression::Literal(expression_literal) => todo!(),
+        Expression::PropertyAccess { object, property } => {
+            let evaluated_object = interpret_expression(*object, context)?;
+            if let Expression::Struct(items) = &evaluated_object {
+                for (item_id, item_expr) in items {
+                    if item_id.0 == property {
+                        return Ok(item_expr.clone());
+                    }
+                }
+            }
+
+            let object_type = get_type_of_expression(&evaluated_object, context)?;
+            let trait_prop = get_trait_prop_of_type(&object_type, &property)?;
+            interpret_expression(
+                Expression::FunctionCall {
+                    function: Box::new(trait_prop),
+                    argument: Box::new(evaluated_object),
+                },
+                context,
+            )
+        }
     }
 }
 
@@ -144,7 +157,16 @@ fn get_type_of_expression(expr: &Expression, context: &mut Context) -> Result<Ex
             )?),
         },
         Expression::Identifier(identifier) => {
-            interpret_expression(Expression::Identifier(identifier.clone()), context)
+            let bound_value = context.bindings
+                .get(&identifier.0)
+                .ok_or_else(|| format!("Unbound identifier: {}", identifier.0))?
+                .clone();
+            
+            match bound_value {
+                BindingContext::Bound(value) => get_type_of_expression(&value, context),
+                BindingContext::UnboundWithType(type_expr) => Ok(interpret_expression(type_expr.clone(), context)?),
+                BindingContext::UnboundWithoutType => Err(format!("Cannot determine type of unbound identifier: {}", identifier.0)),
+            }
         }
         Expression::Operation {
             operator,
@@ -177,6 +199,7 @@ fn get_type_of_expression(expr: &Expression, context: &mut Context) -> Result<Ex
             return_type,
         } => Ok(Expression::IntrinsicType(IntrinsicType::Type)),
         Expression::IntrinsicOperation(intrinsic_operation) => todo!(),
+        Expression::PropertyAccess { object, property } => todo!(),
     }
 }
 
@@ -185,7 +208,9 @@ fn get_type_of_binding_pattern(
     context: &mut Context,
 ) -> Result<Expression, String> {
     match pattern {
-        BindingPattern::Identifier(_) => Err("Cannot determine type of untyped identifier".to_string()),
+        BindingPattern::Identifier(_) => {
+            Err("Cannot determine type of untyped identifier".to_string())
+        }
         BindingPattern::Struct(pattern_items) => {
             let mut struct_items = Vec::with_capacity(pattern_items.len());
             for (field_identifier, field_pattern) in pattern_items {
@@ -198,7 +223,7 @@ fn get_type_of_binding_pattern(
     }
 }
 
-fn get_operator_of_type(value_type: &Expression, operator: &str) -> Result<Expression, String> {
+fn get_trait_prop_of_type(value_type: &Expression, trait_prop: &str) -> Result<Expression, String> {
     match value_type {
         Expression::AttachImplementation {
             type_expr,
@@ -206,15 +231,15 @@ fn get_operator_of_type(value_type: &Expression, operator: &str) -> Result<Expre
         } => {
             if let Expression::Struct(ref items) = **implementation {
                 for (item_id, item_expr) in items {
-                    if item_id.0 == operator {
+                    if item_id.0 == trait_prop {
                         return Ok(item_expr.clone());
                     }
                 }
             }
 
-            get_operator_of_type(type_expr, operator)
+            get_trait_prop_of_type(type_expr, trait_prop)
         }
-        _ => Err("Unsupported value type for operator lookup".to_string()),
+        unrecognized => Err(format!("Unsupported value type {:?} for operator lookup", unrecognized)),
     }
 }
 
@@ -242,20 +267,24 @@ fn interpret_binding(binding: Binding, context: &mut Context) -> Result<Expressi
     Ok(value)
 }
 
-fn bind_pattern_blanks(pattern: BindingPattern, context: &mut Context) -> Result<(), String> {
+fn bind_pattern_blanks(pattern: BindingPattern, context: &mut Context, type_hint: Option<Expression>) -> Result<(), String> {
     match pattern {
         BindingPattern::Identifier(identifier) => {
-            context.bindings.insert(identifier.0, None);
+            if let Some(type_expr) = type_hint {
+                context.bindings.insert(identifier.0, BindingContext::UnboundWithType(type_expr));
+            } else {
+                context.bindings.insert(identifier.0, BindingContext::UnboundWithoutType);
+            }
             Ok(())
         }
         BindingPattern::Struct(pattern_items) => {
             for (_, field_pattern) in pattern_items {
-                bind_pattern_blanks(field_pattern, context)?;
+                bind_pattern_blanks(field_pattern, context, None)?;
             }
 
             Ok(())
         }
-        BindingPattern::TypeHint(inner, _) => bind_pattern_blanks(*inner, context),
+        BindingPattern::TypeHint(inner, type_hint) => bind_pattern_blanks(*inner, context, Some(*type_hint)),
     }
 }
 
@@ -266,7 +295,7 @@ fn bind_pattern_from_value(
 ) -> Result<(), String> {
     match pattern {
         BindingPattern::Identifier(identifier) => {
-            context.bindings.insert(identifier.0, Some(value.clone()));
+            context.bindings.insert(identifier.0, BindingContext::Bound(value.clone()));
             Ok(())
         }
         BindingPattern::Struct(pattern_items) => {
@@ -343,8 +372,7 @@ pub fn intrinsic_context() -> Context {
                 Box::new(Expression::IntrinsicType(IntrinsicType::I32)),
             )
         };
-        let identifier_expr =
-            |name: &str| Expression::Identifier(Identifier(name.to_string()));
+        let identifier_expr = |name: &str| Expression::Identifier(Identifier(name.to_string()));
 
         (
             Identifier(symbol.to_string()),
@@ -369,7 +397,7 @@ pub fn intrinsic_context() -> Context {
 
     context.bindings.insert(
         "i32".to_string(),
-        Some(Expression::AttachImplementation {
+        BindingContext::Bound(Expression::AttachImplementation {
             type_expr: Box::new(Expression::IntrinsicType(IntrinsicType::I32)),
             implementation: Box::new(Expression::Struct(vec![
                 i32_binary_intrinsic("+", BinaryIntrinsicOperator::Add),
@@ -397,7 +425,10 @@ fn evaluate_text_to_number(program: &str) -> i32 {
         .expect("Failed to interpret parsed expression")
     {
         Expression::Literal(ExpressionLiteral::Number(value)) => value,
-        other => panic!("Expected numeric literal after interpretation, got {:?}", other),
+        other => panic!(
+            "Expected numeric literal after interpretation, got {:?}",
+            other
+        ),
     }
 }
 

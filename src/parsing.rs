@@ -61,6 +61,10 @@ pub enum Expression {
         function: Box<Expression>,
         argument: Box<Expression>,
     },
+    PropertyAccess {
+        object: Box<Expression>,
+        property: String,
+    },
     Binding(Box<Binding>),
     Block(Vec<Expression>),
 }
