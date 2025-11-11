@@ -46,7 +46,7 @@ pub enum Expression {
         body: Box<Expression>,
     },
     FunctionType {
-        parameter: BindingPattern,
+        parameter: Box<Expression>,
         return_type: Box<Expression>,
     },
     Struct(Vec<(Identifier, Expression)>),

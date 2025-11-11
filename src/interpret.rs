@@ -159,7 +159,7 @@ fn get_type_of_expression(expr: &Expression, context: &mut Context) -> Result<Ex
             return_type,
             body,
         } => Ok(Expression::FunctionType {
-            parameter: parameter.clone(),
+            parameter: Box::new(get_type_of_binding_pattern(&parameter, context)?),
             return_type: return_type.clone(),
         }),
         Expression::Struct(items) => todo!(),
@@ -168,6 +168,24 @@ fn get_type_of_expression(expr: &Expression, context: &mut Context) -> Result<Ex
             return_type,
         } => Ok(Expression::IntrinsicType(IntrinsicType::Type)),
         Expression::IntrinsicOperation(intrinsic_operation) => todo!(),
+    }
+}
+
+fn get_type_of_binding_pattern(
+    pattern: &BindingPattern,
+    context: &mut Context,
+) -> Result<Expression, String> {
+    match pattern {
+        BindingPattern::Identifier(_) => Err("Cannot determine type of untyped identifier".to_string()),
+        BindingPattern::Struct(pattern_items) => {
+            let mut struct_items = Vec::with_capacity(pattern_items.len());
+            for (field_identifier, field_pattern) in pattern_items {
+                let field_type = get_type_of_binding_pattern(field_pattern, context)?;
+                struct_items.push((field_identifier.clone(), field_type));
+            }
+            Ok(Expression::Struct(struct_items))
+        }
+        BindingPattern::TypeHint(_, type_expr) => Ok(*type_expr.clone()),
     }
 }
 
@@ -324,7 +342,7 @@ fn intrinsic_context() -> Context {
             Expression::Function {
                 parameter: typed_pattern("self"),
                 return_type: Box::new(Expression::FunctionType {
-                    parameter: typed_pattern("other"),
+                    parameter: Box::new(Expression::IntrinsicType(IntrinsicType::I32)),
                     return_type: Box::new(Expression::IntrinsicType(IntrinsicType::I32)),
                 }),
                 body: Box::new(Expression::Function {
