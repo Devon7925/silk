@@ -1,8 +1,8 @@
 use crate::{
     diagnostics::{Diagnostic, SourceSpan},
     parsing::{
-        BinaryIntrinsicOperator, Binding, BindingPattern, Expression, ExpressionLiteral,
-        Identifier, IntrinsicOperation, IntrinsicType,
+        BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, Expression,
+        ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, TargetLiteral,
     },
 };
 
@@ -15,7 +15,7 @@ pub enum BindingContext {
 
 #[derive(Clone)]
 pub struct Context {
-    bindings: std::collections::HashMap<String, BindingContext>,
+    bindings: std::collections::HashMap<String, (BindingContext, Vec<BindingAnnotation>)>,
 }
 
 fn diagnostic(message: impl Into<String>, span: SourceSpan) -> Diagnostic {
@@ -47,7 +47,7 @@ pub fn interpret_expression(
         expr @ (Expression::Literal(_, _) | Expression::IntrinsicType(_, _)) => Ok(expr),
         Expression::Identifier(identifier, span) => {
             if let Some(binding) = context.bindings.get(&identifier.0) {
-                if let BindingContext::Bound(expr) = binding {
+                if let BindingContext::Bound(expr) = &binding.0 {
                     Ok(expr.clone())
                 } else {
                     Ok(Expression::Identifier(identifier, span))
@@ -93,7 +93,12 @@ pub fn interpret_expression(
                     span: _,
                 } => {
                     let mut call_context = context.clone();
-                    bind_pattern_from_value(parameter, &argument_value, &mut call_context)?;
+                    bind_pattern_from_value(
+                        parameter,
+                        &argument_value,
+                        &mut call_context,
+                        Vec::new(),
+                    )?;
                     interpret_expression(*body, &mut call_context)
                 }
                 _ => Err(diagnostic("Attempted to call a non-function value", span)),
@@ -116,7 +121,7 @@ pub fn interpret_expression(
         } => {
             let mut body_context = context.clone();
 
-            bind_pattern_blanks(parameter.clone(), &mut body_context, None)?;
+            bind_pattern_blanks(parameter.clone(), &mut body_context, Vec::new(), None)?;
 
             Ok(Expression::Function {
                 parameter,
@@ -206,6 +211,8 @@ fn get_type_of_expression(
     match expr {
         Expression::Literal(lit, _) => match lit {
             ExpressionLiteral::Number(_) => interpret_expression(identifier_expr("i32"), context),
+            ExpressionLiteral::Boolean(_) => interpret_expression(identifier_expr("bool"), context),
+            ExpressionLiteral::Target(_) => interpret_expression(identifier_expr("target"), context),
         },
         Expression::Identifier(identifier, span) => {
             let bound_value = context
@@ -214,7 +221,7 @@ fn get_type_of_expression(
                 .ok_or_else(|| diagnostic(format!("Unbound identifier: {}", identifier.0), *span))?
                 .clone();
 
-            match bound_value {
+            match bound_value.0 {
                 BindingContext::Bound(value) => get_type_of_expression(&value, context),
                 BindingContext::UnboundWithType(type_expr) => {
                     interpret_expression(type_expr.clone(), context)
@@ -233,7 +240,7 @@ fn get_type_of_expression(
         Expression::Block(..) => todo!(),
         Expression::FunctionCall { .. } => todo!(),
         Expression::IntrinsicType(intrinsic_type, span) => match intrinsic_type {
-            IntrinsicType::I32 | IntrinsicType::Type => {
+            IntrinsicType::I32 | IntrinsicType::Boolean | IntrinsicType::Target | IntrinsicType::Type => {
                 Ok(Expression::IntrinsicType(IntrinsicType::Type, *span))
             }
         },
@@ -275,6 +282,7 @@ fn get_type_of_binding_pattern(
             Ok(Expression::Struct(struct_items, *span))
         }
         BindingPattern::TypeHint(_, type_expr, _) => Ok(*type_expr.clone()),
+        BindingPattern::Annotated { pattern, .. } => get_type_of_binding_pattern(pattern, context),
     }
 }
 
@@ -330,38 +338,81 @@ fn interpret_block(
 
 fn interpret_binding(binding: Binding, context: &mut Context) -> Result<Expression, Diagnostic> {
     let value = interpret_expression(binding.expr, context)?;
-    bind_pattern_from_value(binding.pattern, &value, context)?;
-    Ok(value)
+    let bound_success = bind_pattern_from_value(binding.pattern, &value, context, Vec::new())?;
+    Ok(Expression::Literal(
+        ExpressionLiteral::Boolean(bound_success),
+        dummy_span(),
+    ))
+}
+
+fn parse_binding_annotation(
+    ann: BindingAnnotation,
+    context: &Context,
+) -> Result<BindingAnnotation, Diagnostic> {
+    let mut context = context.clone();
+    match ann {
+        BindingAnnotation::Export(expr, span) => Ok(BindingAnnotation::Export(
+            interpret_expression(expr, &mut context)?,
+            span,
+        )),
+    }
 }
 
 fn bind_pattern_blanks(
     pattern: BindingPattern,
     context: &mut Context,
+    passed_annotations: Vec<BindingAnnotation>,
     type_hint: Option<Expression>,
 ) -> Result<(), Diagnostic> {
     match pattern {
         BindingPattern::Identifier(identifier, _) => {
             if let Some(type_expr) = type_hint {
-                context
-                    .bindings
-                    .insert(identifier.0, BindingContext::UnboundWithType(type_expr));
+                context.bindings.insert(
+                    identifier.0,
+                    (
+                        BindingContext::UnboundWithType(type_expr),
+                        passed_annotations.clone(),
+                    ),
+                );
             } else {
-                context
-                    .bindings
-                    .insert(identifier.0, BindingContext::UnboundWithoutType);
+                context.bindings.insert(
+                    identifier.0,
+                    (
+                        BindingContext::UnboundWithoutType,
+                        passed_annotations.clone(),
+                    ),
+                );
             }
             Ok(())
         }
         BindingPattern::Struct(pattern_items, _) => {
             for (_, field_pattern) in pattern_items {
-                bind_pattern_blanks(field_pattern, context, None)?;
+                bind_pattern_blanks(field_pattern, context, Vec::new(), None)?;
             }
 
             Ok(())
         }
         BindingPattern::TypeHint(inner, type_hint, _) => {
-            bind_pattern_blanks(*inner, context, Some(*type_hint))
+            bind_pattern_blanks(*inner, context, passed_annotations, Some(*type_hint))
         }
+        BindingPattern::Annotated {
+            pattern,
+            annotations,
+            ..
+        } => bind_pattern_blanks(
+            *pattern,
+            context,
+            passed_annotations
+                .into_iter()
+                .chain(
+                    annotations
+                        .into_iter()
+                        .map(|ann| parse_binding_annotation(ann, context))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+                .collect(),
+            None,
+        ),
     }
 }
 
@@ -369,13 +420,15 @@ fn bind_pattern_from_value(
     pattern: BindingPattern,
     value: &Expression,
     context: &mut Context,
-) -> Result<(), Diagnostic> {
+    passed_annotations: Vec<BindingAnnotation>,
+) -> Result<bool, Diagnostic> {
     match pattern {
         BindingPattern::Identifier(identifier, _) => {
-            context
-                .bindings
-                .insert(identifier.0, BindingContext::Bound(value.clone()));
-            Ok(())
+            context.bindings.insert(
+                identifier.0,
+                (BindingContext::Bound(value.clone()), Vec::new()),
+            );
+            Ok(true)
         }
         BindingPattern::Struct(pattern_items, span) => {
             let Expression::Struct(struct_items, _) = value else {
@@ -392,12 +445,32 @@ fn bind_pattern_from_value(
                         diagnostic(format!("Missing field {}", field_identifier.0), field_span)
                     })?;
 
-                bind_pattern_from_value(field_pattern, field_value, context)?;
+                bind_pattern_from_value(field_pattern, field_value, context, Vec::new())?;
             }
 
-            Ok(())
+            Ok(true)
         }
-        BindingPattern::TypeHint(inner, _, _) => bind_pattern_from_value(*inner, value, context),
+        BindingPattern::TypeHint(inner, _, _) => {
+            bind_pattern_from_value(*inner, value, context, passed_annotations)
+        }
+        BindingPattern::Annotated {
+            pattern,
+            annotations,
+            ..
+        } => bind_pattern_from_value(
+            *pattern,
+            value,
+            context,
+            passed_annotations
+                .into_iter()
+                .chain(
+                    annotations
+                        .into_iter()
+                        .map(|ann| parse_binding_annotation(ann, context))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+                .collect(),
+        ),
     }
 }
 
@@ -490,19 +563,44 @@ pub fn intrinsic_context() -> Context {
 
     context.bindings.insert(
         "i32".to_string(),
-        BindingContext::Bound(Expression::AttachImplementation {
-            type_expr: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
-            implementation: Box::new(Expression::Struct(
-                vec![
-                    i32_binary_intrinsic("+", BinaryIntrinsicOperator::Add),
-                    i32_binary_intrinsic("-", BinaryIntrinsicOperator::Subtract),
-                    i32_binary_intrinsic("*", BinaryIntrinsicOperator::Multiply),
-                    i32_binary_intrinsic("/", BinaryIntrinsicOperator::Divide),
-                ],
+        (
+            BindingContext::Bound(Expression::AttachImplementation {
+                type_expr: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
+                implementation: Box::new(Expression::Struct(
+                    vec![
+                        i32_binary_intrinsic("+", BinaryIntrinsicOperator::Add),
+                        i32_binary_intrinsic("-", BinaryIntrinsicOperator::Subtract),
+                        i32_binary_intrinsic("*", BinaryIntrinsicOperator::Multiply),
+                        i32_binary_intrinsic("/", BinaryIntrinsicOperator::Divide),
+                    ],
+                    dummy_span(),
+                )),
+                span: dummy_span(),
+            }),
+            Vec::new(),
+        ),
+    );
+
+    context.bindings.insert(
+        "js".to_string(),
+        (
+            BindingContext::Bound(Expression::Literal(
+                ExpressionLiteral::Target(TargetLiteral::JSTarget),
                 dummy_span(),
             )),
-            span: dummy_span(),
-        }),
+            Vec::new(),
+        ),
+    );
+
+    context.bindings.insert(
+        "wasm".to_string(),
+        (
+            BindingContext::Bound(Expression::Literal(
+                ExpressionLiteral::Target(TargetLiteral::WasmTarget),
+                dummy_span(),
+            )),
+            Vec::new(),
+        ),
     );
 
     context
@@ -642,6 +740,15 @@ let container = {
     )
 };
 container.inc(41)
+    ";
+    assert_eq!(evaluate_text_to_number(program), 42);
+}
+
+#[test]
+fn interpret_binding_with_export_annotation() {
+    let program = "
+let export(js) answer: i32 = 42;
+answer
     ";
     assert_eq!(evaluate_text_to_number(program), 42);
 }

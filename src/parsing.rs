@@ -8,6 +8,11 @@ pub enum BindingPattern {
     Identifier(Identifier, SourceSpan),
     Struct(Vec<(Identifier, BindingPattern)>, SourceSpan),
     TypeHint(Box<BindingPattern>, Box<Expression>, SourceSpan),
+    Annotated {
+        annotations: Vec<BindingAnnotation>,
+        pattern: Box<BindingPattern>,
+        span: SourceSpan,
+    },
 }
 
 impl BindingPattern {
@@ -15,20 +20,31 @@ impl BindingPattern {
         match self {
             BindingPattern::Identifier(_, span)
             | BindingPattern::Struct(_, span)
-            | BindingPattern::TypeHint(_, _, span) => *span,
+            | BindingPattern::TypeHint(_, _, span)
+            | BindingPattern::Annotated { span, .. } => *span,
         }
     }
 }
 
 #[derive(Clone, Debug)]
+pub enum TargetLiteral {
+    JSTarget,
+    WasmTarget,
+}
+
+#[derive(Clone, Debug)]
 pub enum ExpressionLiteral {
     Number(i32),
+    Boolean(bool),
+    Target(TargetLiteral),
 }
 
 #[derive(Clone, Debug)]
 pub enum IntrinsicType {
     I32,
+    Boolean,
     Type,
+    Target,
 }
 
 #[derive(Clone, Debug)]
@@ -111,6 +127,11 @@ impl Expression {
 pub struct Binding {
     pub pattern: BindingPattern,
     pub expr: Expression,
+}
+
+#[derive(Clone, Debug)]
+pub enum BindingAnnotation {
+    Export(Expression, SourceSpan),
 }
 
 fn remainder_span(source: &str, remaining: &str, len: usize) -> SourceSpan {
@@ -235,21 +256,30 @@ fn parse_binding_pattern_with_source<'a>(
     file: &'a str,
 ) -> Result<(BindingPattern, &'a str), Diagnostic> {
     let file = parse_optional_whitespace(file);
-    let (pattern, file) = if file.starts_with("{") {
+    let annotation_start_slice = file;
+    let (annotations, file) = parse_binding_annotations(source, file)?;
+    let (mut pattern, mut remaining) = if file.starts_with("{") {
         parse_struct_binding_pattern_with_source(source, file)?
     } else {
         parse_simple_binding_pattern(source, file)?
     };
-    if let Some(type_hint_parse) = parse_type_hint(source, file) {
-        let (type_expr, remaining) = type_hint_parse?;
+    if let Some(type_hint_parse) = parse_type_hint(source, remaining) {
+        let (type_expr, new_remaining) = type_hint_parse?;
         let span = pattern.span().merge(&type_expr.span());
-        return Ok((
-            BindingPattern::TypeHint(Box::new(pattern), Box::new(type_expr), span),
-            remaining,
-        ));
+        pattern = BindingPattern::TypeHint(Box::new(pattern), Box::new(type_expr), span);
+        remaining = new_remaining;
     }
 
-    Ok((pattern, file))
+    if !annotations.is_empty() {
+        let span = consumed_span(source, annotation_start_slice, remaining);
+        pattern = BindingPattern::Annotated {
+            annotations,
+            pattern: Box::new(pattern),
+            span,
+        };
+    }
+
+    Ok((pattern, remaining))
 }
 
 #[cfg(test)]
@@ -722,6 +752,70 @@ fn parse_operation_expression_with_source<'a>(
     Ok((final_expression, remaining))
 }
 
+fn parse_binding_annotations<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Result<(Vec<BindingAnnotation>, &'a str), Diagnostic> {
+    let mut annotations = Vec::new();
+    let mut remaining = file;
+
+    loop {
+        let trimmed = parse_optional_whitespace(remaining);
+        match parse_binding_annotation(source, trimmed) {
+            Some(result) => {
+                let (annotation, rest) = result?;
+                annotations.push(annotation);
+                remaining = rest;
+            }
+            None => return Ok((annotations, trimmed)),
+        }
+    }
+}
+
+fn parse_binding_annotation<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Option<Result<(BindingAnnotation, &'a str), Diagnostic>> {
+    parse_export_binding_annotation(source, file)
+}
+
+fn parse_export_binding_annotation<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Option<Result<(BindingAnnotation, &'a str), Diagnostic>> {
+    const KEYWORD: &str = "export";
+    if !file.starts_with(KEYWORD) {
+        return None;
+    }
+
+    let after_keyword = &file[KEYWORD.len()..];
+    let after_keyword = parse_optional_whitespace(after_keyword);
+    if !after_keyword.starts_with('(') {
+        return None;
+    }
+
+    let annotation_start_slice = file;
+    let after_paren = &after_keyword[1..];
+    let after_paren = parse_optional_whitespace(after_paren);
+    Some(
+        parse_isolated_expression_with_source(source, after_paren).and_then(
+            |(target_expr, rest)| {
+                let rest = parse_optional_whitespace(rest);
+                let rest = rest.strip_prefix(")").ok_or_else(|| {
+                    diagnostic_here(
+                        source,
+                        rest,
+                        rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
+                        "Expected ) to close export annotation",
+                    )
+                })?;
+                let span = consumed_span(source, annotation_start_slice, rest);
+                Ok((BindingAnnotation::Export(target_expr, span), rest))
+            },
+        ),
+    )
+}
+
 fn parse_binding<'a>(
     source: &'a str,
     file: &'a str,
@@ -866,6 +960,81 @@ let y: i32 = x
         matches!(**binding2_type, Expression::Identifier(ref hint, _) if hint.0 == "i32"),
         true
     );
+}
+
+#[test]
+fn parse_binding_with_export_annotation() {
+    let parsed = parse_block(
+        "
+let export(js) foo = 42;
+let export(wasm) export(js) bar = foo;
+bar
+    ",
+    )
+    .unwrap();
+
+    let (Expression::Block(parsed, _), "") = parsed else {
+        panic!()
+    };
+    assert_eq!(parsed.len(), 3);
+
+    let Expression::Binding(binding1, _) = &parsed[0] else {
+        panic!()
+    };
+    let BindingPattern::Annotated {
+        annotations,
+        pattern: _,
+        ..
+    } = &binding1.pattern
+    else {
+        panic!("expected annotated pattern");
+    };
+    assert_eq!(annotations.len(), 1);
+    match &annotations[0] {
+        BindingAnnotation::Export(target_expr, _) => match target_expr {
+            Expression::Identifier(identifier, _) => assert_eq!(identifier.0, "js"),
+            other => panic!("expected target identifier, got {:?}", other),
+        },
+    }
+
+    let Expression::Binding(binding2, _) = &parsed[1] else {
+        panic!()
+    };
+    let BindingPattern::Annotated { annotations, .. } = &binding2.pattern else {
+        panic!("expected annotated pattern")
+    };
+    assert_eq!(annotations.len(), 2);
+    assert!(matches!(annotations[0], BindingAnnotation::Export(_, _)));
+    assert!(matches!(annotations[1], BindingAnnotation::Export(_, _)));
+}
+
+#[test]
+fn parse_struct_pattern_with_inner_export_annotation() {
+    let parsed = parse_block(
+        "
+let { foo = export(js) foo_binding, bar } = value;
+foo_binding
+    ",
+    )
+    .unwrap();
+
+    let (Expression::Block(parsed, _), "") = parsed else {
+        panic!()
+    };
+    let Expression::Binding(binding, _) = &parsed[0] else {
+        panic!()
+    };
+    let BindingPattern::Struct(fields, _) = &binding.pattern else {
+        panic!("expected struct pattern")
+    };
+    let (_, foo_pattern) = fields
+        .iter()
+        .find(|(identifier, _)| identifier.0 == "foo")
+        .expect("missing foo field");
+    let BindingPattern::Annotated { annotations, .. } = foo_pattern else {
+        panic!("expected annotated foo field")
+    };
+    assert_eq!(annotations.len(), 1);
 }
 
 #[test]
