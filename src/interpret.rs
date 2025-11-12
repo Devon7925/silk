@@ -18,6 +18,30 @@ pub struct Context {
     bindings: std::collections::HashMap<String, (BindingContext, Vec<BindingAnnotation>)>,
 }
 
+#[derive(Clone, Debug)]
+pub struct AnnotatedBinding {
+    pub name: String,
+    pub annotations: Vec<BindingAnnotation>,
+    pub value: Expression,
+}
+
+impl Context {
+    pub fn annotated_bindings(&self) -> Vec<AnnotatedBinding> {
+        self.bindings
+            .iter()
+            .filter(|(_, (_, annotations))| !annotations.is_empty())
+            .filter_map(|(name, (binding, annotations))| match binding {
+                BindingContext::Bound(value) => Some(AnnotatedBinding {
+                    name: name.clone(),
+                    annotations: annotations.clone(),
+                    value: value.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 fn diagnostic(message: impl Into<String>, span: SourceSpan) -> Diagnostic {
     Diagnostic::new(message).with_span(span)
 }
@@ -77,7 +101,10 @@ pub fn interpret_expression(
             context,
         ),
         Expression::Binding(binding, _) => interpret_binding(*binding, context),
-        Expression::Block(expressions, span) => interpret_block(expressions, span, context),
+        Expression::Block(expressions, span) => {
+            let (value, _) = interpret_block(expressions, span, context)?;
+            Ok(value)
+        }
         Expression::FunctionCall {
             function,
             argument,
@@ -125,7 +152,7 @@ pub fn interpret_expression(
 
             Ok(Expression::Function {
                 parameter,
-                return_type,
+                return_type: Box::new(interpret_expression(*return_type, &mut body_context)?),
                 body: Box::new(interpret_expression(*body, &mut body_context)?),
                 span,
             })
@@ -212,7 +239,9 @@ fn get_type_of_expression(
         Expression::Literal(lit, _) => match lit {
             ExpressionLiteral::Number(_) => interpret_expression(identifier_expr("i32"), context),
             ExpressionLiteral::Boolean(_) => interpret_expression(identifier_expr("bool"), context),
-            ExpressionLiteral::Target(_) => interpret_expression(identifier_expr("target"), context),
+            ExpressionLiteral::Target(_) => {
+                interpret_expression(identifier_expr("target"), context)
+            }
         },
         Expression::Identifier(identifier, span) => {
             let bound_value = context
@@ -240,9 +269,10 @@ fn get_type_of_expression(
         Expression::Block(..) => todo!(),
         Expression::FunctionCall { .. } => todo!(),
         Expression::IntrinsicType(intrinsic_type, span) => match intrinsic_type {
-            IntrinsicType::I32 | IntrinsicType::Boolean | IntrinsicType::Target | IntrinsicType::Type => {
-                Ok(Expression::IntrinsicType(IntrinsicType::Type, *span))
-            }
+            IntrinsicType::I32
+            | IntrinsicType::Boolean
+            | IntrinsicType::Target
+            | IntrinsicType::Type => Ok(Expression::IntrinsicType(IntrinsicType::Type, *span)),
         },
         Expression::AttachImplementation { .. } => todo!(),
         Expression::Function {
@@ -321,7 +351,7 @@ fn interpret_block(
     expressions: Vec<Expression>,
     span: SourceSpan,
     context: &mut Context,
-) -> Result<Expression, Diagnostic> {
+) -> Result<(Expression, Context), Diagnostic> {
     let mut block_context = context.clone();
     let mut last_value: Option<Expression> = None;
 
@@ -333,7 +363,18 @@ fn interpret_block(
         last_value = Some(value);
     }
 
-    last_value.ok_or_else(|| diagnostic("Cannot evaluate empty block", span))
+    let value = last_value.ok_or_else(|| diagnostic("Cannot evaluate empty block", span))?;
+    Ok((value, block_context))
+}
+
+pub fn interpret_program(
+    expr: Expression,
+    context: &mut Context,
+) -> Result<(Expression, Context), Diagnostic> {
+    match expr {
+        Expression::Block(expressions, span) => interpret_block(expressions, span, context),
+        other => interpret_expression(other, context).map(|value| (value, context.clone())),
+    }
 }
 
 fn interpret_binding(binding: Binding, context: &mut Context) -> Result<Expression, Diagnostic> {
@@ -426,7 +467,10 @@ fn bind_pattern_from_value(
         BindingPattern::Identifier(identifier, _) => {
             context.bindings.insert(
                 identifier.0,
-                (BindingContext::Bound(value.clone()), Vec::new()),
+                (
+                    BindingContext::Bound(value.clone()),
+                    passed_annotations.clone(),
+                ),
             );
             Ok(true)
         }

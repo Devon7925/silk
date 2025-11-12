@@ -1,6 +1,7 @@
 mod diagnostics;
 mod interpret;
 mod parsing;
+mod wasm;
 
 pub use diagnostics::{Diagnostic, SourceSpan};
 
@@ -19,6 +20,84 @@ pub fn compile(file: String) -> Result<Vec<u8>, Diagnostic> {
         return Err(Diagnostic::new("Unexpected trailing input").with_span(span));
     }
     let mut context = interpret::intrinsic_context();
-    interpret::interpret_expression(ast, &mut context)?;
-    Ok(vec![])
+    let (_value, program_context) = interpret::interpret_program(ast, &mut context)?;
+    wasm::compile_exports(&program_context)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasmparser::{Operator, Parser, Payload};
+
+    #[test]
+    fn compiles_const_wasm_export() {
+        let program = r#"
+let export(wasm) answer = fn{} -> i32 (
+    42
+);
+answer
+"#;
+        let wasm = compile(program.to_string()).expect("compilation should succeed");
+        assert!(
+            !wasm.is_empty(),
+            "expected wasm module bytes for wasm export"
+        );
+
+        let mut exports = Vec::new();
+        let mut const_values = Vec::new();
+        for payload in Parser::new(0).parse_all(&wasm) {
+            match payload.expect("failed to parse wasm payload") {
+                Payload::ExportSection(section) => {
+                    for export in section {
+                        let export = export.expect("invalid export entry");
+                        exports.push(export.name.to_string());
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    let mut reader = body.get_operators_reader().expect("operators");
+                    match reader.read().expect("operator") {
+                        Operator::I32Const { value } => const_values.push(value),
+                        other => panic!("unexpected operator: {:?}", other),
+                    }
+                    assert!(
+                        matches!(reader.read().expect("end"), Operator::End),
+                        "expected function to end after constant"
+                    );
+                    assert!(
+                        reader.read().is_err(),
+                        "expected no more operators in function body"
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(exports, vec!["answer"]);
+        assert_eq!(const_values, vec![42]);
+    }
+
+    #[test]
+    fn compile_without_wasm_exports_returns_empty() {
+        let program = r#"
+let answer = 5;
+answer
+"#;
+        let wasm = compile(program.to_string()).expect("compilation should not fail");
+        assert!(wasm.is_empty(), "expected no wasm bytes without exports");
+    }
+
+    #[test]
+    fn exporting_non_function_reports_diagnostic() {
+        let program = r#"
+let export(wasm) answer: i32 = 42;
+answer
+"#;
+        let err = compile(program.to_string()).expect_err("expected failure");
+        assert!(
+            err.message
+                .contains("Only functions can be exported to wasm"),
+            "unexpected diagnostic message: {}",
+            err.message
+        );
+    }
 }
