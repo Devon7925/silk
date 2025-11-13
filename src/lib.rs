@@ -1,7 +1,7 @@
-mod parsing;
-mod interpret;
-mod simplify;
 mod diagnostics;
+mod interpret;
+mod parsing;
+mod simplify;
 mod wasm;
 
 pub use diagnostics::{Diagnostic, SourceSpan};

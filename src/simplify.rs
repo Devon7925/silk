@@ -1,6 +1,11 @@
 use crate::interpret::Context;
 use crate::{
-    Diagnostic, interpret::BindingContext, parsing::{Binding, BindingAnnotation, BindingPattern, Expression, ExpressionLiteral, IntrinsicOperation, TargetLiteral}
+    Diagnostic,
+    interpret::BindingContext,
+    parsing::{
+        Binding, BindingAnnotation, BindingPattern, Expression, ExpressionLiteral,
+        IntrinsicOperation, TargetLiteral,
+    },
 };
 
 pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
@@ -72,9 +77,12 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
                 ..*binding
             };
             Ok(Expression::Binding(Box::new(binding), source_span))
-        },
+        }
         Expression::Block(expressions, source_span) => {
-            let simplified_exprs = expressions.into_iter().map(simplify_expression).collect::<Result<_, Diagnostic>>()?;
+            let simplified_exprs = expressions
+                .into_iter()
+                .map(simplify_expression)
+                .collect::<Result<_, Diagnostic>>()?;
             Ok(Expression::Block(simplified_exprs, source_span))
         }
         expr @ (Expression::Identifier(..)
@@ -92,12 +100,18 @@ fn simplify_binding_pattern(pattern: BindingPattern) -> Result<BindingPattern, D
                 .collect::<Result<_, Diagnostic>>()?;
             Ok(BindingPattern::Struct(simplified_items, source_span))
         }
-        BindingPattern::TypeHint(binding_pattern, expression, source_span) => Ok(BindingPattern::TypeHint(
-            Box::new(simplify_binding_pattern(*binding_pattern)?),
-            Box::new(simplify_expression(*expression)?),
-            source_span,
-        )),
-        BindingPattern::Annotated { annotations, pattern, span } => Ok(BindingPattern::Annotated {
+        BindingPattern::TypeHint(binding_pattern, expression, source_span) => {
+            Ok(BindingPattern::TypeHint(
+                Box::new(simplify_binding_pattern(*binding_pattern)?),
+                Box::new(simplify_expression(*expression)?),
+                source_span,
+            ))
+        }
+        BindingPattern::Annotated {
+            annotations,
+            pattern,
+            span,
+        } => Ok(BindingPattern::Annotated {
             annotations,
             pattern: Box::new(simplify_binding_pattern(*pattern)?),
             span,
@@ -108,8 +122,12 @@ fn simplify_binding_pattern(pattern: BindingPattern) -> Result<BindingPattern, D
 
 fn simplify_binding_context(binding_context: BindingContext) -> Result<BindingContext, Diagnostic> {
     match binding_context {
-        BindingContext::Bound(expression) => Ok(BindingContext::Bound(simplify_expression(expression)?)),
-        BindingContext::UnboundWithType(expression) => Ok(BindingContext::UnboundWithType(simplify_expression(expression)?)),
+        BindingContext::Bound(expression) => {
+            Ok(BindingContext::Bound(simplify_expression(expression)?))
+        }
+        BindingContext::UnboundWithType(expression) => Ok(BindingContext::UnboundWithType(
+            simplify_expression(expression)?,
+        )),
         BindingContext::UnboundWithoutType => Ok(BindingContext::UnboundWithoutType),
     }
 }
@@ -118,7 +136,9 @@ pub fn simplify_context(context: Context) -> Result<Context, Diagnostic> {
     let simplified_bindings = context
         .bindings
         .into_iter()
-        .map(|(bind_name, (binding, annotations))| Ok((bind_name, (simplify_binding_context(binding)?, annotations))))
+        .map(|(bind_name, (binding, annotations))| {
+            Ok((bind_name, (simplify_binding_context(binding)?, annotations)))
+        })
         .collect::<Result<_, Diagnostic>>()?;
     Ok(Context {
         bindings: simplified_bindings,
@@ -126,7 +146,9 @@ pub fn simplify_context(context: Context) -> Result<Context, Diagnostic> {
 }
 
 #[cfg(test)]
-fn evaluate_text_to_simplified_expression(program: &str) -> Result<(Expression, Context), Diagnostic> {
+fn evaluate_text_to_simplified_expression(
+    program: &str,
+) -> Result<(Expression, Context), Diagnostic> {
     use crate::interpret::{interpret_program, intrinsic_context};
 
     let (expression, remaining) =
@@ -140,7 +162,7 @@ fn evaluate_text_to_simplified_expression(program: &str) -> Result<(Expression, 
     let (result, context) = interpret_program(expression, &mut context)?;
     let simplified_expression = simplify_expression(result)?;
     let simplified_context = simplify_context(context)?;
-    Ok((simplified_expression, simplified_context)) 
+    Ok((simplified_expression, simplified_context))
 }
 
 #[test]
@@ -151,7 +173,8 @@ let export(js) add_one = fn(x: i32) -> i32 (
 );
 {}
     ";
-    let (_result, context) = evaluate_text_to_simplified_expression(&program).expect("interpretation should succeed");
+    let (_result, context) =
+        evaluate_text_to_simplified_expression(&program).expect("interpretation should succeed");
     let annotated_bindings = context.annotated_bindings();
     assert_eq!(annotated_bindings.len(), 1);
     let exported_binding = &annotated_bindings[0];
@@ -160,7 +183,8 @@ let export(js) add_one = fn(x: i32) -> i32 (
     let BindingAnnotation::Export(target_expr, _) = &exported_binding.annotations[0] else {
         panic!("expected export annotation");
     };
-    if let Expression::Literal(ExpressionLiteral::Target(TargetLiteral::JSTarget), _) = target_expr {
+    if let Expression::Literal(ExpressionLiteral::Target(TargetLiteral::JSTarget), _) = target_expr
+    {
     } else {
         panic!("expected js target in export annotation");
     }

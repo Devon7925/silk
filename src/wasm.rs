@@ -135,10 +135,10 @@ fn extract_function_params(pattern: BindingPattern) -> Result<Vec<WasmFunctionPa
             if fields.is_empty() {
                 Ok(Vec::new())
             } else {
-                Err(Diagnostic::new(
-                    "Wasm exports currently support at most one parameter",
+                Err(
+                    Diagnostic::new("Wasm exports currently support at most one parameter")
+                        .with_span(span),
                 )
-                .with_span(span))
             }
         }
         BindingPattern::Annotated { pattern, .. } => extract_function_params(*pattern),
@@ -162,9 +162,7 @@ fn extract_function_params(pattern: BindingPattern) -> Result<Vec<WasmFunctionPa
     }
 }
 
-fn extract_identifier_from_pattern(
-    pattern: BindingPattern,
-) -> Result<String, Diagnostic> {
+fn extract_identifier_from_pattern(pattern: BindingPattern) -> Result<String, Diagnostic> {
     match pattern {
         BindingPattern::Identifier(identifier, _) => Ok(identifier.0),
         BindingPattern::Annotated { pattern, .. } => extract_identifier_from_pattern(*pattern),

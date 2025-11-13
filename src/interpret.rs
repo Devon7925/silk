@@ -231,7 +231,10 @@ pub fn interpret_expression(
     }
 }
 
-fn interpret_binding_pattern(parameter: BindingPattern, context: &mut Context) -> Result<BindingPattern, Diagnostic> {
+fn interpret_binding_pattern(
+    parameter: BindingPattern,
+    context: &mut Context,
+) -> Result<BindingPattern, Diagnostic> {
     match parameter {
         pat @ BindingPattern::Identifier(..) => Ok(pat),
         BindingPattern::Struct(items, source_span) => {
@@ -251,7 +254,11 @@ fn interpret_binding_pattern(parameter: BindingPattern, context: &mut Context) -
                 source_span,
             ))
         }
-        BindingPattern::Annotated { annotations, pattern, span } => {
+        BindingPattern::Annotated {
+            annotations,
+            pattern,
+            span,
+        } => {
             let interpreted_pattern = interpret_binding_pattern(*pattern, context)?;
             let interpreted_annotations = annotations
                 .into_iter()
