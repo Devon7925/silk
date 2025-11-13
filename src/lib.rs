@@ -80,6 +80,63 @@ answer
     }
 
     #[test]
+    fn compiles_parameterized_wasm_export() {
+        let program = r#"
+let export(wasm) add_one = fn(x: i32) -> i32 (
+    x + 1
+);
+{}
+"#;
+        let wasm = compile(program.to_string()).expect("compilation should succeed");
+        assert!(
+            !wasm.is_empty(),
+            "expected wasm module bytes for wasm export"
+        );
+
+        let mut exports = Vec::new();
+        let mut found_body = false;
+
+        for payload in Parser::new(0).parse_all(&wasm) {
+            match payload.expect("failed to parse wasm payload") {
+                Payload::ExportSection(section) => {
+                    for export in section {
+                        let export = export.expect("invalid export entry");
+                        exports.push(export.name.to_string());
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    let mut reader = body.get_operators_reader().expect("operators");
+                    match reader.read().expect("local.get") {
+                        Operator::LocalGet { local_index } => assert_eq!(local_index, 0),
+                        other => panic!("expected local.get, saw {:?}", other),
+                    }
+                    match reader.read().expect("i32.const") {
+                        Operator::I32Const { value } => assert_eq!(value, 1),
+                        other => panic!("expected i32.const, saw {:?}", other),
+                    }
+                    match reader.read().expect("i32.add") {
+                        Operator::I32Add => {}
+                        other => panic!("expected i32.add, saw {:?}", other),
+                    }
+                    match reader.read().expect("end") {
+                        Operator::End => {}
+                        other => panic!("expected end, saw {:?}", other),
+                    }
+                    assert!(
+                        reader.read().is_err(),
+                        "expected no extra operators in function body"
+                    );
+                    found_body = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(exports, vec!["add_one"]);
+        assert!(found_body, "expected to find function body");
+    }
+
+    #[test]
     fn compile_without_wasm_exports_returns_empty() {
         let program = r#"
 let answer = 5;

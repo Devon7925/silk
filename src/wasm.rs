@@ -7,14 +7,20 @@ use crate::{
     diagnostics::{Diagnostic, SourceSpan},
     interpret::{self, AnnotatedBinding},
     parsing::{
-        BindingAnnotation, BindingPattern, Expression, ExpressionLiteral, IntrinsicType,
-        TargetLiteral,
+        BinaryIntrinsicOperator, BindingAnnotation, BindingPattern, Expression, ExpressionLiteral,
+        IntrinsicOperation, IntrinsicType, TargetLiteral,
     },
 };
 
-struct ConstFunctionExport {
+struct WasmFunctionParam {
     name: String,
-    value: i32,
+    ty: ValType,
+}
+
+struct WasmFunctionExport {
+    name: String,
+    params: Vec<WasmFunctionParam>,
+    body: Expression,
 }
 
 pub fn compile_exports(context: &interpret::Context) -> Result<Vec<u8>, Diagnostic> {
@@ -33,12 +39,13 @@ pub fn compile_exports(context: &interpret::Context) -> Result<Vec<u8>, Diagnost
     let mut next_function_index = 0u32;
 
     for export in exports {
-        type_section.function(Vec::new(), vec![ValType::I32]);
+        let param_types: Vec<ValType> = export.params.iter().map(|param| param.ty).collect();
+        type_section.function(param_types, vec![ValType::I32]);
         function_section.function(next_type_index);
         next_type_index += 1;
 
         let mut func = Function::new(Vec::new());
-        func.instruction(&Instruction::I32Const(export.value));
+        emit_expression(&export.body, &export.params, &mut func)?;
         func.instruction(&Instruction::End);
         code_section.function(&func);
 
@@ -56,7 +63,7 @@ pub fn compile_exports(context: &interpret::Context) -> Result<Vec<u8>, Diagnost
 
 fn collect_wasm_exports(
     context: &interpret::Context,
-) -> Result<Vec<ConstFunctionExport>, Diagnostic> {
+) -> Result<Vec<WasmFunctionExport>, Diagnostic> {
     let mut exports = Vec::new();
     for binding in context.annotated_bindings() {
         let AnnotatedBinding {
@@ -67,21 +74,18 @@ fn collect_wasm_exports(
         let Some(annotation_span) = wasm_annotation_span(&annotations) else {
             continue;
         };
-        let const_value = extract_const_function_value(&name, value, annotation_span)?;
-        exports.push(ConstFunctionExport {
-            name,
-            value: const_value,
-        });
+        let export = lower_function_export(&name, value, annotation_span)?;
+        exports.push(export);
     }
     exports.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(exports)
 }
 
-fn extract_const_function_value(
+fn lower_function_export(
     binding_name: &str,
     value: Expression,
     annotation_span: SourceSpan,
-) -> Result<i32, Diagnostic> {
+) -> Result<WasmFunctionExport, Diagnostic> {
     let Expression::Function {
         parameter,
         return_type,
@@ -95,13 +99,6 @@ fn extract_const_function_value(
         .with_span(annotation_span));
     };
 
-    if !is_zero_arg_pattern(&parameter) {
-        return Err(Diagnostic::new(
-            "Only zero-argument functions can be exported to wasm right now",
-        )
-        .with_span(parameter.span()));
-    }
-
     if !is_i32_type(return_type.as_ref()) {
         return Err(
             Diagnostic::new("Only functions returning i32 can be exported to wasm")
@@ -109,14 +106,13 @@ fn extract_const_function_value(
         );
     }
 
-    let body_span = body.span();
-    match *body {
-        Expression::Literal(ExpressionLiteral::Number(value), _) => Ok(value),
-        _ => Err(
-            Diagnostic::new("Only constant numeric function bodies can be exported to wasm")
-                .with_span(body_span),
-        ),
-    }
+    let params = extract_function_params(parameter)?;
+
+    Ok(WasmFunctionExport {
+        name: binding_name.to_string(),
+        params,
+        body: *body,
+    })
 }
 
 fn wasm_annotation_span(annotations: &[BindingAnnotation]) -> Option<SourceSpan> {
@@ -133,12 +129,49 @@ fn wasm_annotation_span(annotations: &[BindingAnnotation]) -> Option<SourceSpan>
     })
 }
 
-fn is_zero_arg_pattern(pattern: &BindingPattern) -> bool {
+fn extract_function_params(pattern: BindingPattern) -> Result<Vec<WasmFunctionParam>, Diagnostic> {
     match pattern {
-        BindingPattern::Struct(fields, _) => fields.is_empty(),
-        BindingPattern::TypeHint(inner, _, _) => is_zero_arg_pattern(inner),
-        BindingPattern::Annotated { pattern, .. } => is_zero_arg_pattern(pattern),
-        _ => false,
+        BindingPattern::Struct(fields, span) => {
+            if fields.is_empty() {
+                Ok(Vec::new())
+            } else {
+                Err(Diagnostic::new(
+                    "Wasm exports currently support at most one parameter",
+                )
+                .with_span(span))
+            }
+        }
+        BindingPattern::Annotated { pattern, .. } => extract_function_params(*pattern),
+        BindingPattern::TypeHint(inner, ty_expr, _) => {
+            if !is_i32_type(ty_expr.as_ref()) {
+                return Err(
+                    Diagnostic::new("Only i32 parameters can be exported to wasm")
+                        .with_span(ty_expr.span()),
+                );
+            }
+            let name = extract_identifier_from_pattern(*inner)?;
+            Ok(vec![WasmFunctionParam {
+                name,
+                ty: ValType::I32,
+            }])
+        }
+        BindingPattern::Identifier(_, _) => Err(Diagnostic::new(
+            "Wasm exports currently require parameter type hints",
+        )
+        .with_span(pattern.span())),
+    }
+}
+
+fn extract_identifier_from_pattern(
+    pattern: BindingPattern,
+) -> Result<String, Diagnostic> {
+    match pattern {
+        BindingPattern::Identifier(identifier, _) => Ok(identifier.0),
+        BindingPattern::Annotated { pattern, .. } => extract_identifier_from_pattern(*pattern),
+        other => Err(
+            Diagnostic::new("Only identifier parameters can be exported to wasm")
+                .with_span(other.span()),
+        ),
     }
 }
 
@@ -147,5 +180,48 @@ fn is_i32_type(expr: &Expression) -> bool {
         Expression::IntrinsicType(IntrinsicType::I32, _) => true,
         Expression::AttachImplementation { type_expr, .. } => is_i32_type(type_expr),
         _ => false,
+    }
+}
+
+fn emit_expression(
+    expr: &Expression,
+    params: &[WasmFunctionParam],
+    func: &mut Function,
+) -> Result<(), Diagnostic> {
+    match expr {
+        Expression::Literal(ExpressionLiteral::Number(value), _) => {
+            func.instruction(&Instruction::I32Const(*value));
+            Ok(())
+        }
+        Expression::Identifier(identifier, span) => {
+            let local_index = params
+                .iter()
+                .position(|param| param.name == identifier.0)
+                .map(|idx| idx as u32)
+                .ok_or_else(|| {
+                    Diagnostic::new(format!(
+                        "Identifier `{}` is not a function parameter",
+                        identifier.0
+                    ))
+                    .with_span(*span)
+                })?;
+            func.instruction(&Instruction::LocalGet(local_index));
+            Ok(())
+        }
+        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, op), _) => {
+            emit_expression(left, params, func)?;
+            emit_expression(right, params, func)?;
+            match op {
+                BinaryIntrinsicOperator::Add => func.instruction(&Instruction::I32Add),
+                BinaryIntrinsicOperator::Subtract => func.instruction(&Instruction::I32Sub),
+                BinaryIntrinsicOperator::Multiply => func.instruction(&Instruction::I32Mul),
+                BinaryIntrinsicOperator::Divide => func.instruction(&Instruction::I32DivS),
+            };
+            Ok(())
+        }
+        other => Err(
+            Diagnostic::new("Expression is not supported in wasm exports yet")
+                .with_span(other.span()),
+        ),
     }
 }
