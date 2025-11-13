@@ -1,6 +1,7 @@
-mod diagnostics;
-mod interpret;
 mod parsing;
+mod interpret;
+mod simplify;
+mod diagnostics;
 mod wasm;
 
 pub use diagnostics::{Diagnostic, SourceSpan};
@@ -20,8 +21,10 @@ pub fn compile(file: String) -> Result<Vec<u8>, Diagnostic> {
         return Err(Diagnostic::new("Unexpected trailing input").with_span(span));
     }
     let mut context = interpret::intrinsic_context();
-    let (_value, program_context) = interpret::interpret_program(ast, &mut context)?;
-    wasm::compile_exports(&program_context)
+    let (value, program_context) = interpret::interpret_program(ast, &mut context)?;
+    let _simplified_value = simplify::simplify_expression(value)?;
+    let simplified_context = simplify::simplify_context(program_context)?;
+    wasm::compile_exports(&simplified_context)
 }
 
 #[cfg(test)]

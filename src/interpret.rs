@@ -15,7 +15,7 @@ pub enum BindingContext {
 
 #[derive(Clone)]
 pub struct Context {
-    bindings: std::collections::HashMap<String, (BindingContext, Vec<BindingAnnotation>)>,
+    pub bindings: std::collections::HashMap<String, (BindingContext, Vec<BindingAnnotation>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -151,7 +151,7 @@ pub fn interpret_expression(
             bind_pattern_blanks(parameter.clone(), &mut body_context, Vec::new(), None)?;
 
             Ok(Expression::Function {
-                parameter,
+                parameter: interpret_binding_pattern(parameter, context)?,
                 return_type: Box::new(interpret_expression(*return_type, &mut body_context)?),
                 body: Box::new(interpret_expression(*body, &mut body_context)?),
                 span,
@@ -227,6 +227,41 @@ pub fn interpret_expression(
                 },
                 context,
             )
+        }
+    }
+}
+
+fn interpret_binding_pattern(parameter: BindingPattern, context: &mut Context) -> Result<BindingPattern, Diagnostic> {
+    match parameter {
+        pat @ BindingPattern::Identifier(..) => Ok(pat),
+        BindingPattern::Struct(items, source_span) => {
+            let mut interpreted_items = Vec::with_capacity(items.len());
+            for (field_id, field_pattern) in items {
+                let interpreted_field_pattern = interpret_binding_pattern(field_pattern, context)?;
+                interpreted_items.push((field_id, interpreted_field_pattern));
+            }
+            Ok(BindingPattern::Struct(interpreted_items, source_span))
+        }
+        BindingPattern::TypeHint(binding_pattern, expression, source_span) => {
+            let interpreted_pattern = interpret_binding_pattern(*binding_pattern, context)?;
+            let interpreted_type = interpret_expression(*expression, context)?;
+            Ok(BindingPattern::TypeHint(
+                Box::new(interpreted_pattern),
+                Box::new(interpreted_type),
+                source_span,
+            ))
+        }
+        BindingPattern::Annotated { annotations, pattern, span } => {
+            let interpreted_pattern = interpret_binding_pattern(*pattern, context)?;
+            let interpreted_annotations = annotations
+                .into_iter()
+                .map(|ann| parse_binding_annotation(ann, context))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(BindingPattern::Annotated {
+                pattern: Box::new(interpreted_pattern),
+                annotations: interpreted_annotations,
+                span,
+            })
         }
     }
 }
@@ -651,7 +686,7 @@ pub fn intrinsic_context() -> Context {
 }
 
 #[cfg(test)]
-fn evaluate_text_to_number(program: &str) -> i32 {
+fn evaluate_text_to_expression(program: &str) -> Result<(Expression, Context), Diagnostic> {
     let (expression, remaining) =
         crate::parsing::parse_block(program).expect("Failed to parse program text");
     assert!(
@@ -660,8 +695,14 @@ fn evaluate_text_to_number(program: &str) -> i32 {
     );
 
     let mut context = intrinsic_context();
-    match interpret_expression(expression, &mut context)
+    interpret_program(expression, &mut context)
+}
+
+#[cfg(test)]
+fn evaluate_text_to_number(program: &str) -> i32 {
+    match evaluate_text_to_expression(program)
         .expect("Failed to interpret parsed expression")
+        .0
     {
         Expression::Literal(ExpressionLiteral::Number(value), _) => value,
         other => panic!(
