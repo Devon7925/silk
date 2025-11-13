@@ -24,6 +24,22 @@ function runSilk(args: string[]) {
   };
 }
 
+function compileFixtureToBytes(fixture: string) {
+  const tmpDir = mkdtempSync(join(tmpdir(), "silk-cli-"));
+  const programPath = join(projectRoot, "fixtures", fixture);
+  const outputPath = join(tmpDir, "module.wasm");
+
+  try {
+    const result = runSilk([programPath, "--output", outputPath]);
+    expect(result.exitCode).toBe(0);
+    const bytes = readFileSync(outputPath);
+    expect(bytes.length).toBeGreaterThan(0);
+    return bytes;
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 test("compiles a wasm export to a file", () => {
   const tmpDir = mkdtempSync(join(tmpdir(), "silk-cli-"));
   const programPath = join(projectRoot, "fixtures", "wasm_export.silk");
@@ -47,4 +63,23 @@ test("prints diagnostics for invalid programs", () => {
   expect(result.exitCode).not.toBe(0);
   expect(result.stderr).toContain("Compilation failed for");
   expect(result.stderr).toContain("Only functions can be exported to wasm");
+});
+
+test("runs wasm_export module and returns const value", async () => {
+  const moduleBytes = compileFixtureToBytes("wasm_export.silk");
+  const { instance } = await WebAssembly.instantiate(moduleBytes);
+  const answer = instance.exports.answer as () => number;
+
+  expect(typeof answer).toBe("function");
+  expect(answer()).toBe(42);
+});
+
+test("runs add_one module and returns incremented value", async () => {
+  const moduleBytes = compileFixtureToBytes("add_one.silk");
+  const { instance } = await WebAssembly.instantiate(moduleBytes);
+  const addOne = instance.exports.add_one as (value: number) => number;
+
+  expect(typeof addOne).toBe("function");
+  expect(addOne(41)).toBe(42);
+  expect(addOne(-1)).toBe(0);
 });
