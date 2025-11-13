@@ -1,0 +1,4 @@
+let export(wasm) answer = fn{} -> i32 (
+    42
+);
+answer

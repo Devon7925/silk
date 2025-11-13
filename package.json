@@ -1,0 +1,7 @@
+{
+  "name": "silk-cli",
+  "private": true,
+  "scripts": {
+    "test": "bun test"
+  }
+}
