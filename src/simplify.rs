@@ -190,3 +190,24 @@ let export(js) add_one = fn(x: i32) -> i32 (
     }
     println!("Exported binding value: {:?}", exported_binding.value);
 }
+
+#[test]
+fn interpret_exported_function_w_binding() {
+    let program = include_str!("../fixtures/binding_in_function.silk");
+    let (_result, context) =
+        evaluate_text_to_simplified_expression(&program).expect("interpretation should succeed");
+    let annotated_bindings = context.annotated_bindings();
+    assert_eq!(annotated_bindings.len(), 1);
+    let exported_binding = &annotated_bindings[0];
+    assert_eq!(exported_binding.name, "add_one_squared");
+    assert!(exported_binding.annotations.len() == 1);
+    let BindingAnnotation::Export(target_expr, _) = &exported_binding.annotations[0] else {
+        panic!("expected export annotation");
+    };
+    if let Expression::Literal(ExpressionLiteral::Target(TargetLiteral::WasmTarget), _) = target_expr
+    {
+    } else {
+        panic!("expected wasm target in export annotation");
+    }
+    println!("Exported binding value: {:?}", exported_binding.value);
+}

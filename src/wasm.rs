@@ -210,10 +210,10 @@ fn emit_expression(
             emit_expression(left, params, func)?;
             emit_expression(right, params, func)?;
             match op {
-                BinaryIntrinsicOperator::Add => func.instruction(&Instruction::I32Add),
-                BinaryIntrinsicOperator::Subtract => func.instruction(&Instruction::I32Sub),
-                BinaryIntrinsicOperator::Multiply => func.instruction(&Instruction::I32Mul),
-                BinaryIntrinsicOperator::Divide => func.instruction(&Instruction::I32DivS),
+                BinaryIntrinsicOperator::I32Add => func.instruction(&Instruction::I32Add),
+                BinaryIntrinsicOperator::I32Subtract => func.instruction(&Instruction::I32Sub),
+                BinaryIntrinsicOperator::I32Multiply => func.instruction(&Instruction::I32Mul),
+                BinaryIntrinsicOperator::I32Divide => func.instruction(&Instruction::I32DivS),
             };
             Ok(())
         }

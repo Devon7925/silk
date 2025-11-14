@@ -49,10 +49,10 @@ pub enum IntrinsicType {
 
 #[derive(Clone, Debug)]
 pub enum BinaryIntrinsicOperator {
-    Add,
-    Subtract,
-    Multiply,
-    Divide,
+    I32Add,
+    I32Subtract,
+    I32Multiply,
+    I32Divide,
 }
 
 #[derive(Clone, Debug)]
@@ -834,7 +834,7 @@ fn parse_binding<'a>(
         let file = parse_eq(file)
             .ok_or_else(|| diagnostic_here(source, file, 1, "Expected = after binding pattern"))?;
         let file = parse_optional_whitespace(file);
-        let (expr, file) = parse_isolated_expression_with_source(source, file)?;
+        let (expr, file) = parse_operation_expression_with_source(source, file)?;
 
         Ok((Binding { pattern, expr }, file))
     }

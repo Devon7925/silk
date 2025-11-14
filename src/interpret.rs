@@ -40,6 +40,12 @@ impl Context {
             })
             .collect()
     }
+
+    fn empty() -> Context {
+        Context {
+            bindings: std::collections::HashMap::new(),
+        }
+    }
 }
 
 fn diagnostic(message: impl Into<String>, span: SourceSpan) -> Diagnostic {
@@ -71,11 +77,12 @@ pub fn interpret_expression(
         expr @ (Expression::Literal(_, _) | Expression::IntrinsicType(_, _)) => Ok(expr),
         Expression::Identifier(identifier, span) => {
             if let Some(binding) = context.bindings.get(&identifier.0) {
-                if let BindingContext::Bound(expr) = &binding.0 {
-                    Ok(expr.clone())
-                } else {
-                    Ok(Expression::Identifier(identifier, span))
+                if let BindingContext::Bound(expr) = &binding.0
+                    && is_resolved_const_function_expression(expr, context)
+                {
+                    return Ok(expr.clone());
                 }
+                Ok(Expression::Identifier(identifier, span))
             } else {
                 Err(diagnostic(
                     format!("Unbound identifier: {}", identifier.0),
@@ -195,10 +202,10 @@ pub fn interpret_expression(
                     context,
                     span,
                     match operator {
-                        BinaryIntrinsicOperator::Add => |l, r| l + r,
-                        BinaryIntrinsicOperator::Subtract => |l, r| l - r,
-                        BinaryIntrinsicOperator::Multiply => |l, r| l * r,
-                        BinaryIntrinsicOperator::Divide => |l, r| l / r,
+                        BinaryIntrinsicOperator::I32Add => |l, r| l + r,
+                        BinaryIntrinsicOperator::I32Subtract => |l, r| l - r,
+                        BinaryIntrinsicOperator::I32Multiply => |l, r| l * r,
+                        BinaryIntrinsicOperator::I32Divide => |l, r| l / r,
                     },
                 )
             }
@@ -331,7 +338,17 @@ fn get_type_of_expression(
         Expression::FunctionType { span, .. } => {
             Ok(Expression::IntrinsicType(IntrinsicType::Type, *span))
         }
-        Expression::IntrinsicOperation(..) => todo!(),
+        Expression::IntrinsicOperation(
+            IntrinsicOperation::Binary(
+                _,
+                _,
+                BinaryIntrinsicOperator::I32Add
+                | BinaryIntrinsicOperator::I32Subtract
+                | BinaryIntrinsicOperator::I32Multiply
+                | BinaryIntrinsicOperator::I32Divide,
+            ),
+            _,
+        ) => interpret_expression(identifier_expr("i32"), context),
         Expression::PropertyAccess { .. } => todo!(),
     }
 }
@@ -379,10 +396,10 @@ fn get_trait_prop_of_type(
 
             get_trait_prop_of_type(type_expr, trait_prop, span)
         }
-        _ => Err(diagnostic(
+        ty => Err(diagnostic(
             format!(
-                "Unsupported value type for `{}` operator lookup",
-                trait_prop
+                "Unsupported value type {:?} for `{}` operator lookup",
+                ty, trait_prop
             ),
             span,
         )),
@@ -596,6 +613,77 @@ fn is_resolved_constant(expr: &Expression) -> bool {
         Expression::Struct(items, _) => items
             .iter()
             .all(|(_, value_expr)| is_resolved_constant(value_expr)),
+        Expression::AttachImplementation {
+            type_expr,
+            implementation,
+            ..
+        } => is_resolved_constant(type_expr) && is_resolved_constant(implementation),
+        Expression::Function {
+            parameter,
+            return_type,
+            body,
+            ..
+        } => {
+            let new_function_context = {
+                let mut ctx = Context::empty();
+                bind_pattern_blanks(parameter.clone(), &mut ctx, Vec::new(), None).unwrap();
+                ctx
+            };
+            is_resolved_constant(&return_type)
+                && is_resolved_const_function_expression(&body, &new_function_context)
+        }
+        Expression::FunctionType {
+            parameter,
+            return_type,
+            ..
+        } => is_resolved_constant(parameter) && is_resolved_constant(return_type),
+        _ => false,
+    }
+}
+
+fn is_resolved_const_function_expression(expr: &Expression, function_context: &Context) -> bool {
+    match expr {
+        Expression::Literal(_, _) | Expression::IntrinsicType(_, _) => true,
+        Expression::Struct(items, _) => items.iter().all(|(_, value_expr)| {
+            is_resolved_const_function_expression(value_expr, function_context)
+        }),
+        Expression::AttachImplementation {
+            type_expr,
+            implementation,
+            ..
+        } => {
+            is_resolved_const_function_expression(type_expr, function_context)
+                && is_resolved_const_function_expression(implementation, function_context)
+        }
+        Expression::Function {
+            parameter,
+            return_type,
+            body,
+            ..
+        } => {
+            let new_function_context = {
+                let mut ctx = function_context.clone();
+                bind_pattern_blanks(parameter.clone(), &mut ctx, Vec::new(), None).unwrap();
+                ctx
+            };
+            is_resolved_const_function_expression(&return_type, &new_function_context)
+                && is_resolved_const_function_expression(&body, &new_function_context)
+        }
+        Expression::FunctionType {
+            parameter,
+            return_type,
+            ..
+        } => {
+            is_resolved_const_function_expression(parameter, function_context)
+                && is_resolved_const_function_expression(return_type, function_context)
+        }
+        Expression::Identifier(ident, _) => function_context.bindings.get(&ident.0).is_some(),
+        Expression::IntrinsicOperation(intrinsic_operation, _) => match intrinsic_operation {
+            IntrinsicOperation::Binary(left, right, _) => {
+                is_resolved_const_function_expression(left, function_context)
+                    && is_resolved_const_function_expression(right, function_context)
+            }
+        },
         _ => false,
     }
 }
@@ -654,10 +742,10 @@ pub fn intrinsic_context() -> Context {
                 type_expr: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
                 implementation: Box::new(Expression::Struct(
                     vec![
-                        i32_binary_intrinsic("+", BinaryIntrinsicOperator::Add),
-                        i32_binary_intrinsic("-", BinaryIntrinsicOperator::Subtract),
-                        i32_binary_intrinsic("*", BinaryIntrinsicOperator::Multiply),
-                        i32_binary_intrinsic("/", BinaryIntrinsicOperator::Divide),
+                        i32_binary_intrinsic("+", BinaryIntrinsicOperator::I32Add),
+                        i32_binary_intrinsic("-", BinaryIntrinsicOperator::I32Subtract),
+                        i32_binary_intrinsic("*", BinaryIntrinsicOperator::I32Multiply),
+                        i32_binary_intrinsic("/", BinaryIntrinsicOperator::I32Divide),
                     ],
                     dummy_span(),
                 )),
@@ -790,6 +878,26 @@ fn test_basic_addition_interpretation() {
     } else {
         panic!("Expected a number literal as result");
     }
+}
+
+#[test]
+fn i32_is_constant() {
+    let binding = intrinsic_context();
+    let Some((BindingContext::Bound(expr), _)) = binding.bindings.get("i32") else {
+        panic!("i32 binding not found");
+    };
+    assert!(is_resolved_constant(expr));
+}
+
+#[test]
+fn interpret_text_user_defined_function2() {
+    let program = "
+fn(bar: i32) -> i32 (
+    bar + 1
+)
+    ";
+    let (expr, _) = evaluate_text_to_expression(program).unwrap();
+    println!("{expr:#?}");
 }
 
 #[test]

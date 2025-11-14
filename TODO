@@ -26,3 +26,5 @@
 * macros
 
 * Bootstrap
+
+* Remove bound variables in function call during interpretation

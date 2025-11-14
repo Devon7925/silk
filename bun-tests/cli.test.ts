@@ -31,6 +31,9 @@ function compileFixtureToBytes(fixture: string) {
 
   try {
     const result = runSilk([programPath, "--output", outputPath]);
+    if (result.exitCode !== 0) {
+      console.error("Compilation failed:", result.stderr);
+    }
     expect(result.exitCode).toBe(0);
     const bytes = readFileSync(outputPath);
     expect(bytes.length).toBeGreaterThan(0);
@@ -82,4 +85,14 @@ test("runs add_one module and returns incremented value", async () => {
   expect(typeof addOne).toBe("function");
   expect(addOne(41)).toBe(42);
   expect(addOne(-1)).toBe(0);
+});
+
+test("runs binding_in_function module and returns correct value", async () => {
+  const moduleBytes = compileFixtureToBytes("binding_in_function.silk");
+  const { instance } = await WebAssembly.instantiate(moduleBytes);
+  const addOneSquared = instance.exports.add_one_squared as (value: number) => number;
+
+  expect(typeof addOneSquared).toBe("function");
+  expect(addOneSquared(-1)).toBe(0);
+  expect(addOneSquared(10)).toBe(121);
 });
