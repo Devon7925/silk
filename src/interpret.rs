@@ -1065,7 +1065,6 @@ pub fn intrinsic_context() -> Context {
     context
 }
 
-#[cfg(test)]
 pub fn evaluate_text_to_expression(program: &str) -> Result<(Expression, Context), Diagnostic> {
     let (expression, remaining) =
         crate::parsing::parse_block(program).expect("Failed to parse program text");
