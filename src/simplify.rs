@@ -184,9 +184,7 @@ let export(js) add_one = fn(x: i32) -> i32 (
     let exported_binding = &annotated_bindings[0];
     assert_eq!(exported_binding.name, "add_one");
     assert!(exported_binding.annotations.len() == 1);
-    let BindingAnnotation::Export(target_expr, _) = &exported_binding.annotations[0] else {
-        panic!("expected export annotation");
-    };
+    let BindingAnnotation::Export(target_expr, _) = &exported_binding.annotations[0];
     if let Expression::Literal(ExpressionLiteral::Target(TargetLiteral::JSTarget), _) = target_expr
     {
     } else {
@@ -205,9 +203,7 @@ fn interpret_exported_function_w_binding() {
     let exported_binding = &annotated_bindings[0];
     assert_eq!(exported_binding.name, "add_one_squared");
     assert!(exported_binding.annotations.len() == 1);
-    let BindingAnnotation::Export(target_expr, _) = &exported_binding.annotations[0] else {
-        panic!("expected export annotation");
-    };
+    let BindingAnnotation::Export(target_expr, _) = &exported_binding.annotations[0];
     if let Expression::Literal(ExpressionLiteral::Target(TargetLiteral::WasmTarget), _) =
         target_expr
     {

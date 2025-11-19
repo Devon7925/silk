@@ -1,4 +1,5 @@
 mod diagnostics;
+mod edge_case_tests;
 mod interpret;
 mod parsing;
 mod simplify;
