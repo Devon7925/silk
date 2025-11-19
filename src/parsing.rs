@@ -59,6 +59,9 @@ pub enum BinaryIntrinsicOperator {
     I32GreaterThan,
     I32LessThanOrEqual,
     I32GreaterThanOrEqual,
+    BooleanAnd,
+    BooleanOr,
+    BooleanXor,
 }
 
 #[derive(Clone, Debug)]
@@ -375,7 +378,7 @@ fn parse_grouping_expression_with_source<'a>(
 }
 
 pub fn parse_operator(file: &str) -> Option<(String, &str)> {
-    let operator_chars: Vec<char> = vec!['+', '-', '*', '/', '=', '!', '<', '>'];
+    let operator_chars: Vec<char> = vec!['+', '-', '*', '/', '=', '!', '<', '>', '&', '|', '^'];
     let operator = file
         .chars()
         .take_while(|c| operator_chars.contains(c))
@@ -395,9 +398,11 @@ pub fn parse_operator(file: &str) -> Option<(String, &str)> {
 
 fn operator_precedence(operator: &str) -> u8 {
     match operator {
-        "*" | "/" => 3,
-        "+" | "-" => 2,
-        "==" | "!=" | "<" | ">" | "<=" | ">=" => 1,
+        "*" | "/" => 4,
+        "+" | "-" => 3,
+        "==" | "!=" | "<" | ">" | "<=" | ">=" => 2,
+        "&&" => 1,
+        "||" | "^" => 0,
         _ => 0,
     }
 }

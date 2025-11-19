@@ -286,6 +286,9 @@ fn emit_expression(
                 BinaryIntrinsicOperator::I32GreaterThanOrEqual => {
                     func.instruction(&Instruction::I32GeS)
                 }
+                BinaryIntrinsicOperator::BooleanAnd => func.instruction(&Instruction::I32And),
+                BinaryIntrinsicOperator::BooleanOr => func.instruction(&Instruction::I32Or),
+                BinaryIntrinsicOperator::BooleanXor => func.instruction(&Instruction::I32Xor),
             };
             Ok(())
         }

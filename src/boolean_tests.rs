@@ -72,4 +72,24 @@ mod tests {
         // 10 == 5 + 5 -> 10 == (5 + 5) -> true
         assert_eq!(evaluate_text_to_bool("10 == 5 + 5"), true);
     }
+
+    #[test]
+    fn test_boolean_operators() {
+        assert_eq!(evaluate_text_to_bool("true && true"), true);
+        assert_eq!(evaluate_text_to_bool("true && false"), false);
+        assert_eq!(evaluate_text_to_bool("false || true"), true);
+        assert_eq!(evaluate_text_to_bool("false || false"), false);
+        assert_eq!(evaluate_text_to_bool("true ^ false"), true);
+        assert_eq!(evaluate_text_to_bool("true ^ true"), false);
+    }
+
+    #[test]
+    fn test_boolean_operator_chaining() {
+        assert_eq!(evaluate_text_to_bool("true && true && false"), false);
+        assert_eq!(evaluate_text_to_bool("true && true && true"), true);
+        assert_eq!(evaluate_text_to_bool("false || false || true"), true);
+        assert_eq!(evaluate_text_to_bool("false || false || false"), false);
+        assert_eq!(evaluate_text_to_bool("true ^ true ^ true"), true);
+        assert_eq!(evaluate_text_to_bool("true ^ false ^ false"), true);
+    }
 }

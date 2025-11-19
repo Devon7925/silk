@@ -241,6 +241,20 @@ pub fn interpret_expression(
                             },
                         )
                     }
+                    BinaryIntrinsicOperator::BooleanAnd
+                    | BinaryIntrinsicOperator::BooleanOr
+                    | BinaryIntrinsicOperator::BooleanXor => interpret_boolean_intrinsic(
+                        evaluated_left,
+                        evaluated_right,
+                        context,
+                        span,
+                        match operator {
+                            BinaryIntrinsicOperator::BooleanAnd => |l, r| l && r,
+                            BinaryIntrinsicOperator::BooleanOr => |l, r| l || r,
+                            BinaryIntrinsicOperator::BooleanXor => |l, r| l ^ r,
+                            _ => unreachable!(),
+                        },
+                    ),
                 }
             }
         },
@@ -395,6 +409,16 @@ fn get_type_of_expression(
                 | BinaryIntrinsicOperator::I32GreaterThan
                 | BinaryIntrinsicOperator::I32LessThanOrEqual
                 | BinaryIntrinsicOperator::I32GreaterThanOrEqual,
+            ),
+            _,
+        ) => interpret_expression(identifier_expr("bool"), context),
+        Expression::IntrinsicOperation(
+            IntrinsicOperation::Binary(
+                _,
+                _,
+                BinaryIntrinsicOperator::BooleanAnd
+                | BinaryIntrinsicOperator::BooleanOr
+                | BinaryIntrinsicOperator::BooleanXor,
             ),
             _,
         ) => interpret_expression(identifier_expr("bool"), context),
@@ -748,6 +772,36 @@ fn evaluate_numeric_operand(expr: Expression, context: &mut Context) -> Result<i
     }
 }
 
+fn interpret_boolean_intrinsic<F>(
+    left: Expression,
+    right: Expression,
+    context: &mut Context,
+    span: SourceSpan,
+    op: F,
+) -> Result<Expression, Diagnostic>
+where
+    F: Fn(bool, bool) -> bool,
+{
+    let left_value = evaluate_boolean_operand(left, context)?;
+    let right_value = evaluate_boolean_operand(right, context)?;
+    Ok(Expression::Literal(
+        ExpressionLiteral::Boolean(op(left_value, right_value)),
+        span,
+    ))
+}
+
+fn evaluate_boolean_operand(expr: Expression, context: &mut Context) -> Result<bool, Diagnostic> {
+    let operand_span = expr.span();
+    let evaluated = resolve_expression(expr, context)?;
+    match evaluated {
+        Expression::Literal(ExpressionLiteral::Boolean(value), _) => Ok(value),
+        _ => Err(diagnostic(
+            "Expected boolean literal during intrinsic operation",
+            operand_span,
+        )),
+    }
+}
+
 fn is_resolved_constant(expr: &Expression) -> bool {
     match expr {
         Expression::Literal(_, _) | Expression::IntrinsicType(_, _) => true,
@@ -953,6 +1007,9 @@ pub fn intrinsic_context() -> Context {
                     vec![
                         bool_binary_intrinsic("==", BinaryIntrinsicOperator::I32Equal),
                         bool_binary_intrinsic("!=", BinaryIntrinsicOperator::I32NotEqual),
+                        bool_binary_intrinsic("&&", BinaryIntrinsicOperator::BooleanAnd),
+                        bool_binary_intrinsic("||", BinaryIntrinsicOperator::BooleanOr),
+                        bool_binary_intrinsic("^", BinaryIntrinsicOperator::BooleanXor),
                     ],
                     dummy_span(),
                 )),

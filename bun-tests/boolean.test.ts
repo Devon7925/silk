@@ -82,3 +82,64 @@ test("boolean comparisons", async () => {
     // Cleanup
     try { unlinkSync(TEMP_SILK); unlinkSync(TEMP_WASM); } catch (e) { }
 });
+
+test("boolean operators", async () => {
+    await compileAndRun(
+        `
+    let export(wasm) and_true = fn(a: bool) -> bool ( a && true );
+    let export(wasm) and_false = fn(a: bool) -> bool ( a && false );
+    let export(wasm) or_true = fn(a: bool) -> bool ( a || true );
+    let export(wasm) or_false = fn(a: bool) -> bool ( a || false );
+    let export(wasm) xor_true = fn(a: bool) -> bool ( a ^ true );
+    let export(wasm) xor_false = fn(a: bool) -> bool ( a ^ false );
+        `,
+        async (instance) => {
+            const exports = instance.exports as any;
+            expect(exports.and_true(1)).toBe(1);
+            expect(exports.and_true(0)).toBe(0);
+            expect(exports.and_false(1)).toBe(0);
+            expect(exports.and_false(0)).toBe(0);
+
+            expect(exports.or_true(0)).toBe(1);
+            expect(exports.or_true(1)).toBe(1);
+            expect(exports.or_false(0)).toBe(0);
+            expect(exports.or_false(1)).toBe(1);
+
+            expect(exports.xor_true(1)).toBe(0);
+            expect(exports.xor_true(0)).toBe(1);
+            expect(exports.xor_false(1)).toBe(1);
+            expect(exports.xor_false(0)).toBe(0);
+        }
+    );
+
+    // Cleanup
+    try { unlinkSync(TEMP_SILK); unlinkSync(TEMP_WASM); } catch (e) { }
+});
+
+test("boolean operator chaining", async () => {
+    await compileAndRun(
+        `
+    let export(wasm) all_true = fn{} -> bool ( true && true && true );
+    let export(wasm) short_circuit_false = fn{} -> bool ( true && true && false );
+    let export(wasm) any_true = fn{} -> bool ( false || false || true );
+    let export(wasm) all_false = fn{} -> bool ( false || false || false );
+    let export(wasm) odd_true = fn{} -> bool ( true ^ true ^ true );
+    let export(wasm) odd_false = fn{} -> bool ( true ^ false ^ true );
+        `,
+        async (instance) => {
+            const exports = instance.exports as any;
+
+            expect(exports.all_true()).toBe(1);
+            expect(exports.short_circuit_false()).toBe(0);
+
+            expect(exports.any_true()).toBe(1);
+            expect(exports.all_false()).toBe(0);
+
+            expect(exports.odd_true()).toBe(1);
+            expect(exports.odd_false()).toBe(0);
+        }
+    );
+
+    // Cleanup
+    try { unlinkSync(TEMP_SILK); unlinkSync(TEMP_WASM); } catch (e) { }
+});
