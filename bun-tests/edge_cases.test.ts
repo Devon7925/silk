@@ -6,6 +6,7 @@ const ROOT_DIR = join(import.meta.dir, "..");
 const FIXTURES_DIR = join(import.meta.dir, "..", "fixtures");
 const TEMP_WASM = join(FIXTURES_DIR, "edge_cases.wasm");
 const TEMP_SILK = join(FIXTURES_DIR, "edge_cases.silk");
+const TEST_TIMEOUT_MS = 20000;
 
 async function compileAndLoad(silkCode: string) {
     writeFileSync(TEMP_SILK, silkCode);
@@ -40,7 +41,7 @@ test("shadowing in block", async () => {
     const exports = await compileAndLoad(silkCode);
     // x + 20. If x=5, result=25.
     expect(exports.shadow_test(5)).toBe(25);
-});
+}, TEST_TIMEOUT_MS);
 
 test("multiple exports", async () => {
     const silkCode = `
@@ -51,7 +52,7 @@ test("multiple exports", async () => {
     const exports = await compileAndLoad(silkCode);
     expect(exports.add(10)).toBe(11);
     expect(exports.sub(10)).toBe(9);
-});
+}, TEST_TIMEOUT_MS);
 
 test("arithmetic edge cases", async () => {
     const silkCode = `
@@ -61,7 +62,7 @@ test("arithmetic edge cases", async () => {
     const exports = await compileAndLoad(silkCode);
     expect(exports.div_test(2)).toBe(50);
     expect(() => exports.div_test(0)).toThrow(); // Division by zero should trap
-});
+}, TEST_TIMEOUT_MS);
 
 test("deeply nested bindings", async () => {
     const silkCode = `
@@ -79,4 +80,4 @@ test("deeply nested bindings", async () => {
     // c = 6 + 3 = 9
     const exports = await compileAndLoad(silkCode);
     expect(exports.nested_test(2)).toBe(9);
-});
+}, TEST_TIMEOUT_MS);

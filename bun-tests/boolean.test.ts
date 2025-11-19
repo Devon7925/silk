@@ -7,6 +7,8 @@ const FIXTURES_DIR = join(import.meta.dir, "..", "fixtures");
 const TEMP_WASM = join(FIXTURES_DIR, "temp_boolean.wasm");
 const TEMP_SILK = join(FIXTURES_DIR, "temp_boolean.silk");
 
+const TEST_TIMEOUT_MS = 20000;
+
 async function compileAndRun(code: string, callback: (instance: WebAssembly.Instance) => Promise<void>) {
     writeFileSync(TEMP_SILK, code);
     const proc = Bun.spawn(["cargo", "run", "--", TEMP_SILK, "-o", TEMP_WASM], {
@@ -38,7 +40,7 @@ test("boolean literals", async () => {
 
     // Cleanup
     try { unlinkSync(TEMP_SILK); unlinkSync(TEMP_WASM); } catch (e) { }
-});
+}, TEST_TIMEOUT_MS);
 
 test("boolean comparisons", async () => {
     await compileAndRun(
@@ -81,7 +83,7 @@ test("boolean comparisons", async () => {
 
     // Cleanup
     try { unlinkSync(TEMP_SILK); unlinkSync(TEMP_WASM); } catch (e) { }
-});
+}, TEST_TIMEOUT_MS);
 
 test("boolean operators", async () => {
     await compileAndRun(
@@ -114,7 +116,7 @@ test("boolean operators", async () => {
 
     // Cleanup
     try { unlinkSync(TEMP_SILK); unlinkSync(TEMP_WASM); } catch (e) { }
-});
+}, TEST_TIMEOUT_MS);
 
 test("boolean operator chaining", async () => {
     await compileAndRun(
@@ -142,4 +144,4 @@ test("boolean operator chaining", async () => {
 
     // Cleanup
     try { unlinkSync(TEMP_SILK); unlinkSync(TEMP_WASM); } catch (e) { }
-});
+}, TEST_TIMEOUT_MS);

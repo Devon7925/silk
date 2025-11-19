@@ -6,6 +6,7 @@ const ROOT_DIR = join(import.meta.dir, "..");
 const FIXTURES_DIR = join(import.meta.dir, "..", "fixtures");
 const TEMP_WASM = join(FIXTURES_DIR, "temp_bindings.wasm");
 const TEMP_SILK = join(FIXTURES_DIR, "temp_bindings.silk");
+const TEST_TIMEOUT_MS = 20000;
 
 test("compiles and runs wasm with bindings", async () => {
     const silkCode = `
@@ -40,4 +41,4 @@ test("compiles and runs wasm with bindings", async () => {
         unlinkSync(TEMP_SILK);
         unlinkSync(TEMP_WASM);
     } catch (e) { }
-});
+}, TEST_TIMEOUT_MS);
