@@ -6,7 +6,7 @@ mod wasm;
 
 pub mod test_support {
     pub use crate::interpret::{
-        evaluate_text_to_expression, interpret_program, intrinsic_context, Context,
+        Context, evaluate_text_to_expression, interpret_program, intrinsic_context,
     };
     pub use crate::simplify::{simplify_context, simplify_expression};
 }
@@ -33,4 +33,3 @@ pub fn compile(file: String) -> Result<Vec<u8>, Diagnostic> {
     let simplified_context = simplify::simplify_context(program_context)?;
     wasm::compile_exports(&simplified_context)
 }
-

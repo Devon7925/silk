@@ -81,3 +81,44 @@ test("deeply nested bindings", async () => {
     const exports = await compileAndLoad(silkCode);
     expect(exports.nested_test(2)).toBe(9);
 }, TEST_TIMEOUT_MS);
+
+test("if expressions evaluate and type check", async () => {
+    const silkCode = `
+    let export(wasm) choose = fn(flag: bool) -> i32 (
+        if flag ( 10 ) else ( 20 )
+    );
+    let export(wasm) ladder = fn(flag: bool) -> i32 (
+        if false ( 1 ) else if flag ( 2 ) else ( 3 )
+    );
+    {} 
+    `;
+    const exports = await compileAndLoad(silkCode);
+    expect(exports.choose(1)).toBe(10);
+    expect(exports.choose(0)).toBe(20);
+    expect(exports.ladder(1)).toBe(2);
+    expect(exports.ladder(0)).toBe(3);
+}, TEST_TIMEOUT_MS);
+
+test("if branch type mismatches are reported", async () => {
+    const silkCode = `
+    let export(wasm) bad = fn{} -> i32 (
+        if true ( 1; ) else ( 2 )
+    );
+    {}
+    `;
+
+    writeFileSync(TEMP_SILK, silkCode);
+
+    const proc = Bun.spawn(["cargo", "run", "--", TEMP_SILK, "-o", TEMP_WASM], {
+        cwd: ROOT_DIR,
+        stdin: "ignore",
+        stderr: "pipe",
+        stdout: "ignore",
+        env: process.env,
+    });
+
+    const exitCode = await proc.exited;
+    expect(exitCode).toBe(1);
+    const stderr = await new Response(proc.stderr).text();
+    expect(stderr).toContain("Type mismatch between if branches");
+}, TEST_TIMEOUT_MS);

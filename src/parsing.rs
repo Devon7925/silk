@@ -39,7 +39,7 @@ pub enum ExpressionLiteral {
     Target(TargetLiteral),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntrinsicType {
     I32,
     Boolean,
@@ -73,6 +73,12 @@ pub enum IntrinsicOperation {
 pub enum Expression {
     IntrinsicType(IntrinsicType, SourceSpan),
     IntrinsicOperation(IntrinsicOperation, SourceSpan),
+    If {
+        condition: Box<Expression>,
+        then_branch: Box<Expression>,
+        else_branch: Option<Box<Expression>>,
+        span: SourceSpan,
+    },
     AttachImplementation {
         type_expr: Box<Expression>,
         implementation: Box<Expression>,
@@ -118,6 +124,7 @@ impl Expression {
             Expression::IntrinsicType(_, span)
             | Expression::IntrinsicOperation(_, span)
             | Expression::Struct(_, span)
+            | Expression::If { span, .. }
             | Expression::Literal(_, span)
             | Expression::Identifier(_, span)
             | Expression::Binding(_, span)
@@ -141,6 +148,110 @@ pub struct Binding {
 #[derive(Clone, Debug)]
 pub enum BindingAnnotation {
     Export(Expression, SourceSpan),
+}
+
+fn parse_if_expression<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Option<Result<(Expression, &'a str), Diagnostic>> {
+    if !file.starts_with("if") {
+        return None;
+    }
+
+    let after_keyword = &file[2..];
+    if after_keyword
+        .chars()
+        .next()
+        .filter(|c| c.is_alphanumeric() || *c == '_')
+        .is_some()
+    {
+        return None;
+    }
+
+    Some(parse_if_expression_with_source(source, file))
+}
+
+fn parse_if_expression_with_source<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Result<(Expression, &'a str), Diagnostic> {
+    let start_slice = file;
+    let mut remaining = file
+        .strip_prefix("if")
+        .ok_or_else(|| diagnostic_here(source, file, 2, "Expected if"))?;
+
+    remaining = parse_optional_whitespace(remaining);
+    let (mut condition, mut after_condition) =
+        parse_operation_expression_with_guard(source, remaining, true)?;
+    after_condition = parse_optional_whitespace(after_condition);
+
+    let mut inferred_then_branch: Option<Expression> = None;
+    if !after_condition.starts_with('(') {
+        if let Expression::FunctionCall {
+            function, argument, ..
+        } = condition.clone()
+        {
+            if let Expression::Block(_, _) = *argument {
+                inferred_then_branch = Some(*argument);
+                condition = *function;
+            }
+        }
+    }
+
+    let (then_branch, mut remaining) = if let Some(branch) = inferred_then_branch {
+        (branch, after_condition)
+    } else {
+        match parse_grouping_expression_with_source(source, after_condition) {
+            Some(result) => result?,
+            None => {
+                return Err(diagnostic_here(
+                    source,
+                    after_condition,
+                    after_condition
+                        .chars()
+                        .next()
+                        .map(|c| c.len_utf8())
+                        .unwrap_or(1),
+                    "Expected ( to start if body",
+                ));
+            }
+        }
+    };
+
+    remaining = parse_optional_whitespace(remaining);
+
+    let else_branch = if let Some(rest) = remaining.strip_prefix("else") {
+        let rest = parse_optional_whitespace(rest);
+        if let Some(if_parse) = parse_if_expression(source, rest) {
+            let (else_expr, remaining) = if_parse?;
+            Some((Some(else_expr), remaining))
+        } else if let Some(group_parse) = parse_grouping_expression_with_source(source, rest) {
+            let (else_expr, remaining) = group_parse?;
+            Some((Some(else_expr), remaining))
+        } else {
+            return Err(diagnostic_here(
+                source,
+                rest,
+                rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
+                "Expected ( to start else body",
+            ));
+        }
+    } else {
+        None
+    };
+
+    let (else_branch, remaining) = else_branch.unwrap_or((None, remaining));
+
+    let span = consumed_span(source, start_slice, remaining);
+    Ok((
+        Expression::If {
+            condition: Box::new(condition),
+            then_branch: Box::new(then_branch),
+            else_branch: else_branch.map(Box::new),
+            span,
+        },
+        remaining,
+    ))
 }
 
 fn remainder_span(source: &str, remaining: &str, len: usize) -> SourceSpan {
@@ -590,6 +701,9 @@ fn parse_isolated_expression_with_source<'a>(
     if let Some(function_parse) = parse_function_literal(source, file) {
         return function_parse;
     }
+    if let Some(if_parse) = parse_if_expression(source, file) {
+        return if_parse;
+    }
     if let Some(group_parse) = parse_grouping_expression_with_source(source, file) {
         return group_parse;
     }
@@ -656,12 +770,28 @@ fn parse_property_access<'a>(
 fn parse_function_call<'a>(
     source: &'a str,
     file: &'a str,
+    stop_before_grouping: bool,
 ) -> Result<(Expression, &'a str), Diagnostic> {
     let mut exprs = vec![];
     let (function_expr, mut remaining) = parse_property_access(source, file)?;
     remaining = parse_optional_whitespace(remaining);
     exprs.push(function_expr);
-    while let Ok((argument_expr, rest)) = parse_property_access(source, remaining) {
+    loop {
+        let lookahead = parse_optional_whitespace(remaining);
+        if stop_before_grouping && lookahead.starts_with('(') {
+            break;
+        }
+
+        let Ok((argument_expr, rest)) = parse_property_access(source, remaining) else {
+            break;
+        };
+
+        if stop_before_grouping {
+            if let Expression::Block(_, _) = argument_expr {
+                break;
+            }
+        }
+
         remaining = parse_optional_whitespace(rest);
         exprs.push(argument_expr);
     }
@@ -690,18 +820,27 @@ fn parse_operation_expression_with_source<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Result<(Expression, &'a str), Diagnostic> {
+    parse_operation_expression_with_guard(source, file, false)
+}
+
+fn parse_operation_expression_with_guard<'a>(
+    source: &'a str,
+    file: &'a str,
+    stop_before_grouping: bool,
+) -> Result<(Expression, &'a str), Diagnostic> {
     fn parse_operations<'a>(
         source: &'a str,
         file: &'a str,
+        stop_before_grouping: bool,
     ) -> Result<(Vec<Expression>, Vec<String>, &'a str), Diagnostic> {
         let mut expressions: Vec<Expression> = Vec::new();
         let mut operators: Vec<String> = Vec::new();
-        let (expression, mut remaining) = parse_function_call(source, file)?;
+        let (expression, mut remaining) = parse_function_call(source, file, stop_before_grouping)?;
         remaining = parse_optional_whitespace(remaining);
         expressions.push(expression);
         while let Some((operator, rest)) = parse_operator(remaining) {
             let rest = parse_optional_whitespace(rest);
-            let (next_expression, rest) = parse_function_call(source, rest)?;
+            let (next_expression, rest) = parse_function_call(source, rest, stop_before_grouping)?;
             let rest = parse_optional_whitespace(rest);
             operators.push(operator);
             expressions.push(next_expression);
@@ -710,7 +849,7 @@ fn parse_operation_expression_with_source<'a>(
         Ok((expressions, operators, remaining))
     }
 
-    let (expressions, operators, remaining) = parse_operations(source, file)?;
+    let (expressions, operators, remaining) = parse_operations(source, file, stop_before_grouping)?;
 
     fn reduce_stacks(
         operand_stack: &mut Vec<Expression>,
@@ -884,6 +1023,7 @@ fn parse_block_with_terminators<'a>(
 ) -> Result<(Expression, &'a str), Diagnostic> {
     let mut expressions = Vec::new();
     let mut remaining = parse_optional_whitespace(file);
+    let mut ended_with_semicolon = false;
 
     loop {
         if remaining.is_empty() {
@@ -899,6 +1039,7 @@ fn parse_block_with_terminators<'a>(
         let (expression, rest) = parse_individual_expression_with_source(source, remaining)?;
         expressions.push(expression);
         remaining = parse_optional_whitespace(rest);
+        ended_with_semicolon = false;
 
         if remaining.is_empty() {
             break;
@@ -912,6 +1053,7 @@ fn parse_block_with_terminators<'a>(
 
         let rest = parse_semicolon(source, remaining)?;
         remaining = parse_optional_whitespace(rest);
+        ended_with_semicolon = true;
     }
 
     if expressions.is_empty() {
@@ -921,6 +1063,15 @@ fn parse_block_with_terminators<'a>(
             remaining.chars().next().map(|c| c.len_utf8()).unwrap_or(0),
             "Cannot parse empty block",
         ));
+    }
+
+    if ended_with_semicolon {
+        if let Some(last_span) = expressions.last().map(|expr| expr.span()) {
+            expressions.push(Expression::Struct(
+                vec![],
+                SourceSpan::new(last_span.end(), 0),
+            ));
+        }
     }
 
     if expressions.len() == 1 {
