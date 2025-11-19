@@ -9,6 +9,7 @@ use crate::{
 #[derive(Clone, Debug)]
 pub enum BindingContext {
     Bound(Expression),
+    BoundPreserved(Expression),
     UnboundWithType(Expression),
     UnboundWithoutType,
 }
@@ -77,10 +78,14 @@ pub fn interpret_expression(
         expr @ (Expression::Literal(_, _) | Expression::IntrinsicType(_, _)) => Ok(expr),
         Expression::Identifier(identifier, span) => {
             if let Some(binding) = context.bindings.get(&identifier.0) {
-                if let BindingContext::Bound(expr) = &binding.0
-                    && is_resolved_const_function_expression(expr, context)
-                {
-                    return Ok(expr.clone());
+                match &binding.0 {
+                    BindingContext::Bound(expr) => {
+                        return Ok(expr.clone());
+                    }
+                    BindingContext::BoundPreserved(_) => {
+                        return Ok(Expression::Identifier(identifier, span));
+                    }
+                    _ => {}
                 }
                 Ok(Expression::Identifier(identifier, span))
             } else {
@@ -107,7 +112,7 @@ pub fn interpret_expression(
             },
             context,
         ),
-        Expression::Binding(binding, _) => interpret_binding(*binding, context),
+        Expression::Binding(binding, _) => interpret_binding(*binding, context, false),
         Expression::Block(expressions, span) => {
             let (value, _) = interpret_block(expressions, span, context)?;
             Ok(value)
@@ -132,6 +137,7 @@ pub fn interpret_expression(
                         &argument_value,
                         &mut call_context,
                         Vec::new(),
+                        false,
                     )?;
                     interpret_expression(*body, &mut call_context)
                 }
@@ -300,7 +306,9 @@ fn get_type_of_expression(
                 .clone();
 
             match bound_value.0 {
-                BindingContext::Bound(value) => get_type_of_expression(&value, context),
+                BindingContext::Bound(value) | BindingContext::BoundPreserved(value) => {
+                    get_type_of_expression(&value, context)
+                }
                 BindingContext::UnboundWithType(type_expr) => {
                     interpret_expression(type_expr.clone(), context)
                 }
@@ -413,17 +421,62 @@ fn interpret_block(
 ) -> Result<(Expression, Context), Diagnostic> {
     let mut block_context = context.clone();
     let mut last_value: Option<Expression> = None;
+    let mut preserved_expressions = Vec::new();
+
+    let mut usage_counter = UsageCounter::new();
+    for expression in &expressions {
+        usage_counter.count(expression);
+    }
 
     for expression in expressions {
         let value = match expression {
-            Expression::Binding(binding, _) => interpret_binding(*binding, &mut block_context)?,
-            other => interpret_expression(other, &mut block_context)?,
+            Expression::Binding(binding, span) => {
+                let should_preserve = usage_counter.should_preserve(&binding.pattern);
+                let binding_expr =
+                    interpret_binding(*binding, &mut block_context, should_preserve)?;
+                if should_preserve {
+                    if let Expression::Binding(binding, _) = binding_expr {
+                        preserved_expressions.push(Expression::Binding(binding, span));
+                    }
+                }
+                Expression::Literal(ExpressionLiteral::Boolean(true), dummy_span())
+            }
+            other => {
+                let val = interpret_expression(other, &mut block_context)?;
+                if let Expression::Binding(..) = val {
+                    // Should not happen from interpret_expression but just in case
+                } else {
+                    // If it's not a binding, we don't add it to preserved_expressions
+                    // unless it's the last value?
+                    // Wait, interpret_block returns (Expression, Context).
+                    // If we have statements like `do_something();`, we want to preserve them?
+                    // The current interpreter only returns the *last* value.
+                    // Intermediate expressions that are not bindings are effectively dropped if they are not used?
+                    // But side effects? The interpreter assumes pure expressions mostly, except for bindings?
+                    // If we have `print("hello")`, it's an expression.
+                    // If we want to preserve it in the output AST, we should add it.
+                    // But `interpret_block` signature returns `Expression`.
+                    // If we preserve bindings, we are building a Block.
+                }
+                val
+            }
         };
         last_value = Some(value);
     }
 
-    let value = last_value.ok_or_else(|| diagnostic("Cannot evaluate empty block", span))?;
-    Ok((value, block_context))
+    let final_value = last_value.ok_or_else(|| diagnostic("Cannot evaluate empty block", span))?;
+
+    if preserved_expressions.is_empty() {
+        Ok((final_value, block_context))
+    } else {
+        // If we have preserved bindings, we need to return a Block that contains them
+        // AND the final value.
+        preserved_expressions.push(final_value);
+        Ok((
+            Expression::Block(preserved_expressions, span),
+            block_context,
+        ))
+    }
 }
 
 pub fn interpret_program(
@@ -436,13 +489,36 @@ pub fn interpret_program(
     }
 }
 
-fn interpret_binding(binding: Binding, context: &mut Context) -> Result<Expression, Diagnostic> {
-    let value = interpret_expression(binding.expr, context)?;
-    let bound_success = bind_pattern_from_value(binding.pattern, &value, context, Vec::new())?;
-    Ok(Expression::Literal(
-        ExpressionLiteral::Boolean(bound_success),
-        dummy_span(),
-    ))
+fn interpret_binding(
+    binding: Binding,
+    context: &mut Context,
+    preserve: bool,
+) -> Result<Expression, Diagnostic> {
+    let value = interpret_expression(binding.expr.clone(), context)?;
+    let bound_success = bind_pattern_from_value(
+        binding.pattern.clone(),
+        &value,
+        context,
+        Vec::new(),
+        preserve,
+    )?;
+
+    if preserve {
+        // Return the binding expression so it can be preserved in the block
+        // We use the evaluated value in the binding to ensure consts are resolved if possible
+        Ok(Expression::Binding(
+            Box::new(Binding {
+                pattern: binding.pattern,
+                expr: value,
+            }),
+            dummy_span(),
+        ))
+    } else {
+        Ok(Expression::Literal(
+            ExpressionLiteral::Boolean(bound_success),
+            dummy_span(),
+        ))
+    }
 }
 
 fn parse_binding_annotation(
@@ -521,13 +597,18 @@ fn bind_pattern_from_value(
     value: &Expression,
     context: &mut Context,
     passed_annotations: Vec<BindingAnnotation>,
+    preserve: bool,
 ) -> Result<bool, Diagnostic> {
     match pattern {
         BindingPattern::Identifier(identifier, _) => {
             context.bindings.insert(
                 identifier.0,
                 (
-                    BindingContext::Bound(value.clone()),
+                    if preserve {
+                        BindingContext::BoundPreserved(value.clone())
+                    } else {
+                        BindingContext::Bound(value.clone())
+                    },
                     passed_annotations.clone(),
                 ),
             );
@@ -548,13 +629,13 @@ fn bind_pattern_from_value(
                         diagnostic(format!("Missing field {}", field_identifier.0), field_span)
                     })?;
 
-                bind_pattern_from_value(field_pattern, field_value, context, Vec::new())?;
+                bind_pattern_from_value(field_pattern, field_value, context, Vec::new(), preserve)?;
             }
 
             Ok(true)
         }
         BindingPattern::TypeHint(inner, _, _) => {
-            bind_pattern_from_value(*inner, value, context, passed_annotations)
+            bind_pattern_from_value(*inner, value, context, passed_annotations, preserve)
         }
         BindingPattern::Annotated {
             pattern,
@@ -573,6 +654,7 @@ fn bind_pattern_from_value(
                         .collect::<Result<Vec<_>, _>>()?,
                 )
                 .collect(),
+            preserve,
         ),
     }
 }
@@ -597,7 +679,7 @@ where
 
 fn evaluate_numeric_operand(expr: Expression, context: &mut Context) -> Result<i32, Diagnostic> {
     let operand_span = expr.span();
-    let evaluated = interpret_expression(expr, context)?;
+    let evaluated = resolve_expression(expr, context)?;
     match evaluated {
         Expression::Literal(ExpressionLiteral::Number(value), _) => Ok(value),
         _ => Err(diagnostic(
@@ -800,10 +882,146 @@ fn evaluate_text_to_number(program: &str) -> i32 {
         .0
     {
         Expression::Literal(ExpressionLiteral::Number(value), _) => value,
-        other => panic!(
-            "Expected numeric literal after interpretation, got {:?}",
-            other
-        ),
+        _ => panic!("Expected numeric result"),
+    }
+}
+
+fn resolve_expression(expr: Expression, context: &mut Context) -> Result<Expression, Diagnostic> {
+    let evaluated = interpret_expression(expr, context)?;
+    match evaluated {
+        Expression::Identifier(ident, span) => {
+            if let Some(binding) = context.bindings.get(&ident.0) {
+                match &binding.0 {
+                    BindingContext::Bound(val) | BindingContext::BoundPreserved(val) => {
+                        resolve_expression(val.clone(), context)
+                    }
+                    _ => Ok(Expression::Identifier(ident, span)),
+                }
+            } else {
+                Ok(Expression::Identifier(ident, span))
+            }
+        }
+        other => Ok(other),
+    }
+}
+
+struct UsageCounter {
+    counts: std::collections::HashMap<String, usize>,
+}
+
+impl UsageCounter {
+    fn new() -> Self {
+        Self {
+            counts: std::collections::HashMap::new(),
+        }
+    }
+
+    fn count(&mut self, expr: &Expression) {
+        match expr {
+            Expression::Identifier(ident, _) => {
+                *self.counts.entry(ident.0.clone()).or_default() += 1;
+            }
+            Expression::Block(exprs, _) => {
+                for e in exprs {
+                    self.count(e);
+                }
+            }
+            Expression::Function {
+                body,
+                parameter,
+                return_type,
+                ..
+            } => {
+                self.count(body);
+                self.count(return_type);
+                self.count_pattern(parameter);
+            }
+            Expression::FunctionCall {
+                function, argument, ..
+            } => {
+                self.count(function);
+                self.count(argument);
+            }
+            Expression::Operation { left, right, .. } => {
+                self.count(left);
+                self.count(right);
+            }
+            Expression::Binding(binding, _) => {
+                self.count(&binding.expr);
+                self.count_pattern(&binding.pattern);
+            }
+            Expression::IntrinsicOperation(op, _) => match op {
+                IntrinsicOperation::Binary(left, right, _) => {
+                    self.count(left);
+                    self.count(right);
+                }
+            },
+            Expression::Struct(items, _) => {
+                for (_, expr) in items {
+                    self.count(expr);
+                }
+            }
+            Expression::PropertyAccess { object, .. } => {
+                self.count(object);
+            }
+            Expression::AttachImplementation {
+                type_expr,
+                implementation,
+                ..
+            } => {
+                self.count(type_expr);
+                self.count(implementation);
+            }
+            Expression::FunctionType {
+                parameter,
+                return_type,
+                ..
+            } => {
+                self.count(parameter);
+                self.count(return_type);
+            }
+            Expression::Literal(..) | Expression::IntrinsicType(..) => {}
+        }
+    }
+
+    fn count_pattern(&mut self, pattern: &BindingPattern) {
+        match pattern {
+            BindingPattern::TypeHint(inner, type_expr, _) => {
+                self.count_pattern(inner);
+                self.count(type_expr);
+            }
+            BindingPattern::Annotated {
+                pattern,
+                annotations,
+                ..
+            } => {
+                self.count_pattern(pattern);
+                for ann in annotations {
+                    match ann {
+                        BindingAnnotation::Export(expr, _) => self.count(expr),
+                    }
+                }
+            }
+            BindingPattern::Struct(items, _) => {
+                for (_, pat) in items {
+                    self.count_pattern(pat);
+                }
+            }
+            BindingPattern::Identifier(..) => {}
+        }
+    }
+
+    fn should_preserve(&self, pattern: &BindingPattern) -> bool {
+        match pattern {
+            BindingPattern::Identifier(ident, _) => {
+                self.counts.get(&ident.0).copied().unwrap_or(0) > 1
+            }
+            BindingPattern::TypeHint(inner, _, _) => self.should_preserve(inner),
+            BindingPattern::Annotated { pattern, .. } => self.should_preserve(pattern),
+            BindingPattern::Struct(items, _) => {
+                items.iter().any(|(_, pat)| self.should_preserve(pat))
+            }
+        }
     }
 }
 
@@ -975,4 +1193,69 @@ fn interpret_reports_calling_non_function_span() {
     let rendered = err.render_with_source(source);
     assert!(rendered.contains("Attempted to call a non-function value"));
     assert!(rendered.contains("line 1, column 1"));
+}
+
+#[test]
+fn interpret_preserves_bindings_in_function() {
+    let program = "
+    let export(wasm) double_add = fn(x: i32) -> i32 (
+        let y = x * 2;
+        y + y
+    );
+    {}
+    ";
+    let (_, context) = evaluate_text_to_expression(program).unwrap();
+    let bindings = context.annotated_bindings();
+    let double_add = bindings
+        .iter()
+        .find(|b| b.name == "double_add")
+        .expect("double_add not found");
+
+    if let Expression::Function { body, .. } = &double_add.value {
+        // The body should be a Block containing `let y = ...` and `y + y`.
+        if let Expression::Block(exprs, _) = &**body {
+            assert_eq!(exprs.len(), 2);
+            match &exprs[0] {
+                Expression::Binding(binding, _) => {
+                    if let BindingPattern::Identifier(ident, _) = &binding.pattern {
+                        assert_eq!(ident.0, "y");
+                    } else {
+                        panic!("Expected identifier pattern for y");
+                    }
+                }
+                _ => panic!("Expected binding as first expression"),
+            }
+        } else {
+            panic!("Expected function body to be a block, got {:?}", body);
+        }
+    } else {
+        panic!("Expected function value");
+    }
+}
+
+#[test]
+fn interpret_inlines_single_use() {
+    let program = "
+    let export(wasm) add_one = fn(x: i32) -> i32 (
+        let y = x + 1;
+        y
+    );
+    {}
+    ";
+    let (_, context) = evaluate_text_to_expression(program).unwrap();
+    let bindings = context.annotated_bindings();
+    let add_one = bindings
+        .iter()
+        .find(|b| b.name == "add_one")
+        .expect("add_one not found");
+
+    if let Expression::Function { body, .. } = &add_one.value {
+        match &**body {
+            Expression::IntrinsicOperation(..) => {} // Good
+            Expression::Block(..) => panic!("Expected inlined expression, got Block"),
+            _ => panic!("Expected IntrinsicOperation, got {:?}", body),
+        }
+    } else {
+        panic!("Expected function value");
+    }
 }

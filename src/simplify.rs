@@ -125,6 +125,9 @@ fn simplify_binding_context(binding_context: BindingContext) -> Result<BindingCo
         BindingContext::Bound(expression) => {
             Ok(BindingContext::Bound(simplify_expression(expression)?))
         }
+        BindingContext::BoundPreserved(expression) => Ok(BindingContext::BoundPreserved(
+            simplify_expression(expression)?,
+        )),
         BindingContext::UnboundWithType(expression) => Ok(BindingContext::UnboundWithType(
             simplify_expression(expression)?,
         )),
@@ -150,6 +153,7 @@ fn evaluate_text_to_simplified_expression(
     program: &str,
 ) -> Result<(Expression, Context), Diagnostic> {
     use crate::interpret::{interpret_program, intrinsic_context};
+    use crate::parsing::{BindingAnnotation, ExpressionLiteral, TargetLiteral};
 
     let (expression, remaining) =
         crate::parsing::parse_block(program).expect("Failed to parse program text");
@@ -204,7 +208,8 @@ fn interpret_exported_function_w_binding() {
     let BindingAnnotation::Export(target_expr, _) = &exported_binding.annotations[0] else {
         panic!("expected export annotation");
     };
-    if let Expression::Literal(ExpressionLiteral::Target(TargetLiteral::WasmTarget), _) = target_expr
+    if let Expression::Literal(ExpressionLiteral::Target(TargetLiteral::WasmTarget), _) =
+        target_expr
     {
     } else {
         panic!("expected wasm target in export annotation");

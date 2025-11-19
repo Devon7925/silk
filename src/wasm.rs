@@ -44,8 +44,30 @@ pub fn compile_exports(context: &interpret::Context) -> Result<Vec<u8>, Diagnost
         function_section.function(next_type_index);
         next_type_index += 1;
 
-        let mut func = Function::new(Vec::new());
-        emit_expression(&export.body, &export.params, &mut func)?;
+        let mut locals = Vec::new();
+        let mut local_indices = std::collections::HashMap::new();
+
+        // Add parameters to local_indices
+        for (i, param) in export.params.iter().enumerate() {
+            local_indices.insert(param.name.clone(), i as u32);
+        }
+
+        // Collect additional locals from body
+        let body_locals = collect_locals(&export.body)?;
+        for (name, ty) in body_locals {
+            if !local_indices.contains_key(&name) {
+                local_indices.insert(name, (export.params.len() + locals.len()) as u32);
+                locals.push(ty);
+            }
+        }
+
+        let mut func = Function::new(if locals.is_empty() {
+            Vec::new()
+        } else {
+            vec![(locals.len() as u32, ValType::I32)]
+        });
+
+        emit_expression(&export.body, &local_indices, &mut func)?;
         func.instruction(&Instruction::End);
         code_section.function(&func);
 
@@ -166,6 +188,7 @@ fn extract_identifier_from_pattern(pattern: BindingPattern) -> Result<String, Di
     match pattern {
         BindingPattern::Identifier(identifier, _) => Ok(identifier.0),
         BindingPattern::Annotated { pattern, .. } => extract_identifier_from_pattern(*pattern),
+        BindingPattern::TypeHint(pattern, _, _) => extract_identifier_from_pattern(*pattern),
         other => Err(
             Diagnostic::new("Only identifier parameters can be exported to wasm")
                 .with_span(other.span()),
@@ -181,9 +204,47 @@ fn is_i32_type(expr: &Expression) -> bool {
     }
 }
 
+fn collect_locals(expr: &Expression) -> Result<Vec<(String, ValType)>, Diagnostic> {
+    let mut locals = Vec::new();
+    match expr {
+        Expression::Binding(binding, _) => {
+            let name = extract_identifier_from_pattern(binding.pattern.clone())?;
+            locals.push((name, ValType::I32));
+            // Also recurse into the expression?
+            // A binding expression usually doesn't contain other bindings unless it's a block?
+            // But `binding.expr` is an expression.
+            locals.extend(collect_locals(&binding.expr)?);
+        }
+        Expression::Block(exprs, _) => {
+            for e in exprs {
+                locals.extend(collect_locals(e)?);
+            }
+        }
+        Expression::Function { body, .. } => {
+            // Locals in inner functions are separate?
+            // But we don't support compiling inner functions to WASM closures yet.
+            // So we can ignore them or error?
+            // For now, let's ignore them as they won't be reached by the main emission if we don't support them.
+        }
+        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _) => {
+            locals.extend(collect_locals(left)?);
+            locals.extend(collect_locals(right)?);
+        }
+        Expression::FunctionCall {
+            function, argument, ..
+        } => {
+            locals.extend(collect_locals(function)?);
+            locals.extend(collect_locals(argument)?);
+        }
+        // Add other recursive cases if needed
+        _ => {}
+    }
+    Ok(locals)
+}
+
 fn emit_expression(
     expr: &Expression,
-    params: &[WasmFunctionParam],
+    locals: &std::collections::HashMap<String, u32>,
     func: &mut Function,
 ) -> Result<(), Diagnostic> {
     match expr {
@@ -192,29 +253,57 @@ fn emit_expression(
             Ok(())
         }
         Expression::Identifier(identifier, span) => {
-            let local_index = params
-                .iter()
-                .position(|param| param.name == identifier.0)
-                .map(|idx| idx as u32)
-                .ok_or_else(|| {
-                    Diagnostic::new(format!(
-                        "Identifier `{}` is not a function parameter",
-                        identifier.0
-                    ))
-                    .with_span(*span)
-                })?;
+            let local_index = locals.get(&identifier.0).copied().ok_or_else(|| {
+                Diagnostic::new(format!(
+                    "Identifier `{}` is not a local variable or parameter",
+                    identifier.0
+                ))
+                .with_span(*span)
+            })?;
             func.instruction(&Instruction::LocalGet(local_index));
             Ok(())
         }
         Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, op), _) => {
-            emit_expression(left, params, func)?;
-            emit_expression(right, params, func)?;
+            emit_expression(left, locals, func)?;
+            emit_expression(right, locals, func)?;
             match op {
                 BinaryIntrinsicOperator::I32Add => func.instruction(&Instruction::I32Add),
                 BinaryIntrinsicOperator::I32Subtract => func.instruction(&Instruction::I32Sub),
                 BinaryIntrinsicOperator::I32Multiply => func.instruction(&Instruction::I32Mul),
                 BinaryIntrinsicOperator::I32Divide => func.instruction(&Instruction::I32DivS),
             };
+            Ok(())
+        }
+        Expression::Binding(binding, _) => {
+            emit_expression(&binding.expr, locals, func)?;
+            let name = extract_identifier_from_pattern(binding.pattern.clone())?;
+            let local_index = locals
+                .get(&name)
+                .copied()
+                .expect("Local should have been collected");
+            func.instruction(&Instruction::LocalSet(local_index));
+            // Bindings don't leave a value on the stack in our block logic,
+            // but if they are part of a block, the block handles dropping if needed?
+            // Wait, if I have `let x = 1; let y = 2;`, the block will emit:
+            // emit(let x = 1) -> sets local, stack empty.
+            // emit(let y = 2) -> sets local, stack empty.
+            // So we are good.
+            Ok(())
+        }
+        Expression::Block(exprs, _) => {
+            for (i, e) in exprs.iter().enumerate() {
+                emit_expression(e, locals, func)?;
+                // If it's not the last expression, and it left something on the stack, we should drop it.
+                // But how do we know if it left something?
+                // `Expression::Binding` leaves nothing (we just implemented it).
+                // `Expression::Literal`, `Identifier`, `IntrinsicOperation` leave 1 value.
+                // So we should drop if it's not a binding.
+                if i < exprs.len() - 1 {
+                    if !matches!(e, Expression::Binding(..)) {
+                        func.instruction(&Instruction::Drop);
+                    }
+                }
+            }
             Ok(())
         }
         other => Err(
