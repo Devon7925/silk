@@ -2,11 +2,11 @@ use crate::interpret::Context;
 use crate::{
     Diagnostic,
     interpret::BindingContext,
-    parsing::{
-        Binding, BindingAnnotation, BindingPattern, Expression, ExpressionLiteral,
-        IntrinsicOperation, TargetLiteral,
-    },
+    parsing::{Binding, BindingPattern, Expression, IntrinsicOperation},
 };
+
+#[cfg(test)]
+use crate::parsing::{BindingAnnotation, ExpressionLiteral, TargetLiteral};
 
 pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
     match expr {
@@ -153,7 +153,6 @@ fn evaluate_text_to_simplified_expression(
     program: &str,
 ) -> Result<(Expression, Context), Diagnostic> {
     use crate::interpret::{interpret_program, intrinsic_context};
-    use crate::parsing::{BindingAnnotation, ExpressionLiteral, TargetLiteral};
 
     let (expression, remaining) =
         crate::parsing::parse_block(program).expect("Failed to parse program text");

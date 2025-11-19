@@ -202,18 +202,46 @@ pub fn interpret_expression(
                         span,
                     ));
                 }
-                interpret_numeric_intrinsic(
-                    evaluated_left,
-                    evaluated_right,
-                    context,
-                    span,
-                    match operator {
-                        BinaryIntrinsicOperator::I32Add => |l, r| l + r,
-                        BinaryIntrinsicOperator::I32Subtract => |l, r| l - r,
-                        BinaryIntrinsicOperator::I32Multiply => |l, r| l * r,
-                        BinaryIntrinsicOperator::I32Divide => |l, r| l / r,
-                    },
-                )
+                match operator {
+                    BinaryIntrinsicOperator::I32Add
+                    | BinaryIntrinsicOperator::I32Subtract
+                    | BinaryIntrinsicOperator::I32Multiply
+                    | BinaryIntrinsicOperator::I32Divide => interpret_numeric_intrinsic(
+                        evaluated_left,
+                        evaluated_right,
+                        context,
+                        span,
+                        match operator {
+                            BinaryIntrinsicOperator::I32Add => |l, r| l + r,
+                            BinaryIntrinsicOperator::I32Subtract => |l, r| l - r,
+                            BinaryIntrinsicOperator::I32Multiply => |l, r| l * r,
+                            BinaryIntrinsicOperator::I32Divide => |l, r| l / r,
+                            _ => unreachable!(),
+                        },
+                    ),
+                    BinaryIntrinsicOperator::I32Equal
+                    | BinaryIntrinsicOperator::I32NotEqual
+                    | BinaryIntrinsicOperator::I32LessThan
+                    | BinaryIntrinsicOperator::I32GreaterThan
+                    | BinaryIntrinsicOperator::I32LessThanOrEqual
+                    | BinaryIntrinsicOperator::I32GreaterThanOrEqual => {
+                        interpret_comparison_intrinsic(
+                            evaluated_left,
+                            evaluated_right,
+                            context,
+                            span,
+                            match operator {
+                                BinaryIntrinsicOperator::I32Equal => |l, r| l == r,
+                                BinaryIntrinsicOperator::I32NotEqual => |l, r| l != r,
+                                BinaryIntrinsicOperator::I32LessThan => |l, r| l < r,
+                                BinaryIntrinsicOperator::I32GreaterThan => |l, r| l > r,
+                                BinaryIntrinsicOperator::I32LessThanOrEqual => |l, r| l <= r,
+                                BinaryIntrinsicOperator::I32GreaterThanOrEqual => |l, r| l >= r,
+                                _ => unreachable!(),
+                            },
+                        )
+                    }
+                }
             }
         },
         Expression::PropertyAccess {
@@ -357,6 +385,19 @@ fn get_type_of_expression(
             ),
             _,
         ) => interpret_expression(identifier_expr("i32"), context),
+        Expression::IntrinsicOperation(
+            IntrinsicOperation::Binary(
+                _,
+                _,
+                BinaryIntrinsicOperator::I32Equal
+                | BinaryIntrinsicOperator::I32NotEqual
+                | BinaryIntrinsicOperator::I32LessThan
+                | BinaryIntrinsicOperator::I32GreaterThan
+                | BinaryIntrinsicOperator::I32LessThanOrEqual
+                | BinaryIntrinsicOperator::I32GreaterThanOrEqual,
+            ),
+            _,
+        ) => interpret_expression(identifier_expr("bool"), context),
         Expression::PropertyAccess { .. } => todo!(),
     }
 }
@@ -677,6 +718,24 @@ where
     ))
 }
 
+fn interpret_comparison_intrinsic<F>(
+    left: Expression,
+    right: Expression,
+    context: &mut Context,
+    span: SourceSpan,
+    op: F,
+) -> Result<Expression, Diagnostic>
+where
+    F: Fn(i32, i32) -> bool,
+{
+    let left_value = evaluate_numeric_operand(left, context)?;
+    let right_value = evaluate_numeric_operand(right, context)?;
+    Ok(Expression::Literal(
+        ExpressionLiteral::Boolean(op(left_value, right_value)),
+        span,
+    ))
+}
+
 fn evaluate_numeric_operand(expr: Expression, context: &mut Context) -> Result<i32, Diagnostic> {
     let operand_span = expr.span();
     let evaluated = resolve_expression(expr, context)?;
@@ -828,11 +887,99 @@ pub fn intrinsic_context() -> Context {
                         i32_binary_intrinsic("-", BinaryIntrinsicOperator::I32Subtract),
                         i32_binary_intrinsic("*", BinaryIntrinsicOperator::I32Multiply),
                         i32_binary_intrinsic("/", BinaryIntrinsicOperator::I32Divide),
+                        i32_binary_intrinsic("==", BinaryIntrinsicOperator::I32Equal),
+                        i32_binary_intrinsic("!=", BinaryIntrinsicOperator::I32NotEqual),
+                        i32_binary_intrinsic("<", BinaryIntrinsicOperator::I32LessThan),
+                        i32_binary_intrinsic(">", BinaryIntrinsicOperator::I32GreaterThan),
+                        i32_binary_intrinsic("<=", BinaryIntrinsicOperator::I32LessThanOrEqual),
+                        i32_binary_intrinsic(">=", BinaryIntrinsicOperator::I32GreaterThanOrEqual),
                     ],
                     dummy_span(),
                 )),
                 span: dummy_span(),
             }),
+            Vec::new(),
+        ),
+    );
+
+    fn bool_binary_intrinsic(
+        symbol: &str,
+        operator: BinaryIntrinsicOperator,
+    ) -> (Identifier, Expression) {
+        let typed_pattern = |name: &str| {
+            BindingPattern::TypeHint(
+                Box::new(BindingPattern::Identifier(
+                    Identifier(name.to_string()),
+                    dummy_span(),
+                )),
+                Box::new(intrinsic_type_expr(IntrinsicType::Boolean)),
+                dummy_span(),
+            )
+        };
+
+        (
+            Identifier(symbol.to_string()),
+            Expression::Function {
+                parameter: typed_pattern("self"),
+                return_type: Box::new(Expression::FunctionType {
+                    parameter: Box::new(intrinsic_type_expr(IntrinsicType::Boolean)),
+                    return_type: Box::new(intrinsic_type_expr(IntrinsicType::Boolean)),
+                    span: dummy_span(),
+                }),
+                body: Box::new(Expression::Function {
+                    parameter: typed_pattern("other"),
+                    return_type: Box::new(intrinsic_type_expr(IntrinsicType::Boolean)),
+                    body: Box::new(Expression::IntrinsicOperation(
+                        IntrinsicOperation::Binary(
+                            Box::new(identifier_expr("self")),
+                            Box::new(identifier_expr("other")),
+                            operator,
+                        ),
+                        dummy_span(),
+                    )),
+                    span: dummy_span(),
+                }),
+                span: dummy_span(),
+            },
+        )
+    }
+
+    context.bindings.insert(
+        "bool".to_string(),
+        (
+            BindingContext::Bound(Expression::AttachImplementation {
+                type_expr: Box::new(intrinsic_type_expr(IntrinsicType::Boolean)),
+                implementation: Box::new(Expression::Struct(
+                    vec![
+                        bool_binary_intrinsic("==", BinaryIntrinsicOperator::I32Equal),
+                        bool_binary_intrinsic("!=", BinaryIntrinsicOperator::I32NotEqual),
+                    ],
+                    dummy_span(),
+                )),
+                span: dummy_span(),
+            }),
+            Vec::new(),
+        ),
+    );
+
+    context.bindings.insert(
+        "true".to_string(),
+        (
+            BindingContext::Bound(Expression::Literal(
+                ExpressionLiteral::Boolean(true),
+                dummy_span(),
+            )),
+            Vec::new(),
+        ),
+    );
+
+    context.bindings.insert(
+        "false".to_string(),
+        (
+            BindingContext::Bound(Expression::Literal(
+                ExpressionLiteral::Boolean(false),
+                dummy_span(),
+            )),
             Vec::new(),
         ),
     );
@@ -858,12 +1005,11 @@ pub fn intrinsic_context() -> Context {
             Vec::new(),
         ),
     );
-
     context
 }
 
 #[cfg(test)]
-fn evaluate_text_to_expression(program: &str) -> Result<(Expression, Context), Diagnostic> {
+pub fn evaluate_text_to_expression(program: &str) -> Result<(Expression, Context), Diagnostic> {
     let (expression, remaining) =
         crate::parsing::parse_block(program).expect("Failed to parse program text");
     assert!(

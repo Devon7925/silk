@@ -121,11 +121,11 @@ fn lower_function_export(
         .with_span(annotation_span));
     };
 
-    if !is_i32_type(return_type.as_ref()) {
-        return Err(
-            Diagnostic::new("Only functions returning i32 can be exported to wasm")
-                .with_span(return_type.span()),
-        );
+    if !is_supported_wasm_type(return_type.as_ref()) {
+        return Err(Diagnostic::new(
+            "Only functions returning i32 or bool can be exported to wasm",
+        )
+        .with_span(return_type.span()));
     }
 
     let params = extract_function_params(parameter)?;
@@ -165,9 +165,9 @@ fn extract_function_params(pattern: BindingPattern) -> Result<Vec<WasmFunctionPa
         }
         BindingPattern::Annotated { pattern, .. } => extract_function_params(*pattern),
         BindingPattern::TypeHint(inner, ty_expr, _) => {
-            if !is_i32_type(ty_expr.as_ref()) {
+            if !is_supported_wasm_type(ty_expr.as_ref()) {
                 return Err(
-                    Diagnostic::new("Only i32 parameters can be exported to wasm")
+                    Diagnostic::new("Only i32 or bool parameters can be exported to wasm")
                         .with_span(ty_expr.span()),
                 );
             }
@@ -196,10 +196,11 @@ fn extract_identifier_from_pattern(pattern: BindingPattern) -> Result<String, Di
     }
 }
 
-fn is_i32_type(expr: &Expression) -> bool {
+fn is_supported_wasm_type(expr: &Expression) -> bool {
     match expr {
         Expression::IntrinsicType(IntrinsicType::I32, _) => true,
-        Expression::AttachImplementation { type_expr, .. } => is_i32_type(type_expr),
+        Expression::IntrinsicType(IntrinsicType::Boolean, _) => true,
+        Expression::AttachImplementation { type_expr, .. } => is_supported_wasm_type(type_expr),
         _ => false,
     }
 }
@@ -220,7 +221,7 @@ fn collect_locals(expr: &Expression) -> Result<Vec<(String, ValType)>, Diagnosti
                 locals.extend(collect_locals(e)?);
             }
         }
-        Expression::Function { body, .. } => {
+        Expression::Function { body: _body, .. } => {
             // Locals in inner functions are separate?
             // But we don't support compiling inner functions to WASM closures yet.
             // So we can ignore them or error?
@@ -252,6 +253,10 @@ fn emit_expression(
             func.instruction(&Instruction::I32Const(*value));
             Ok(())
         }
+        Expression::Literal(ExpressionLiteral::Boolean(value), _) => {
+            func.instruction(&Instruction::I32Const(if *value { 1 } else { 0 }));
+            Ok(())
+        }
         Expression::Identifier(identifier, span) => {
             let local_index = locals.get(&identifier.0).copied().ok_or_else(|| {
                 Diagnostic::new(format!(
@@ -271,6 +276,16 @@ fn emit_expression(
                 BinaryIntrinsicOperator::I32Subtract => func.instruction(&Instruction::I32Sub),
                 BinaryIntrinsicOperator::I32Multiply => func.instruction(&Instruction::I32Mul),
                 BinaryIntrinsicOperator::I32Divide => func.instruction(&Instruction::I32DivS),
+                BinaryIntrinsicOperator::I32Equal => func.instruction(&Instruction::I32Eq),
+                BinaryIntrinsicOperator::I32NotEqual => func.instruction(&Instruction::I32Ne),
+                BinaryIntrinsicOperator::I32LessThan => func.instruction(&Instruction::I32LtS),
+                BinaryIntrinsicOperator::I32GreaterThan => func.instruction(&Instruction::I32GtS),
+                BinaryIntrinsicOperator::I32LessThanOrEqual => {
+                    func.instruction(&Instruction::I32LeS)
+                }
+                BinaryIntrinsicOperator::I32GreaterThanOrEqual => {
+                    func.instruction(&Instruction::I32GeS)
+                }
             };
             Ok(())
         }

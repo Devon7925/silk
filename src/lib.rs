@@ -1,9 +1,13 @@
 mod diagnostics;
-mod edge_case_tests;
 mod interpret;
-mod parsing;
+pub mod parsing;
 mod simplify;
 mod wasm;
+
+#[cfg(test)]
+mod boolean_tests;
+#[cfg(test)]
+mod edge_case_tests;
 
 pub use diagnostics::{Diagnostic, SourceSpan};
 
