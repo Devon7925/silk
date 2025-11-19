@@ -180,18 +180,47 @@ pub fn interpret_expression(
             left,
             right,
             span,
-        } => interpret_expression(
-            Expression::FunctionCall {
-                function: Box::new(Expression::PropertyAccess {
-                    object: left,
-                    property: operator.clone(),
-                    span,
-                }),
-                argument: right,
-                span,
-            },
-            context,
-        ),
+        } => {
+            let intrinsic_operator = match operator.as_str() {
+                "+" => Some(BinaryIntrinsicOperator::I32Add),
+                "-" => Some(BinaryIntrinsicOperator::I32Subtract),
+                "*" => Some(BinaryIntrinsicOperator::I32Multiply),
+                "/" => Some(BinaryIntrinsicOperator::I32Divide),
+                "==" => Some(BinaryIntrinsicOperator::I32Equal),
+                "!=" => Some(BinaryIntrinsicOperator::I32NotEqual),
+                "<" => Some(BinaryIntrinsicOperator::I32LessThan),
+                ">" => Some(BinaryIntrinsicOperator::I32GreaterThan),
+                "<=" => Some(BinaryIntrinsicOperator::I32LessThanOrEqual),
+                ">=" => Some(BinaryIntrinsicOperator::I32GreaterThanOrEqual),
+                "&&" => Some(BinaryIntrinsicOperator::BooleanAnd),
+                "||" => Some(BinaryIntrinsicOperator::BooleanOr),
+                "^" => Some(BinaryIntrinsicOperator::BooleanXor),
+                _ => None,
+            };
+
+            if let Some(op) = intrinsic_operator {
+                interpret_expression(
+                    Expression::IntrinsicOperation(
+                        IntrinsicOperation::Binary(left, right, op),
+                        span,
+                    ),
+                    context,
+                )
+            } else {
+                interpret_expression(
+                    Expression::FunctionCall {
+                        function: Box::new(Expression::PropertyAccess {
+                            object: left,
+                            property: operator.clone(),
+                            span,
+                        }),
+                        argument: right,
+                        span,
+                    },
+                    context,
+                )
+            }
+        }
         Expression::Binding(binding, _) => interpret_binding(*binding, context, false),
         Expression::Block(expressions, span) => {
             let (value, _) = interpret_block(expressions, span, context)?;
@@ -343,7 +372,7 @@ pub fn interpret_expression(
             property,
             span,
         } => {
-            let evaluated_object = interpret_expression(*object, context)?;
+            let evaluated_object = resolve_expression(interpret_expression(*object, context)?, context)?;
             if let Expression::Struct(items, _) = &evaluated_object {
                 for (item_id, item_expr) in items {
                     if item_id.0 == property {
@@ -353,15 +382,23 @@ pub fn interpret_expression(
             }
 
             let object_type = get_type_of_expression(&evaluated_object, context)?;
-            let trait_prop = get_trait_prop_of_type(&object_type, &property, span)?;
-            interpret_expression(
-                Expression::FunctionCall {
-                    function: Box::new(trait_prop),
-                    argument: Box::new(evaluated_object),
+            let resolved_object_type = resolve_expression(object_type, context)?;
+            let trait_prop = get_trait_prop_of_type(&resolved_object_type, &property, span)?;
+            match trait_prop {
+                Expression::Function { .. } => interpret_expression(
+                    Expression::FunctionCall {
+                        function: Box::new(trait_prop),
+                        argument: Box::new(evaluated_object),
+                        span,
+                    },
+                    context,
+                ),
+                _other => Ok(Expression::PropertyAccess {
+                    object: Box::new(evaluated_object),
+                    property,
                     span,
-                },
-                context,
-            )
+                }),
+            }
         }
     }
 }
@@ -570,6 +607,18 @@ fn get_trait_prop_of_type(
     span: SourceSpan,
 ) -> Result<Expression, Diagnostic> {
     match value_type {
+        Expression::Struct(items, _) => {
+            for (field_id, field_expr) in items {
+                if field_id.0 == trait_prop {
+                    return Ok(field_expr.clone());
+                }
+            }
+
+            Err(diagnostic(
+                format!("Missing field {} on type", trait_prop),
+                span,
+            ))
+        }
         Expression::AttachImplementation {
             type_expr,
             implementation,
@@ -1190,7 +1239,14 @@ pub fn evaluate_text_to_expression(program: &str) -> Result<(Expression, Context
     );
 
     let mut context = intrinsic_context();
-    interpret_program(expression, &mut context)
+    let (value, context) = interpret_program(expression, &mut context)?;
+
+    let final_value = match &value {
+        Expression::Block(exprs, _) => exprs.last().cloned().unwrap_or(value),
+        other => other.clone(),
+    };
+
+    Ok((final_value, context))
 }
 
 #[cfg(test)]
