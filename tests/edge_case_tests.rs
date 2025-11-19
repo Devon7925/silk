@@ -1,6 +1,6 @@
-use silk::parsing::{parse_block, Expression};
+use silk::parsing::{Expression, parse_block};
 use silk::test_support::{
-    interpret_program, intrinsic_context, simplify_context, simplify_expression, Context,
+    Context, interpret_program, intrinsic_context, simplify_context, simplify_expression,
 };
 
 fn evaluate_text_to_simplified_expression(

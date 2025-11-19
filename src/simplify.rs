@@ -22,6 +22,20 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             source_span,
         )),
         Expression::AttachImplementation { type_expr, .. } => simplify_expression(*type_expr),
+        Expression::If {
+            condition,
+            then_branch,
+            else_branch,
+            span,
+        } => Ok(Expression::If {
+            condition: Box::new(simplify_expression(*condition)?),
+            then_branch: Box::new(simplify_expression(*then_branch)?),
+            else_branch: match else_branch {
+                Some(branch) => Some(Box::new(simplify_expression(*branch)?)),
+                None => None,
+            },
+            span,
+        }),
         Expression::Function {
             parameter,
             return_type,

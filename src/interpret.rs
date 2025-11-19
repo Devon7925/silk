@@ -57,12 +57,55 @@ fn dummy_span() -> SourceSpan {
     SourceSpan::default()
 }
 
+fn empty_struct_expr(span: SourceSpan) -> Expression {
+    Expression::Struct(vec![], span)
+}
+
 fn identifier_expr(name: &str) -> Expression {
     Expression::Identifier(Identifier(name.to_string()), dummy_span())
 }
 
 fn intrinsic_type_expr(ty: IntrinsicType) -> Expression {
     Expression::IntrinsicType(ty, dummy_span())
+}
+
+fn types_equivalent(left: &Expression, right: &Expression) -> bool {
+    match (left, right) {
+        (Expression::IntrinsicType(a, _), Expression::IntrinsicType(b, _)) => a == b,
+        (Expression::Identifier(a, _), Expression::Identifier(b, _)) => a.0 == b.0,
+        (Expression::Struct(a_items, _), Expression::Struct(b_items, _)) => {
+            if a_items.len() != b_items.len() {
+                return false;
+            }
+            a_items
+                .iter()
+                .zip(b_items.iter())
+                .all(|((aid, aexpr), (bid, bexpr))| {
+                    aid.0 == bid.0 && types_equivalent(aexpr, bexpr)
+                })
+        }
+        (
+            Expression::FunctionType {
+                parameter: a_param,
+                return_type: a_ret,
+                ..
+            },
+            Expression::FunctionType {
+                parameter: b_param,
+                return_type: b_ret,
+                ..
+            },
+        ) => types_equivalent(a_param, b_param) && types_equivalent(a_ret, b_ret),
+        (
+            Expression::AttachImplementation {
+                type_expr: a_type, ..
+            },
+            Expression::AttachImplementation {
+                type_expr: b_type, ..
+            },
+        ) => types_equivalent(a_type, b_type),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -76,6 +119,43 @@ pub fn interpret_expression(
 ) -> Result<Expression, Diagnostic> {
     match expr {
         expr @ (Expression::Literal(_, _) | Expression::IntrinsicType(_, _)) => Ok(expr),
+        Expression::If {
+            condition,
+            then_branch,
+            else_branch,
+            span,
+        } => {
+            let interpreted_condition = interpret_expression(*condition, context)?;
+
+            let inferred_else_expr = else_branch
+                .clone()
+                .unwrap_or_else(|| Box::new(empty_struct_expr(SourceSpan::new(span.end(), 0))));
+
+            let (interpreted_then, then_type) = branch_type(&then_branch, context)?;
+            let (interpreted_else, else_type) = branch_type(&inferred_else_expr, context)?;
+
+            if !types_equivalent(&then_type, &else_type) {
+                return Err(diagnostic("Type mismatch between if branches", span));
+            }
+
+            let resolved_condition = resolve_expression(interpreted_condition.clone(), context);
+            if let Ok(Expression::Literal(ExpressionLiteral::Boolean(condition_value), _)) =
+                resolved_condition
+            {
+                if condition_value {
+                    interpret_expression(*then_branch, context)
+                } else {
+                    interpret_expression(*inferred_else_expr, context)
+                }
+            } else {
+                Ok(Expression::If {
+                    condition: Box::new(interpreted_condition),
+                    then_branch: Box::new(interpreted_then),
+                    else_branch: Some(Box::new(interpreted_else)),
+                    span,
+                })
+            }
+        }
         Expression::Identifier(identifier, span) => {
             if let Some(binding) = context.bindings.get(&identifier.0) {
                 match &binding.0 {
@@ -363,6 +443,25 @@ fn get_type_of_expression(
                 )),
             }
         }
+        Expression::If {
+            then_branch,
+            else_branch,
+            span,
+            ..
+        } => {
+            let inferred_else = else_branch
+                .as_ref()
+                .map(|expr| expr.as_ref().clone())
+                .unwrap_or_else(|| empty_struct_expr(SourceSpan::new(span.end(), 0)));
+            let mut then_context = context.clone();
+            let then_type = get_type_of_expression(then_branch, &mut then_context)?;
+            let mut else_context = context.clone();
+            let else_type = get_type_of_expression(&inferred_else, &mut else_context)?;
+            if !types_equivalent(&then_type, &else_type) {
+                return Err(diagnostic("Type mismatch between if branches", *span));
+            }
+            Ok(then_type)
+        }
         Expression::Operation { .. } => todo!(),
         Expression::Binding(..) => todo!(),
         Expression::Block(..) => todo!(),
@@ -384,7 +483,14 @@ fn get_type_of_expression(
             return_type: return_type.clone(),
             span: *span,
         }),
-        Expression::Struct(..) => todo!(),
+        Expression::Struct(items, span) => {
+            let mut struct_items = Vec::with_capacity(items.len());
+            for (field_id, field_expr) in items {
+                let field_type = get_type_of_expression(field_expr, context)?;
+                struct_items.push((field_id.clone(), field_type));
+            }
+            Ok(Expression::Struct(struct_items, *span))
+        }
         Expression::FunctionType { span, .. } => {
             Ok(Expression::IntrinsicType(IntrinsicType::Type, *span))
         }
@@ -446,6 +552,16 @@ fn get_type_of_binding_pattern(
         BindingPattern::TypeHint(_, type_expr, _) => Ok(*type_expr.clone()),
         BindingPattern::Annotated { pattern, .. } => get_type_of_binding_pattern(pattern, context),
     }
+}
+
+fn branch_type(
+    branch: &Expression,
+    context: &Context,
+) -> Result<(Expression, Expression), Diagnostic> {
+    let mut branch_context = context.clone();
+    let evaluated_branch = interpret_expression(branch.clone(), &mut branch_context)?;
+    let branch_type = get_type_of_expression(&evaluated_branch, &mut branch_context)?;
+    Ok((evaluated_branch, branch_type))
 }
 
 fn get_trait_prop_of_type(
@@ -1143,6 +1259,18 @@ impl UsageCounter {
             } => {
                 self.count(function);
                 self.count(argument);
+            }
+            Expression::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.count(condition);
+                self.count(then_branch);
+                if let Some(else_branch) = else_branch {
+                    self.count(else_branch);
+                }
             }
             Expression::Operation { left, right, .. } => {
                 self.count(left);

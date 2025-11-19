@@ -237,6 +237,18 @@ fn collect_locals(expr: &Expression) -> Result<Vec<(String, ValType)>, Diagnosti
             locals.extend(collect_locals(function)?);
             locals.extend(collect_locals(argument)?);
         }
+        Expression::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            locals.extend(collect_locals(condition)?);
+            locals.extend(collect_locals(then_branch)?);
+            if let Some(else_branch) = else_branch {
+                locals.extend(collect_locals(else_branch)?);
+            }
+        }
         // Add other recursive cases if needed
         _ => {}
     }
@@ -290,6 +302,26 @@ fn emit_expression(
                 BinaryIntrinsicOperator::BooleanOr => func.instruction(&Instruction::I32Or),
                 BinaryIntrinsicOperator::BooleanXor => func.instruction(&Instruction::I32Xor),
             };
+            Ok(())
+        }
+        Expression::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            emit_expression(condition, locals, func)?;
+            func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
+                ValType::I32,
+            )));
+            emit_expression(then_branch, locals, func)?;
+            func.instruction(&Instruction::Else);
+            if let Some(else_expr) = else_branch {
+                emit_expression(else_expr, locals, func)?;
+            } else {
+                func.instruction(&Instruction::I32Const(0));
+            }
+            func.instruction(&Instruction::End);
             Ok(())
         }
         Expression::Binding(binding, _) => {
