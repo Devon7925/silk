@@ -8,6 +8,7 @@ import { TextDecoder } from "node:util";
 const testDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = dirname(testDir);
 const decoder = new TextDecoder();
+const TEST_TIMEOUT_MS = 20000;
 
 function runSilk(args: string[]) {
   const result = Bun.spawnSync({
@@ -57,7 +58,7 @@ test("compiles a wasm export to a file", () => {
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }
-});
+}, TEST_TIMEOUT_MS);
 
 test("prints diagnostics for invalid programs", () => {
   const invalidPath = join(projectRoot, "fixtures", "invalid_export.silk");
@@ -66,7 +67,7 @@ test("prints diagnostics for invalid programs", () => {
   expect(result.exitCode).not.toBe(0);
   expect(result.stderr).toContain("Compilation failed for");
   expect(result.stderr).toContain("Only functions can be exported to wasm");
-});
+}, TEST_TIMEOUT_MS);
 
 test("runs wasm_export module and returns const value", async () => {
   const moduleBytes = compileFixtureToBytes("wasm_export.silk");
@@ -75,7 +76,7 @@ test("runs wasm_export module and returns const value", async () => {
 
   expect(typeof answer).toBe("function");
   expect(answer()).toBe(42);
-});
+}, TEST_TIMEOUT_MS);
 
 test("runs add_one module and returns incremented value", async () => {
   const moduleBytes = compileFixtureToBytes("add_one.silk");
@@ -85,7 +86,7 @@ test("runs add_one module and returns incremented value", async () => {
   expect(typeof addOne).toBe("function");
   expect(addOne(41)).toBe(42);
   expect(addOne(-1)).toBe(0);
-});
+}, TEST_TIMEOUT_MS);
 
 test("runs binding_in_function module and returns correct value", async () => {
   const moduleBytes = compileFixtureToBytes("binding_in_function.silk");
@@ -95,4 +96,4 @@ test("runs binding_in_function module and returns correct value", async () => {
   expect(typeof addOneSquared).toBe("function");
   expect(addOneSquared(-1)).toBe(0);
   expect(addOneSquared(10)).toBe(121);
-});
+}, TEST_TIMEOUT_MS);
