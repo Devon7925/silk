@@ -181,45 +181,38 @@ pub fn interpret_expression(
             right,
             span,
         } => {
-            let intrinsic_operator = match operator.as_str() {
-                "+" => Some(BinaryIntrinsicOperator::I32Add),
-                "-" => Some(BinaryIntrinsicOperator::I32Subtract),
-                "*" => Some(BinaryIntrinsicOperator::I32Multiply),
-                "/" => Some(BinaryIntrinsicOperator::I32Divide),
-                "==" => Some(BinaryIntrinsicOperator::I32Equal),
-                "!=" => Some(BinaryIntrinsicOperator::I32NotEqual),
-                "<" => Some(BinaryIntrinsicOperator::I32LessThan),
-                ">" => Some(BinaryIntrinsicOperator::I32GreaterThan),
-                "<=" => Some(BinaryIntrinsicOperator::I32LessThanOrEqual),
-                ">=" => Some(BinaryIntrinsicOperator::I32GreaterThanOrEqual),
-                "&&" => Some(BinaryIntrinsicOperator::BooleanAnd),
-                "||" => Some(BinaryIntrinsicOperator::BooleanOr),
-                "^" => Some(BinaryIntrinsicOperator::BooleanXor),
-                _ => None,
-            };
+            let evaluated_left = interpret_expression(*left, context)?;
+            let evaluated_right = interpret_expression(*right, context)?;
+            let left_type = resolve_expression(get_type_of_expression(&evaluated_left, context)?, context)?;
 
-            if let Some(op) = intrinsic_operator {
-                interpret_expression(
-                    Expression::IntrinsicOperation(
-                        IntrinsicOperation::Binary(left, right, op),
-                        span,
-                    ),
-                    context,
-                )
-            } else {
-                interpret_expression(
-                    Expression::FunctionCall {
-                        function: Box::new(Expression::PropertyAccess {
-                            object: left,
-                            property: operator.clone(),
+            if let Ok(trait_prop) = get_trait_prop_of_type(&left_type, &operator, span) {
+                if let Some(op) = intrinsic_operator_from_trait_prop(&trait_prop) {
+                    return interpret_expression(
+                        Expression::IntrinsicOperation(
+                            IntrinsicOperation::Binary(
+                                Box::new(evaluated_left.clone()),
+                                Box::new(evaluated_right.clone()),
+                                op,
+                            ),
                             span,
-                        }),
-                        argument: right,
-                        span,
-                    },
-                    context,
-                )
+                        ),
+                        context,
+                    );
+                }
             }
+
+            interpret_expression(
+                Expression::FunctionCall {
+                    function: Box::new(Expression::PropertyAccess {
+                        object: Box::new(evaluated_left),
+                        property: operator.clone(),
+                        span,
+                    }),
+                    argument: Box::new(evaluated_right),
+                    span,
+                },
+                context,
+            )
         }
         Expression::Binding(binding, _) => interpret_binding(*binding, context, false),
         Expression::Block(expressions, span) => {
@@ -503,6 +496,15 @@ fn get_type_of_expression(
         Expression::Binding(..) => todo!(),
         Expression::Block(..) => todo!(),
         Expression::FunctionCall { .. } => todo!(),
+        Expression::PropertyAccess {
+            object,
+            property,
+            span,
+        } => {
+            let object_type = get_type_of_expression(object, context)?;
+            let resolved_object_type = resolve_expression(object_type, context)?;
+            get_trait_prop_of_type(&resolved_object_type, property, *span)
+        }
         Expression::IntrinsicType(intrinsic_type, span) => match intrinsic_type {
             IntrinsicType::I32
             | IntrinsicType::Boolean
@@ -565,7 +567,6 @@ fn get_type_of_expression(
             ),
             _,
         ) => interpret_expression(identifier_expr("bool"), context),
-        Expression::PropertyAccess { .. } => todo!(),
     }
 }
 
@@ -642,6 +643,22 @@ fn get_trait_prop_of_type(
             span,
         )),
     }
+}
+
+fn intrinsic_operator_from_trait_prop(expr: &Expression) -> Option<BinaryIntrinsicOperator> {
+    let Expression::Function { body: outer_body, .. } = expr else {
+        return None;
+    };
+
+    let Expression::Function { body: inner_body, .. } = outer_body.as_ref() else {
+        return None;
+    };
+
+    let Expression::IntrinsicOperation(IntrinsicOperation::Binary(_, _, op), _) = inner_body.as_ref() else {
+        return None;
+    };
+
+    Some(op.clone())
 }
 
 fn interpret_block(
