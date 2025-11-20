@@ -221,7 +221,17 @@ pub fn interpret_expression(
                     )?;
                     interpret_expression(*body, &mut call_context)
                 }
-                _ => Err(diagnostic("Attempted to call a non-function value", span)),
+                other => {
+                    if is_resolved_constant(&other) {
+                        Err(diagnostic("Attempted to call a non-function value", span))
+                    } else {
+                        Ok(Expression::FunctionCall {
+                            function: Box::new(other),
+                            argument: Box::new(argument_value),
+                            span,
+                        })
+                    }
+                }
             }
         }
         Expression::AttachImplementation {
