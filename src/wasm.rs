@@ -8,6 +8,7 @@ use crate::{
     interpret::{self, AnnotatedBinding},
     parsing::{
         BinaryIntrinsicOperator, BindingAnnotation, BindingPattern, Expression, ExpressionLiteral,
+        Identifier,
         IntrinsicOperation, IntrinsicType, TargetLiteral,
     },
 };
@@ -67,7 +68,12 @@ pub fn compile_exports(context: &interpret::Context) -> Result<Vec<u8>, Diagnost
             vec![(locals.len() as u32, ValType::I32)]
         });
 
-        emit_expression(&export.body, &local_indices, &mut func)?;
+        emit_expression(
+            &export.body,
+            &local_indices,
+            &mut func,
+            &mut std::collections::HashMap::new(),
+        )?;
         func.instruction(&Instruction::End);
         code_section.function(&func);
 
@@ -259,6 +265,7 @@ fn emit_expression(
     expr: &Expression,
     locals: &std::collections::HashMap<String, u32>,
     func: &mut Function,
+    struct_bindings: &mut std::collections::HashMap<String, Vec<(Identifier, Expression)>>,
 ) -> Result<(), Diagnostic> {
     match expr {
         Expression::Literal(ExpressionLiteral::Number(value), _) => {
@@ -281,8 +288,8 @@ fn emit_expression(
             Ok(())
         }
         Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, op), _) => {
-            emit_expression(left, locals, func)?;
-            emit_expression(right, locals, func)?;
+            emit_expression(left, locals, func, struct_bindings)?;
+            emit_expression(right, locals, func, struct_bindings)?;
             match op {
                 BinaryIntrinsicOperator::I32Add => func.instruction(&Instruction::I32Add),
                 BinaryIntrinsicOperator::I32Subtract => func.instruction(&Instruction::I32Sub),
@@ -310,14 +317,14 @@ fn emit_expression(
             else_branch,
             ..
         } => {
-            emit_expression(condition, locals, func)?;
+            emit_expression(condition, locals, func, struct_bindings)?;
             func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
                 ValType::I32,
             )));
-            emit_expression(then_branch, locals, func)?;
+            emit_expression(then_branch, locals, func, struct_bindings)?;
             func.instruction(&Instruction::Else);
             if let Some(else_expr) = else_branch {
-                emit_expression(else_expr, locals, func)?;
+                emit_expression(else_expr, locals, func, struct_bindings)?;
             } else {
                 func.instruction(&Instruction::I32Const(0));
             }
@@ -325,24 +332,25 @@ fn emit_expression(
             Ok(())
         }
         Expression::Binding(binding, _) => {
-            emit_expression(&binding.expr, locals, func)?;
+            if let Expression::Struct(items, _) = &binding.expr {
+                if let BindingPattern::Identifier(identifier, _) = &binding.pattern {
+                    struct_bindings.insert(identifier.0.clone(), items.clone());
+                    return Ok(());
+                }
+            }
+
+            emit_expression(&binding.expr, locals, func, struct_bindings)?;
             let name = extract_identifier_from_pattern(binding.pattern.clone())?;
             let local_index = locals
                 .get(&name)
                 .copied()
                 .expect("Local should have been collected");
             func.instruction(&Instruction::LocalSet(local_index));
-            // Bindings don't leave a value on the stack in our block logic,
-            // but if they are part of a block, the block handles dropping if needed?
-            // Wait, if I have `let x = 1; let y = 2;`, the block will emit:
-            // emit(let x = 1) -> sets local, stack empty.
-            // emit(let y = 2) -> sets local, stack empty.
-            // So we are good.
             Ok(())
         }
         Expression::Block(exprs, _) => {
             for (i, e) in exprs.iter().enumerate() {
-                emit_expression(e, locals, func)?;
+                emit_expression(e, locals, func, struct_bindings)?;
                 // If it's not the last expression, and it left something on the stack, we should drop it.
                 // But how do we know if it left something?
                 // `Expression::Binding` leaves nothing (we just implemented it).
@@ -356,6 +364,26 @@ fn emit_expression(
             }
             Ok(())
         }
+        Expression::PropertyAccess { object, property, span } => {
+            if let Expression::Identifier(identifier, _) = object.as_ref() {
+                if let Some(items) = struct_bindings.get(&identifier.0) {
+                    if let Some(field_expr) =
+                        items.iter().find(|(id, _)| &id.0 == property).map(|(_, expr)| expr.clone())
+                    {
+                        return emit_expression(&field_expr, locals, func, struct_bindings);
+                    }
+                }
+            }
+
+            Err(
+                Diagnostic::new("Expression is not supported in wasm exports yet")
+                    .with_span(*span),
+            )
+        }
+        Expression::Struct(..) => Err(
+            Diagnostic::new("Expression is not supported in wasm exports yet")
+                .with_span(expr.span()),
+        ),
         other => Err(
             Diagnostic::new("Expression is not supported in wasm exports yet")
                 .with_span(other.span()),
