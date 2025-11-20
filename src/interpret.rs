@@ -344,7 +344,8 @@ pub fn interpret_expression(
             span,
         } => {
             let evaluated_object = interpret_expression(*object, context)?;
-            if let Expression::Struct(items, _) = &evaluated_object {
+            let resolved_object = resolve_value(evaluated_object, context)?;
+            if let Expression::Struct(items, _) = &resolved_object {
                 for (item_id, item_expr) in items {
                     if item_id.0 == property {
                         return Ok(item_expr.clone());
@@ -352,16 +353,24 @@ pub fn interpret_expression(
                 }
             }
 
-            let object_type = get_type_of_expression(&evaluated_object, context)?;
-            let trait_prop = get_trait_prop_of_type(&object_type, &property, span)?;
-            interpret_expression(
-                Expression::FunctionCall {
-                    function: Box::new(trait_prop),
-                    argument: Box::new(evaluated_object),
+            let object_type = get_type_of_expression(&resolved_object, context)?;
+            let resolved_object_type = resolve_value(object_type, context)?;
+            let trait_prop = get_trait_prop_of_type(&resolved_object_type, &property, span)?;
+            match trait_prop {
+                Expression::Function { .. } => interpret_expression(
+                    Expression::FunctionCall {
+                        function: Box::new(trait_prop),
+                        argument: Box::new(resolved_object),
+                        span,
+                    },
+                    context,
+                ),
+                _other => Ok(Expression::PropertyAccess {
+                    object: Box::new(resolved_object),
+                    property,
                     span,
-                },
-                context,
-            )
+                }),
+            }
         }
     }
 }
@@ -466,6 +475,15 @@ fn get_type_of_expression(
         Expression::Binding(..) => todo!(),
         Expression::Block(..) => todo!(),
         Expression::FunctionCall { .. } => todo!(),
+        Expression::PropertyAccess {
+            object,
+            property,
+            span,
+        } => {
+            let object_type = get_type_of_expression(object, context)?;
+            let resolved_object_type = resolve_expression(object_type, context)?;
+            get_trait_prop_of_type(&resolved_object_type, property, *span)
+        }
         Expression::IntrinsicType(intrinsic_type, span) => match intrinsic_type {
             IntrinsicType::I32
             | IntrinsicType::Boolean
@@ -528,7 +546,6 @@ fn get_type_of_expression(
             ),
             _,
         ) => interpret_expression(identifier_expr("bool"), context),
-        Expression::PropertyAccess { .. } => todo!(),
     }
 }
 
@@ -569,17 +586,30 @@ fn get_trait_prop_of_type(
     trait_prop: &str,
     span: SourceSpan,
 ) -> Result<Expression, Diagnostic> {
+    fn get_struct_field(
+        items: &[(Identifier, Expression)],
+        trait_prop: &str,
+    ) -> Option<Expression> {
+        items
+            .iter()
+            .find(|(field_id, _)| field_id.0 == trait_prop)
+            .map(|(_, expr)| expr.clone())
+    }
+
     match value_type {
+        Expression::Struct(items, _) => {
+            get_struct_field(items, trait_prop).ok_or_else(|| {
+                diagnostic(format!("Missing field {} on type", trait_prop), span)
+            })
+        }
         Expression::AttachImplementation {
             type_expr,
             implementation,
             ..
         } => {
             if let Expression::Struct(ref items, _) = **implementation {
-                for (item_id, item_expr) in items {
-                    if item_id.0 == trait_prop {
-                        return Ok(item_expr.clone());
-                    }
+                if let Some(field) = get_struct_field(items, trait_prop) {
+                    return Ok(field);
                 }
             }
 
@@ -1190,7 +1220,14 @@ pub fn evaluate_text_to_expression(program: &str) -> Result<(Expression, Context
     );
 
     let mut context = intrinsic_context();
-    interpret_program(expression, &mut context)
+    let (value, context) = interpret_program(expression, &mut context)?;
+
+    let final_value = match &value {
+        Expression::Block(exprs, _) => exprs.last().cloned().unwrap_or(value),
+        other => other.clone(),
+    };
+
+    Ok((final_value, context))
 }
 
 #[cfg(test)]
@@ -1204,15 +1241,19 @@ fn evaluate_text_to_number(program: &str) -> i32 {
     }
 }
 
-fn resolve_expression(expr: Expression, context: &mut Context) -> Result<Expression, Diagnostic> {
-    let evaluated = interpret_expression(expr, context)?;
-    match evaluated {
+fn resolve_value(expr: Expression, context: &mut Context) -> Result<Expression, Diagnostic> {
+    match expr {
         Expression::Identifier(ident, span) => {
             if let Some(binding) = context.bindings.get(&ident.0) {
                 match &binding.0 {
-                    BindingContext::Bound(val) | BindingContext::BoundPreserved(val) => {
-                        resolve_expression(val.clone(), context)
-                    }
+                    BindingContext::Bound(val) => resolve_value(val.clone(), context),
+                    BindingContext::BoundPreserved(val) => match val {
+                        // Preserved bindings keep their identifiers in place unless they point to
+                        // structs, which need to be resolved so field access can see concrete
+                        // values during lowering.
+                        Expression::Struct(..) => resolve_value(val.clone(), context),
+                        _ => Ok(Expression::Identifier(ident, span)),
+                    },
                     _ => Ok(Expression::Identifier(ident, span)),
                 }
             } else {
@@ -1221,6 +1262,11 @@ fn resolve_expression(expr: Expression, context: &mut Context) -> Result<Express
         }
         other => Ok(other),
     }
+}
+
+fn resolve_expression(expr: Expression, context: &mut Context) -> Result<Expression, Diagnostic> {
+    let evaluated = interpret_expression(expr, context)?;
+    resolve_value(evaluated, context)
 }
 
 struct UsageCounter {
