@@ -1,0 +1,67 @@
+import { test, expect } from "bun:test";
+import { join } from "path";
+import { writeFileSync } from "fs";
+
+const ROOT_DIR = join(import.meta.dir, "..");
+const FIXTURES_DIR = join(import.meta.dir, "..", "fixtures");
+const TEMP_WASM = join(FIXTURES_DIR, "higher_order_functions.wasm");
+const TEMP_SILK = join(FIXTURES_DIR, "higher_order_functions.silk");
+const TEST_TIMEOUT_MS = 20000;
+
+async function compileAndLoad(silkCode: string) {
+    writeFileSync(TEMP_SILK, silkCode);
+
+    const proc = Bun.spawn(["cargo", "run", "--", TEMP_SILK, "-o", TEMP_WASM], {
+        cwd: ROOT_DIR,
+        stderr: "pipe",
+    });
+
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) {
+        const stderr = await new Response(proc.stderr).text();
+        throw new Error(`Compilation failed:\n${stderr}`);
+    }
+
+    const wasmBuffer = await Bun.file(TEMP_WASM).arrayBuffer();
+    const { instance } = await WebAssembly.instantiate(wasmBuffer);
+    return instance.exports as any;
+}
+
+test("functions can be passed as arguments", async () => {
+    const silkCode = `
+    let export(wasm) apply_increment = fn(x: i32) -> i32 (
+        let apply = fn{ func = func, value = value } -> i32 (
+            func value
+        );
+
+        let increment = fn(y: i32) -> i32 (
+            y + 1
+        );
+
+        apply { func = increment, value = x }
+    );
+    {};
+    `;
+
+    const exports = await compileAndLoad(silkCode);
+    expect(exports.apply_increment(41)).toBe(42);
+}, TEST_TIMEOUT_MS);
+
+test("functions can be returned and invoked", async () => {
+    const silkCode = `
+    let export(wasm) apply_offset = fn(offset: i32) -> i32 (
+        let make_adder = fn(base: i32) -> i32 (
+            fn(y: i32) -> i32 (
+                base + y
+            )
+        );
+
+        let add_three = make_adder 3;
+        add_three offset
+    );
+    {};
+    `;
+
+    const exports = await compileAndLoad(silkCode);
+    expect(exports.apply_offset(7)).toBe(10);
+}, TEST_TIMEOUT_MS);
