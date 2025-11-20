@@ -646,19 +646,19 @@ fn get_trait_prop_of_type(
 }
 
 fn intrinsic_operator_from_trait_prop(expr: &Expression) -> Option<BinaryIntrinsicOperator> {
-    let Expression::Function { body: outer_body, .. } = expr else {
-        return None;
-    };
+    fn find_binary_intrinsic(expr: &Expression) -> Option<BinaryIntrinsicOperator> {
+        match expr {
+            Expression::IntrinsicOperation(IntrinsicOperation::Binary(_, _, op), _) => Some(op.clone()),
+            Expression::Function { body, .. } => find_binary_intrinsic(body),
+            Expression::Block(items, _) => items
+                .last()
+                .and_then(|last| find_binary_intrinsic(last)),
+            Expression::Binding(binding, _) => find_binary_intrinsic(&binding.expr),
+            _ => None,
+        }
+    }
 
-    let Expression::Function { body: inner_body, .. } = outer_body.as_ref() else {
-        return None;
-    };
-
-    let Expression::IntrinsicOperation(IntrinsicOperation::Binary(_, _, op), _) = inner_body.as_ref() else {
-        return None;
-    };
-
-    Some(op.clone())
+    find_binary_intrinsic(expr)
 }
 
 fn interpret_block(
