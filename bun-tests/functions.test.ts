@@ -1,6 +1,6 @@
-import { test, expect } from "bun:test";
+import { test, expect, afterAll } from "bun:test";
 import { join } from "path";
-import { writeFileSync } from "fs";
+import { writeFileSync, unlinkSync } from "fs";
 
 const ROOT_DIR = join(import.meta.dir, "..");
 const FIXTURES_DIR = join(import.meta.dir, "..", "fixtures");
@@ -65,3 +65,13 @@ test("functions can be returned and invoked", async () => {
     const exports = await compileAndLoad(silkCode);
     expect(exports.apply_offset(7)).toBe(10);
 }, TEST_TIMEOUT_MS);
+
+// Cleanup after the test suite to avoid leaving temporary files behind.
+afterAll(() => {
+    try {
+        unlinkSync(TEMP_SILK);
+    } catch (e) { }
+    try {
+        unlinkSync(TEMP_WASM);
+    } catch (e) { }
+});

@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect, afterAll } from "bun:test";
 import { join } from "path";
 import { writeFileSync, unlinkSync } from "fs";
 
@@ -122,3 +122,13 @@ test("if branch type mismatches are reported", async () => {
     const stderr = await new Response(proc.stderr).text();
     expect(stderr).toContain("Type mismatch between if branches");
 }, TEST_TIMEOUT_MS);
+
+// Cleanup after the test suite to avoid leaving temporary files behind.
+afterAll(() => {
+    try {
+        unlinkSync(TEMP_SILK);
+    } catch (e) { }
+    try {
+        unlinkSync(TEMP_WASM);
+    } catch (e) { }
+});
