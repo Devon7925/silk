@@ -67,6 +67,27 @@ fn test_nested_arithmetic() {
 }
 
 #[test]
+fn test_division_by_zero_errors() {
+    let program = "
+        let export(wasm) div_zero = 1 / 0;
+        {}
+        ";
+    let (expression, remaining) = parse_block(program).expect("Failed to parse program text");
+    assert!(
+        remaining.trim().is_empty(),
+        "Parser did not consume entire input, remaining: {remaining:?}"
+    );
+
+    let mut context = intrinsic_context();
+    let result = interpret_program(expression, &mut context);
+
+    match result {
+        Err(diag) => assert_eq!(diag.message, "Division by zero"),
+        Ok(_) => panic!("division by zero should not interpret successfully"),
+    }
+}
+
+#[test]
 fn test_negative_number_literal() {
     let program = "
         let export(wasm) negative_literal = -5;

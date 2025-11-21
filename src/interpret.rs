@@ -336,8 +336,7 @@ pub fn interpret_expression(
                 match operator {
                     BinaryIntrinsicOperator::I32Add
                     | BinaryIntrinsicOperator::I32Subtract
-                    | BinaryIntrinsicOperator::I32Multiply
-                    | BinaryIntrinsicOperator::I32Divide => interpret_numeric_intrinsic(
+                    | BinaryIntrinsicOperator::I32Multiply => interpret_numeric_intrinsic(
                         evaluated_left,
                         evaluated_right,
                         context,
@@ -346,9 +345,14 @@ pub fn interpret_expression(
                             BinaryIntrinsicOperator::I32Add => |l, r| l + r,
                             BinaryIntrinsicOperator::I32Subtract => |l, r| l - r,
                             BinaryIntrinsicOperator::I32Multiply => |l, r| l * r,
-                            BinaryIntrinsicOperator::I32Divide => |l, r| l / r,
                             _ => unreachable!(),
                         },
+                    ),
+                    BinaryIntrinsicOperator::I32Divide => interpret_divide_intrinsic(
+                        evaluated_left,
+                        evaluated_right,
+                        context,
+                        span,
                     ),
                     BinaryIntrinsicOperator::I32Equal
                     | BinaryIntrinsicOperator::I32NotEqual
@@ -1014,6 +1018,25 @@ where
     let right_value = evaluate_numeric_operand(right, context)?;
     Ok(Expression::Literal(
         ExpressionLiteral::Number(op(left_value, right_value)),
+        span,
+    ))
+}
+
+fn interpret_divide_intrinsic(
+    left: Expression,
+    right: Expression,
+    context: &mut Context,
+    span: SourceSpan,
+) -> Result<Expression, Diagnostic> {
+    let left_value = evaluate_numeric_operand(left, context)?;
+    let right_value = evaluate_numeric_operand(right, context)?;
+
+    if right_value == 0 {
+        return Err(diagnostic("Division by zero", span));
+    }
+
+    Ok(Expression::Literal(
+        ExpressionLiteral::Number(left_value / right_value),
         span,
     ))
 }
