@@ -63,6 +63,13 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
                 .collect::<Result<_, Diagnostic>>()?;
             Ok(Expression::Struct(simplified_items, source_span))
         }
+        Expression::Enum(variants, source_span) => {
+            let simplified_variants = variants
+                .into_iter()
+                .map(|(id, expr)| Ok((id, simplify_expression(expr)?)))
+                .collect::<Result<_, Diagnostic>>()?;
+            Ok(Expression::Enum(simplified_variants, source_span))
+        }
         Expression::Operation { span, .. } => Err(Diagnostic::new(format!(
             "Invalid state: uninterpreted operator expression",
         ))

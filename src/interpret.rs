@@ -61,6 +61,20 @@ fn empty_struct_expr(span: SourceSpan) -> Expression {
     Expression::Struct(vec![], span)
 }
 
+fn enum_marker_expr(span: SourceSpan) -> Expression {
+    Expression::Literal(
+        ExpressionLiteral::Number(span.start() as i32),
+        dummy_span(),
+    )
+}
+
+fn enum_marker_type(items: &[(Identifier, Expression)]) -> Option<&Expression> {
+    items
+        .iter()
+        .find(|(id, _)| id.0 == "__enum_type")
+        .map(|(_, expr)| expr)
+}
+
 fn identifier_expr(name: &str) -> Expression {
     Expression::Identifier(Identifier(name.to_string()), dummy_span())
 }
@@ -69,11 +83,62 @@ fn intrinsic_type_expr(ty: IntrinsicType) -> Expression {
     Expression::IntrinsicType(ty, dummy_span())
 }
 
+fn enum_variant_value(
+    marker: &Expression,
+    variant_identifier: Identifier,
+    payload_value: Expression,
+    span: SourceSpan,
+) -> Expression {
+    Expression::Struct(
+        vec![
+            (Identifier("__enum_type".to_string()), marker.clone()),
+            (variant_identifier, payload_value),
+        ],
+        span,
+    )
+}
+
+fn enum_variant_constructor(
+    marker: &Expression,
+    variant_identifier: Identifier,
+    payload_expr: Expression,
+    enum_span: SourceSpan,
+) -> Expression {
+    match payload_expr {
+        Expression::Struct(ref items, payload_span) if items.is_empty() => {
+            enum_variant_value(marker, variant_identifier, Expression::Struct(vec![], payload_span), enum_span)
+        }
+        other => {
+            let param_ident = Identifier("value".to_string());
+            let param_span = dummy_span();
+            Expression::Function {
+                parameter: BindingPattern::Identifier(param_ident.clone(), param_span),
+                return_type: Box::new(enum_variant_value(marker, variant_identifier.clone(), other.clone(), enum_span)),
+                body: Box::new(enum_variant_value(
+                    marker,
+                    variant_identifier,
+                    Expression::Identifier(param_ident, param_span),
+                    enum_span,
+                )),
+                span: enum_span,
+            }
+        }
+    }
+}
+
 fn types_equivalent(left: &Expression, right: &Expression) -> bool {
     match (left, right) {
         (Expression::IntrinsicType(a, _), Expression::IntrinsicType(b, _)) => a == b,
         (Expression::Identifier(a, _), Expression::Identifier(b, _)) => a.0 == b.0,
         (Expression::Struct(a_items, _), Expression::Struct(b_items, _)) => {
+            if let (Some(a_marker), Some(b_marker)) =
+                (enum_marker_type(a_items), enum_marker_type(b_items))
+            {
+                if types_equivalent(a_marker, b_marker) {
+                    return true;
+                }
+            }
+
             if a_items.len() != b_items.len() {
                 return false;
             }
@@ -125,7 +190,11 @@ pub fn interpret_expression(
             else_branch,
             span,
         } => {
-            let interpreted_condition = interpret_expression(*condition, context)?;
+            let interpreted_condition = if let Expression::Binding(binding, _) = *condition.clone() {
+                interpret_binding(*binding, context, false, true)?
+            } else {
+                interpret_expression(*condition, context)?
+            };
 
             let inferred_else_expr = else_branch
                 .clone()
@@ -192,17 +261,28 @@ pub fn interpret_expression(
             },
             context,
         ),
-        Expression::Binding(binding, _) => interpret_binding(*binding, context, false),
+        Expression::Binding(binding, _) => interpret_binding(*binding, context, false, false),
         Expression::Block(expressions, span) => {
             let (value, _) = interpret_block(expressions, span, context)?;
             Ok(value)
+        }
+        Expression::Enum(variants, span) => {
+            let marker = enum_marker_expr(span);
+            let mut items = Vec::with_capacity(variants.len());
+            for (variant_identifier, payload_expr) in variants {
+                let interpreted_payload = interpret_expression(payload_expr, context)?;
+                let constructor =
+                    enum_variant_constructor(&marker, variant_identifier.clone(), interpreted_payload, span);
+                items.push((variant_identifier, constructor));
+            }
+            Ok(Expression::Struct(items, span))
         }
         Expression::FunctionCall {
             function,
             argument,
             span,
         } => {
-            let function_value = interpret_expression(*function, context)?;
+            let function_value = resolve_expression(*function, context)?;
             let argument_value = interpret_expression(*argument, context)?;
             match function_value {
                 Expression::Function {
@@ -482,9 +562,23 @@ fn get_type_of_expression(
             Ok(then_type)
         }
         Expression::Operation { .. } => todo!(),
-        Expression::Binding(..) => todo!(),
-        Expression::Block(..) => todo!(),
-        Expression::FunctionCall { .. } => todo!(),
+        Expression::Binding(binding, _) => get_type_of_expression(&binding.expr, context),
+        Expression::Block(exprs, span) => exprs
+            .last()
+            .map(|expr| get_type_of_expression(expr, context))
+            .unwrap_or_else(|| {
+                Err(diagnostic(
+                    "Cannot determine type of empty block",
+                    *span,
+                ))
+            }),
+        Expression::FunctionCall { function, .. } => {
+            let function_type = get_type_of_expression(function, context)?;
+            match resolve_expression(function_type.clone(), context)? {
+                Expression::FunctionType { return_type, .. } => Ok(*return_type),
+                other => Ok(other),
+            }
+        }
         Expression::PropertyAccess {
             object,
             property,
@@ -500,6 +594,7 @@ fn get_type_of_expression(
             | IntrinsicType::Target
             | IntrinsicType::Type => Ok(Expression::IntrinsicType(IntrinsicType::Type, *span)),
         },
+        Expression::Enum(_, span) => Ok(Expression::IntrinsicType(IntrinsicType::Type, *span)),
         Expression::AttachImplementation { .. } => todo!(),
         Expression::Function {
             parameter,
@@ -654,7 +749,7 @@ fn interpret_block(
             Expression::Binding(binding, span) => {
                 let should_preserve = usage_counter.should_preserve(&binding.pattern);
                 let binding_expr =
-                    interpret_binding(*binding, &mut block_context, should_preserve)?;
+                    interpret_binding(*binding, &mut block_context, should_preserve, false)?;
                 if should_preserve {
                     if let Expression::Binding(binding, _) = binding_expr {
                         preserved_expressions.push(Expression::Binding(binding, span));
@@ -714,15 +809,43 @@ fn interpret_binding(
     binding: Binding,
     context: &mut Context,
     preserve: bool,
+    allow_partial: bool,
 ) -> Result<Expression, Diagnostic> {
-    let value = interpret_expression(binding.expr.clone(), context)?;
-    let bound_success = bind_pattern_from_value(
+    let value = if allow_partial {
+        let mut eval_context = context.clone();
+        for (binding_ctx, _) in eval_context.bindings.values_mut() {
+            if let BindingContext::BoundPreserved(val) = binding_ctx.clone() {
+                *binding_ctx = BindingContext::Bound(val);
+            }
+        }
+
+        let mut evaluated = resolve_expression(binding.expr.clone(), &mut eval_context)?;
+        if let Expression::Block(exprs, _) = &evaluated {
+            if let Some(last) = exprs.last() {
+                evaluated = last.clone();
+            }
+        }
+
+        resolve_expression(evaluated, &mut eval_context)?
+    } else {
+        interpret_expression(binding.expr.clone(), context)?
+    };
+    let bound_success = match bind_pattern_from_value(
         binding.pattern.clone(),
         &value,
         context,
         Vec::new(),
         preserve,
-    )?;
+    ) {
+        Ok(success) => success,
+        Err(_err) if allow_partial => {
+            return Ok(Expression::Literal(
+                ExpressionLiteral::Boolean(false),
+                dummy_span(),
+            ))
+        }
+        Err(err) => return Err(err),
+    };
 
     if preserve {
         // Return the binding expression so it can be preserved in the block
@@ -837,7 +960,10 @@ fn bind_pattern_from_value(
         }
         BindingPattern::Struct(pattern_items, span) => {
             let Expression::Struct(struct_items, _) = value else {
-                return Err(diagnostic("Struct pattern requires struct value", span));
+                return Err(diagnostic(
+                    format!("Struct pattern requires struct value, got {:?}", value),
+                    span,
+                ));
             };
 
             for (field_identifier, field_pattern) in pattern_items {
@@ -847,7 +973,15 @@ fn bind_pattern_from_value(
                     .find(|(value_identifier, _)| value_identifier.0 == field_identifier.0)
                     .map(|(_, expr)| expr)
                     .ok_or_else(|| {
-                        diagnostic(format!("Missing field {}", field_identifier.0), field_span)
+                        if enum_marker_type(struct_items).is_some() {
+                            Diagnostic::new("Enum variant did not match pattern")
+                                .with_span(field_span)
+                        } else {
+                            diagnostic(
+                                format!("Missing field {}", field_identifier.0),
+                                field_span,
+                            )
+                        }
                     })?;
 
                 bind_pattern_from_value(field_pattern, field_value, context, Vec::new(), preserve)?;
@@ -1259,9 +1393,11 @@ fn resolve_value(expr: Expression, context: &mut Context) -> Result<Expression, 
                     BindingContext::Bound(val) => resolve_value(val.clone(), context),
                     BindingContext::BoundPreserved(val) => match val {
                         // Preserved bindings keep their identifiers in place unless they point to
-                        // structs, which need to be resolved so field access can see concrete
-                        // values during lowering.
-                        Expression::Struct(..) => resolve_value(val.clone(), context),
+                        // structs or functions, which need to be resolved so field access and calls
+                        // can see concrete values during lowering.
+                        Expression::Struct(..) | Expression::Function { .. } => {
+                            resolve_value(val.clone(), context)
+                        }
                         _ => Ok(Expression::Identifier(ident, span)),
                     },
                     _ => Ok(Expression::Identifier(ident, span)),
@@ -1365,6 +1501,11 @@ impl UsageCounter {
             } => {
                 self.count(parameter);
                 self.count(return_type);
+            }
+            Expression::Enum(variants, _) => {
+                for (_, expr) in variants {
+                    self.count(expr);
+                }
             }
             Expression::Literal(..) | Expression::IntrinsicType(..) => {}
         }

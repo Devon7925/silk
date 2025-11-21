@@ -73,6 +73,7 @@ pub enum IntrinsicOperation {
 pub enum Expression {
     IntrinsicType(IntrinsicType, SourceSpan),
     IntrinsicOperation(IntrinsicOperation, SourceSpan),
+    Enum(Vec<(Identifier, Expression)>, SourceSpan),
     If {
         condition: Box<Expression>,
         then_branch: Box<Expression>,
@@ -123,6 +124,7 @@ impl Expression {
         match self {
             Expression::IntrinsicType(_, span)
             | Expression::IntrinsicOperation(_, span)
+            | Expression::Enum(_, span)
             | Expression::Struct(_, span)
             | Expression::If { span, .. }
             | Expression::Literal(_, span)
@@ -181,8 +183,30 @@ fn parse_if_expression_with_source<'a>(
         .ok_or_else(|| diagnostic_here(source, file, 2, "Expected if"))?;
 
     remaining = parse_optional_whitespace(remaining);
-    let (mut condition, mut after_condition) =
-        parse_operation_expression_with_guard(source, remaining, true)?;
+    let (mut condition, mut after_condition) = if let Some(after_let) = parse_let(remaining) {
+        let condition_start = remaining;
+        let after_ws = parse_whitespace(after_let)
+            .ok_or_else(|| diagnostic_here(source, after_let, 1, "Expected binding after let"))?;
+        let (pattern, after_pattern) = parse_binding_pattern_with_source(source, after_ws)?;
+        let after_pattern = parse_optional_whitespace(after_pattern);
+        let after_eq = parse_eq(after_pattern)
+            .ok_or_else(|| diagnostic_here(source, after_pattern, 1, "Expected = after pattern"))?;
+        let after_eq = parse_optional_whitespace(after_eq);
+        let (value_expr, rest) = parse_operation_expression_with_guard(source, after_eq, true)?;
+        let span = consumed_span(source, condition_start, rest);
+        (
+            Expression::Binding(
+                Box::new(Binding {
+                    pattern,
+                    expr: value_expr,
+                }),
+                span,
+            ),
+            rest,
+        )
+    } else {
+        parse_operation_expression_with_guard(source, remaining, true)?
+    };
     after_condition = parse_optional_whitespace(after_condition);
 
     let mut inferred_then_branch: Option<Expression> = None;
@@ -308,12 +332,36 @@ fn parse_semicolon<'a>(source: &'a str, file: &'a str) -> Result<&'a str, Diagno
 }
 
 pub fn parse_whitespace(file: &str) -> Option<&str> {
-    file.starts_with(char::is_whitespace)
-        .then(|| file.trim_start())
+    let after = parse_optional_whitespace(file);
+    (after.len() != file.len()).then_some(after)
 }
 
 pub fn parse_optional_whitespace(file: &str) -> &str {
-    file.trim_start()
+    let mut remaining = file;
+    loop {
+        let mut progressed = false;
+
+        let trimmed = remaining.trim_start();
+        if trimmed.len() != remaining.len() {
+            remaining = trimmed;
+            progressed = true;
+        }
+
+        if let Some(after_comment) = remaining.strip_prefix("//") {
+            let rest = after_comment
+                .split_once('\n')
+                .map(|(_, after_line)| after_line)
+                .unwrap_or("");
+            remaining = rest;
+            progressed = true;
+        }
+
+        if !progressed {
+            break;
+        }
+    }
+
+    remaining
 }
 
 pub fn parse_identifier(file: &str) -> Option<(Identifier, &str)> {
@@ -378,7 +426,12 @@ fn parse_binding_pattern_with_source<'a>(
     let file = parse_optional_whitespace(file);
     let annotation_start_slice = file;
     let (annotations, file) = parse_binding_annotations(source, file)?;
-    let (mut pattern, mut remaining) = if file.starts_with("{") {
+
+    let (mut pattern, mut remaining) = if let Some((variant_pattern, rest)) =
+        parse_enum_variant_binding_pattern(source, file)?
+    {
+        (variant_pattern, rest)
+    } else if file.starts_with("{") {
         parse_struct_binding_pattern_with_source(source, file)?
     } else {
         parse_simple_binding_pattern(source, file)?
@@ -466,6 +519,40 @@ fn parse_struct_binding_pattern_with_source<'a>(
             )
         })?;
     }
+}
+
+fn parse_enum_variant_binding_pattern<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Result<Option<(BindingPattern, &'a str)>, Diagnostic> {
+    let start_slice = file;
+    let Some((_, after_type)) = parse_identifier(file) else {
+        return Ok(None);
+    };
+
+    let after_type = parse_optional_whitespace(after_type);
+    let Some(after_sep) = after_type.strip_prefix("::") else {
+        return Ok(None);
+    };
+    let after_sep = parse_optional_whitespace(after_sep);
+    let Some((variant_identifier, after_variant)) = parse_identifier(after_sep) else {
+        return Ok(None);
+    };
+
+    let after_variant = parse_optional_whitespace(after_variant);
+
+    let (payload_pattern, rest) = if after_variant.starts_with("{") {
+        parse_struct_binding_pattern_with_source(source, after_variant)?
+    } else {
+        let span = consumed_span(source, after_variant, after_variant);
+        (BindingPattern::Struct(vec![], span), after_variant)
+    };
+
+    let span = consumed_span(source, start_slice, rest);
+    Ok(Some((
+        BindingPattern::Struct(vec![(variant_identifier, payload_pattern)], span),
+        rest,
+    )))
 }
 
 fn parse_grouping_expression_with_source<'a>(
@@ -689,6 +776,68 @@ fn parse_struct_expression<'a>(
     Some(parse_struct_expression_inner(source, file))
 }
 
+fn parse_enum_expression<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Option<Result<(Expression, &'a str), Diagnostic>> {
+    fn parse_enum_expression_inner<'a>(
+        source: &'a str,
+        file: &'a str,
+    ) -> Result<(Expression, &'a str), Diagnostic> {
+        let start_slice = file;
+        let mut remaining = file
+            .strip_prefix("enum")
+            .ok_or_else(|| diagnostic_here(source, file, 4, "Expected enum"))?;
+        remaining = parse_optional_whitespace(remaining);
+        remaining = remaining.strip_prefix("{").ok_or_else(|| {
+            diagnostic_here(source, remaining, 1, "Expected { to start enum literal")
+        })?;
+
+        let mut variants = Vec::new();
+
+        loop {
+            remaining = parse_optional_whitespace(remaining);
+
+            if let Some(rest) = remaining.strip_prefix("}") {
+                let span = consumed_span(source, start_slice, rest);
+                return Ok((Expression::Enum(variants, span), rest));
+            }
+
+            let (variant_identifier, after_identifier) = parse_identifier(remaining)
+                .ok_or_else(|| diagnostic_here(source, remaining, 1, "Expected variant name"))?;
+            let after_identifier = parse_optional_whitespace(after_identifier);
+            let after_equals = after_identifier.strip_prefix("=").ok_or_else(|| {
+                diagnostic_here(source, after_identifier, 1, "Expected = after variant name")
+            })?;
+            let after_equals = parse_optional_whitespace(after_equals);
+            let (payload_expr, rest) =
+                parse_operation_expression_with_source(source, after_equals)?;
+            variants.push((variant_identifier, payload_expr));
+            remaining = parse_optional_whitespace(rest);
+
+            if let Some(rest) = remaining.strip_prefix("}") {
+                let span = consumed_span(source, start_slice, rest);
+                return Ok((Expression::Enum(variants, span), rest));
+            }
+
+            remaining = remaining.strip_prefix(",").ok_or_else(|| {
+                diagnostic_here(
+                    source,
+                    remaining,
+                    1,
+                    "Expected , or } after enum variant",
+                )
+            })?;
+        }
+    }
+
+    if !file.starts_with("enum") {
+        return None;
+    }
+
+    Some(parse_enum_expression_inner(source, file))
+}
+
 #[cfg(test)]
 pub fn parse_isolated_expression(file: &str) -> Result<(Expression, &str), Diagnostic> {
     parse_isolated_expression_with_source(file, file)
@@ -703,6 +852,9 @@ fn parse_isolated_expression_with_source<'a>(
     }
     if let Some(if_parse) = parse_if_expression(source, file) {
         return if_parse;
+    }
+    if let Some(enum_parse) = parse_enum_expression(source, file) {
+        return enum_parse;
     }
     if let Some(group_parse) = parse_grouping_expression_with_source(source, file) {
         return group_parse;
@@ -743,10 +895,19 @@ fn parse_property_access<'a>(
 
     loop {
         let lookahead = parse_optional_whitespace(remaining);
-        let Some(after_dot) = lookahead.strip_prefix(".") else {
-            break;
+        let (separator, after_sep) = if let Some(rest) = lookahead.strip_prefix("::") {
+            (Some(()), rest)
+        } else if let Some(rest) = lookahead.strip_prefix(".") {
+            (Some(()), rest)
+        } else {
+            (None, "")
         };
-        let after_dot = parse_optional_whitespace(after_dot);
+
+        if separator.is_none() {
+            break;
+        }
+
+        let after_dot = parse_optional_whitespace(after_sep);
         let (property_identifier, rest) = parse_identifier(after_dot).ok_or_else(|| {
             diagnostic_here(
                 source,
