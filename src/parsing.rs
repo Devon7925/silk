@@ -6,6 +6,7 @@ pub struct Identifier(pub String);
 #[derive(Clone, Debug)]
 pub enum BindingPattern {
     Identifier(Identifier, SourceSpan),
+    Literal(ExpressionLiteral, SourceSpan),
     Struct(Vec<(Identifier, BindingPattern)>, SourceSpan),
     TypeHint(Box<BindingPattern>, Box<Expression>, SourceSpan),
     Annotated {
@@ -19,6 +20,7 @@ impl BindingPattern {
     pub fn span(&self) -> SourceSpan {
         match self {
             BindingPattern::Identifier(_, span)
+            | BindingPattern::Literal(_, span)
             | BindingPattern::Struct(_, span)
             | BindingPattern::TypeHint(_, _, span)
             | BindingPattern::Annotated { span, .. } => *span,
@@ -313,7 +315,21 @@ pub fn parse_whitespace(file: &str) -> Option<&str> {
 }
 
 pub fn parse_optional_whitespace(file: &str) -> &str {
-    file.trim_start()
+    let mut remaining = file.trim_start();
+
+    // Skip line comments as if they were whitespace.
+    loop {
+        if let Some(after_comment) = remaining.strip_prefix("//") {
+            if let Some((_, rest)) = after_comment.split_once('\n') {
+                remaining = rest.trim_start();
+                continue;
+            } else {
+                return "";
+            }
+        }
+
+        return remaining;
+    }
 }
 
 pub fn parse_identifier(file: &str) -> Option<(Identifier, &str)> {
@@ -356,6 +372,10 @@ fn parse_simple_binding_pattern<'a>(
     if let Some((identifier, remaining)) = parse_identifier(file) {
         let span = consumed_span(source, file, remaining);
         return Ok((BindingPattern::Identifier(identifier, span), remaining));
+    }
+    if let Some((literal, remaining)) = parse_literal(file) {
+        let span = consumed_span(source, file, remaining);
+        return Ok((BindingPattern::Literal(literal, span), remaining));
     }
     Err(diagnostic_here(source, file, 1, "Expected binding pattern"))
 }
@@ -698,6 +718,9 @@ fn parse_isolated_expression_with_source<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Result<(Expression, &'a str), Diagnostic> {
+    if let Some(binding_parse) = parse_binding(source, file, false) {
+        return binding_parse;
+    }
     if let Some(function_parse) = parse_function_literal(source, file) {
         return function_parse;
     }
@@ -828,6 +851,12 @@ fn parse_operation_expression_with_guard<'a>(
     file: &'a str,
     stop_before_grouping: bool,
 ) -> Result<(Expression, &'a str), Diagnostic> {
+    if stop_before_grouping {
+        if let Some(binding_parse) = parse_binding(source, file, true) {
+            return binding_parse;
+        }
+    }
+
     fn parse_operations<'a>(
         source: &'a str,
         file: &'a str,
@@ -974,6 +1003,7 @@ fn parse_export_binding_annotation<'a>(
 fn parse_binding<'a>(
     source: &'a str,
     file: &'a str,
+    stop_before_grouping: bool,
 ) -> Option<Result<(Expression, &'a str), Diagnostic>> {
     let start_slice = file;
     let file = parse_let(file)?;
@@ -981,6 +1011,7 @@ fn parse_binding<'a>(
     fn parse_binding_inner<'a>(
         source: &'a str,
         file: &'a str,
+        stop_before_grouping: bool,
     ) -> Result<(Binding, &'a str), Diagnostic> {
         let file = parse_whitespace(file)
             .ok_or_else(|| diagnostic_here(source, file, 1, "Expected whitespace after let"))?;
@@ -989,13 +1020,13 @@ fn parse_binding<'a>(
         let file = parse_eq(file)
             .ok_or_else(|| diagnostic_here(source, file, 1, "Expected = after binding pattern"))?;
         let file = parse_optional_whitespace(file);
-        let (expr, file) = parse_operation_expression_with_source(source, file)?;
+        let (expr, file) = parse_operation_expression_with_guard(source, file, stop_before_grouping)?;
 
         Ok((Binding { pattern, expr }, file))
     }
 
     Some(
-        parse_binding_inner(source, file).map(|(binding, remaining)| {
+        parse_binding_inner(source, file, stop_before_grouping).map(|(binding, remaining)| {
             let span = consumed_span(source, start_slice, remaining);
             (Expression::Binding(Box::new(binding), span), remaining)
         }),
@@ -1006,7 +1037,7 @@ fn parse_individual_expression_with_source<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Result<(Expression, &'a str), Diagnostic> {
-    if let Some(binding_parse) = parse_binding(source, file) {
+    if let Some(binding_parse) = parse_binding(source, file, false) {
         return binding_parse;
     }
     parse_operation_expression_with_source(source, file)

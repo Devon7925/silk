@@ -220,9 +220,9 @@ fn collect_types(
         }
         Expression::Binding(binding, _) => {
             collect_types(&binding.expr, ctx, locals_types)?;
-            let name = extract_identifier_from_pattern(binding.pattern.clone())?;
             let ty = infer_type(&binding.expr, locals_types)?;
-            locals_types.insert(name, ty);
+            let mut locals = Vec::new();
+            collect_locals_for_pattern(binding.pattern.clone(), ty, locals_types, &mut locals)?;
         }
         Expression::FunctionCall {
             function, argument, ..
@@ -439,6 +439,10 @@ fn extract_function_params(
             let name = extract_identifier_from_pattern(*inner)?;
             Ok(vec![WasmFunctionParam { name, ty }])
         }
+        BindingPattern::Literal(_, _) => Err(
+            Diagnostic::new("Literal patterns cannot be used in function parameters")
+                .with_span(pattern.span()),
+        ),
         BindingPattern::Identifier(_, _) => Err(Diagnostic::new(
             "Wasm exports currently require parameter type hints",
         )
@@ -451,9 +455,20 @@ fn extract_identifier_from_pattern(pattern: BindingPattern) -> Result<String, Di
         BindingPattern::Identifier(identifier, _) => Ok(identifier.0),
         BindingPattern::Annotated { pattern, .. } => extract_identifier_from_pattern(*pattern),
         BindingPattern::TypeHint(pattern, _, _) => extract_identifier_from_pattern(*pattern),
-        other => Err(
-            Diagnostic::new("Only identifier parameters can be exported to wasm")
-                .with_span(other.span()),
+        BindingPattern::Struct(ref items, _) => {
+            for (_, pat) in items {
+                if let Ok(name) = extract_identifier_from_pattern(pat.clone()) {
+                    return Ok(name);
+                }
+            }
+            Err(
+                Diagnostic::new("Struct patterns require at least one identifier")
+                    .with_span(pattern.span()),
+            )
+        }
+        BindingPattern::Literal(_, _) => Err(
+            Diagnostic::new("Literal patterns cannot be used in function parameters")
+                .with_span(pattern.span()),
         ),
     }
 }
@@ -465,10 +480,13 @@ fn collect_locals(
     let mut locals = Vec::new();
     match expr {
         Expression::Binding(binding, _) => {
-            let name = extract_identifier_from_pattern(binding.pattern.clone())?;
-            let ty = infer_type(&binding.expr, locals_types)?;
-            locals.push((name.clone(), ty.clone()));
-            locals_types.insert(name, ty);
+            let expr_type = infer_type(&binding.expr, locals_types)?;
+            collect_locals_for_pattern(
+                binding.pattern.clone(),
+                expr_type,
+                locals_types,
+                &mut locals,
+            )?;
 
             locals.extend(collect_locals(&binding.expr, locals_types)?);
         }
@@ -503,6 +521,46 @@ fn collect_locals(
         _ => {}
     }
     Ok(locals)
+}
+
+fn collect_locals_for_pattern(
+    pattern: BindingPattern,
+    expr_type: WasmType,
+    locals_types: &mut std::collections::HashMap<String, WasmType>,
+    locals: &mut Vec<(String, WasmType)>,
+) -> Result<(), Diagnostic> {
+    match pattern {
+        BindingPattern::Identifier(identifier, _) => {
+            locals.push((identifier.0.clone(), expr_type.clone()));
+            locals_types.insert(identifier.0, expr_type);
+            Ok(())
+        }
+        BindingPattern::Struct(items, span) => {
+            let WasmType::Struct(field_types) = expr_type else {
+                return Err(Diagnostic::new("Struct pattern requires struct value type").with_span(span));
+            };
+
+            for (field_identifier, field_pattern) in items {
+                let field_type = field_types
+                    .iter()
+                    .find(|(name, _)| name == &field_identifier.0)
+                    .map(|(_, ty)| ty.clone())
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!("Missing field {} in struct type", field_identifier.0))
+                            .with_span(field_pattern.span())
+                    })?;
+                collect_locals_for_pattern(field_pattern, field_type, locals_types, locals)?;
+            }
+            Ok(())
+        }
+        BindingPattern::TypeHint(inner, _, _) => {
+            collect_locals_for_pattern(*inner, expr_type, locals_types, locals)
+        }
+        BindingPattern::Annotated { pattern, .. } => {
+            collect_locals_for_pattern(*pattern, expr_type, locals_types, locals)
+        }
+        BindingPattern::Literal(_, _) => Ok(()),
+    }
 }
 
 fn emit_expression(
@@ -587,14 +645,68 @@ fn emit_expression(
             Ok(())
         }
         Expression::Binding(binding, _) => {
-            emit_expression(&binding.expr, locals, locals_types, func, type_ctx)?;
-            let name = extract_identifier_from_pattern(binding.pattern.clone())?;
-            let local_index = locals
-                .get(&name)
-                .copied()
-                .expect("Local should have been collected");
-            func.instruction(&Instruction::LocalSet(local_index));
-            Ok(())
+            if let (
+                BindingPattern::Struct(pattern_fields, _),
+                Expression::Struct(value_fields, _),
+            ) = (&binding.pattern, &binding.expr)
+            {
+                let mut comparisons_emitted = false;
+                for (field_identifier, field_pattern) in pattern_fields {
+                    let value_expr = value_fields
+                        .iter()
+                        .find(|(id, _)| id.0 == field_identifier.0)
+                        .map(|(_, expr)| expr)
+                        .ok_or_else(|| {
+                            Diagnostic::new(format!(
+                                "Missing field {} in struct binding",
+                                field_identifier.0
+                            ))
+                            .with_span(field_pattern.span())
+                        })?;
+
+                    match field_pattern {
+                        BindingPattern::Literal(ExpressionLiteral::Number(expected), _) => {
+                            emit_expression(value_expr, locals, locals_types, func, type_ctx)?;
+                            func.instruction(&Instruction::I32Const(*expected));
+                            func.instruction(&Instruction::I32Eq);
+                            if comparisons_emitted {
+                                func.instruction(&Instruction::I32And);
+                            }
+                            comparisons_emitted = true;
+                        }
+                        BindingPattern::Identifier(identifier, _) => {
+                            emit_expression(value_expr, locals, locals_types, func, type_ctx)?;
+                            let local_index = locals
+                                .get(&identifier.0)
+                                .copied()
+                                .expect("Local should have been collected");
+                            func.instruction(&Instruction::LocalSet(local_index));
+                        }
+                        _ => {
+                            return Err(
+                                Diagnostic::new(
+                                    "Unsupported pattern in struct binding for wasm emission",
+                                )
+                                .with_span(field_pattern.span()),
+                            );
+                        }
+                    }
+                }
+
+                if !comparisons_emitted {
+                    func.instruction(&Instruction::I32Const(1));
+                }
+                Ok(())
+            } else {
+                emit_expression(&binding.expr, locals, locals_types, func, type_ctx)?;
+                let name = extract_identifier_from_pattern(binding.pattern.clone())?;
+                let local_index = locals
+                    .get(&name)
+                    .copied()
+                    .expect("Local should have been collected");
+                func.instruction(&Instruction::LocalSet(local_index));
+                Ok(())
+            }
         }
         Expression::Block(exprs, _) => {
             for (i, e) in exprs.iter().enumerate() {

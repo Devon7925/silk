@@ -133,14 +133,29 @@ pub fn interpret_expression(
             else_branch,
             span,
         } => {
-            let interpreted_condition = interpret_expression(*condition, context)?;
+            let base_context = context.clone();
+            let condition_expr = *condition;
+            let condition_for_pattern = condition_expr.clone();
+            let interpreted_condition = interpret_expression(condition_expr, context)?;
 
             let inferred_else_expr = else_branch
                 .clone()
                 .unwrap_or_else(|| Box::new(empty_struct_expr(SourceSpan::new(span.end(), 0))));
 
-            let (interpreted_then, then_type) = branch_type(&then_branch, context)?;
-            let (interpreted_else, else_type) = branch_type(&inferred_else_expr, context)?;
+            let mut then_context = base_context.clone();
+            if let Expression::Binding(binding, _) = &condition_for_pattern {
+                let mut type_context = base_context.clone();
+                let value_type = get_type_of_expression(&binding.expr, &mut type_context).ok();
+                bind_pattern_blanks(
+                    binding.pattern.clone(),
+                    &mut then_context,
+                    Vec::new(),
+                    value_type,
+                )?;
+            }
+
+            let (interpreted_then, then_type) = branch_type(&then_branch, &then_context)?;
+            let (interpreted_else, else_type) = branch_type(&inferred_else_expr, &base_context)?;
 
             if !types_equivalent(&then_type, &else_type) {
                 return Err(diagnostic("Type mismatch between if branches", span));
@@ -417,6 +432,7 @@ fn interpret_binding_pattern(
 ) -> Result<BindingPattern, Diagnostic> {
     match parameter {
         pat @ BindingPattern::Identifier(..) => Ok(pat),
+        pat @ BindingPattern::Literal(..) => Ok(pat),
         BindingPattern::Struct(items, source_span) => {
             let mut interpreted_items = Vec::with_capacity(items.len());
             for (field_id, field_pattern) in items {
@@ -507,10 +523,51 @@ fn get_type_of_expression(
             }
             Ok(then_type)
         }
-        Expression::Operation { .. } => todo!(),
-        Expression::Binding(..) => todo!(),
-        Expression::Block(..) => todo!(),
-        Expression::FunctionCall { .. } => todo!(),
+        Expression::Binding(binding, _) => {
+            let mut binding_context = context.clone();
+            let value_type = get_type_of_expression(&binding.expr, &mut binding_context)?;
+            bind_pattern_blanks(
+                binding.pattern.clone(),
+                &mut binding_context,
+                Vec::new(),
+                Some(value_type),
+            )?;
+            interpret_expression(identifier_expr("bool"), context)
+        }
+        Expression::Operation {
+            operator,
+            left,
+            right,
+            span,
+        } => get_type_of_expression(
+            &Expression::FunctionCall {
+                function: Box::new(Expression::PropertyAccess {
+                    object: left.clone(),
+                    property: operator.clone(),
+                    span: *span,
+                }),
+                argument: right.clone(),
+                span: *span,
+            },
+            context,
+        ),
+        Expression::Block(exprs, span) => {
+            let mut block_context = context.clone();
+            let (value, _) = interpret_block(exprs.clone(), *span, &mut block_context)?;
+            get_type_of_expression(&value, &mut block_context)
+        }
+        Expression::FunctionCall { function, argument, span } => {
+            let mut call_context = context.clone();
+            let evaluated_call = interpret_expression(
+                Expression::FunctionCall {
+                    function: function.clone(),
+                    argument: argument.clone(),
+                    span: *span,
+                },
+                &mut call_context,
+            )?;
+            get_type_of_expression(&evaluated_call, &mut call_context)
+        }
         Expression::PropertyAccess {
             object,
             property,
@@ -594,6 +651,9 @@ fn get_type_of_binding_pattern(
             "Cannot determine type of untyped identifier",
             *span,
         )),
+        BindingPattern::Literal(lit, span) => {
+            get_type_of_expression(&Expression::Literal(lit.clone(), *span), context)
+        }
         BindingPattern::Struct(pattern_items, span) => {
             let mut struct_items = Vec::with_capacity(pattern_items.len());
             for (field_identifier, field_pattern) in pattern_items {
@@ -737,33 +797,44 @@ fn interpret_binding(
     binding: Binding,
     context: &mut Context,
     preserve: bool,
-) -> Result<Expression, Diagnostic> {
-    let value = interpret_expression(binding.expr.clone(), context)?;
-    let bound_success = bind_pattern_from_value(
-        binding.pattern.clone(),
-        &value,
-        context,
-        Vec::new(),
+    ) -> Result<Expression, Diagnostic> {
+        let value = interpret_expression(binding.expr.clone(), context)?;
+        let value_is_constant = is_resolved_constant(&value);
+        let bound_success = bind_pattern_from_value(
+            binding.pattern.clone(),
+            &value,
+            context,
+            Vec::new(),
         preserve,
     )?;
 
-    if preserve {
-        // Return the binding expression so it can be preserved in the block
-        // We use the evaluated value in the binding to ensure consts are resolved if possible
-        Ok(Expression::Binding(
-            Box::new(Binding {
-                pattern: binding.pattern,
-                expr: value,
-            }),
-            dummy_span(),
-        ))
-    } else {
-        Ok(Expression::Literal(
-            ExpressionLiteral::Boolean(bound_success),
-            dummy_span(),
-        ))
+        if preserve {
+            // Return the binding expression so it can be preserved in the block
+            // We use the evaluated value in the binding to ensure consts are resolved if possible
+            Ok(Expression::Binding(
+                Box::new(Binding {
+                    pattern: binding.pattern,
+                    expr: value,
+                }),
+                dummy_span(),
+            ))
+        } else {
+            if !value_is_constant && !bound_success {
+                Ok(Expression::Binding(
+                    Box::new(Binding {
+                        pattern: binding.pattern,
+                        expr: value,
+                    }),
+                    dummy_span(),
+                ))
+            } else {
+                Ok(Expression::Literal(
+                    ExpressionLiteral::Boolean(bound_success),
+                    dummy_span(),
+                ))
+            }
+        }
     }
-}
 
 fn parse_binding_annotation(
     ann: BindingAnnotation,
@@ -805,9 +876,23 @@ fn bind_pattern_blanks(
             }
             Ok(())
         }
+        BindingPattern::Literal(_, _) => Ok(()),
         BindingPattern::Struct(pattern_items, _) => {
-            for (_, field_pattern) in pattern_items {
-                bind_pattern_blanks(field_pattern, context, Vec::new(), None)?;
+            let mut type_lookup = None;
+            if let Some(Expression::Struct(type_fields, _)) = &type_hint {
+                type_lookup = Some(type_fields.clone());
+            }
+
+            for (field_identifier, field_pattern) in pattern_items {
+                let field_type_hint = type_lookup
+                    .as_ref()
+                    .and_then(|fields| {
+                        fields
+                            .iter()
+                            .find(|(name, _)| name.0 == field_identifier.0)
+                            .map(|(_, ty)| ty.clone())
+                    });
+                bind_pattern_blanks(field_pattern, context, Vec::new(), field_type_hint)?;
             }
 
             Ok(())
@@ -858,6 +943,15 @@ fn bind_pattern_from_value(
             );
             Ok(true)
         }
+        BindingPattern::Literal(literal, _) => match (literal, value) {
+            (ExpressionLiteral::Number(pattern_value), Expression::Literal(ExpressionLiteral::Number(value), _)) => {
+                Ok(pattern_value == *value)
+            }
+            (ExpressionLiteral::Boolean(pattern_value), Expression::Literal(ExpressionLiteral::Boolean(value), _)) => {
+                Ok(pattern_value == *value)
+            }
+            _ => Ok(false),
+        },
         BindingPattern::Struct(pattern_items, span) => {
             let Expression::Struct(struct_items, _) = value else {
                 return Err(diagnostic("Struct pattern requires struct value", span));
@@ -873,7 +967,10 @@ fn bind_pattern_from_value(
                         diagnostic(format!("Missing field {}", field_identifier.0), field_span)
                     })?;
 
-                bind_pattern_from_value(field_pattern, field_value, context, Vec::new(), preserve)?;
+                let matched = bind_pattern_from_value(field_pattern, field_value, context, Vec::new(), preserve)?;
+                if !matched {
+                    return Ok(false);
+                }
             }
 
             Ok(true)
@@ -1428,7 +1525,7 @@ impl UsageCounter {
                     self.count_pattern(pat);
                 }
             }
-            BindingPattern::Identifier(..) => {}
+            BindingPattern::Identifier(..) | BindingPattern::Literal(..) => {}
         }
     }
 
@@ -1437,6 +1534,7 @@ impl UsageCounter {
             BindingPattern::Identifier(ident, _) => {
                 self.counts.get(&ident.0).copied().unwrap_or(0) > 1
             }
+            BindingPattern::Literal(..) => false,
             BindingPattern::TypeHint(inner, _, _) => self.should_preserve(inner),
             BindingPattern::Annotated { pattern, .. } => self.should_preserve(pattern),
             BindingPattern::Struct(items, _) => {
