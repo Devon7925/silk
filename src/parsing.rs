@@ -351,18 +351,30 @@ pub fn parse_identifier(file: &str) -> Option<(Identifier, &str)> {
 }
 
 pub fn parse_literal(file: &str) -> Option<(ExpressionLiteral, &str)> {
-    let number_str = file
+    let mut consumed = 0;
+    let is_negative = matches!(file.chars().next(), Some('-'));
+
+    let digits = file
         .chars()
+        .skip(is_negative as usize)
         .take_while(|c| c.is_digit(10))
         .collect::<String>();
 
-    if number_str.is_empty() {
+    if digits.is_empty() {
         return None;
     }
 
-    let number: i32 = number_str.parse().ok()?;
-    let remaining = &file[number_str.len()..];
-    Some((ExpressionLiteral::Number(number), remaining))
+    consumed += digits.len();
+    if is_negative {
+        consumed += 1;
+    }
+
+    let number: i32 = digits.parse().ok()?;
+    let remaining = &file[consumed..];
+    Some((
+        ExpressionLiteral::Number(if is_negative { -number } else { number }),
+        remaining,
+    ))
 }
 
 fn parse_simple_binding_pattern<'a>(
