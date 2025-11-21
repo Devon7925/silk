@@ -21,6 +21,12 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             ),
             source_span,
         )),
+        Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, source_span) => {
+            Ok(Expression::IntrinsicOperation(
+                IntrinsicOperation::EnumFromStruct,
+                source_span,
+            ))
+        }
         Expression::AttachImplementation { type_expr, .. } => simplify_expression(*type_expr),
         Expression::If {
             condition,
@@ -85,6 +91,82 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             property,
             span,
         }),
+        Expression::EnumType(variants, span) => Ok(Expression::EnumType(
+            variants
+                .into_iter()
+                .map(|(id, ty)| Ok((id, simplify_expression(ty)?)))
+                .collect::<Result<_, Diagnostic>>()?,
+            span,
+        )),
+        Expression::EnumAccess {
+            enum_expr,
+            variant,
+            span,
+        } => {
+            let simplified_enum = simplify_expression(*enum_expr)?;
+            if let Expression::EnumType(variants, _) = &simplified_enum {
+                if let Some((variant_index, (_id, payload_type))) = variants
+                    .iter()
+                    .enumerate()
+                    .find(|(_, (id, _))| id.0 == variant.0)
+                {
+                    if let Expression::Struct(fields, _) = payload_type {
+                        if fields.is_empty() {
+                            return Ok(Expression::EnumValue {
+                                enum_type: Box::new(simplified_enum.clone()),
+                                variant,
+                                variant_index,
+                                payload: None,
+                                span,
+                            });
+                        }
+                    }
+
+                    return Ok(Expression::EnumConstructor {
+                        enum_type: Box::new(simplified_enum.clone()),
+                        variant,
+                        variant_index,
+                        payload_type: Box::new(payload_type.clone()),
+                        span,
+                    });
+                }
+            }
+
+            Ok(Expression::EnumAccess {
+                enum_expr: Box::new(simplified_enum),
+                variant,
+                span,
+            })
+        }
+        Expression::EnumConstructor {
+            enum_type,
+            variant,
+            variant_index,
+            payload_type,
+            span,
+        } => Ok(Expression::EnumConstructor {
+            enum_type: Box::new(simplify_expression(*enum_type)?),
+            variant,
+            variant_index,
+            payload_type: Box::new(simplify_expression(*payload_type)?),
+            span,
+        }),
+        Expression::EnumValue {
+            enum_type,
+            variant,
+            variant_index,
+            payload,
+            span,
+        } => Ok(Expression::EnumValue {
+            enum_type: Box::new(simplify_expression(*enum_type)?),
+            variant,
+            variant_index,
+            payload: match payload {
+                Some(payload) => Some(Box::new(simplify_expression(*payload)?)),
+                None => None,
+            },
+            span,
+        }),
         Expression::Binding(binding, source_span) => {
             let binding = Binding {
                 pattern: simplify_binding_pattern(binding.pattern)?,
@@ -123,6 +205,20 @@ fn simplify_binding_pattern(pattern: BindingPattern) -> Result<BindingPattern, D
                 source_span,
             ))
         }
+        BindingPattern::EnumVariant {
+            enum_type,
+            variant,
+            payload,
+            span,
+        } => Ok(BindingPattern::EnumVariant {
+            enum_type,
+            variant,
+            payload: match payload {
+                Some(payload) => Some(Box::new(simplify_binding_pattern(*payload)?)),
+                None => None,
+            },
+            span,
+        }),
         BindingPattern::Annotated {
             annotations,
             pattern,

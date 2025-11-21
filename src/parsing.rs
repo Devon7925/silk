@@ -8,6 +8,12 @@ pub enum BindingPattern {
     Identifier(Identifier, SourceSpan),
     Literal(ExpressionLiteral, SourceSpan),
     Struct(Vec<(Identifier, BindingPattern)>, SourceSpan),
+    EnumVariant {
+        enum_type: Identifier,
+        variant: Identifier,
+        payload: Option<Box<BindingPattern>>,
+        span: SourceSpan,
+    },
     TypeHint(Box<BindingPattern>, Box<Expression>, SourceSpan),
     Annotated {
         annotations: Vec<BindingAnnotation>,
@@ -22,6 +28,7 @@ impl BindingPattern {
             BindingPattern::Identifier(_, span)
             | BindingPattern::Literal(_, span)
             | BindingPattern::Struct(_, span)
+            | BindingPattern::EnumVariant { span, .. }
             | BindingPattern::TypeHint(_, _, span)
             | BindingPattern::Annotated { span, .. } => *span,
         }
@@ -69,12 +76,33 @@ pub enum BinaryIntrinsicOperator {
 #[derive(Clone, Debug)]
 pub enum IntrinsicOperation {
     Binary(Box<Expression>, Box<Expression>, BinaryIntrinsicOperator),
+    EnumFromStruct,
 }
 
 #[derive(Clone, Debug)]
 pub enum Expression {
     IntrinsicType(IntrinsicType, SourceSpan),
     IntrinsicOperation(IntrinsicOperation, SourceSpan),
+    EnumType(Vec<(Identifier, Expression)>, SourceSpan),
+    EnumValue {
+        enum_type: Box<Expression>,
+        variant: Identifier,
+        variant_index: usize,
+        payload: Option<Box<Expression>>,
+        span: SourceSpan,
+    },
+    EnumConstructor {
+        enum_type: Box<Expression>,
+        variant: Identifier,
+        variant_index: usize,
+        payload_type: Box<Expression>,
+        span: SourceSpan,
+    },
+    EnumAccess {
+        enum_expr: Box<Expression>,
+        variant: Identifier,
+        span: SourceSpan,
+    },
     If {
         condition: Box<Expression>,
         then_branch: Box<Expression>,
@@ -125,12 +153,16 @@ impl Expression {
         match self {
             Expression::IntrinsicType(_, span)
             | Expression::IntrinsicOperation(_, span)
+            | Expression::EnumType(_, span)
+            | Expression::EnumAccess { span, .. }
             | Expression::Struct(_, span)
             | Expression::If { span, .. }
             | Expression::Literal(_, span)
             | Expression::Identifier(_, span)
             | Expression::Binding(_, span)
-            | Expression::Block(_, span) => *span,
+            | Expression::Block(_, span)
+            | Expression::EnumValue { span, .. }
+            | Expression::EnumConstructor { span, .. } => *span,
             Expression::AttachImplementation { span, .. }
             | Expression::Function { span, .. }
             | Expression::FunctionType { span, .. }
@@ -381,9 +413,49 @@ fn parse_simple_binding_pattern<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Result<(BindingPattern, &'a str), Diagnostic> {
-    if let Some((identifier, remaining)) = parse_identifier(file) {
+    if let Some((enum_identifier, remaining)) = parse_identifier(file) {
+        if let Some(after_enum) = remaining.strip_prefix("::") {
+            let after_enum = parse_optional_whitespace(after_enum);
+            let (variant_identifier, after_variant) = parse_identifier(after_enum).ok_or_else(|| {
+                diagnostic_here(
+                    source,
+                    after_enum,
+                    after_enum.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
+                    "Expected variant identifier after ::",
+                )
+            })?;
+
+            let after_variant = parse_optional_whitespace(after_variant);
+            let (payload, remaining) = if let Some(after_paren) = after_variant.strip_prefix("(") {
+                let after_paren = parse_optional_whitespace(after_paren);
+                let (payload, rest) = parse_binding_pattern_with_source(source, after_paren)?;
+                let rest = parse_optional_whitespace(rest);
+                let rest = rest.strip_prefix(")").ok_or_else(|| {
+                    diagnostic_here(
+                        source,
+                        rest,
+                        rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
+                        "Expected ) after enum payload pattern",
+                    )
+                })?;
+                (Some(Box::new(payload)), rest)
+            } else {
+                (None, after_variant)
+            };
+            let span = consumed_span(source, file, remaining);
+            return Ok((
+                BindingPattern::EnumVariant {
+                    enum_type: enum_identifier,
+                    variant: variant_identifier,
+                    payload,
+                    span,
+                },
+                remaining,
+            ));
+        }
+
         let span = consumed_span(source, file, remaining);
-        return Ok((BindingPattern::Identifier(identifier, span), remaining));
+        return Ok((BindingPattern::Identifier(enum_identifier, span), remaining));
     }
     if let Some((literal, remaining)) = parse_literal(file) {
         let span = consumed_span(source, file, remaining);
@@ -778,23 +850,40 @@ fn parse_property_access<'a>(
 
     loop {
         let lookahead = parse_optional_whitespace(remaining);
-        let Some(after_dot) = lookahead.strip_prefix(".") else {
+        let (after_separator, is_enum_access) = if let Some(rest) = lookahead.strip_prefix("::") {
+            (rest, true)
+        } else if let Some(rest) = lookahead.strip_prefix(".") {
+            (rest, false)
+        } else {
             break;
         };
-        let after_dot = parse_optional_whitespace(after_dot);
-        let (property_identifier, rest) = parse_identifier(after_dot).ok_or_else(|| {
+
+        let after_separator = parse_optional_whitespace(after_separator);
+        let (property_identifier, rest) = parse_identifier(after_separator).ok_or_else(|| {
             diagnostic_here(
                 source,
-                after_dot,
-                after_dot.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
-                "Expected identifier after . in property access",
+                after_separator,
+                after_separator.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
+                if is_enum_access {
+                    "Expected identifier after :: in enum access"
+                } else {
+                    "Expected identifier after . in property access"
+                },
             )
         })?;
         let span = consumed_span(source, expression_start, rest);
-        expr = Expression::PropertyAccess {
-            object: Box::new(expr),
-            property: property_identifier.0,
-            span,
+        expr = if is_enum_access {
+            Expression::EnumAccess {
+                enum_expr: Box::new(expr),
+                variant: property_identifier,
+                span,
+            }
+        } else {
+            Expression::PropertyAccess {
+                object: Box::new(expr),
+                property: property_identifier.0,
+                span,
+            }
         };
         remaining = rest;
     }
