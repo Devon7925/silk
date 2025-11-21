@@ -113,6 +113,14 @@ fn literal_number_expr(value: i32) -> Expression {
     Expression::Literal(ExpressionLiteral::Number(value), dummy_span())
 }
 
+fn is_type_expression(expr: &Expression) -> bool {
+    match expr {
+        Expression::IntrinsicType(IntrinsicType::Type, _) => true,
+        Expression::AttachImplementation { type_expr, .. } => is_type_expression(type_expr),
+        _ => false,
+    }
+}
+
 pub fn interpret_expression(
     expr: Expression,
     context: &mut Context,
@@ -204,13 +212,27 @@ pub fn interpret_expression(
         } => {
             let function_value = interpret_expression(*function, context)?;
             let argument_value = interpret_expression(*argument, context)?;
-            match function_value {
-                Expression::Function {
-                    parameter,
-                    return_type: _,
-                    body,
-                    span: _,
-                } => {
+
+            let effective_function = if let Expression::Identifier(ident, _) = &function_value {
+                context.bindings.get(&ident.0).and_then(|b| match &b.0 {
+                    BindingContext::Bound(v) | BindingContext::BoundPreserved(v) => Some(v.clone()),
+                    _ => None,
+                })
+            } else {
+                Some(function_value.clone())
+            };
+
+            if let Some(Expression::Function {
+                parameter,
+                return_type,
+                body,
+                span: _,
+            }) = effective_function
+            {
+                let is_direct = matches!(function_value, Expression::Function { .. });
+                let returns_type = is_type_expression(&return_type);
+
+                if is_direct || returns_type {
                     let mut call_context = context.clone();
                     bind_pattern_from_value(
                         parameter,
@@ -219,8 +241,12 @@ pub fn interpret_expression(
                         Vec::new(),
                         false,
                     )?;
-                    interpret_expression(*body, &mut call_context)
+                    return interpret_expression(*body, &mut call_context);
                 }
+            }
+
+            match function_value {
+                Expression::Function { .. } => unreachable!(), // Handled above
                 other => {
                     if is_resolved_constant(&other) {
                         Err(diagnostic("Attempted to call a non-function value", span))
@@ -607,11 +633,8 @@ fn get_trait_prop_of_type(
     }
 
     match value_type {
-        Expression::Struct(items, _) => {
-            get_struct_field(items, trait_prop).ok_or_else(|| {
-                diagnostic(format!("Missing field {} on type", trait_prop), span)
-            })
-        }
+        Expression::Struct(items, _) => get_struct_field(items, trait_prop)
+            .ok_or_else(|| diagnostic(format!("Missing field {} on type", trait_prop), span)),
         Expression::AttachImplementation {
             type_expr,
             implementation,
@@ -1043,6 +1066,18 @@ pub fn intrinsic_context() -> Context {
     let mut context = Context {
         bindings: std::collections::HashMap::new(),
     };
+
+    context.bindings.insert(
+        "type".to_string(),
+        (
+            BindingContext::Bound(Expression::AttachImplementation {
+                type_expr: Box::new(intrinsic_type_expr(IntrinsicType::Type)),
+                implementation: Box::new(Expression::Struct(vec![], dummy_span())),
+                span: dummy_span(),
+            }),
+            Vec::new(),
+        ),
+    );
 
     fn i32_binary_intrinsic(
         symbol: &str,
