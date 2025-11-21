@@ -1,4 +1,4 @@
-use silk::parsing::{Expression, parse_block};
+use silk::parsing::{Expression, ExpressionLiteral, parse_block};
 use silk::test_support::{
     Context, interpret_program, intrinsic_context, simplify_context, simplify_expression,
 };
@@ -64,4 +64,25 @@ fn test_nested_arithmetic() {
         {}
         ";
     evaluate_text_to_simplified_expression(program).expect("interpretation should succeed");
+}
+
+#[test]
+fn test_negative_number_literal() {
+    let program = "
+        let export(wasm) negative_literal = -5;
+        {}
+        ";
+    let (_result, context) =
+        evaluate_text_to_simplified_expression(program).expect("interpretation should succeed");
+
+    let binding = context
+        .annotated_bindings()
+        .into_iter()
+        .find(|b| b.name == "negative_literal")
+        .expect("exported binding found");
+
+    assert!(matches!(
+        binding.value,
+        Expression::Literal(ExpressionLiteral::Number(-5), _)
+    ));
 }
