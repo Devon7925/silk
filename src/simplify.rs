@@ -107,6 +107,8 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
 
 fn simplify_binding_pattern(pattern: BindingPattern) -> Result<BindingPattern, Diagnostic> {
     match pattern {
+        pat @ BindingPattern::Identifier(..) => Ok(pat),
+        pat @ BindingPattern::Literal(..) => Ok(pat),
         BindingPattern::Struct(items, source_span) => {
             let simplified_items = items
                 .into_iter()
@@ -130,7 +132,6 @@ fn simplify_binding_pattern(pattern: BindingPattern) -> Result<BindingPattern, D
             pattern: Box::new(simplify_binding_pattern(*pattern)?),
             span,
         }),
-        pat @ BindingPattern::Identifier(..) => Ok(pat),
     }
 }
 
