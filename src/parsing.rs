@@ -416,14 +416,15 @@ fn parse_simple_binding_pattern<'a>(
     if let Some((enum_identifier, remaining)) = parse_identifier(file) {
         if let Some(after_enum) = remaining.strip_prefix("::") {
             let after_enum = parse_optional_whitespace(after_enum);
-            let (variant_identifier, after_variant) = parse_identifier(after_enum).ok_or_else(|| {
-                diagnostic_here(
-                    source,
-                    after_enum,
-                    after_enum.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
-                    "Expected variant identifier after ::",
-                )
-            })?;
+            let (variant_identifier, after_variant) =
+                parse_identifier(after_enum).ok_or_else(|| {
+                    diagnostic_here(
+                        source,
+                        after_enum,
+                        after_enum.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
+                        "Expected variant identifier after ::",
+                    )
+                })?;
 
             let after_variant = parse_optional_whitespace(after_variant);
             let (payload, remaining) = if let Some(after_paren) = after_variant.strip_prefix("(") {
@@ -863,7 +864,11 @@ fn parse_property_access<'a>(
             diagnostic_here(
                 source,
                 after_separator,
-                after_separator.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
+                after_separator
+                    .chars()
+                    .next()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(1),
                 if is_enum_access {
                     "Expected identifier after :: in enum access"
                 } else {
@@ -952,16 +957,20 @@ fn parse_operation_expression_with_guard<'a>(
     file: &'a str,
     stop_before_grouping: bool,
 ) -> Result<(Expression, &'a str), Diagnostic> {
-    if stop_before_grouping {
-        if let Some(binding_parse) = parse_binding(source, file, true) {
-            return binding_parse;
-        }
-    }
+    parse_operation_expression_with_min_precedence(source, file, stop_before_grouping, 0)
+}
 
+fn parse_operation_expression_with_min_precedence<'a>(
+    source: &'a str,
+    file: &'a str,
+    stop_before_grouping: bool,
+    min_precedence: u8,
+) -> Result<(Expression, &'a str), Diagnostic> {
     fn parse_operations<'a>(
         source: &'a str,
         file: &'a str,
         stop_before_grouping: bool,
+        min_precedence: u8,
     ) -> Result<(Vec<Expression>, Vec<String>, &'a str), Diagnostic> {
         let mut expressions: Vec<Expression> = Vec::new();
         let mut operators: Vec<String> = Vec::new();
@@ -969,6 +978,10 @@ fn parse_operation_expression_with_guard<'a>(
         remaining = parse_optional_whitespace(remaining);
         expressions.push(expression);
         while let Some((operator, rest)) = parse_operator(remaining) {
+            // Stop if operator precedence is below minimum
+            if operator_precedence(&operator) < min_precedence {
+                break;
+            }
             let rest = parse_optional_whitespace(rest);
             let (next_expression, rest) = parse_function_call(source, rest, stop_before_grouping)?;
             let rest = parse_optional_whitespace(rest);
@@ -979,7 +992,8 @@ fn parse_operation_expression_with_guard<'a>(
         Ok((expressions, operators, remaining))
     }
 
-    let (expressions, operators, remaining) = parse_operations(source, file, stop_before_grouping)?;
+    let (expressions, operators, remaining) =
+        parse_operations(source, file, stop_before_grouping, min_precedence)?;
 
     fn reduce_stacks(
         operand_stack: &mut Vec<Expression>,
@@ -1121,7 +1135,10 @@ fn parse_binding<'a>(
         let file = parse_eq(file)
             .ok_or_else(|| diagnostic_here(source, file, 1, "Expected = after binding pattern"))?;
         let file = parse_optional_whitespace(file);
-        let (expr, file) = parse_operation_expression_with_guard(source, file, stop_before_grouping)?;
+        // Use min_precedence=2 to stop before && (precedence 1) and || (precedence 0)
+        // This enables let chains: "let x = a && b" parses as "(let x = a) && b"
+        let (expr, file) =
+            parse_operation_expression_with_min_precedence(source, file, stop_before_grouping, 2)?;
 
         Ok((Binding { pattern, expr }, file))
     }

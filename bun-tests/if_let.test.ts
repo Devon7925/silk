@@ -69,6 +69,44 @@ test("refutable let in if condition", async () => {
     expect(exports.let_as_expr(6)).toBe(0);
 }, TEST_TIMEOUT_MS);
 
+test("let chain with boolean condition", async () => {
+    const silkCode = `
+    let Option = enum { Some = i32, None = {} };
+    let export(wasm) check = fn(x: i32) -> i32 (
+        let foo = Option::Some(x);
+        if let Option::Some(a) = foo && a == 5 (
+            1
+        ) else (
+            0
+        )
+    );
+    {}
+    `;
+    const exports = await compileAndLoad(silkCode);
+    expect(exports.check(5)).toBe(1);
+    expect(exports.check(4)).toBe(0);
+}, TEST_TIMEOUT_MS);
+
+test("let chain with multiple lets", async () => {
+    const silkCode = `
+    let Level2 = enum { Some = i32, None = {} };
+    let Level1 = enum { Some = Level2, None = {} };
+    
+    let export(wasm) check = fn(x: i32) -> i32 (
+        let foo = Level1::Some(Level2::Some(x));
+
+        if let Level1::Some(a) = foo && let Level2::Some(b) = a (
+            b
+        ) else (
+            0
+        )
+    );
+    {}
+    `;
+    const exports = await compileAndLoad(silkCode);
+    expect(exports.check(10)).toBe(10);
+}, TEST_TIMEOUT_MS);
+
 // Cleanup after the test suite to avoid leaving temporary files behind.
 afterAll(() => {
     try {
