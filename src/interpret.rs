@@ -1,5 +1,6 @@
 use crate::{
     diagnostics::{Diagnostic, SourceSpan},
+    enum_normalization::normalize_enum_application,
     parsing::{
         BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, Expression,
         ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, TargetLiteral,
@@ -110,7 +111,9 @@ fn types_equivalent(left: &Expression, right: &Expression) -> bool {
             a_variants
                 .iter()
                 .zip(b_variants.iter())
-                .all(|((a_id, a_ty), (b_id, b_ty))| a_id.0 == b_id.0 && types_equivalent(a_ty, b_ty))
+                .all(|((a_id, a_ty), (b_id, b_ty))| {
+                    a_id.0 == b_id.0 && types_equivalent(a_ty, b_ty)
+                })
         }
         _ => false,
     }
@@ -133,10 +136,7 @@ fn is_type_expression(expr: &Expression) -> bool {
     }
 }
 
-fn enum_variant_info(
-    enum_type: &Expression,
-    variant: &Identifier,
-) -> Option<(usize, Expression)> {
+fn enum_variant_info(enum_type: &Expression, variant: &Identifier) -> Option<(usize, Expression)> {
     if let Expression::EnumType(variants, _) = enum_type {
         variants
             .iter()
@@ -148,29 +148,30 @@ fn enum_variant_info(
     }
 }
 
-fn resolve_enum_type_from_identifier(
-    enum_identifier: &Identifier,
+pub fn resolve_enum_type_expression(
+    enum_expr: &Expression,
     context: &mut Context,
 ) -> Option<Expression> {
-    let binding = context.bindings.get(&enum_identifier.0)?.0.clone();
-    let enum_value = match binding {
-        BindingContext::Bound(value)
-        | BindingContext::BoundPreserved(value)
-        | BindingContext::UnboundWithType(value) => value,
-        BindingContext::UnboundWithoutType => return None,
-    };
-
-    resolve_expression(enum_value, context).ok()
+    let interpreted = interpret_expression(enum_expr.clone(), context).ok()?;
+    resolve_expression(interpreted, context).ok()
 }
 
 pub fn interpret_expression(
     expr: Expression,
     context: &mut Context,
 ) -> Result<Expression, Diagnostic> {
+    let expr = normalize_enum_application(expr);
+
     let result = match expr {
-        expr @ (Expression::Literal(_, _)
-        | Expression::IntrinsicType(_, _)
-        | Expression::EnumType(_, _)) => Ok(expr),
+        Expression::EnumType(variants, span) => {
+            let mut evaluated_variants = Vec::with_capacity(variants.len());
+            for (id, ty_expr) in variants {
+                let evaluated_ty = interpret_expression(ty_expr, context)?;
+                evaluated_variants.push((id, evaluated_ty));
+            }
+            Ok(Expression::EnumType(evaluated_variants, span))
+        }
+        expr @ (Expression::Literal(_, _) | Expression::IntrinsicType(_, _)) => Ok(expr),
         Expression::If {
             condition,
             then_branch,
@@ -232,6 +233,7 @@ pub fn interpret_expression(
                     BindingContext::BoundPreserved(_) => {
                         return Ok(Expression::Identifier(identifier, span));
                     }
+                    BindingContext::UnboundWithType(_) => {}
                     _ => {}
                 }
                 Ok(Expression::Identifier(identifier, span))
@@ -281,10 +283,8 @@ pub fn interpret_expression(
                 Some(function_value.clone())
             };
 
-            if let Some(Expression::IntrinsicOperation(
-                IntrinsicOperation::EnumFromStruct,
-                _,
-            )) = &effective_function
+            if let Some(Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, _)) =
+                &effective_function
             {
                 return interpret_enum_from_struct(argument_value, span, context);
             }
@@ -487,12 +487,9 @@ pub fn interpret_expression(
                             _ => unreachable!(),
                         },
                     ),
-                    BinaryIntrinsicOperator::I32Divide => interpret_divide_intrinsic(
-                        evaluated_left,
-                        evaluated_right,
-                        context,
-                        span,
-                    ),
+                    BinaryIntrinsicOperator::I32Divide => {
+                        interpret_divide_intrinsic(evaluated_left, evaluated_right, context, span)
+                    }
                     BinaryIntrinsicOperator::I32Equal
                     | BinaryIntrinsicOperator::I32NotEqual
                     | BinaryIntrinsicOperator::I32LessThan
@@ -595,7 +592,7 @@ fn interpret_binding_pattern(
             payload,
             span,
         } => Ok(BindingPattern::EnumVariant {
-            enum_type,
+            enum_type: Box::new(interpret_expression(*enum_type, context)?),
             variant,
             payload: match payload {
                 Some(payload) => Some(Box::new(interpret_binding_pattern(*payload, context)?)),
@@ -696,7 +693,11 @@ fn get_type_of_expression(
             )?;
             interpret_expression(identifier_expr("bool"), context)
         }
-        Expression::EnumAccess { enum_expr, variant, span } => {
+        Expression::EnumAccess {
+            enum_expr,
+            variant,
+            span,
+        } => {
             let enum_type = get_type_of_expression(enum_expr, context)?;
             if let Some((_, payload_type)) = enum_variant_info(&enum_type, variant) {
                 if let Expression::Struct(fields, _) = &payload_type {
@@ -747,7 +748,11 @@ fn get_type_of_expression(
             let (value, _) = interpret_block(exprs.clone(), *span, &mut block_context)?;
             get_type_of_expression(&value, &mut block_context)
         }
-        Expression::FunctionCall { function, argument, span } => {
+        Expression::FunctionCall {
+            function,
+            argument,
+            span,
+        } => {
             let mut call_context = context.clone();
             let evaluated_call = interpret_expression(
                 Expression::FunctionCall {
@@ -774,7 +779,9 @@ fn get_type_of_expression(
             | IntrinsicType::Target
             | IntrinsicType::Type => Ok(Expression::IntrinsicType(IntrinsicType::Type, *span)),
         },
-        Expression::AttachImplementation { .. } => todo!(),
+        Expression::AttachImplementation { type_expr, .. } => {
+            get_type_of_expression(type_expr, context)
+        }
         Expression::Function {
             parameter,
             return_type,
@@ -830,13 +837,13 @@ fn get_type_of_expression(
             ),
             _,
         ) => interpret_expression(identifier_expr("bool"), context),
-        Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, span) => Ok(
-            Expression::FunctionType {
+        Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, span) => {
+            Ok(Expression::FunctionType {
                 parameter: Box::new(intrinsic_type_expr(IntrinsicType::Type)),
                 return_type: Box::new(intrinsic_type_expr(IntrinsicType::Type)),
                 span: *span,
-            },
-        ),
+            })
+        }
     }
 }
 
@@ -861,7 +868,7 @@ fn get_type_of_binding_pattern(
             Ok(Expression::Struct(struct_items, *span))
         }
         BindingPattern::EnumVariant { enum_type, .. } => {
-            Ok(Expression::Identifier(enum_type.clone(), dummy_span()))
+            interpret_expression(*enum_type.clone(), context)
         }
         BindingPattern::TypeHint(_, type_expr, _) => Ok(*type_expr.clone()),
         BindingPattern::Annotated { pattern, .. } => get_type_of_binding_pattern(pattern, context),
@@ -999,6 +1006,15 @@ fn interpret_binding(
     context: &mut Context,
     preserve: bool,
 ) -> Result<Expression, Diagnostic> {
+    if let Ok(value_type) = get_type_of_expression(&binding.expr, &mut context.clone()) {
+        bind_pattern_blanks(
+            binding.pattern.clone(),
+            context,
+            Vec::new(),
+            Some(value_type),
+        )?;
+    }
+
     let value = interpret_expression(binding.expr.clone(), context)?;
     let value_is_constant = is_resolved_constant(&value);
     let bound_success = bind_pattern_from_value(
@@ -1081,35 +1097,26 @@ fn bind_pattern_blanks(
             }
 
             for (field_identifier, field_pattern) in pattern_items {
-                let field_type_hint = type_lookup
-                    .as_ref()
-                    .and_then(|fields| {
-                        fields
-                            .iter()
-                            .find(|(name, _)| name.0 == field_identifier.0)
-                            .map(|(_, ty)| ty.clone())
-                    });
+                let field_type_hint = type_lookup.as_ref().and_then(|fields| {
+                    fields
+                        .iter()
+                        .find(|(name, _)| name.0 == field_identifier.0)
+                        .map(|(_, ty)| ty.clone())
+                });
                 bind_pattern_blanks(field_pattern, context, Vec::new(), field_type_hint)?;
             }
 
             Ok(())
         }
         BindingPattern::EnumVariant {
-            variant,
-            payload,
-            ..
+            variant, payload, ..
         } => {
             let payload_hint = type_hint
                 .as_ref()
                 .and_then(|hint| enum_variant_info(hint, &variant).map(|(_, ty)| ty));
 
             if let Some(payload_pattern) = payload {
-                bind_pattern_blanks(
-                    *payload_pattern,
-                    context,
-                    passed_annotations,
-                    payload_hint,
-                )?;
+                bind_pattern_blanks(*payload_pattern, context, passed_annotations, payload_hint)?;
             }
             Ok(())
         }
@@ -1160,12 +1167,14 @@ fn bind_pattern_from_value(
             Ok(true)
         }
         BindingPattern::Literal(literal, _) => match (literal, value) {
-            (ExpressionLiteral::Number(pattern_value), Expression::Literal(ExpressionLiteral::Number(value), _)) => {
-                Ok(pattern_value == *value)
-            }
-            (ExpressionLiteral::Boolean(pattern_value), Expression::Literal(ExpressionLiteral::Boolean(value), _)) => {
-                Ok(pattern_value == *value)
-            }
+            (
+                ExpressionLiteral::Number(pattern_value),
+                Expression::Literal(ExpressionLiteral::Number(value), _),
+            ) => Ok(pattern_value == *value),
+            (
+                ExpressionLiteral::Boolean(pattern_value),
+                Expression::Literal(ExpressionLiteral::Boolean(value), _),
+            ) => Ok(pattern_value == *value),
             _ => Ok(false),
         },
         BindingPattern::Struct(pattern_items, span) => {
@@ -1183,7 +1192,13 @@ fn bind_pattern_from_value(
                         diagnostic(format!("Missing field {}", field_identifier.0), field_span)
                     })?;
 
-                let matched = bind_pattern_from_value(field_pattern, field_value, context, Vec::new(), preserve)?;
+                let matched = bind_pattern_from_value(
+                    field_pattern,
+                    field_value,
+                    context,
+                    Vec::new(),
+                    preserve,
+                )?;
                 if !matched {
                     return Ok(false);
                 }
@@ -1207,10 +1222,18 @@ fn bind_pattern_from_value(
                 return Ok(false);
             };
 
-            let expected_enum_type = resolve_enum_type_from_identifier(&enum_type, context)
+            let enum_type_name = match enum_type.as_ref() {
+                Expression::Identifier(id, _) => id.0.clone(),
+                _ => "<unknown>".to_string(),
+            };
+
+            let expected_enum_type = resolve_enum_type_expression(enum_type.as_ref(), context)
                 .ok_or_else(|| {
                     diagnostic(
-                        format!("Enum pattern references unknown type: {}", enum_type.0),
+                        format!(
+                            "Enum pattern references unknown type: {}",
+                            enum_type_name
+                        ),
                         span,
                     )
                 })?;
@@ -1365,18 +1388,18 @@ fn evaluate_boolean_operand(expr: Expression, context: &mut Context) -> Result<b
 fn is_resolved_constant(expr: &Expression) -> bool {
     match expr {
         Expression::Literal(_, _) | Expression::IntrinsicType(_, _) => true,
-        Expression::EnumType(variants, _) => variants
-            .iter()
-            .all(|(_, ty)| is_resolved_constant(ty)),
+        Expression::EnumType(variants, _) => {
+            variants.iter().all(|(_, ty)| is_resolved_constant(ty))
+        }
         Expression::EnumValue {
-            enum_type,
-            payload,
-            ..
-        } => is_resolved_constant(enum_type)
-            && payload
-                .as_ref()
-                .map(|p| is_resolved_constant(p))
-                .unwrap_or(true),
+            enum_type, payload, ..
+        } => {
+            is_resolved_constant(enum_type)
+                && payload
+                    .as_ref()
+                    .map(|p| is_resolved_constant(p))
+                    .unwrap_or(true)
+        }
         Expression::EnumConstructor {
             enum_type,
             payload_type,
@@ -1706,9 +1729,9 @@ fn resolve_value(expr: Expression, context: &mut Context) -> Result<Expression, 
                         // Preserved bindings keep their identifiers in place unless they point to
                         // structs, which need to be resolved so field access can see concrete
                         // values during lowering.
-                        Expression::Struct(..) | Expression::EnumType(..) | Expression::EnumValue { .. } => {
-                            resolve_value(val.clone(), context)
-                        }
+                        Expression::Struct(..)
+                        | Expression::EnumType(..)
+                        | Expression::EnumValue { .. } => resolve_value(val.clone(), context),
                         _ => Ok(Expression::Identifier(ident, span)),
                     },
                     _ => Ok(Expression::Identifier(ident, span)),
@@ -1796,9 +1819,7 @@ impl UsageCounter {
                 }
             }
             Expression::EnumValue {
-                enum_type,
-                payload,
-                ..
+                enum_type, payload, ..
             } => {
                 self.count(enum_type);
                 if let Some(payload) = payload {
@@ -1887,9 +1908,10 @@ impl UsageCounter {
             BindingPattern::Struct(items, _) => {
                 items.iter().any(|(_, pat)| self.should_preserve(pat))
             }
-            BindingPattern::EnumVariant { payload, .. } => {
-                payload.as_ref().map(|p| self.should_preserve(p)).unwrap_or(false)
-            }
+            BindingPattern::EnumVariant { payload, .. } => payload
+                .as_ref()
+                .map(|p| self.should_preserve(p))
+                .unwrap_or(false),
         }
     }
 }
@@ -2182,8 +2204,14 @@ fn enum_intrinsic_exposes_function_type() {
                 return_type,
                 ..
             }) => {
-                assert!(matches!(parameter.as_ref(), Expression::IntrinsicType(IntrinsicType::Type, _)));
-                assert!(matches!(return_type.as_ref(), Expression::IntrinsicType(IntrinsicType::Type, _)));
+                assert!(matches!(
+                    parameter.as_ref(),
+                    Expression::IntrinsicType(IntrinsicType::Type, _)
+                ));
+                assert!(matches!(
+                    return_type.as_ref(),
+                    Expression::IntrinsicType(IntrinsicType::Type, _)
+                ));
             }
             other => panic!("unexpected enum intrinsic type {other:?}"),
         },
@@ -2258,7 +2286,9 @@ fn enum_rejects_value_payloads() {
     assert!(result.is_err(), "expected enum construction to fail");
     let error = result.err().unwrap();
     assert!(
-        error.message.contains("Enum variant payload must be a type"),
+        error
+            .message
+            .contains("Enum variant payload must be a type"),
         "unexpected error: {}",
         error.message
     );
@@ -2286,4 +2316,3 @@ fn interpret_enum_from_struct(
 
     Ok(Expression::EnumType(evaluated_variants, span))
 }
-

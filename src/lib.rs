@@ -1,4 +1,5 @@
 mod diagnostics;
+mod enum_normalization;
 mod interpret;
 pub mod parsing;
 mod simplify;

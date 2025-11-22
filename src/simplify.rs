@@ -1,6 +1,7 @@
 use crate::interpret::Context;
 use crate::{
     Diagnostic,
+    enum_normalization::normalize_enum_application,
     interpret::BindingContext,
     parsing::{Binding, BindingPattern, Expression, IntrinsicOperation},
 };
@@ -9,7 +10,7 @@ use crate::{
 use crate::parsing::{BindingAnnotation, ExpressionLiteral, TargetLiteral};
 
 pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
-    match expr {
+    match normalize_enum_application(expr) {
         Expression::IntrinsicOperation(
             IntrinsicOperation::Binary(left, right, op),
             source_span,
@@ -21,12 +22,9 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             ),
             source_span,
         )),
-        Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, source_span) => {
-            Ok(Expression::IntrinsicOperation(
-                IntrinsicOperation::EnumFromStruct,
-                source_span,
-            ))
-        }
+        Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, source_span) => Ok(
+            Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, source_span),
+        ),
         Expression::AttachImplementation { type_expr, .. } => simplify_expression(*type_expr),
         Expression::If {
             condition,
@@ -211,7 +209,7 @@ fn simplify_binding_pattern(pattern: BindingPattern) -> Result<BindingPattern, D
             payload,
             span,
         } => Ok(BindingPattern::EnumVariant {
-            enum_type,
+            enum_type: Box::new(simplify_expression(*enum_type)?),
             variant,
             payload: match payload {
                 Some(payload) => Some(Box::new(simplify_binding_pattern(*payload)?)),

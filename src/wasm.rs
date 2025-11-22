@@ -90,7 +90,8 @@ fn materialize_enum_value(enum_value: &Expression) -> Option<Expression> {
             }
 
             let payload_struct = Expression::Struct(payload_fields, *span);
-            let tag_expr = Expression::Literal(ExpressionLiteral::Number(*variant_index as i32), *span);
+            let tag_expr =
+                Expression::Literal(ExpressionLiteral::Number(*variant_index as i32), *span);
             return Some(Expression::Struct(
                 vec![
                     (Identifier("payload".to_string()), payload_struct),
@@ -103,7 +104,10 @@ fn materialize_enum_value(enum_value: &Expression) -> Option<Expression> {
     None
 }
 
-fn enum_wasm_type(enum_type: &Expression, ctx: &interpret::Context) -> Result<WasmType, Diagnostic> {
+fn enum_wasm_type(
+    enum_type: &Expression,
+    ctx: &interpret::Context,
+) -> Result<WasmType, Diagnostic> {
     if let Expression::EnumType(variants, _span) = enum_type {
         let mut payload_fields = Vec::new();
         for (id, ty) in variants {
@@ -126,34 +130,25 @@ fn enum_wasm_type(enum_type: &Expression, ctx: &interpret::Context) -> Result<Wa
 }
 
 fn enum_variant_index_from_context(
-    enum_identifier: &Identifier,
+    enum_expr: &Expression,
     variant: &Identifier,
     context: &interpret::Context,
     span: SourceSpan,
 ) -> Result<usize, Diagnostic> {
-    if let Some((binding, _)) = context.bindings.get(&enum_identifier.0) {
-        if let interpret::BindingContext::Bound(value)
-        | interpret::BindingContext::BoundPreserved(value) = binding
+    let mut ctx = context.clone();
+    if let Some(Expression::EnumType(variants, _)) =
+        interpret::resolve_enum_type_expression(enum_expr, &mut ctx)
+    {
+        if let Some((index, _)) = variants
+            .iter()
+            .enumerate()
+            .find(|(_, (id, _))| id.0 == variant.0)
         {
-            if let Expression::EnumType(variants, _) = value {
-                if let Some((index, _)) = variants
-                    .iter()
-                    .enumerate()
-                    .find(|(_, (id, _))| id.0 == variant.0)
-                {
-                    return Ok(index);
-                }
-            }
+            return Ok(index);
         }
     }
 
-    Err(
-        Diagnostic::new(format!(
-            "Unknown enum `{}` or variant `{}` in wasm lowering",
-            enum_identifier.0, variant.0
-        ))
-        .with_span(span),
-    )
+    Err(Diagnostic::new("Unknown enum or variant in wasm lowering").with_span(span))
 }
 
 struct TypeContext {
@@ -379,10 +374,10 @@ fn collect_types(
             collect_types(right, ctx, locals_types, context)?;
         }
         Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, span) => {
-            return Err(Diagnostic::new(
-                "enum intrinsic should be resolved before wasm lowering",
-            )
-            .with_span(*span))
+            return Err(
+                Diagnostic::new("enum intrinsic should be resolved before wasm lowering")
+                    .with_span(*span),
+            );
         }
         Expression::PropertyAccess { object, .. } => {
             collect_types(object, ctx, locals_types, context)?;
@@ -467,9 +462,11 @@ fn infer_type(
         }
         Expression::Binding(..) => Ok(WasmType::I32),
         Expression::EnumType(_, _) => enum_wasm_type(expr, context),
-        Expression::EnumConstructor { enum_type, .. } | Expression::EnumAccess { enum_expr: enum_type, .. } => {
-            enum_wasm_type(enum_type, context)
-        }
+        Expression::EnumConstructor { enum_type, .. }
+        | Expression::EnumAccess {
+            enum_expr: enum_type,
+            ..
+        } => enum_wasm_type(enum_type, context),
         _ => Ok(WasmType::I32),
     }
 }
@@ -605,14 +602,14 @@ fn extract_function_params(
             let name = extract_identifier_from_pattern(*inner)?;
             Ok(vec![WasmFunctionParam { name, ty }])
         }
-        BindingPattern::EnumVariant { .. } => Err(
-            Diagnostic::new("Enum patterns are not supported in exported parameters")
-                .with_span(pattern.span()),
-        ),
-        BindingPattern::Literal(_, _) => Err(
-            Diagnostic::new("Literal patterns cannot be used in function parameters")
-                .with_span(pattern.span()),
-        ),
+        BindingPattern::EnumVariant { .. } => Err(Diagnostic::new(
+            "Enum patterns are not supported in exported parameters",
+        )
+        .with_span(pattern.span())),
+        BindingPattern::Literal(_, _) => Err(Diagnostic::new(
+            "Literal patterns cannot be used in function parameters",
+        )
+        .with_span(pattern.span())),
         BindingPattern::Identifier(_, _) => Err(Diagnostic::new(
             "Wasm exports currently require parameter type hints",
         )
@@ -640,14 +637,14 @@ fn extract_identifier_from_pattern(pattern: BindingPattern) -> Result<String, Di
             payload: Some(payload),
             ..
         } => extract_identifier_from_pattern(*payload),
-        BindingPattern::EnumVariant { .. } => Err(
-            Diagnostic::new("Cannot extract identifier from enum pattern")
-                .with_span(pattern.span()),
-        ),
-        BindingPattern::Literal(_, _) => Err(
-            Diagnostic::new("Literal patterns cannot be used in function parameters")
-                .with_span(pattern.span()),
-        ),
+        BindingPattern::EnumVariant { .. } => Err(Diagnostic::new(
+            "Cannot extract identifier from enum pattern",
+        )
+        .with_span(pattern.span())),
+        BindingPattern::Literal(_, _) => Err(Diagnostic::new(
+            "Literal patterns cannot be used in function parameters",
+        )
+        .with_span(pattern.span())),
     }
 }
 
@@ -718,7 +715,9 @@ fn collect_locals_for_pattern(
         }
         BindingPattern::Struct(items, span) => {
             let WasmType::Struct(field_types) = expr_type else {
-                return Err(Diagnostic::new("Struct pattern requires struct value type").with_span(span));
+                return Err(
+                    Diagnostic::new("Struct pattern requires struct value type").with_span(span)
+                );
             };
 
             for (field_identifier, field_pattern) in items {
@@ -727,10 +726,19 @@ fn collect_locals_for_pattern(
                     .find(|(name, _)| name == &field_identifier.0)
                     .map(|(_, ty)| ty.clone())
                     .ok_or_else(|| {
-                        Diagnostic::new(format!("Missing field {} in struct type", field_identifier.0))
-                            .with_span(field_pattern.span())
+                        Diagnostic::new(format!(
+                            "Missing field {} in struct type",
+                            field_identifier.0
+                        ))
+                        .with_span(field_pattern.span())
                     })?;
-                collect_locals_for_pattern(field_pattern, field_type, locals_types, locals, context)?;
+                collect_locals_for_pattern(
+                    field_pattern,
+                    field_type,
+                    locals_types,
+                    locals,
+                    context,
+                )?;
             }
             Ok(())
         }
@@ -757,10 +765,10 @@ fn collect_locals_for_pattern(
                                 .with_span(span)
                         })?;
                     let WasmType::Struct(payload_fields) = payload_struct else {
-                        return Err(
-                            Diagnostic::new("Enum payload is not a struct in wasm lowering")
-                                .with_span(span),
-                        );
+                        return Err(Diagnostic::new(
+                            "Enum payload is not a struct in wasm lowering",
+                        )
+                        .with_span(span));
                     };
                     payload_fields
                         .iter()
@@ -775,7 +783,7 @@ fn collect_locals_for_pattern(
                     return Err(
                         Diagnostic::new("Enum pattern requires struct-backed enum type")
                             .with_span(span),
-                    )
+                    );
                 }
             };
 
@@ -803,14 +811,7 @@ fn emit_expression(
     context: &interpret::Context,
 ) -> Result<(), Diagnostic> {
     if let Some(struct_expr) = materialize_enum_value(expr) {
-        return emit_expression(
-            &struct_expr,
-            locals,
-            locals_types,
-            func,
-            type_ctx,
-            context,
-        );
+        return emit_expression(&struct_expr, locals, locals_types, func, type_ctx, context);
     }
     match expr {
         Expression::Literal(ExpressionLiteral::Number(value), _) => {
@@ -879,14 +880,7 @@ fn emit_expression(
                     payload: Some(argument.clone()),
                     span: *span,
                 };
-                return emit_expression(
-                    &enum_value,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    context,
-                );
+                return emit_expression(&enum_value, locals, locals_types, func, type_ctx, context);
             }
 
             Err(
@@ -955,9 +949,9 @@ fn emit_expression(
                             .with_span(*pattern_span)
                     })? as u32;
 
-                let type_index = type_ctx
-                    .get_type_index(&fields)
-                    .ok_or_else(|| Diagnostic::new("Enum type not registered").with_span(*pattern_span))?;
+                let type_index = type_ctx.get_type_index(&fields).ok_or_else(|| {
+                    Diagnostic::new("Enum type not registered").with_span(*pattern_span)
+                })?;
 
                 let payload_struct = fields
                     .iter()
@@ -965,24 +959,22 @@ fn emit_expression(
                     .map(|(_, ty)| ty)
                     .expect("Payload field should exist");
                 let WasmType::Struct(payload_fields) = payload_struct else {
-                    return Err(
-                        Diagnostic::new("Enum payload expected to be a struct")
-                            .with_span(*pattern_span),
-                    );
+                    return Err(Diagnostic::new("Enum payload expected to be a struct")
+                        .with_span(*pattern_span));
                 };
-                let payload_type_index = type_ctx
-                    .get_type_index(payload_fields)
-                    .ok_or_else(|| Diagnostic::new("Enum payload type not registered").with_span(*pattern_span))?;
+                let payload_type_index =
+                    type_ctx.get_type_index(payload_fields).ok_or_else(|| {
+                        Diagnostic::new("Enum payload type not registered").with_span(*pattern_span)
+                    })?;
                 let variant_field_index = payload_fields
                     .iter()
                     .position(|(name, _)| name == &variant.0)
                     .ok_or_else(|| {
-                        Diagnostic::new("Enum variant payload missing")
-                            .with_span(*pattern_span)
+                        Diagnostic::new("Enum variant payload missing").with_span(*pattern_span)
                     })? as u32;
 
                 let variant_index = enum_variant_index_from_context(
-                    enum_type,
+                    enum_type.as_ref(),
                     variant,
                     context,
                     *pattern_span,
@@ -1039,7 +1031,14 @@ fn emit_expression(
 
                     match field_pattern {
                         BindingPattern::Literal(ExpressionLiteral::Number(expected), _) => {
-                            emit_expression(value_expr, locals, locals_types, func, type_ctx, context)?;
+                            emit_expression(
+                                value_expr,
+                                locals,
+                                locals_types,
+                                func,
+                                type_ctx,
+                                context,
+                            )?;
                             func.instruction(&Instruction::I32Const(*expected));
                             func.instruction(&Instruction::I32Eq);
                             if comparisons_emitted {
@@ -1048,7 +1047,14 @@ fn emit_expression(
                             comparisons_emitted = true;
                         }
                         BindingPattern::Identifier(identifier, _) => {
-                            emit_expression(value_expr, locals, locals_types, func, type_ctx, context)?;
+                            emit_expression(
+                                value_expr,
+                                locals,
+                                locals_types,
+                                func,
+                                type_ctx,
+                                context,
+                            )?;
                             let local_index = locals
                                 .get(&identifier.0)
                                 .copied()
@@ -1056,12 +1062,10 @@ fn emit_expression(
                             func.instruction(&Instruction::LocalSet(local_index));
                         }
                         _ => {
-                            return Err(
-                                Diagnostic::new(
-                                    "Unsupported pattern in struct binding for wasm emission",
-                                )
-                                .with_span(field_pattern.span()),
-                            );
+                            return Err(Diagnostic::new(
+                                "Unsupported pattern in struct binding for wasm emission",
+                            )
+                            .with_span(field_pattern.span()));
                         }
                     }
                 }
