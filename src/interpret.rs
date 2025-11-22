@@ -1222,8 +1222,21 @@ fn bind_pattern_from_value(
                 return Ok(false);
             };
 
+            let enum_type_name = match enum_type.as_ref() {
+                Expression::Identifier(id, _) => id.0.clone(),
+                _ => "<unknown>".to_string(),
+            };
+
             let expected_enum_type = resolve_enum_type_expression(enum_type.as_ref(), context)
-                .ok_or_else(|| diagnostic("Enum pattern references unknown type", span))?;
+                .ok_or_else(|| {
+                    diagnostic(
+                        format!(
+                            "Enum pattern references unknown type: {}",
+                            enum_type_name
+                        ),
+                        span,
+                    )
+                })?;
             let actual_enum_type = resolve_expression(value_enum.as_ref().clone(), context)?;
 
             if !types_equivalent(&expected_enum_type, &actual_enum_type) {
