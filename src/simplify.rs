@@ -1,6 +1,7 @@
 use crate::interpret::Context;
 use crate::{
     Diagnostic,
+    enum_normalization::normalize_enum_application,
     interpret::BindingContext,
     parsing::{Binding, BindingPattern, Expression, IntrinsicOperation},
 };
@@ -9,7 +10,7 @@ use crate::{
 use crate::parsing::{BindingAnnotation, ExpressionLiteral, TargetLiteral};
 
 pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
-    match expr {
+    match normalize_enum_application(expr) {
         Expression::IntrinsicOperation(
             IntrinsicOperation::Binary(left, right, op),
             source_span,
@@ -74,44 +75,11 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             function,
             argument,
             span,
-        } => {
-            if let Expression::FunctionCall {
-                function: inner_function,
-                argument: inner_argument,
-                span: inner_span,
-            } = function.as_ref()
-            {
-                if let Expression::EnumAccess {
-                    enum_expr,
-                    variant,
-                    span: access_span,
-                } = inner_argument.as_ref()
-                {
-                    let enum_expr_span = enum_expr.span();
-                    let applied_enum = Expression::FunctionCall {
-                        function: Box::new(inner_function.as_ref().clone()),
-                        argument: Box::new(enum_expr.as_ref().clone()),
-                        span: inner_span.merge(&enum_expr_span),
-                    };
-
-                    return simplify_expression(Expression::FunctionCall {
-                        function: Box::new(Expression::EnumAccess {
-                            enum_expr: Box::new(applied_enum),
-                            variant: variant.clone(),
-                            span: *access_span,
-                        }),
-                        argument,
-                        span,
-                    });
-                }
-            }
-
-            Ok(Expression::FunctionCall {
-                function: Box::new(simplify_expression(*function)?),
-                argument: Box::new(simplify_expression(*argument)?),
-                span,
-            })
-        }
+        } => Ok(Expression::FunctionCall {
+            function: Box::new(simplify_expression(*function)?),
+            argument: Box::new(simplify_expression(*argument)?),
+            span,
+        }),
         Expression::PropertyAccess {
             object,
             property,

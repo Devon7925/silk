@@ -1,5 +1,6 @@
 use crate::{
     diagnostics::{Diagnostic, SourceSpan},
+    enum_normalization::normalize_enum_application,
     parsing::{
         BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, Expression,
         ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, TargetLiteral,
@@ -159,75 +160,7 @@ pub fn interpret_expression(
     expr: Expression,
     context: &mut Context,
 ) -> Result<Expression, Diagnostic> {
-    let expr = match expr {
-        Expression::FunctionCall {
-            function,
-            argument,
-            span,
-        } => {
-            if let Expression::EnumAccess {
-                enum_expr,
-                variant,
-                span: access_span,
-            } = argument.as_ref()
-            {
-                let enum_span = enum_expr.span();
-                let applied_enum = Expression::FunctionCall {
-                    function: function.clone(),
-                    argument: enum_expr.clone(),
-                    span: span.merge(&enum_span),
-                };
-
-                Expression::EnumAccess {
-                    enum_expr: Box::new(applied_enum),
-                    variant: variant.clone(),
-                    span: *access_span,
-                }
-            } else if let Expression::FunctionCall {
-                function: inner_function,
-                argument: inner_argument,
-                span: inner_span,
-            } = function.as_ref()
-            {
-                if let Expression::EnumAccess {
-                    enum_expr,
-                    variant,
-                    span: access_span,
-                } = inner_argument.as_ref()
-                {
-                    let enum_expr_span = enum_expr.span();
-                    let applied_enum = Expression::FunctionCall {
-                        function: Box::new(inner_function.as_ref().clone()),
-                        argument: Box::new(enum_expr.as_ref().clone()),
-                        span: inner_span.merge(&enum_expr_span),
-                    };
-
-                    Expression::FunctionCall {
-                        function: Box::new(Expression::EnumAccess {
-                            enum_expr: Box::new(applied_enum),
-                            variant: variant.clone(),
-                            span: *access_span,
-                        }),
-                        argument,
-                        span,
-                    }
-                } else {
-                    Expression::FunctionCall {
-                        function,
-                        argument,
-                        span,
-                    }
-                }
-            } else {
-                Expression::FunctionCall {
-                    function,
-                    argument,
-                    span,
-                }
-            }
-        }
-        other => other,
-    };
+    let expr = normalize_enum_application(expr);
 
     let result = match expr {
         Expression::EnumType(variants, span) => {
