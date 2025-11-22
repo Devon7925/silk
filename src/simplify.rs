@@ -21,12 +21,9 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             ),
             source_span,
         )),
-        Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, source_span) => {
-            Ok(Expression::IntrinsicOperation(
-                IntrinsicOperation::EnumFromStruct,
-                source_span,
-            ))
-        }
+        Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, source_span) => Ok(
+            Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, source_span),
+        ),
         Expression::AttachImplementation { type_expr, .. } => simplify_expression(*type_expr),
         Expression::If {
             condition,
@@ -77,11 +74,44 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             function,
             argument,
             span,
-        } => Ok(Expression::FunctionCall {
-            function: Box::new(simplify_expression(*function)?),
-            argument: Box::new(simplify_expression(*argument)?),
-            span,
-        }),
+        } => {
+            if let Expression::FunctionCall {
+                function: inner_function,
+                argument: inner_argument,
+                span: inner_span,
+            } = function.as_ref()
+            {
+                if let Expression::EnumAccess {
+                    enum_expr,
+                    variant,
+                    span: access_span,
+                } = inner_argument.as_ref()
+                {
+                    let enum_expr_span = enum_expr.span();
+                    let applied_enum = Expression::FunctionCall {
+                        function: Box::new(inner_function.as_ref().clone()),
+                        argument: Box::new(enum_expr.as_ref().clone()),
+                        span: inner_span.merge(&enum_expr_span),
+                    };
+
+                    return simplify_expression(Expression::FunctionCall {
+                        function: Box::new(Expression::EnumAccess {
+                            enum_expr: Box::new(applied_enum),
+                            variant: variant.clone(),
+                            span: *access_span,
+                        }),
+                        argument,
+                        span,
+                    });
+                }
+            }
+
+            Ok(Expression::FunctionCall {
+                function: Box::new(simplify_expression(*function)?),
+                argument: Box::new(simplify_expression(*argument)?),
+                span,
+            })
+        }
         Expression::PropertyAccess {
             object,
             property,
@@ -211,7 +241,7 @@ fn simplify_binding_pattern(pattern: BindingPattern) -> Result<BindingPattern, D
             payload,
             span,
         } => Ok(BindingPattern::EnumVariant {
-            enum_type,
+            enum_type: Box::new(simplify_expression(*enum_type)?),
             variant,
             payload: match payload {
                 Some(payload) => Some(Box::new(simplify_binding_pattern(*payload)?)),

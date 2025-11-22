@@ -15,8 +15,8 @@ fn functions_accept_struct_parameters() {
         rotated.first + rotated.second
     ";
 
-    let (expr, _) = evaluate_text_to_expression(program)
-        .unwrap_or_else(|err| panic!("{}", err.message));
+    let (expr, _) =
+        evaluate_text_to_expression(program).unwrap_or_else(|err| panic!("{}", err.message));
 
     match expr {
         Expression::Literal(ExpressionLiteral::Number(value), _) => assert_eq!(value, -1),
@@ -75,8 +75,8 @@ fn functions_can_return_structs() {
         pair.second
     ";
 
-    let (expr, _) = evaluate_text_to_expression(program)
-        .unwrap_or_else(|err| panic!("{}", err.message));
+    let (expr, _) =
+        evaluate_text_to_expression(program).unwrap_or_else(|err| panic!("{}", err.message));
 
     match expr {
         Expression::Literal(ExpressionLiteral::Number(value), _) => assert_eq!(value, 6),

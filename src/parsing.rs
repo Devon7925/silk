@@ -9,7 +9,7 @@ pub enum BindingPattern {
     Literal(ExpressionLiteral, SourceSpan),
     Struct(Vec<(Identifier, BindingPattern)>, SourceSpan),
     EnumVariant {
-        enum_type: Identifier,
+        enum_type: Box<Expression>,
         variant: Identifier,
         payload: Option<Box<BindingPattern>>,
         span: SourceSpan,
@@ -413,50 +413,61 @@ fn parse_simple_binding_pattern<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Result<(BindingPattern, &'a str), Diagnostic> {
-    if let Some((enum_identifier, remaining)) = parse_identifier(file) {
-        if let Some(after_enum) = remaining.strip_prefix("::") {
-            let after_enum = parse_optional_whitespace(after_enum);
-            let (variant_identifier, after_variant) =
-                parse_identifier(after_enum).ok_or_else(|| {
-                    diagnostic_here(
-                        source,
-                        after_enum,
-                        after_enum.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
-                        "Expected variant identifier after ::",
-                    )
-                })?;
+    let search_slice = if let Some(eq_index) = file.find('=') {
+        &file[..eq_index]
+    } else {
+        file
+    };
 
-            let after_variant = parse_optional_whitespace(after_variant);
-            let (payload, remaining) = if let Some(after_paren) = after_variant.strip_prefix("(") {
-                let after_paren = parse_optional_whitespace(after_paren);
-                let (payload, rest) = parse_binding_pattern_with_source(source, after_paren)?;
-                let rest = parse_optional_whitespace(rest);
-                let rest = rest.strip_prefix(")").ok_or_else(|| {
-                    diagnostic_here(
-                        source,
-                        rest,
-                        rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
-                        "Expected ) after enum payload pattern",
-                    )
-                })?;
-                (Some(Box::new(payload)), rest)
-            } else {
-                (None, after_variant)
-            };
-            let span = consumed_span(source, file, remaining);
-            return Ok((
-                BindingPattern::EnumVariant {
-                    enum_type: enum_identifier,
-                    variant: variant_identifier,
-                    payload,
-                    span,
-                },
-                remaining,
-            ));
-        }
+    if let Some(sep_index) = search_slice.find("::") {
+        let start_slice = file;
+        let (enum_part, after_enum) = file.split_at(sep_index);
+        let (enum_type, _enum_remaining) =
+            parse_operation_expression_with_source(source, enum_part)?;
 
+        let mut after_enum = &after_enum["::".len()..];
+        after_enum = parse_optional_whitespace(after_enum);
+        let (variant_identifier, after_variant) =
+            parse_identifier(after_enum).ok_or_else(|| {
+                diagnostic_here(
+                    source,
+                    after_enum,
+                    after_enum.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
+                    "Expected variant identifier after ::",
+                )
+            })?;
+
+        let after_variant = parse_optional_whitespace(after_variant);
+        let (payload, remaining) = if let Some(after_paren) = after_variant.strip_prefix("(") {
+            let after_paren = parse_optional_whitespace(after_paren);
+            let (payload, rest) = parse_binding_pattern_with_source(source, after_paren)?;
+            let rest = parse_optional_whitespace(rest);
+            let rest = rest.strip_prefix(")").ok_or_else(|| {
+                diagnostic_here(
+                    source,
+                    rest,
+                    rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
+                    "Expected ) after enum payload pattern",
+                )
+            })?;
+            (Some(Box::new(payload)), rest)
+        } else {
+            (None, after_variant)
+        };
+        let span = consumed_span(source, start_slice, remaining);
+        return Ok((
+            BindingPattern::EnumVariant {
+                enum_type: Box::new(enum_type),
+                variant: variant_identifier,
+                payload,
+                span,
+            },
+            remaining,
+        ));
+    }
+    if let Some((identifier, remaining)) = parse_identifier(file) {
         let span = consumed_span(source, file, remaining);
-        return Ok((BindingPattern::Identifier(enum_identifier, span), remaining));
+        return Ok((BindingPattern::Identifier(identifier, span), remaining));
     }
     if let Some((literal, remaining)) = parse_literal(file) {
         let span = consumed_span(source, file, remaining);
@@ -921,7 +932,9 @@ fn parse_function_call<'a>(
             break;
         }
 
-        let Ok((argument_expr, rest)) = parse_property_access(source, remaining, stop_before_grouping) else {
+        let Ok((argument_expr, rest)) =
+            parse_property_access(source, remaining, stop_before_grouping)
+        else {
             break;
         };
 
