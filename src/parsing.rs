@@ -803,7 +803,15 @@ fn parse_isolated_expression_with_source<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Result<(Expression, &'a str), Diagnostic> {
-    if let Some(binding_parse) = parse_binding(source, file, false) {
+    parse_isolated_expression_with_source_with_guard(source, file, false)
+}
+
+fn parse_isolated_expression_with_source_with_guard<'a>(
+    source: &'a str,
+    file: &'a str,
+    stop_before_grouping: bool,
+) -> Result<(Expression, &'a str), Diagnostic> {
+    if let Some(binding_parse) = parse_binding(source, file, stop_before_grouping) {
         return binding_parse;
     }
     if let Some(function_parse) = parse_function_literal(source, file) {
@@ -845,9 +853,11 @@ fn parse_isolated_expression_with_source<'a>(
 fn parse_property_access<'a>(
     source: &'a str,
     file: &'a str,
+    stop_before_grouping: bool,
 ) -> Result<(Expression, &'a str), Diagnostic> {
     let expression_start = file;
-    let (mut expr, mut remaining) = parse_isolated_expression_with_source(source, file)?;
+    let (mut expr, mut remaining) =
+        parse_isolated_expression_with_source_with_guard(source, file, stop_before_grouping)?;
 
     loop {
         let lookahead = parse_optional_whitespace(remaining);
@@ -902,7 +912,7 @@ fn parse_function_call<'a>(
     stop_before_grouping: bool,
 ) -> Result<(Expression, &'a str), Diagnostic> {
     let mut exprs = vec![];
-    let (function_expr, mut remaining) = parse_property_access(source, file)?;
+    let (function_expr, mut remaining) = parse_property_access(source, file, stop_before_grouping)?;
     remaining = parse_optional_whitespace(remaining);
     exprs.push(function_expr);
     loop {
@@ -911,7 +921,7 @@ fn parse_function_call<'a>(
             break;
         }
 
-        let Ok((argument_expr, rest)) = parse_property_access(source, remaining) else {
+        let Ok((argument_expr, rest)) = parse_property_access(source, remaining, stop_before_grouping) else {
             break;
         };
 
