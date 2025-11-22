@@ -148,7 +148,7 @@ fn enum_variant_info(enum_type: &Expression, variant: &Identifier) -> Option<(us
     }
 }
 
-fn resolve_enum_type_expression(
+pub fn resolve_enum_type_expression(
     enum_expr: &Expression,
     context: &mut Context,
 ) -> Option<Expression> {

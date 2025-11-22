@@ -136,8 +136,9 @@ fn enum_variant_index_from_context(
     span: SourceSpan,
 ) -> Result<usize, Diagnostic> {
     let mut ctx = context.clone();
-    let interpreted = interpret::interpret_expression(enum_expr.clone(), &mut ctx)?;
-    if let Expression::EnumType(variants, _) = interpreted {
+    if let Some(Expression::EnumType(variants, _)) =
+        interpret::resolve_enum_type_expression(enum_expr, &mut ctx)
+    {
         if let Some((index, _)) = variants
             .iter()
             .enumerate()
