@@ -89,6 +89,13 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             property,
             span,
         }),
+        Expression::Return { value, span } => Ok(Expression::Return {
+            value: match value {
+                Some(expr) => Some(Box::new(simplify_expression(*expr)?)),
+                None => None,
+            },
+            span,
+        }),
         Expression::EnumType(variants, span) => Ok(Expression::EnumType(
             variants
                 .into_iter()
