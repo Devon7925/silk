@@ -93,7 +93,7 @@ test("let chain with multiple lets", async () => {
     let Level1 = enum { Some = Level2, None = {} };
     
     let export(wasm) check = fn(x: i32) -> i32 (
-        let foo = Level1::Some(Level2::Some(x));
+    let foo = if x > 0 (Level1::Some(Level2::Some(x))) else (Level1::None);
 
         if let Level1::Some(a) = foo && let Level2::Some(b) = a (
             b
@@ -105,6 +105,7 @@ test("let chain with multiple lets", async () => {
     `;
     const exports = await compileAndLoad(silkCode);
     expect(exports.check(10)).toBe(10);
+    expect(exports.check(-10)).toBe(0);
 }, TEST_TIMEOUT_MS);
 
 // Cleanup after the test suite to avoid leaving temporary files behind.

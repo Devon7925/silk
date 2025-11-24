@@ -6,10 +6,46 @@ use crate::{
         ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, TargetLiteral,
     },
 };
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreserveBehavior {
+    PreserveUsage,
+    PreserveBinding,
+    Inline,
+}
+
+impl PartialOrd for PreserveBehavior {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        use PreserveBehavior::*;
+        Some(match (self, other) {
+            (PreserveUsage, PreserveUsage) => std::cmp::Ordering::Equal,
+            (PreserveUsage, _) => std::cmp::Ordering::Greater,
+            (_, PreserveUsage) => std::cmp::Ordering::Less,
+            (PreserveBinding, PreserveBinding) => std::cmp::Ordering::Equal,
+            (PreserveBinding, Inline) => std::cmp::Ordering::Greater,
+            (Inline, PreserveBinding) => std::cmp::Ordering::Less,
+            (Inline, Inline) => std::cmp::Ordering::Equal,
+        })
+    }
+}
+
+impl Ord for PreserveBehavior {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use PreserveBehavior::*;
+        match (self, other) {
+            (PreserveUsage, PreserveUsage) => std::cmp::Ordering::Equal,
+            (PreserveUsage, _) => std::cmp::Ordering::Greater,
+            (_, PreserveUsage) => std::cmp::Ordering::Less,
+            (PreserveBinding, PreserveBinding) => std::cmp::Ordering::Equal,
+            (PreserveBinding, Inline) => std::cmp::Ordering::Greater,
+            (Inline, PreserveBinding) => std::cmp::Ordering::Less,
+            (Inline, Inline) => std::cmp::Ordering::Equal,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum BindingContext {
-    Bound(Expression),
-    BoundPreserved(Expression),
+    Bound(Expression, PreserveBehavior),
     UnboundWithType(Expression),
     UnboundWithoutType,
 }
@@ -32,7 +68,7 @@ impl Context {
             .iter()
             .filter(|(_, (_, annotations))| !annotations.is_empty())
             .filter_map(|(name, (binding, annotations))| match binding {
-                BindingContext::Bound(value) => Some(AnnotatedBinding {
+                BindingContext::Bound(value, _) => Some(AnnotatedBinding {
                     name: name.clone(),
                     annotations: annotations.clone(),
                     value: value.clone(),
@@ -156,6 +192,109 @@ pub fn resolve_enum_type_expression(
     resolve_expression(interpreted, context).ok()
 }
 
+fn resolve_operations(expr: Expression, context: &mut Context) -> Result<Expression, Diagnostic> {
+    match expr {
+        Expression::Operation {
+            operator,
+            left,
+            right,
+            span,
+        } => {
+            let mut type_context = context.clone();
+            let possible_binary_op = get_type_of_expression(&left, &mut type_context)
+                .and_then(|left_type| resolve_expression(left_type, &mut type_context))
+                .and_then(|resolved_left_type| {
+                    get_trait_prop_of_type(&resolved_left_type, &operator, span)
+                })
+                .map(|op_impl| {
+                    let Expression::Function {
+                        body: outer_body, ..
+                    } = op_impl
+                    else {
+                        return None;
+                    };
+                    let Expression::Function {
+                        body: inner_body, ..
+                    } = *outer_body
+                    else {
+                        return None;
+                    };
+
+                    if let Expression::IntrinsicOperation(
+                        IntrinsicOperation::Binary(_, _, binary_op),
+                        _,
+                    ) = *inner_body
+                    {
+                        Some(binary_op)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(None);
+
+            if let Some(binary_op) = possible_binary_op {
+                let resolved_left = resolve_operations(*left, context)?;
+                let resolved_right = resolve_operations(*right, context)?;
+                Ok(Expression::IntrinsicOperation(
+                    IntrinsicOperation::Binary(
+                        Box::new(resolved_left),
+                        Box::new(resolved_right),
+                        binary_op,
+                    ),
+                    span,
+                ))
+            } else {
+                Ok(Expression::Operation {
+                    operator,
+                    left,
+                    right,
+                    span,
+                })
+            }
+        }
+        Expression::IntrinsicOperation(
+            IntrinsicOperation::Binary(left, right, BinaryIntrinsicOperator::BooleanAnd),
+            span,
+        ) => {
+            let resolved_left = resolve_operations(*left, context)?;
+            let resolved_right = resolve_operations(*right, context)?;
+            Ok(Expression::IntrinsicOperation(
+                IntrinsicOperation::Binary(
+                    Box::new(resolved_left),
+                    Box::new(resolved_right),
+                    BinaryIntrinsicOperator::BooleanAnd,
+                ),
+                span,
+            ))
+        }
+        _ => Ok(expr),
+    }
+}
+
+fn collect_bindings(expr: &Expression, context: &mut Context) -> Result<(), Diagnostic> {
+    match expr {
+        Expression::Binding(binding, _) => {
+            let mut type_context = context.clone();
+            let value_type = get_type_of_expression(&binding.expr, &mut type_context).ok();
+            let resolved_type = if let Some(ty) = value_type {
+                resolve_expression(ty, context).ok()
+            } else {
+                None
+            };
+            bind_pattern_blanks(binding.pattern.clone(), context, Vec::new(), resolved_type)?;
+        }
+        Expression::IntrinsicOperation(
+            IntrinsicOperation::Binary(left, right, BinaryIntrinsicOperator::BooleanAnd),
+            _,
+        ) => {
+            collect_bindings(left, context)?;
+            collect_bindings(right, context)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 pub fn interpret_expression(
     expr: Expression,
     context: &mut Context,
@@ -188,16 +327,8 @@ pub fn interpret_expression(
                 .unwrap_or_else(|| Box::new(empty_struct_expr(SourceSpan::new(span.end(), 0))));
 
             let mut then_context = base_context.clone();
-            if let Expression::Binding(binding, _) = &condition_for_pattern {
-                let mut type_context = base_context.clone();
-                let value_type = get_type_of_expression(&binding.expr, &mut type_context).ok();
-                bind_pattern_blanks(
-                    binding.pattern.clone(),
-                    &mut then_context,
-                    Vec::new(),
-                    value_type,
-                )?;
-            }
+            let resolved_condition = resolve_operations(condition_for_pattern, context)?;
+            collect_bindings(&resolved_condition, &mut then_context)?;
 
             let (interpreted_then, then_type) = branch_type(&then_branch, &then_context)?;
             let (interpreted_else, else_type) = branch_type(&inferred_else_expr, &base_context)?;
@@ -227,11 +358,14 @@ pub fn interpret_expression(
         Expression::Identifier(identifier, span) => {
             if let Some(binding) = context.bindings.get(&identifier.0) {
                 match &binding.0 {
-                    BindingContext::Bound(expr) => {
-                        return Ok(expr.clone());
-                    }
-                    BindingContext::BoundPreserved(_) => {
+                    BindingContext::Bound(_, PreserveBehavior::PreserveUsage) => {
                         return Ok(Expression::Identifier(identifier, span));
+                    }
+                    BindingContext::Bound(
+                        expr,
+                        PreserveBehavior::Inline | PreserveBehavior::PreserveBinding,
+                    ) => {
+                        return Ok(expr.clone());
                     }
                     BindingContext::UnboundWithType(_) => {}
                     _ => {}
@@ -261,7 +395,9 @@ pub fn interpret_expression(
             },
             context,
         ),
-        Expression::Binding(binding, _) => interpret_binding(*binding, context, false),
+        Expression::Binding(binding, _) => {
+            interpret_binding(*binding, context, None).map(|(binding_result, _)| binding_result)
+        }
         Expression::Block(expressions, span) => {
             let (value, _) = interpret_block(expressions, span, context)?;
             Ok(value)
@@ -276,7 +412,7 @@ pub fn interpret_expression(
 
             let effective_function = if let Expression::Identifier(ident, _) = &function_value {
                 context.bindings.get(&ident.0).and_then(|b| match &b.0 {
-                    BindingContext::Bound(v) | BindingContext::BoundPreserved(v) => Some(v.clone()),
+                    BindingContext::Bound(v, _) => Some(v.clone()),
                     _ => None,
                 })
             } else {
@@ -306,7 +442,8 @@ pub fn interpret_expression(
                         &argument_value,
                         &mut call_context,
                         Vec::new(),
-                        false,
+                        PreserveBehavior::Inline,
+                        None,
                     )?;
                     return interpret_expression(*body, &mut call_context);
                 }
@@ -320,7 +457,7 @@ pub fn interpret_expression(
                 span: constructor_span,
             } = function_value.clone()
             {
-                let payload_type_resolved = interpret_expression(*payload_type, context)?;
+                let payload_type_resolved = resolve_expression(*payload_type, context)?;
                 let argument_type = get_type_of_expression(&argument_value, context)?;
                 if !types_equivalent(&payload_type_resolved, &argument_type) {
                     return Err(diagnostic("Enum variant payload type mismatch", span));
@@ -648,9 +785,7 @@ fn get_type_of_expression(
                 .clone();
 
             match bound_value.0 {
-                BindingContext::Bound(value) | BindingContext::BoundPreserved(value) => {
-                    get_type_of_expression(&value, context)
-                }
+                BindingContext::Bound(value, _) => get_type_of_expression(&value, context),
                 BindingContext::UnboundWithType(type_expr) => {
                     interpret_expression(type_expr.clone(), context)
                 }
@@ -753,6 +888,23 @@ fn get_type_of_expression(
             argument,
             span,
         } => {
+            if let Expression::EnumAccess {
+                enum_expr,
+                variant,
+                span,
+            } = function.as_ref()
+            {
+                let enum_type = interpret_expression(enum_expr.as_ref().clone(), context)?;
+                if let Some((_, payload_type)) = enum_variant_info(&enum_type, variant) {
+                    let argument_type = get_type_of_expression(argument, context)?;
+                    if !types_equivalent(&payload_type, &argument_type) {
+                        return Err(diagnostic("Enum variant payload type mismatch", *span));
+                    }
+                    return Ok(enum_type);
+                } else {
+                    return Err(diagnostic("Unknown enum variant", *span));
+                }
+            }
             let mut call_context = context.clone();
             let evaluated_call = interpret_expression(
                 Expression::FunctionCall {
@@ -943,10 +1095,9 @@ fn interpret_block(
     for expression in expressions {
         let value = match expression {
             Expression::Binding(binding, span) => {
-                let should_preserve = usage_counter.should_preserve(&binding.pattern);
-                let binding_expr =
-                    interpret_binding(*binding, &mut block_context, should_preserve)?;
-                if should_preserve {
+                let (binding_expr, preserve_behavior) =
+                    interpret_binding(*binding, &mut block_context, Some(&usage_counter))?;
+                if preserve_behavior != PreserveBehavior::Inline {
                     if let Expression::Binding(binding, _) = binding_expr {
                         preserved_expressions.push(Expression::Binding(binding, span));
                     }
@@ -1004,8 +1155,8 @@ pub fn interpret_program(
 fn interpret_binding(
     binding: Binding,
     context: &mut Context,
-    preserve: bool,
-) -> Result<Expression, Diagnostic> {
+    usage_counter: Option<&UsageCounter>,
+) -> Result<(Expression, PreserveBehavior), Diagnostic> {
     if let Ok(value_type) = get_type_of_expression(&binding.expr, &mut context.clone()) {
         bind_pattern_blanks(
             binding.pattern.clone(),
@@ -1017,36 +1168,29 @@ fn interpret_binding(
 
     let value = interpret_expression(binding.expr.clone(), context)?;
     let value_is_constant = is_resolved_constant(&value);
-    let bound_success = bind_pattern_from_value(
+    let (bound_success, preserve_behavior) = bind_pattern_from_value(
         binding.pattern.clone(),
         &value,
         context,
         Vec::new(),
-        preserve,
+        PreserveBehavior::Inline,
+        usage_counter,
     )?;
 
-    if preserve {
-        Ok(Expression::Binding(
-            Box::new(Binding {
-                pattern: binding.pattern,
-                expr: value,
-            }),
-            dummy_span(),
-        ))
-    } else if !value_is_constant && !bound_success {
-        Ok(Expression::Binding(
-            Box::new(Binding {
-                pattern: binding.pattern,
-                expr: value,
-            }),
-            dummy_span(),
-        ))
-    } else {
-        Ok(Expression::Literal(
-            ExpressionLiteral::Boolean(bound_success),
-            dummy_span(),
-        ))
-    }
+    Ok((
+        if preserve_behavior != PreserveBehavior::Inline || (!value_is_constant && !bound_success) {
+            Expression::Binding(
+                Box::new(Binding {
+                    pattern: binding.pattern,
+                    expr: value,
+                }),
+                dummy_span(),
+            )
+        } else {
+            Expression::Literal(ExpressionLiteral::Boolean(bound_success), dummy_span())
+        },
+        preserve_behavior,
+    ))
 }
 
 fn parse_binding_annotation(
@@ -1149,38 +1293,47 @@ fn bind_pattern_from_value(
     value: &Expression,
     context: &mut Context,
     passed_annotations: Vec<BindingAnnotation>,
-    preserve: bool,
-) -> Result<bool, Diagnostic> {
+    preserve_behavior: PreserveBehavior,
+    usage_counter: Option<&UsageCounter>,
+) -> Result<(bool, PreserveBehavior), Diagnostic> {
     match pattern {
         BindingPattern::Identifier(identifier, _) => {
+            let mut identifier_preserve_behavior = preserve_behavior;
+            if let Some(usage_counter) = usage_counter
+                && let Some(usage_count) = usage_counter.counts.get(&identifier.0)
+                && *usage_count > 1
+                && !is_resolved_constant(value)
+            {
+                identifier_preserve_behavior = identifier_preserve_behavior.max(PreserveBehavior::PreserveUsage);
+            }
             context.bindings.insert(
                 identifier.0,
                 (
-                    if preserve {
-                        BindingContext::BoundPreserved(value.clone())
-                    } else {
-                        BindingContext::Bound(value.clone())
-                    },
+                    BindingContext::Bound(value.clone(), identifier_preserve_behavior),
                     passed_annotations.clone(),
                 ),
             );
-            Ok(true)
+            Ok((true, identifier_preserve_behavior))
         }
         BindingPattern::Literal(literal, _) => match (literal, value) {
             (
                 ExpressionLiteral::Number(pattern_value),
                 Expression::Literal(ExpressionLiteral::Number(value), _),
-            ) => Ok(pattern_value == *value),
+            ) => Ok((pattern_value == *value, preserve_behavior)),
             (
                 ExpressionLiteral::Boolean(pattern_value),
                 Expression::Literal(ExpressionLiteral::Boolean(value), _),
-            ) => Ok(pattern_value == *value),
-            _ => Ok(false),
+            ) => Ok((pattern_value == *value, preserve_behavior)),
+            _ => Ok((false, preserve_behavior)),
         },
         BindingPattern::Struct(pattern_items, span) => {
             let Expression::Struct(struct_items, _) = value else {
+                // not sure if it is ok to fail here, it could be an identifier of the struct type
                 return Err(diagnostic("Struct pattern requires struct value", span));
             };
+
+            let mut preserve_behavior = preserve_behavior;
+            let mut overall_matched = true;
 
             for (field_identifier, field_pattern) in pattern_items {
                 let field_span = field_pattern.span();
@@ -1192,19 +1345,21 @@ fn bind_pattern_from_value(
                         diagnostic(format!("Missing field {}", field_identifier.0), field_span)
                     })?;
 
-                let matched = bind_pattern_from_value(
+                let (matched, new_preserve_behavior) = bind_pattern_from_value(
                     field_pattern,
                     field_value,
                     context,
                     Vec::new(),
-                    preserve,
+                    preserve_behavior,
+                    usage_counter,
                 )?;
+                preserve_behavior = Ord::max(preserve_behavior, new_preserve_behavior);
                 if !matched {
-                    return Ok(false);
+                    overall_matched = false;
                 }
             }
 
-            Ok(true)
+            Ok((overall_matched, preserve_behavior))
         }
         BindingPattern::EnumVariant {
             enum_type,
@@ -1212,6 +1367,7 @@ fn bind_pattern_from_value(
             payload,
             span,
         } => {
+            // not sure if it is ok to fail here, it could be an identifier of the correct type type
             let Expression::EnumValue {
                 enum_type: value_enum,
                 variant: value_variant,
@@ -1219,7 +1375,7 @@ fn bind_pattern_from_value(
                 ..
             } = value
             else {
-                return Ok(false);
+                return Ok((false, preserve_behavior));
             };
 
             let enum_type_name = match enum_type.as_ref() {
@@ -1230,21 +1386,18 @@ fn bind_pattern_from_value(
             let expected_enum_type = resolve_enum_type_expression(enum_type.as_ref(), context)
                 .ok_or_else(|| {
                     diagnostic(
-                        format!(
-                            "Enum pattern references unknown type: {}",
-                            enum_type_name
-                        ),
+                        format!("Enum pattern references unknown type: {}", enum_type_name),
                         span,
                     )
                 })?;
             let actual_enum_type = resolve_expression(value_enum.as_ref().clone(), context)?;
 
             if !types_equivalent(&expected_enum_type, &actual_enum_type) {
-                return Ok(false);
+                return Ok((false, preserve_behavior));
             }
 
             if value_variant.0 != variant.0 {
-                return Ok(false);
+                return Ok((false, preserve_behavior));
             }
 
             if let Some(payload_pattern) = payload {
@@ -1257,15 +1410,21 @@ fn bind_pattern_from_value(
                     &payload_value_owned,
                     context,
                     passed_annotations,
-                    preserve,
+                    preserve_behavior,
+                    usage_counter,
                 )
             } else {
-                Ok(true)
+                Ok((true, preserve_behavior))
             }
         }
-        BindingPattern::TypeHint(inner, _, _) => {
-            bind_pattern_from_value(*inner, value, context, passed_annotations, preserve)
-        }
+        BindingPattern::TypeHint(inner, _, _) => bind_pattern_from_value(
+            *inner,
+            value,
+            context,
+            passed_annotations,
+            preserve_behavior,
+            usage_counter,
+        ),
         BindingPattern::Annotated {
             pattern,
             annotations,
@@ -1283,7 +1442,8 @@ fn bind_pattern_from_value(
                         .collect::<Result<Vec<_>, _>>()?,
                 )
                 .collect(),
-            preserve,
+            preserve_behavior,
+            usage_counter,
         ),
     }
 }
@@ -1492,11 +1652,14 @@ pub fn intrinsic_context() -> Context {
     context.bindings.insert(
         "type".to_string(),
         (
-            BindingContext::Bound(Expression::AttachImplementation {
-                type_expr: Box::new(intrinsic_type_expr(IntrinsicType::Type)),
-                implementation: Box::new(Expression::Struct(vec![], dummy_span())),
-                span: dummy_span(),
-            }),
+            BindingContext::Bound(
+                Expression::AttachImplementation {
+                    type_expr: Box::new(intrinsic_type_expr(IntrinsicType::Type)),
+                    implementation: Box::new(Expression::Struct(vec![], dummy_span())),
+                    span: dummy_span(),
+                },
+                PreserveBehavior::Inline,
+            ),
             Vec::new(),
         ),
     );
@@ -1546,25 +1709,31 @@ pub fn intrinsic_context() -> Context {
     context.bindings.insert(
         "i32".to_string(),
         (
-            BindingContext::Bound(Expression::AttachImplementation {
-                type_expr: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
-                implementation: Box::new(Expression::Struct(
-                    vec![
-                        i32_binary_intrinsic("+", BinaryIntrinsicOperator::I32Add),
-                        i32_binary_intrinsic("-", BinaryIntrinsicOperator::I32Subtract),
-                        i32_binary_intrinsic("*", BinaryIntrinsicOperator::I32Multiply),
-                        i32_binary_intrinsic("/", BinaryIntrinsicOperator::I32Divide),
-                        i32_binary_intrinsic("==", BinaryIntrinsicOperator::I32Equal),
-                        i32_binary_intrinsic("!=", BinaryIntrinsicOperator::I32NotEqual),
-                        i32_binary_intrinsic("<", BinaryIntrinsicOperator::I32LessThan),
-                        i32_binary_intrinsic(">", BinaryIntrinsicOperator::I32GreaterThan),
-                        i32_binary_intrinsic("<=", BinaryIntrinsicOperator::I32LessThanOrEqual),
-                        i32_binary_intrinsic(">=", BinaryIntrinsicOperator::I32GreaterThanOrEqual),
-                    ],
-                    dummy_span(),
-                )),
-                span: dummy_span(),
-            }),
+            BindingContext::Bound(
+                Expression::AttachImplementation {
+                    type_expr: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
+                    implementation: Box::new(Expression::Struct(
+                        vec![
+                            i32_binary_intrinsic("+", BinaryIntrinsicOperator::I32Add),
+                            i32_binary_intrinsic("-", BinaryIntrinsicOperator::I32Subtract),
+                            i32_binary_intrinsic("*", BinaryIntrinsicOperator::I32Multiply),
+                            i32_binary_intrinsic("/", BinaryIntrinsicOperator::I32Divide),
+                            i32_binary_intrinsic("==", BinaryIntrinsicOperator::I32Equal),
+                            i32_binary_intrinsic("!=", BinaryIntrinsicOperator::I32NotEqual),
+                            i32_binary_intrinsic("<", BinaryIntrinsicOperator::I32LessThan),
+                            i32_binary_intrinsic(">", BinaryIntrinsicOperator::I32GreaterThan),
+                            i32_binary_intrinsic("<=", BinaryIntrinsicOperator::I32LessThanOrEqual),
+                            i32_binary_intrinsic(
+                                ">=",
+                                BinaryIntrinsicOperator::I32GreaterThanOrEqual,
+                            ),
+                        ],
+                        dummy_span(),
+                    )),
+                    span: dummy_span(),
+                },
+                PreserveBehavior::Inline,
+            ),
             Vec::new(),
         ),
     );
@@ -1614,20 +1783,23 @@ pub fn intrinsic_context() -> Context {
     context.bindings.insert(
         "bool".to_string(),
         (
-            BindingContext::Bound(Expression::AttachImplementation {
-                type_expr: Box::new(intrinsic_type_expr(IntrinsicType::Boolean)),
-                implementation: Box::new(Expression::Struct(
-                    vec![
-                        bool_binary_intrinsic("==", BinaryIntrinsicOperator::I32Equal),
-                        bool_binary_intrinsic("!=", BinaryIntrinsicOperator::I32NotEqual),
-                        bool_binary_intrinsic("&&", BinaryIntrinsicOperator::BooleanAnd),
-                        bool_binary_intrinsic("||", BinaryIntrinsicOperator::BooleanOr),
-                        bool_binary_intrinsic("^", BinaryIntrinsicOperator::BooleanXor),
-                    ],
-                    dummy_span(),
-                )),
-                span: dummy_span(),
-            }),
+            BindingContext::Bound(
+                Expression::AttachImplementation {
+                    type_expr: Box::new(intrinsic_type_expr(IntrinsicType::Boolean)),
+                    implementation: Box::new(Expression::Struct(
+                        vec![
+                            bool_binary_intrinsic("==", BinaryIntrinsicOperator::I32Equal),
+                            bool_binary_intrinsic("!=", BinaryIntrinsicOperator::I32NotEqual),
+                            bool_binary_intrinsic("&&", BinaryIntrinsicOperator::BooleanAnd),
+                            bool_binary_intrinsic("||", BinaryIntrinsicOperator::BooleanOr),
+                            bool_binary_intrinsic("^", BinaryIntrinsicOperator::BooleanXor),
+                        ],
+                        dummy_span(),
+                    )),
+                    span: dummy_span(),
+                },
+                PreserveBehavior::Inline,
+            ),
             Vec::new(),
         ),
     );
@@ -1635,10 +1807,10 @@ pub fn intrinsic_context() -> Context {
     context.bindings.insert(
         "true".to_string(),
         (
-            BindingContext::Bound(Expression::Literal(
-                ExpressionLiteral::Boolean(true),
-                dummy_span(),
-            )),
+            BindingContext::Bound(
+                Expression::Literal(ExpressionLiteral::Boolean(true), dummy_span()),
+                PreserveBehavior::Inline,
+            ),
             Vec::new(),
         ),
     );
@@ -1646,10 +1818,10 @@ pub fn intrinsic_context() -> Context {
     context.bindings.insert(
         "false".to_string(),
         (
-            BindingContext::Bound(Expression::Literal(
-                ExpressionLiteral::Boolean(false),
-                dummy_span(),
-            )),
+            BindingContext::Bound(
+                Expression::Literal(ExpressionLiteral::Boolean(false), dummy_span()),
+                PreserveBehavior::Inline,
+            ),
             Vec::new(),
         ),
     );
@@ -1657,10 +1829,13 @@ pub fn intrinsic_context() -> Context {
     context.bindings.insert(
         "js".to_string(),
         (
-            BindingContext::Bound(Expression::Literal(
-                ExpressionLiteral::Target(TargetLiteral::JSTarget),
-                dummy_span(),
-            )),
+            BindingContext::Bound(
+                Expression::Literal(
+                    ExpressionLiteral::Target(TargetLiteral::JSTarget),
+                    dummy_span(),
+                ),
+                PreserveBehavior::Inline,
+            ),
             Vec::new(),
         ),
     );
@@ -1668,10 +1843,13 @@ pub fn intrinsic_context() -> Context {
     context.bindings.insert(
         "wasm".to_string(),
         (
-            BindingContext::Bound(Expression::Literal(
-                ExpressionLiteral::Target(TargetLiteral::WasmTarget),
-                dummy_span(),
-            )),
+            BindingContext::Bound(
+                Expression::Literal(
+                    ExpressionLiteral::Target(TargetLiteral::WasmTarget),
+                    dummy_span(),
+                ),
+                PreserveBehavior::Inline,
+            ),
             Vec::new(),
         ),
     );
@@ -1679,14 +1857,26 @@ pub fn intrinsic_context() -> Context {
     context.bindings.insert(
         "enum".to_string(),
         (
-            BindingContext::BoundPreserved(Expression::IntrinsicOperation(
-                IntrinsicOperation::EnumFromStruct,
-                dummy_span(),
-            )),
+            BindingContext::Bound(
+                Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, dummy_span()),
+                PreserveBehavior::Inline,
+            ),
             Vec::new(),
         ),
     );
     context
+}
+
+pub fn evaluate_text_to_raw_expression(program: &str) -> Result<(Expression, Context), Diagnostic> {
+    let (expression, remaining) =
+        crate::parsing::parse_block(program).expect("Failed to parse program text");
+    assert!(
+        remaining.trim().is_empty(),
+        "Parser did not consume entire input, remaining: {remaining:?}"
+    );
+
+    let mut context = intrinsic_context();
+    interpret_program(expression, &mut context)
 }
 
 pub fn evaluate_text_to_expression(program: &str) -> Result<(Expression, Context), Diagnostic> {
@@ -1724,16 +1914,13 @@ fn resolve_value(expr: Expression, context: &mut Context) -> Result<Expression, 
         Expression::Identifier(ident, span) => {
             if let Some(binding) = context.bindings.get(&ident.0) {
                 match &binding.0 {
-                    BindingContext::Bound(val) => resolve_value(val.clone(), context),
-                    BindingContext::BoundPreserved(val) => match val {
-                        // Preserved bindings keep their identifiers in place unless they point to
-                        // structs, which need to be resolved so field access can see concrete
-                        // values during lowering.
-                        Expression::Struct(..)
-                        | Expression::EnumType(..)
-                        | Expression::EnumValue { .. } => resolve_value(val.clone(), context),
-                        _ => Ok(Expression::Identifier(ident, span)),
-                    },
+                    BindingContext::Bound(
+                        val,
+                        PreserveBehavior::Inline | PreserveBehavior::PreserveBinding,
+                    ) => resolve_value(val.clone(), context),
+                    BindingContext::Bound(_, PreserveBehavior::PreserveUsage) => {
+                        Ok(Expression::Identifier(ident, span))
+                    }
                     _ => Ok(Expression::Identifier(ident, span)),
                 }
             } else {
@@ -1897,21 +2084,39 @@ impl UsageCounter {
         }
     }
 
-    fn should_preserve(&self, pattern: &BindingPattern) -> bool {
+    fn get_preserve_behavior(&self, pattern: &BindingPattern) -> PreserveBehavior {
         match pattern {
             BindingPattern::Identifier(ident, _) => {
-                self.counts.get(&ident.0).copied().unwrap_or(0) > 1
+                (self.counts.get(&ident.0).copied().unwrap_or(0) > 1)
+                    .then(|| PreserveBehavior::PreserveUsage)
+                    .unwrap_or(PreserveBehavior::Inline)
             }
-            BindingPattern::Literal(..) => false,
-            BindingPattern::TypeHint(inner, _, _) => self.should_preserve(inner),
-            BindingPattern::Annotated { pattern, .. } => self.should_preserve(pattern),
-            BindingPattern::Struct(items, _) => {
-                items.iter().any(|(_, pat)| self.should_preserve(pat))
-            }
+            BindingPattern::Literal(..) => PreserveBehavior::Inline,
+            BindingPattern::TypeHint(inner, _, _) => self.get_preserve_behavior(inner),
+            BindingPattern::Annotated {
+                pattern,
+                annotations,
+                ..
+            } => Ord::max(
+                self.get_preserve_behavior(pattern),
+                annotations
+                    .iter()
+                    .map(|ann| match ann {
+                        BindingAnnotation::Export(..) => PreserveBehavior::PreserveBinding,
+                        _ => PreserveBehavior::Inline,
+                    })
+                    .max()
+                    .unwrap_or(PreserveBehavior::Inline),
+            ),
+            BindingPattern::Struct(items, _) => items
+                .iter()
+                .map(|(_, pat)| self.get_preserve_behavior(pat))
+                .max()
+                .unwrap_or(PreserveBehavior::Inline),
             BindingPattern::EnumVariant { payload, .. } => payload
                 .as_ref()
-                .map(|p| self.should_preserve(p))
-                .unwrap_or(false),
+                .map(|p| self.get_preserve_behavior(p))
+                .unwrap_or(PreserveBehavior::Inline),
         }
     }
 }
@@ -1992,7 +2197,7 @@ fn test_basic_addition_interpretation() {
 #[test]
 fn i32_is_constant() {
     let binding = intrinsic_context();
-    let Some((BindingContext::Bound(expr), _)) = binding.bindings.get("i32") else {
+    let Some((BindingContext::Bound(expr, _), _)) = binding.bindings.get("i32") else {
         panic!("i32 binding not found");
     };
     assert!(is_resolved_constant(expr));
@@ -2007,6 +2212,26 @@ fn(bar: i32) -> i32 (
     ";
     let (expr, _) = evaluate_text_to_expression(program).unwrap();
     assert!(matches!(expr, Expression::Function { .. }));
+}
+#[test]
+fn interpret_let_binding_function() {
+    let program = "
+let Level2 = enum { Some = i32, None = {} };
+let Level1 = enum { Some = Level2, None = {} };
+
+let export(wasm) check = fn(x: i32) -> i32 (
+    let foo = if x > 0 (Level1::Some(Level2::Some(x))) else (Level1::None);
+
+    if let Level1::Some(a) = foo && let Level2::Some(b) = a (
+        b
+    ) else (
+        0
+    )
+);
+{}
+    ";
+    let (expr, _) = evaluate_text_to_raw_expression(program).unwrap();
+    println!("{expr:?}");
 }
 
 #[test]
@@ -2198,7 +2423,7 @@ fn enum_intrinsic_exposes_function_type() {
         .clone();
 
     match &enum_binding.0 {
-        BindingContext::BoundPreserved(expr) => match get_type_of_expression(expr, &mut context) {
+        BindingContext::Bound(expr, _) => match get_type_of_expression(expr, &mut context) {
             Ok(Expression::FunctionType {
                 parameter,
                 return_type,
