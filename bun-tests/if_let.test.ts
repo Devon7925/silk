@@ -108,6 +108,27 @@ test("let chain with multiple lets", async () => {
     expect(exports.check(-10)).toBe(0);
 }, TEST_TIMEOUT_MS);
 
+test("if let with multiple unwraps", async () => {
+    const silkCode = `
+    let Level2 = enum { Some = i32, None = {} };
+    let Level1 = enum { Some = Level2, None = {} };
+    
+    let export(wasm) check = fn(x: i32) -> i32 (
+    let foo = if x > 0 (Level1::Some(Level2::Some(x))) else (Level1::None);
+
+        if let Level1::Some(Level2::Some(b)) = foo (
+            b
+        ) else (
+            0
+        )
+    );
+    {}
+    `;
+    const exports = await compileAndLoad(silkCode);
+    expect(exports.check(10)).toBe(10);
+    expect(exports.check(-10)).toBe(0);
+}, TEST_TIMEOUT_MS);
+
 // Cleanup after the test suite to avoid leaving temporary files behind.
 afterAll(() => {
     try {
