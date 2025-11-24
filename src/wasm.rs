@@ -7,8 +7,8 @@ use crate::{
     diagnostics::{Diagnostic, SourceSpan},
     interpret::{self, AnnotatedBinding},
     parsing::{
-        BinaryIntrinsicOperator, BindingAnnotation, BindingPattern, Expression, ExpressionLiteral,
-        Identifier, IntrinsicOperation, IntrinsicType, TargetLiteral,
+        BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, Expression,
+        ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, TargetLiteral,
     },
 };
 
@@ -831,27 +831,68 @@ fn emit_expression(
             Ok(())
         }
         Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, op), _) => {
-            emit_expression(left, locals, locals_types, func, type_ctx, context)?;
-            emit_expression(right, locals, locals_types, func, type_ctx, context)?;
             match op {
-                BinaryIntrinsicOperator::I32Add => func.instruction(&Instruction::I32Add),
-                BinaryIntrinsicOperator::I32Subtract => func.instruction(&Instruction::I32Sub),
-                BinaryIntrinsicOperator::I32Multiply => func.instruction(&Instruction::I32Mul),
-                BinaryIntrinsicOperator::I32Divide => func.instruction(&Instruction::I32DivS),
-                BinaryIntrinsicOperator::I32Equal => func.instruction(&Instruction::I32Eq),
-                BinaryIntrinsicOperator::I32NotEqual => func.instruction(&Instruction::I32Ne),
-                BinaryIntrinsicOperator::I32LessThan => func.instruction(&Instruction::I32LtS),
-                BinaryIntrinsicOperator::I32GreaterThan => func.instruction(&Instruction::I32GtS),
-                BinaryIntrinsicOperator::I32LessThanOrEqual => {
-                    func.instruction(&Instruction::I32LeS)
+                BinaryIntrinsicOperator::BooleanAnd => {
+                    emit_expression(left, locals, locals_types, func, type_ctx, context)?;
+                    func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
+                        ValType::I32,
+                    )));
+                    emit_expression(right, locals, locals_types, func, type_ctx, context)?;
+                    func.instruction(&Instruction::Else);
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::End);
                 }
-                BinaryIntrinsicOperator::I32GreaterThanOrEqual => {
-                    func.instruction(&Instruction::I32GeS)
+                BinaryIntrinsicOperator::BooleanOr => {
+                    emit_expression(left, locals, locals_types, func, type_ctx, context)?;
+                    func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
+                        ValType::I32,
+                    )));
+                    func.instruction(&Instruction::I32Const(1));
+                    func.instruction(&Instruction::Else);
+                    emit_expression(right, locals, locals_types, func, type_ctx, context)?;
+                    func.instruction(&Instruction::End);
                 }
-                BinaryIntrinsicOperator::BooleanAnd => func.instruction(&Instruction::I32And),
-                BinaryIntrinsicOperator::BooleanOr => func.instruction(&Instruction::I32Or),
-                BinaryIntrinsicOperator::BooleanXor => func.instruction(&Instruction::I32Xor),
-            };
+                _ => {
+                    emit_expression(left, locals, locals_types, func, type_ctx, context)?;
+                    emit_expression(right, locals, locals_types, func, type_ctx, context)?;
+                    match op {
+                        BinaryIntrinsicOperator::I32Add => {
+                            func.instruction(&Instruction::I32Add);
+                        }
+                        BinaryIntrinsicOperator::I32Subtract => {
+                            func.instruction(&Instruction::I32Sub);
+                        }
+                        BinaryIntrinsicOperator::I32Multiply => {
+                            func.instruction(&Instruction::I32Mul);
+                        }
+                        BinaryIntrinsicOperator::I32Divide => {
+                            func.instruction(&Instruction::I32DivS);
+                        }
+                        BinaryIntrinsicOperator::I32Equal => {
+                            func.instruction(&Instruction::I32Eq);
+                        }
+                        BinaryIntrinsicOperator::I32NotEqual => {
+                            func.instruction(&Instruction::I32Ne);
+                        }
+                        BinaryIntrinsicOperator::I32LessThan => {
+                            func.instruction(&Instruction::I32LtS);
+                        }
+                        BinaryIntrinsicOperator::I32GreaterThan => {
+                            func.instruction(&Instruction::I32GtS);
+                        }
+                        BinaryIntrinsicOperator::I32LessThanOrEqual => {
+                            func.instruction(&Instruction::I32LeS);
+                        }
+                        BinaryIntrinsicOperator::I32GreaterThanOrEqual => {
+                            func.instruction(&Instruction::I32GeS);
+                        }
+                        BinaryIntrinsicOperator::BooleanXor => {
+                            func.instruction(&Instruction::I32Xor);
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
             Ok(())
         }
         Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, span) => Err(
@@ -985,24 +1026,53 @@ fn emit_expression(
                 func.instruction(&Instruction::I32Const(variant_index));
                 func.instruction(&Instruction::I32Eq);
 
-                if let Some(payload_pattern) = payload.clone() {
-                    let local_name = extract_identifier_from_pattern(*payload_pattern)?;
-                    let local_index = locals.get(&local_name).copied().ok_or_else(|| {
-                        Diagnostic::new("Enum payload local not found during wasm lowering")
-                            .with_span(*pattern_span)
-                    })?;
+                // If tag matches (1), we proceed to check payload.
+                // We use `if (result i32)` block.
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
+                    ValType::I32,
+                )));
 
-                    emit_expression(&binding.expr, locals, locals_types, func, type_ctx, context)?;
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: type_index,
-                        field_index: payload_field_index,
-                    });
-                    func.instruction(&Instruction::StructGet {
-                        struct_type_index: payload_type_index,
-                        field_index: variant_field_index,
-                    });
-                    func.instruction(&Instruction::LocalSet(local_index));
+                if let Some(payload_pattern) = payload.clone() {
+                    // Extract payload
+                    // We construct a property access expression for the payload
+                    let payload_access_expr = Expression::PropertyAccess {
+                        object: Box::new(Expression::PropertyAccess {
+                            object: Box::new(binding.expr.clone()),
+                            property: "payload".to_string(),
+                            span: *pattern_span,
+                        }),
+                        property: variant.0.clone(),
+                        span: *pattern_span,
+                    };
+
+                    let payload_binding = Expression::Binding(
+                        Box::new(Binding {
+                            pattern: *payload_pattern,
+                            expr: payload_access_expr,
+                        }),
+                        *pattern_span,
+                    );
+
+                    emit_expression(
+                        &payload_binding,
+                        locals,
+                        locals_types,
+                        func,
+                        type_ctx,
+                        context,
+                    )?;
+                    // The binding expression returns 1 (i32) on success.
+                    // We drop it and push 1 to be explicit and safe.
+                    func.instruction(&Instruction::Drop);
+                    func.instruction(&Instruction::I32Const(1));
+                } else {
+                    // No payload to check, so if tag matched, we are good.
+                    func.instruction(&Instruction::I32Const(1));
                 }
+
+                func.instruction(&Instruction::Else);
+                func.instruction(&Instruction::I32Const(0));
+                func.instruction(&Instruction::End);
 
                 return Ok(());
             }
@@ -1079,6 +1149,8 @@ fn emit_expression(
                     .copied()
                     .expect("Local should have been collected");
                 func.instruction(&Instruction::LocalSet(local_index));
+                // Binding to an identifier always succeeds
+                func.instruction(&Instruction::I32Const(1));
                 Ok(())
             }
         }
@@ -1140,9 +1212,9 @@ fn emit_expression(
             for (i, e) in exprs.iter().enumerate() {
                 emit_expression(e, locals, locals_types, func, type_ctx, context)?;
                 if i < exprs.len() - 1 {
-                    if !matches!(e, Expression::Binding(..)) {
-                        func.instruction(&Instruction::Drop);
-                    }
+                    // All expressions, including bindings, return a value (i32 for bindings)
+                    // so we must drop them if they are not the last expression.
+                    func.instruction(&Instruction::Drop);
                 }
             }
             Ok(())

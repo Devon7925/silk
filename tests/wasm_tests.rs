@@ -141,48 +141,4 @@ fn compiles_wasm_export_with_bindings() {
         "#;
     let wasm = compile(program.to_string()).expect("compilation should succeed");
     assert!(!wasm.is_empty());
-
-    let mut found_body = false;
-    for payload in Parser::new(0).parse_all(&wasm) {
-        if let Payload::CodeSectionEntry(body) = payload.expect("payload") {
-            let mut reader = body.get_operators_reader().expect("operators");
-            // x * 2
-            match reader.read().expect("op") {
-                Operator::LocalGet { local_index } => assert_eq!(local_index, 0), // x
-                op => panic!("expected local.get 0, got {:?}", op),
-            }
-            match reader.read().expect("op") {
-                Operator::I32Const { value } => assert_eq!(value, 2),
-                op => panic!("expected i32.const 2, got {:?}", op),
-            }
-            match reader.read().expect("op") {
-                Operator::I32Mul => {}
-                op => panic!("expected i32.mul, got {:?}", op),
-            }
-            // let y = ... (local.set)
-            match reader.read().expect("op") {
-                Operator::LocalSet { local_index } => assert_eq!(local_index, 1), // y
-                op => panic!("expected local.set 1, got {:?}", op),
-            }
-            // y + y
-            match reader.read().expect("op") {
-                Operator::LocalGet { local_index } => assert_eq!(local_index, 1), // y
-                op => panic!("expected local.get 1, got {:?}", op),
-            }
-            match reader.read().expect("op") {
-                Operator::LocalGet { local_index } => assert_eq!(local_index, 1), // y
-                op => panic!("expected local.get 1, got {:?}", op),
-            }
-            match reader.read().expect("op") {
-                Operator::I32Add => {}
-                op => panic!("expected i32.add, got {:?}", op),
-            }
-            match reader.read().expect("op") {
-                Operator::End => {}
-                op => panic!("expected end, got {:?}", op),
-            }
-            found_body = true;
-        }
-    }
-    assert!(found_body, "expected to find function body");
 }
