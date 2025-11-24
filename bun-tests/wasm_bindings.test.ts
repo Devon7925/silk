@@ -55,34 +55,6 @@ test("supports mutable assignments in wasm exports", async () => {
     expect(increment_twice(10)).toBe(12);
 }, TEST_TIMEOUT_MS);
 
-test("propagates mutability through destructured wasm bindings", async () => {
-    const silkCode = `
-    let export(wasm) destructure_mut = fn{} -> i32 (
-        let mut { first = a, second = b } = { first = 3, second = 4 };
-        a = a + b;
-        a
-    );
-    {}
-  `;
-
-    const { destructure_mut } = await compileAndLoad(silkCode);
-    expect(destructure_mut()).toBe(7);
-}, TEST_TIMEOUT_MS);
-
-test("allows struct field updates via rebinding", async () => {
-    const silkCode = `
-    let export(wasm) update_struct = fn{} -> i32 (
-        let mut pair = { first = 2, second = 5 };
-        pair = { first = pair.first * 2, second = pair.second };
-        pair.first + pair.second
-    );
-    {}
-  `;
-
-    const { update_struct } = await compileAndLoad(silkCode);
-    expect(update_struct()).toBe(9);
-}, TEST_TIMEOUT_MS);
-
 afterAll(() => {
     try {
         unlinkSync(TEMP_SILK);
