@@ -3,7 +3,7 @@ use crate::{
     enum_normalization::normalize_enum_application,
     parsing::{
         BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, Expression,
-        ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, TargetLiteral,
+        ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, LValue, TargetLiteral,
     },
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -405,13 +405,9 @@ pub fn interpret_expression(
         Expression::Binding(binding, _) => {
             interpret_binding(*binding, context, None).map(|(binding_result, _)| binding_result)
         }
-        Expression::Assignment {
-            identifier,
-            expr,
-            span,
-        } => {
+        Expression::Assignment { target, expr, span } => {
             let value = interpret_expression(*expr, context)?;
-            apply_assignment(identifier, value, span, context)
+            apply_assignment(target, value, span, context)
         }
         Expression::Block(expressions, span) => {
             let (value, _) = interpret_block(expressions, span, context)?;
@@ -813,49 +809,22 @@ fn get_type_of_expression(
                 )),
             }
         }
-        Expression::Assignment {
-            identifier,
-            expr,
-            span,
-        } => {
+        Expression::Assignment { target, expr, span } => {
             let mut type_context = context.clone();
             let value_type = get_type_of_expression(expr, &mut type_context)?;
-            let (binding_ctx, annotations) =
-                context.bindings.get(&identifier.0).ok_or_else(|| {
-                    diagnostic(
-                        format!("Cannot assign to unbound identifier: {}", identifier.0),
-                        *span,
-                    )
-                })?;
+            let target_type = get_lvalue_type(target, context, *span)?;
 
-            if !annotations
-                .iter()
-                .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)))
-            {
+            if !types_equivalent(&target_type, &value_type) {
                 return Err(diagnostic(
-                    format!("Cannot assign to immutable identifier: {}", identifier.0),
+                    format!(
+                        "Cannot assign value of mismatched type to {}",
+                        lvalue_display_name(target)
+                    ),
                     *span,
                 ));
             }
 
-            let expected_type = match binding_ctx {
-                BindingContext::Bound(value, _) => {
-                    get_type_of_expression(value, &mut type_context).ok()
-                }
-                BindingContext::UnboundWithType(type_expr) => Some(type_expr.clone()),
-                BindingContext::UnboundWithoutType => None,
-            };
-
-            if let Some(expected_type) = expected_type {
-                if !types_equivalent(&expected_type, &value_type) {
-                    return Err(diagnostic(
-                        format!("Cannot assign value of mismatched type to {}", identifier.0),
-                        *span,
-                    ));
-                }
-            }
-
-            Ok(value_type)
+            Ok(target_type)
         }
         Expression::If {
             then_branch,
@@ -1169,14 +1138,14 @@ fn interpret_block(
                 }
                 Expression::Literal(ExpressionLiteral::Boolean(true), dummy_span())
             }
-            Expression::Assignment { identifier, expr, span } => {
+            Expression::Assignment { target, expr, span } => {
                 let interpreted_expr = interpret_expression((*expr).clone(), &mut block_context)?;
                 let assignment_expr = Expression::Assignment {
-                    identifier: identifier.clone(),
+                    target: target.clone(),
                     expr: Box::new(interpreted_expr.clone()),
                     span,
                 };
-                let val = apply_assignment(identifier, interpreted_expr, span, &mut block_context)?;
+                let val = apply_assignment(target, interpreted_expr, span, &mut block_context)?;
                 preserved_expressions.push(assignment_expr);
                 val
             }
@@ -1228,57 +1197,242 @@ pub fn interpret_program(
     }
 }
 
+fn ensure_lvalue_mutable(
+    target: &LValue,
+    context: &Context,
+    span: SourceSpan,
+) -> Result<(), Diagnostic> {
+    match target {
+        LValue::Identifier(identifier, target_span) => {
+            let (_, annotations) = context.bindings.get(&identifier.0).ok_or_else(|| {
+                diagnostic(
+                    format!("Cannot assign to unbound identifier: {}", identifier.0),
+                    *target_span,
+                )
+            })?;
+
+            if !annotations
+                .iter()
+                .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)))
+            {
+                return Err(diagnostic(
+                    format!("Cannot assign to immutable identifier: {}", identifier.0),
+                    span,
+                ));
+            }
+            Ok(())
+        }
+        LValue::PropertyAccess { object, .. } => ensure_lvalue_mutable(object, context, span),
+    }
+}
+
+fn lvalue_display_name(lvalue: &LValue) -> String {
+    match lvalue {
+        LValue::Identifier(Identifier(name), _) => name.clone(),
+        LValue::PropertyAccess { object, property, .. } => {
+            format!("{}.{}", lvalue_display_name(object), property)
+        }
+    }
+}
+
+fn get_lvalue_type(
+    target: &LValue,
+    context: &mut Context,
+    span: SourceSpan,
+) -> Result<Expression, Diagnostic> {
+    ensure_lvalue_mutable(target, context, span)?;
+
+    match target {
+        LValue::Identifier(identifier, target_span) => {
+            let (binding_ctx, _) = context.bindings.get(&identifier.0).ok_or_else(|| {
+                diagnostic(
+                    format!("Cannot assign to unbound identifier: {}", identifier.0),
+                    *target_span,
+                )
+            })?;
+
+            match binding_ctx {
+                BindingContext::Bound(value, _) => {
+                    get_type_of_expression(value, &mut context.clone())
+                }
+                BindingContext::UnboundWithType(type_expr) => Ok(type_expr.clone()),
+                BindingContext::UnboundWithoutType => Err(diagnostic(
+                    format!("Cannot determine type of {}", identifier.0),
+                    *target_span,
+                )),
+            }
+        }
+        LValue::PropertyAccess {
+            object,
+            property,
+            span: prop_span,
+        } => {
+            let object_type = get_lvalue_type(object, context, *prop_span)?;
+            let Expression::Struct(fields, _) = object_type else {
+                return Err(diagnostic("Property access on non-struct type", *prop_span));
+            };
+
+            let field_type = fields
+                .iter()
+                .find(|(id, _)| id.0 == *property)
+                .map(|(_, ty)| ty.clone())
+                .ok_or_else(|| {
+                    diagnostic(
+                        format!("Field {} not found in struct type", property),
+                        *prop_span,
+                    )
+                })?;
+            Ok(field_type)
+        }
+    }
+}
+
+fn get_lvalue_value(
+    target: &LValue,
+    context: &mut Context,
+) -> Result<Expression, Diagnostic> {
+    match target {
+        LValue::Identifier(identifier, target_span) => {
+            let (binding_ctx, _) = context.bindings.get(&identifier.0).ok_or_else(|| {
+                diagnostic(
+                    format!("Cannot assign to unbound identifier: {}", identifier.0),
+                    *target_span,
+                )
+            })?;
+
+            match binding_ctx {
+                BindingContext::Bound(value, _) => Ok(value.clone()),
+                _ => Err(diagnostic(
+                    format!("Cannot assign to uninitialized identifier: {}", identifier.0),
+                    *target_span,
+                )),
+            }
+        }
+        LValue::PropertyAccess {
+            object,
+            property,
+            span: prop_span,
+        } => {
+            let object_value = get_lvalue_value(object, context)?;
+            let Expression::Struct(fields, struct_span) = object_value else {
+                return Err(diagnostic("Property access on non-struct value", *prop_span));
+            };
+
+            fields
+                .into_iter()
+                .find(|(id, _)| id.0 == *property)
+                .map(|(_, expr)| expr)
+                .ok_or_else(|| {
+                    diagnostic(
+                        format!("Missing field {} in struct", property),
+                        struct_span,
+                    )
+                })
+        }
+    }
+}
+
+fn apply_lvalue_update(
+    target: LValue,
+    value: Expression,
+    context: &mut Context,
+    span: SourceSpan,
+) -> Result<(), Diagnostic> {
+    match target {
+        LValue::Identifier(identifier, _) => {
+            let mut type_context = context.clone();
+            let value_type = get_type_of_expression(&value, &mut type_context).ok();
+
+            let Some((binding_ctx, _annotations)) = context.bindings.get_mut(&identifier.0) else {
+                return Err(diagnostic(
+                    format!("Cannot assign to unbound identifier: {}", identifier.0),
+                    span,
+                ));
+            };
+
+            let expected_type = match binding_ctx {
+                BindingContext::Bound(existing, _) => {
+                    get_type_of_expression(existing, &mut type_context).ok()
+                }
+                BindingContext::UnboundWithType(expected_ty) => Some(expected_ty.clone()),
+                BindingContext::UnboundWithoutType => None,
+            };
+
+            if let (Some(expected_ty), Some(actual_ty)) = (expected_type, value_type) {
+                if !types_equivalent(&expected_ty, &actual_ty) {
+                    return Err(diagnostic(
+                        format!(
+                            "Cannot assign value of mismatched type to {}",
+                            identifier.0
+                        ),
+                        span,
+                    ));
+                }
+            }
+
+            let preserve_behavior = match binding_ctx {
+                BindingContext::Bound(_, preserve_behavior) => *preserve_behavior,
+                BindingContext::UnboundWithType(_) | BindingContext::UnboundWithoutType => {
+                    PreserveBehavior::PreserveBinding
+                }
+            };
+
+            *binding_ctx = BindingContext::Bound(value, preserve_behavior);
+            Ok(())
+        }
+        LValue::PropertyAccess { object, property, span: prop_span } => {
+            let current_object = get_lvalue_value(&object, context)?;
+            let Expression::Struct(mut fields, struct_span) = current_object else {
+                return Err(diagnostic("Property access on non-struct value", prop_span));
+            };
+
+            let mut found = false;
+            for (field_id, field_expr) in fields.iter_mut() {
+                if field_id.0 == property {
+                    *field_expr = value.clone();
+                    found = true;
+                    break;
+                }
+            }
+
+            if !found {
+                return Err(diagnostic(
+                    format!("Missing field {} in struct", property),
+                    prop_span,
+                ));
+            }
+
+            let updated_struct = Expression::Struct(fields, struct_span);
+            apply_lvalue_update(*object, updated_struct, context, span)
+        }
+    }
+}
+
 fn apply_assignment(
-    identifier: Identifier,
+    target: LValue,
     value: Expression,
     span: SourceSpan,
     context: &mut Context,
 ) -> Result<Expression, Diagnostic> {
+    ensure_lvalue_mutable(&target, context, span)?;
+
     let mut type_context = context.clone();
     let value_type = get_type_of_expression(&value, &mut type_context).ok();
+    let target_type = get_lvalue_type(&target, &mut type_context, span)?;
 
-    let Some((binding_ctx, annotations)) = context.bindings.get_mut(&identifier.0) else {
-        return Err(diagnostic(
-            format!("Cannot assign to unbound identifier: {}", identifier.0),
-            span,
-        ));
-    };
-
-    if !annotations
-        .iter()
-        .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)))
-    {
-        return Err(diagnostic(
-            format!("Cannot assign to immutable identifier: {}", identifier.0),
-            span,
-        ));
-    }
-
-    let expected_type = match binding_ctx {
-        BindingContext::Bound(existing, _) => {
-            get_type_of_expression(existing, &mut type_context).ok()
-        }
-        BindingContext::UnboundWithType(ty) => Some(ty.clone()),
-        BindingContext::UnboundWithoutType => None,
-    };
-
-    if let (Some(expected), Some(actual)) = (expected_type, value_type) {
-        if !types_equivalent(&expected, &actual) {
+    if let Some(actual_type) = value_type {
+        if !types_equivalent(&target_type, &actual_type) {
             return Err(diagnostic(
-                format!("Cannot assign value of mismatched type to {}", identifier.0),
+                format!(
+                    "Cannot assign value of mismatched type to {}",
+                    lvalue_display_name(&target)
+                ),
                 span,
             ));
         }
     }
 
-    let preserve_behavior = match binding_ctx {
-        BindingContext::Bound(_, preserve_behavior) => *preserve_behavior,
-        BindingContext::UnboundWithType(_) | BindingContext::UnboundWithoutType => {
-            PreserveBehavior::PreserveBinding
-        }
-    };
-
-    *binding_ctx = BindingContext::Bound(value.clone(), preserve_behavior);
+    apply_lvalue_update(target, value.clone(), context, span)?;
 
     Ok(value)
 }
@@ -2129,10 +2283,8 @@ impl UsageCounter {
             Expression::Identifier(ident, _) => {
                 *self.counts.entry(ident.0.clone()).or_default() += 1;
             }
-            Expression::Assignment {
-                identifier, expr, ..
-            } => {
-                *self.counts.entry(identifier.0.clone()).or_default() += 1;
+            Expression::Assignment { target, expr, .. } => {
+                self.count_lvalue(target);
                 self.count(expr);
             }
             Expression::Block(exprs, _) => {
@@ -2232,6 +2384,15 @@ impl UsageCounter {
                 self.count(return_type);
             }
             Expression::Literal(..) | Expression::IntrinsicType(..) => {}
+        }
+    }
+
+    fn count_lvalue(&mut self, target: &LValue) {
+        match target {
+            LValue::Identifier(identifier, _) => {
+                *self.counts.entry(identifier.0.clone()).or_default() += 1;
+            }
+            LValue::PropertyAccess { object, .. } => self.count_lvalue(object),
         }
     }
 
