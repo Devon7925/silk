@@ -170,6 +170,10 @@ pub enum Expression {
     },
     Binding(Box<Binding>, SourceSpan),
     Block(Vec<Expression>, SourceSpan),
+    Return {
+        value: Option<Box<Expression>>,
+        span: SourceSpan,
+    },
 }
 
 impl Expression {
@@ -185,6 +189,7 @@ impl Expression {
             | Expression::Identifier(_, span)
             | Expression::Binding(_, span)
             | Expression::Block(_, span)
+            | Expression::Return { span, .. }
             | Expression::Assignment { span, .. }
             | Expression::EnumValue { span, .. }
             | Expression::EnumConstructor { span, .. } => *span,
@@ -831,6 +836,48 @@ fn parse_struct_expression<'a>(
     Some(parse_struct_expression_inner(source, file))
 }
 
+fn parse_return_expression_with_source<'a>(
+    source: &'a str,
+    file: &'a str,
+    stop_before_grouping: bool,
+) -> Option<Result<(Expression, &'a str), Diagnostic>> {
+    const KEYWORD: &str = "return";
+    if !file.starts_with(KEYWORD) {
+        return None;
+    }
+
+    let after_keyword = &file[KEYWORD.len()..];
+    if after_keyword
+        .chars()
+        .next()
+        .map(|c| c.is_alphanumeric() || c == '_')
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let start_slice = file;
+    let remaining = parse_optional_whitespace(after_keyword);
+
+    let (value, rest) = if remaining.is_empty() {
+        (None, remaining)
+    } else {
+        match parse_operation_expression_with_guard(source, remaining, stop_before_grouping) {
+            Ok((expr, rest)) => (Some(expr), rest),
+            Err(err) => return Some(Err(err)),
+        }
+    };
+
+    let span = consumed_span(source, start_slice, rest);
+    Some(Ok((
+        Expression::Return {
+            value: value.map(Box::new),
+            span,
+        },
+        rest,
+    )))
+}
+
 #[cfg(test)]
 pub fn parse_isolated_expression(file: &str) -> Result<(Expression, &str), Diagnostic> {
     parse_isolated_expression_with_source(file, file)
@@ -850,6 +897,11 @@ fn parse_isolated_expression_with_source_with_guard<'a>(
 ) -> Result<(Expression, &'a str), Diagnostic> {
     if let Some(binding_parse) = parse_binding(source, file, stop_before_grouping) {
         return binding_parse;
+    }
+    if let Some(return_parse) =
+        parse_return_expression_with_source(source, file, stop_before_grouping)
+    {
+        return return_parse;
     }
     if let Some(function_parse) = parse_function_literal(source, file) {
         return function_parse;
@@ -907,17 +959,31 @@ fn parse_property_access<'a>(
         };
 
         let after_separator = parse_optional_whitespace(after_separator);
-        let (property_identifier, rest) = if let Some((identifier, rest)) =
-            parse_identifier(after_separator)
-        {
-            (identifier, rest)
-        } else if !is_enum_access {
-            let tuple_index = after_separator
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect::<String>();
+        let (property_identifier, rest) =
+            if let Some((identifier, rest)) = parse_identifier(after_separator) {
+                (identifier, rest)
+            } else if !is_enum_access {
+                let tuple_index = after_separator
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>();
 
-            if tuple_index.is_empty() {
+                if tuple_index.is_empty() {
+                    return Err(diagnostic_here(
+                        source,
+                        after_separator,
+                        after_separator
+                            .chars()
+                            .next()
+                            .map(|c| c.len_utf8())
+                            .unwrap_or(1),
+                        "Expected identifier after . in property access",
+                    ));
+                }
+
+                let rest = &after_separator[tuple_index.len()..];
+                (Identifier(tuple_index), rest)
+            } else {
                 return Err(diagnostic_here(
                     source,
                     after_separator,
@@ -926,24 +992,9 @@ fn parse_property_access<'a>(
                         .next()
                         .map(|c| c.len_utf8())
                         .unwrap_or(1),
-                    "Expected identifier after . in property access",
+                    "Expected identifier after :: in enum access",
                 ));
-            }
-
-            let rest = &after_separator[tuple_index.len()..];
-            (Identifier(tuple_index), rest)
-        } else {
-            return Err(diagnostic_here(
-                source,
-                after_separator,
-                after_separator
-                    .chars()
-                    .next()
-                    .map(|c| c.len_utf8())
-                    .unwrap_or(1),
-                "Expected identifier after :: in enum access",
-            ));
-        };
+            };
         let span = consumed_span(source, expression_start, rest);
         expr = if is_enum_access {
             Expression::EnumAccess {
@@ -1070,7 +1121,10 @@ fn parse_assignment_expression_with_guard<'a>(
     parse_operation_expression_with_guard(source, file, stop_before_grouping)
 }
 
-fn parse_lvalue<'a>(source: &'a str, file: &'a str) -> Option<Result<(LValue, &'a str), Diagnostic>> {
+fn parse_lvalue<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Option<Result<(LValue, &'a str), Diagnostic>> {
     let trimmed = parse_optional_whitespace(file);
     let start_slice = trimmed;
     let (identifier, mut remaining) = parse_identifier(trimmed)?;
@@ -1084,27 +1138,27 @@ fn parse_lvalue<'a>(source: &'a str, file: &'a str) -> Option<Result<(LValue, &'
         };
 
         let after_dot = parse_optional_whitespace(after_dot);
-        let (property_identifier, rest) = if let Some((identifier, rest)) = parse_identifier(after_dot)
-        {
-            (identifier, rest)
-        } else {
-            let tuple_index = after_dot
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect::<String>();
+        let (property_identifier, rest) =
+            if let Some((identifier, rest)) = parse_identifier(after_dot) {
+                (identifier, rest)
+            } else {
+                let tuple_index = after_dot
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>();
 
-            if tuple_index.is_empty() {
-                return Some(Err(diagnostic_here(
-                    source,
-                    after_dot,
-                    after_dot.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
-                    "Expected identifier after . in assignment target",
-                )));
-            }
+                if tuple_index.is_empty() {
+                    return Some(Err(diagnostic_here(
+                        source,
+                        after_dot,
+                        after_dot.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
+                        "Expected identifier after . in assignment target",
+                    )));
+                }
 
-            let rest = &after_dot[tuple_index.len()..];
-            (Identifier(tuple_index), rest)
-        };
+                let rest = &after_dot[tuple_index.len()..];
+                (Identifier(tuple_index), rest)
+            };
 
         current_span = consumed_span(source, start_slice, rest);
         lvalue = LValue::PropertyAccess {

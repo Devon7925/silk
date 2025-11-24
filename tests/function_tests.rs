@@ -45,3 +45,23 @@ fn functions_can_be_returned() {
         other => panic!("Expected numeric literal, got {:?}", other),
     }
 }
+
+#[test]
+fn return_exits_function_early() {
+    let program = "
+        let early = fn(x: i32) -> i32 (
+            return x + 1;
+            x + 100
+        );
+
+        early 41
+    ";
+
+    let (expr, _) =
+        evaluate_text_to_expression(program).unwrap_or_else(|err| panic!("{}", err.message));
+
+    match expr {
+        Expression::Literal(ExpressionLiteral::Number(value), _) => assert_eq!(value, 42),
+        other => panic!("Expected numeric literal, got {:?}", other),
+    }
+}

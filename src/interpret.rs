@@ -405,6 +405,17 @@ pub fn interpret_expression(
         Expression::Binding(binding, _) => {
             interpret_binding(*binding, context, None).map(|(binding_result, _)| binding_result)
         }
+        Expression::Return { value, span } => {
+            let evaluated_value = match value {
+                Some(expr) => interpret_expression(*expr, context)?,
+                None => empty_struct_expr(span),
+            };
+
+            Ok(Expression::Return {
+                value: Some(Box::new(evaluated_value)),
+                span,
+            })
+        }
         Expression::Assignment { target, expr, span } => {
             let value = interpret_expression(*expr, context)?;
             apply_assignment(target, value, span, context)
@@ -456,7 +467,11 @@ pub fn interpret_expression(
                         PreserveBehavior::Inline,
                         None,
                     )?;
-                    return interpret_expression(*body, &mut call_context);
+                    let body_value = interpret_expression(*body, &mut call_context)?;
+                    if let Expression::Return { value, .. } = body_value {
+                        return Ok(*value.expect("Return value should be populated"));
+                    }
+                    return Ok(body_value);
                 }
             }
 
@@ -826,6 +841,13 @@ fn get_type_of_expression(
 
             Ok(target_type)
         }
+        Expression::Return { value, span } => {
+            let inner_value = value
+                .as_ref()
+                .map(|expr| expr.as_ref().clone())
+                .unwrap_or_else(|| empty_struct_expr(*span));
+            get_type_of_expression(&inner_value, context)
+        }
         Expression::If {
             then_branch,
             else_branch,
@@ -1169,6 +1191,10 @@ fn interpret_block(
                 val
             }
         };
+        if matches!(value, Expression::Return { .. }) {
+            return Ok((value, block_context));
+        }
+
         last_value = Some(value);
     }
 
@@ -1229,7 +1255,9 @@ fn ensure_lvalue_mutable(
 fn lvalue_display_name(lvalue: &LValue) -> String {
     match lvalue {
         LValue::Identifier(Identifier(name), _) => name.clone(),
-        LValue::PropertyAccess { object, property, .. } => {
+        LValue::PropertyAccess {
+            object, property, ..
+        } => {
             format!("{}.{}", lvalue_display_name(object), property)
         }
     }
@@ -1287,10 +1315,7 @@ fn get_lvalue_type(
     }
 }
 
-fn get_lvalue_value(
-    target: &LValue,
-    context: &mut Context,
-) -> Result<Expression, Diagnostic> {
+fn get_lvalue_value(target: &LValue, context: &mut Context) -> Result<Expression, Diagnostic> {
     match target {
         LValue::Identifier(identifier, target_span) => {
             let (binding_ctx, _) = context.bindings.get(&identifier.0).ok_or_else(|| {
@@ -1303,7 +1328,10 @@ fn get_lvalue_value(
             match binding_ctx {
                 BindingContext::Bound(value, _) => Ok(value.clone()),
                 _ => Err(diagnostic(
-                    format!("Cannot assign to uninitialized identifier: {}", identifier.0),
+                    format!(
+                        "Cannot assign to uninitialized identifier: {}",
+                        identifier.0
+                    ),
                     *target_span,
                 )),
             }
@@ -1315,7 +1343,10 @@ fn get_lvalue_value(
         } => {
             let object_value = get_lvalue_value(object, context)?;
             let Expression::Struct(fields, struct_span) = object_value else {
-                return Err(diagnostic("Property access on non-struct value", *prop_span));
+                return Err(diagnostic(
+                    "Property access on non-struct value",
+                    *prop_span,
+                ));
             };
 
             fields
@@ -1323,10 +1354,7 @@ fn get_lvalue_value(
                 .find(|(id, _)| id.0 == *property)
                 .map(|(_, expr)| expr)
                 .ok_or_else(|| {
-                    diagnostic(
-                        format!("Missing field {} in struct", property),
-                        struct_span,
-                    )
+                    diagnostic(format!("Missing field {} in struct", property), struct_span)
                 })
         }
     }
@@ -1361,10 +1389,7 @@ fn apply_lvalue_update(
             if let (Some(expected_ty), Some(actual_ty)) = (expected_type, value_type) {
                 if !types_equivalent(&expected_ty, &actual_ty) {
                     return Err(diagnostic(
-                        format!(
-                            "Cannot assign value of mismatched type to {}",
-                            identifier.0
-                        ),
+                        format!("Cannot assign value of mismatched type to {}", identifier.0),
                         span,
                     ));
                 }
@@ -1380,7 +1405,11 @@ fn apply_lvalue_update(
             *binding_ctx = BindingContext::Bound(value, preserve_behavior);
             Ok(())
         }
-        LValue::PropertyAccess { object, property, span: prop_span } => {
+        LValue::PropertyAccess {
+            object,
+            property,
+            span: prop_span,
+        } => {
             let current_object = get_lvalue_value(&object, context)?;
             let Expression::Struct(mut fields, struct_span) = current_object else {
                 return Err(diagnostic("Property access on non-struct value", prop_span));
@@ -1440,11 +1469,15 @@ fn apply_assignment(
 fn pattern_has_mutable_annotation(pattern: &BindingPattern) -> bool {
     match pattern {
         BindingPattern::Annotated {
-            annotations, pattern, ..
-        } => annotations
-            .iter()
-            .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)))
-            || pattern_has_mutable_annotation(pattern),
+            annotations,
+            pattern,
+            ..
+        } => {
+            annotations
+                .iter()
+                .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)))
+                || pattern_has_mutable_annotation(pattern)
+        }
         BindingPattern::Struct(items, _) => items
             .iter()
             .any(|(_, pat)| pattern_has_mutable_annotation(pat)),
@@ -2307,6 +2340,11 @@ impl UsageCounter {
             } => {
                 self.count(function);
                 self.count(argument);
+            }
+            Expression::Return { value, .. } => {
+                if let Some(expr) = value {
+                    self.count(expr);
+                }
             }
             Expression::If {
                 condition,

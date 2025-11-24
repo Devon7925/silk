@@ -169,23 +169,30 @@ fn wasm_emits_assignment_updates() {
         }
     }
 
-    let has_expected_sequence = instructions
-        .windows(4)
-        .any(|window| matches!(window, [
-            Operator::LocalGet { local_index: 0 },
-            Operator::LocalSet { .. },
-            Operator::I32Const { value: 1 },
-            Operator::Drop,
-        ]))
-        && instructions
-            .windows(4)
-            .filter(|window| matches!(window[0], Operator::LocalGet { .. }))
-            .any(|window| matches!(window, [
-                Operator::LocalGet { local_index: 1 },
+    let has_expected_sequence = instructions.windows(4).any(|window| {
+        matches!(
+            window,
+            [
+                Operator::LocalGet { local_index: 0 },
+                Operator::LocalSet { .. },
                 Operator::I32Const { value: 1 },
-                Operator::I32Add,
-                Operator::LocalTee { local_index: 1 },
-            ]));
+                Operator::Drop,
+            ]
+        )
+    }) && instructions
+        .windows(4)
+        .filter(|window| matches!(window[0], Operator::LocalGet { .. }))
+        .any(|window| {
+            matches!(
+                window,
+                [
+                    Operator::LocalGet { local_index: 1 },
+                    Operator::I32Const { value: 1 },
+                    Operator::I32Add,
+                    Operator::LocalTee { local_index: 1 },
+                ]
+            )
+        });
 
     assert!(
         has_expected_sequence,
