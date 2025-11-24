@@ -142,3 +142,69 @@ fn compiles_wasm_export_with_bindings() {
     let wasm = compile(program.to_string()).expect("compilation should succeed");
     assert!(!wasm.is_empty());
 }
+
+#[test]
+fn wasm_emits_assignment_updates() {
+    let program = r#"
+        let export(wasm) increment_twice = fn(x: i32) -> i32 (
+            let mut total = x;
+            total = total + 1;
+            total = total + 1;
+            total
+        );
+        {}
+        "#;
+    let wasm = compile(program.to_string()).expect("compilation should succeed");
+
+    let mut instructions = Vec::new();
+    for payload in Parser::new(0).parse_all(&wasm) {
+        if let Payload::CodeSectionEntry(body) = payload.expect("valid wasm payload") {
+            let mut reader = body.get_operators_reader().expect("operators reader");
+            while let Ok(op) = reader.read() {
+                if matches!(op, Operator::End) {
+                    break;
+                }
+                instructions.push(op);
+            }
+        }
+    }
+
+    let has_expected_sequence = instructions
+        .windows(4)
+        .any(|window| matches!(window, [
+            Operator::LocalGet { local_index: 0 },
+            Operator::LocalSet { .. },
+            Operator::I32Const { value: 1 },
+            Operator::Drop,
+        ]))
+        && instructions
+            .windows(4)
+            .filter(|window| matches!(window[0], Operator::LocalGet { .. }))
+            .any(|window| matches!(window, [
+                Operator::LocalGet { local_index: 1 },
+                Operator::I32Const { value: 1 },
+                Operator::I32Add,
+                Operator::LocalTee { local_index: 1 },
+            ]));
+
+    assert!(
+        has_expected_sequence,
+        "expected assignments to emit stores back to the local, got {:?}",
+        instructions
+    );
+}
+
+#[test]
+fn wasm_supports_destructured_mut_locals() {
+    let program = r#"
+        let export(wasm) destructure_mut = fn{} -> i32 (
+            let mut { first = a, second = b } = { first = 3, second = 4 };
+            a = a + b;
+            a
+        );
+        {}
+        "#;
+
+    let wasm = compile(program.to_string()).expect("compilation should succeed");
+    assert!(!wasm.is_empty());
+}

@@ -357,14 +357,21 @@ pub fn interpret_expression(
         }
         Expression::Identifier(identifier, span) => {
             if let Some(binding) = context.bindings.get(&identifier.0) {
+                let is_mutable = binding
+                    .1
+                    .iter()
+                    .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)));
                 match &binding.0 {
                     BindingContext::Bound(_, PreserveBehavior::PreserveUsage) => {
                         return Ok(Expression::Identifier(identifier, span));
                     }
-                    BindingContext::Bound(
-                        expr,
-                        PreserveBehavior::Inline | PreserveBehavior::PreserveBinding,
-                    ) => {
+                    BindingContext::Bound(expr, PreserveBehavior::PreserveBinding) => {
+                        if is_mutable {
+                            return Ok(Expression::Identifier(identifier, span));
+                        }
+                        return Ok(expr.clone());
+                    }
+                    BindingContext::Bound(expr, PreserveBehavior::Inline) => {
                         return Ok(expr.clone());
                     }
                     BindingContext::UnboundWithType(_) => {}
@@ -397,6 +404,14 @@ pub fn interpret_expression(
         ),
         Expression::Binding(binding, _) => {
             interpret_binding(*binding, context, None).map(|(binding_result, _)| binding_result)
+        }
+        Expression::Assignment {
+            identifier,
+            expr,
+            span,
+        } => {
+            let value = interpret_expression(*expr, context)?;
+            apply_assignment(identifier, value, span, context)
         }
         Expression::Block(expressions, span) => {
             let (value, _) = interpret_block(expressions, span, context)?;
@@ -798,6 +813,50 @@ fn get_type_of_expression(
                 )),
             }
         }
+        Expression::Assignment {
+            identifier,
+            expr,
+            span,
+        } => {
+            let mut type_context = context.clone();
+            let value_type = get_type_of_expression(expr, &mut type_context)?;
+            let (binding_ctx, annotations) =
+                context.bindings.get(&identifier.0).ok_or_else(|| {
+                    diagnostic(
+                        format!("Cannot assign to unbound identifier: {}", identifier.0),
+                        *span,
+                    )
+                })?;
+
+            if !annotations
+                .iter()
+                .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)))
+            {
+                return Err(diagnostic(
+                    format!("Cannot assign to immutable identifier: {}", identifier.0),
+                    *span,
+                ));
+            }
+
+            let expected_type = match binding_ctx {
+                BindingContext::Bound(value, _) => {
+                    get_type_of_expression(value, &mut type_context).ok()
+                }
+                BindingContext::UnboundWithType(type_expr) => Some(type_expr.clone()),
+                BindingContext::UnboundWithoutType => None,
+            };
+
+            if let Some(expected_type) = expected_type {
+                if !types_equivalent(&expected_type, &value_type) {
+                    return Err(diagnostic(
+                        format!("Cannot assign value of mismatched type to {}", identifier.0),
+                        *span,
+                    ));
+                }
+            }
+
+            Ok(value_type)
+        }
         Expression::If {
             then_branch,
             else_branch,
@@ -1097,12 +1156,29 @@ fn interpret_block(
             Expression::Binding(binding, span) => {
                 let (binding_expr, preserve_behavior) =
                     interpret_binding(*binding, &mut block_context, Some(&usage_counter))?;
-                if preserve_behavior != PreserveBehavior::Inline {
-                    if let Expression::Binding(binding, _) = binding_expr {
+                let should_preserve_binding = preserve_behavior != PreserveBehavior::Inline
+                    || matches!(
+                        &binding_expr,
+                        Expression::Binding(binding, _)
+                            if pattern_has_mutable_annotation(&binding.pattern)
+                    );
+                if should_preserve_binding {
+                    if let Expression::Binding(binding, _) = binding_expr.clone() {
                         preserved_expressions.push(Expression::Binding(binding, span));
                     }
                 }
                 Expression::Literal(ExpressionLiteral::Boolean(true), dummy_span())
+            }
+            Expression::Assignment { identifier, expr, span } => {
+                let interpreted_expr = interpret_expression((*expr).clone(), &mut block_context)?;
+                let assignment_expr = Expression::Assignment {
+                    identifier: identifier.clone(),
+                    expr: Box::new(interpreted_expr.clone()),
+                    span,
+                };
+                let val = apply_assignment(identifier, interpreted_expr, span, &mut block_context)?;
+                preserved_expressions.push(assignment_expr);
+                val
             }
             other => {
                 let val = interpret_expression(other, &mut block_context)?;
@@ -1152,6 +1228,81 @@ pub fn interpret_program(
     }
 }
 
+fn apply_assignment(
+    identifier: Identifier,
+    value: Expression,
+    span: SourceSpan,
+    context: &mut Context,
+) -> Result<Expression, Diagnostic> {
+    let mut type_context = context.clone();
+    let value_type = get_type_of_expression(&value, &mut type_context).ok();
+
+    let Some((binding_ctx, annotations)) = context.bindings.get_mut(&identifier.0) else {
+        return Err(diagnostic(
+            format!("Cannot assign to unbound identifier: {}", identifier.0),
+            span,
+        ));
+    };
+
+    if !annotations
+        .iter()
+        .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)))
+    {
+        return Err(diagnostic(
+            format!("Cannot assign to immutable identifier: {}", identifier.0),
+            span,
+        ));
+    }
+
+    let expected_type = match binding_ctx {
+        BindingContext::Bound(existing, _) => {
+            get_type_of_expression(existing, &mut type_context).ok()
+        }
+        BindingContext::UnboundWithType(ty) => Some(ty.clone()),
+        BindingContext::UnboundWithoutType => None,
+    };
+
+    if let (Some(expected), Some(actual)) = (expected_type, value_type) {
+        if !types_equivalent(&expected, &actual) {
+            return Err(diagnostic(
+                format!("Cannot assign value of mismatched type to {}", identifier.0),
+                span,
+            ));
+        }
+    }
+
+    let preserve_behavior = match binding_ctx {
+        BindingContext::Bound(_, preserve_behavior) => *preserve_behavior,
+        BindingContext::UnboundWithType(_) | BindingContext::UnboundWithoutType => {
+            PreserveBehavior::PreserveBinding
+        }
+    };
+
+    *binding_ctx = BindingContext::Bound(value.clone(), preserve_behavior);
+
+    Ok(value)
+}
+
+fn pattern_has_mutable_annotation(pattern: &BindingPattern) -> bool {
+    match pattern {
+        BindingPattern::Annotated {
+            annotations, pattern, ..
+        } => annotations
+            .iter()
+            .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)))
+            || pattern_has_mutable_annotation(pattern),
+        BindingPattern::Struct(items, _) => items
+            .iter()
+            .any(|(_, pat)| pattern_has_mutable_annotation(pat)),
+        BindingPattern::EnumVariant { payload, .. } => payload
+            .as_ref()
+            .map(|pat| pattern_has_mutable_annotation(pat))
+            .unwrap_or(false),
+        BindingPattern::TypeHint(inner, _, _) => pattern_has_mutable_annotation(inner),
+        BindingPattern::Identifier(..) | BindingPattern::Literal(..) => false,
+    }
+}
+
 fn interpret_binding(
     binding: Binding,
     context: &mut Context,
@@ -1176,20 +1327,29 @@ fn interpret_binding(
         PreserveBehavior::Inline,
         usage_counter,
     )?;
+    let force_preserve = pattern_has_mutable_annotation(&binding.pattern);
+    let binding_expr = Expression::Binding(
+        Box::new(Binding {
+            pattern: binding.pattern,
+            expr: value,
+        }),
+        dummy_span(),
+    );
 
     Ok((
-        if preserve_behavior != PreserveBehavior::Inline || (!value_is_constant && !bound_success) {
-            Expression::Binding(
-                Box::new(Binding {
-                    pattern: binding.pattern,
-                    expr: value,
-                }),
-                dummy_span(),
-            )
+        if force_preserve
+            || preserve_behavior != PreserveBehavior::Inline
+            || (!value_is_constant && !bound_success)
+        {
+            binding_expr
         } else {
             Expression::Literal(ExpressionLiteral::Boolean(bound_success), dummy_span())
         },
-        preserve_behavior,
+        if force_preserve {
+            preserve_behavior.max(PreserveBehavior::PreserveBinding)
+        } else {
+            preserve_behavior
+        },
     ))
 }
 
@@ -1203,6 +1363,7 @@ fn parse_binding_annotation(
             interpret_expression(expr, &mut context)?,
             span,
         )),
+        BindingAnnotation::Mutable(span) => Ok(BindingAnnotation::Mutable(span)),
     }
 }
 
@@ -1247,7 +1408,12 @@ fn bind_pattern_blanks(
                         .find(|(name, _)| name.0 == field_identifier.0)
                         .map(|(_, ty)| ty.clone())
                 });
-                bind_pattern_blanks(field_pattern, context, Vec::new(), field_type_hint)?;
+                bind_pattern_blanks(
+                    field_pattern,
+                    context,
+                    passed_annotations.clone(),
+                    field_type_hint,
+                )?;
             }
 
             Ok(())
@@ -1350,7 +1516,7 @@ fn bind_pattern_from_value(
                     field_pattern,
                     field_value,
                     context,
-                    Vec::new(),
+                    passed_annotations.clone(),
                     preserve_behavior,
                     usage_counter,
                 )?;
@@ -1602,6 +1768,7 @@ fn is_resolved_constant(expr: &Expression) -> bool {
             return_type,
             ..
         } => is_resolved_constant(parameter) && is_resolved_constant(return_type),
+        Expression::Assignment { .. } => false,
         _ => false,
     }
 }
@@ -1962,6 +2129,12 @@ impl UsageCounter {
             Expression::Identifier(ident, _) => {
                 *self.counts.entry(ident.0.clone()).or_default() += 1;
             }
+            Expression::Assignment {
+                identifier, expr, ..
+            } => {
+                *self.counts.entry(identifier.0.clone()).or_default() += 1;
+                self.count(expr);
+            }
             Expression::Block(exprs, _) => {
                 for e in exprs {
                     self.count(e);
@@ -2077,6 +2250,7 @@ impl UsageCounter {
                 for ann in annotations {
                     match ann {
                         BindingAnnotation::Export(expr, _) => self.count(expr),
+                        BindingAnnotation::Mutable(_) => {}
                     }
                 }
             }
@@ -2113,7 +2287,7 @@ impl UsageCounter {
                     .iter()
                     .map(|ann| match ann {
                         BindingAnnotation::Export(..) => PreserveBehavior::PreserveBinding,
-                        _ => PreserveBehavior::Inline,
+                        BindingAnnotation::Mutable(..) => PreserveBehavior::PreserveBinding,
                     })
                     .max()
                     .unwrap_or(PreserveBehavior::Inline),

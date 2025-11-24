@@ -19,6 +19,21 @@ fn evaluate_text_to_simplified_expression(
     Ok((simplified_expression, simplified_context))
 }
 
+fn assert_final_number(result: Expression, expected: i32) {
+    match result {
+        Expression::Literal(ExpressionLiteral::Number(value), _) => {
+            assert_eq!(value, expected)
+        }
+        Expression::Block(expressions, _) => match expressions.last() {
+            Some(Expression::Literal(ExpressionLiteral::Number(value), _)) => {
+                assert_eq!(*value, expected)
+            }
+            other => panic!("Expected final numeric literal, got {:?}", other),
+        },
+        other => panic!("Expected numeric literal, got {:?}", other),
+    }
+}
+
 #[test]
 fn test_shadowing_in_block() {
     let program = "
@@ -106,4 +121,108 @@ fn test_negative_number_literal() {
         binding.value,
         Expression::Literal(ExpressionLiteral::Number(-5), _)
     ));
+}
+
+#[test]
+fn test_mutable_assignment_updates_binding() {
+    let program = "
+        let mut counter = 1;
+        counter = counter + 1;
+        counter
+        ";
+
+    let (result, _context) =
+        evaluate_text_to_simplified_expression(program).expect("interpretation should succeed");
+
+    assert_final_number(result, 2);
+}
+
+#[test]
+fn test_shadowed_mutable_bindings_respect_scope() {
+    let program = "
+        let mut x = 1;
+        (
+            let mut x = 2;
+            x = x + 5;
+            x
+        );
+        x
+        ";
+
+    let (result, _context) =
+        evaluate_text_to_simplified_expression(program).expect("interpretation should succeed");
+
+    assert_final_number(result, 1);
+}
+
+#[test]
+fn test_mutable_struct_destructuring_propagates_mut() {
+    let program = "
+        let mut { first = a, second = b } = { first = 2, second = 3 };
+        a = a + b;
+        a
+        ";
+
+    let (result, _context) =
+        evaluate_text_to_simplified_expression(program).expect("interpretation should succeed");
+
+    assert_final_number(result, 5);
+}
+
+#[test]
+fn test_mutable_struct_property_updates_through_rebinding() {
+    let program = "
+        let mut pair = { first = 1, second = 2 };
+        pair = { first = pair.first + 5, second = pair.second };
+        pair.first
+        ";
+
+    let (result, _context) =
+        evaluate_text_to_simplified_expression(program).expect("interpretation should succeed");
+
+    assert_final_number(result, 6);
+}
+
+#[test]
+fn test_assignment_requires_mut_annotation() {
+    let program = "
+        let counter = 1;
+        counter = 2;
+        ";
+
+    let (expression, remaining) = parse_block(program).expect("Failed to parse program text");
+    assert!(remaining.trim().is_empty());
+
+    let mut context = intrinsic_context();
+    let result = interpret_program(expression, &mut context);
+
+    match result {
+        Err(diag) => assert_eq!(
+            diag.message,
+            "Cannot assign to immutable identifier: counter"
+        ),
+        Ok(_) => panic!("assignment to immutable binding should fail"),
+    }
+}
+
+#[test]
+fn test_assignment_respects_type_hints() {
+    let program = "
+        let mut counter: i32 = 1;
+        counter = true;
+        ";
+
+    let (expression, remaining) = parse_block(program).expect("Failed to parse program text");
+    assert!(remaining.trim().is_empty());
+
+    let mut context = intrinsic_context();
+    let result = interpret_program(expression, &mut context);
+
+    match result {
+        Err(diag) => assert_eq!(
+            diag.message,
+            "Cannot assign value of mismatched type to counter"
+        ),
+        Ok(_) => panic!("type mismatched assignment should fail"),
+    }
 }

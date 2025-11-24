@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect, afterAll } from "bun:test";
 import { join } from "path";
 import { writeFileSync, unlinkSync } from "fs";
 
@@ -8,14 +8,7 @@ const TEMP_WASM = join(FIXTURES_DIR, "temp_bindings.wasm");
 const TEMP_SILK = join(FIXTURES_DIR, "temp_bindings.silk");
 const TEST_TIMEOUT_MS = 20000;
 
-test("compiles and runs wasm with bindings", async () => {
-    const silkCode = `
-    let export(wasm) double_add = fn(x: i32) -> i32 (
-        let y = x * 2;
-        y + y
-    );
-    {}
-  `;
+async function compileAndLoad(silkCode: string) {
     writeFileSync(TEMP_SILK, silkCode);
 
     const proc = Bun.spawn(["cargo", "run", "--", TEMP_SILK, "-o", TEMP_WASM], {
@@ -26,19 +19,75 @@ test("compiles and runs wasm with bindings", async () => {
     const exitCode = await proc.exited;
     if (exitCode !== 0) {
         const stderr = await new Response(proc.stderr).text();
-        console.error(stderr);
+        throw new Error(`Compilation failed:\n${stderr}`);
     }
-    expect(exitCode).toBe(0);
 
     const wasmBuffer = await Bun.file(TEMP_WASM).arrayBuffer();
     const { instance } = await WebAssembly.instantiate(wasmBuffer);
-    const { double_add } = instance.exports as any;
+    return instance.exports as any;
+}
 
+test("compiles and runs wasm with bindings", async () => {
+    const silkCode = `
+    let export(wasm) double_add = fn(x: i32) -> i32 (
+        let y = x * 2;
+        y + y
+    );
+    {}
+  `;
+
+    const { double_add } = await compileAndLoad(silkCode);
     expect(double_add(5)).toBe(20); // (5 * 2) + (5 * 2) = 10 + 10 = 20
+}, TEST_TIMEOUT_MS);
 
-    // Cleanup
+test("supports mutable assignments in wasm exports", async () => {
+    const silkCode = `
+    let export(wasm) increment_twice = fn(x: i32) -> i32 (
+        let mut total = x;
+        total = total + 1;
+        total = total + 1;
+        total
+    );
+    {}
+  `;
+
+    const { increment_twice } = await compileAndLoad(silkCode);
+    expect(increment_twice(10)).toBe(12);
+}, TEST_TIMEOUT_MS);
+
+test("propagates mutability through destructured wasm bindings", async () => {
+    const silkCode = `
+    let export(wasm) destructure_mut = fn{} -> i32 (
+        let mut { first = a, second = b } = { first = 3, second = 4 };
+        a = a + b;
+        a
+    );
+    {}
+  `;
+
+    const { destructure_mut } = await compileAndLoad(silkCode);
+    expect(destructure_mut()).toBe(7);
+}, TEST_TIMEOUT_MS);
+
+test("allows struct field updates via rebinding", async () => {
+    const silkCode = `
+    let export(wasm) update_struct = fn{} -> i32 (
+        let mut pair = { first = 2, second = 5 };
+        pair = { first = pair.first * 2, second = pair.second };
+        pair.first + pair.second
+    );
+    {}
+  `;
+
+    const { update_struct } = await compileAndLoad(silkCode);
+    expect(update_struct()).toBe(9);
+}, TEST_TIMEOUT_MS);
+
+afterAll(() => {
     try {
         unlinkSync(TEMP_SILK);
+    } catch (e) {}
+    try {
         unlinkSync(TEMP_WASM);
-    } catch (e) { }
-}, TEST_TIMEOUT_MS);
+    } catch (e) {}
+});

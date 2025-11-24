@@ -165,6 +165,15 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             },
             span,
         }),
+        Expression::Assignment {
+            identifier,
+            expr,
+            span,
+        } => Ok(Expression::Assignment {
+            identifier,
+            expr: Box::new(simplify_expression(*expr)?),
+            span,
+        }),
         Expression::Binding(binding, source_span) => {
             let binding = Binding {
                 pattern: simplify_binding_pattern(binding.pattern)?,
@@ -290,7 +299,14 @@ let export(js) add_one = fn(x: i32) -> i32 (
     let exported_binding = &annotated_bindings[0];
     assert_eq!(exported_binding.name, "add_one");
     assert!(exported_binding.annotations.len() == 1);
-    let BindingAnnotation::Export(target_expr, _) = &exported_binding.annotations[0];
+    let target_expr = exported_binding
+        .annotations
+        .iter()
+        .find_map(|ann| match ann {
+            BindingAnnotation::Export(expr, _) => Some(expr),
+            _ => None,
+        })
+        .expect("expected export annotation");
     if let Expression::Literal(ExpressionLiteral::Target(TargetLiteral::JSTarget), _) = target_expr
     {
     } else {
@@ -309,7 +325,14 @@ fn interpret_exported_function_w_binding() {
     let exported_binding = &annotated_bindings[0];
     assert_eq!(exported_binding.name, "add_one_squared");
     assert!(exported_binding.annotations.len() == 1);
-    let BindingAnnotation::Export(target_expr, _) = &exported_binding.annotations[0];
+    let target_expr = exported_binding
+        .annotations
+        .iter()
+        .find_map(|ann| match ann {
+            BindingAnnotation::Export(expr, _) => Some(expr),
+            _ => None,
+        })
+        .expect("expected export annotation");
     if let Expression::Literal(ExpressionLiteral::Target(TargetLiteral::WasmTarget), _) =
         target_expr
     {

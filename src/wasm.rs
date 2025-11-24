@@ -431,6 +431,26 @@ fn infer_type(
                 Diagnostic::new(format!("Unknown identifier `{}`", identifier.0)).with_span(*span)
             })
         }
+        Expression::Assignment {
+            identifier,
+            expr,
+            span,
+        } => {
+            let value_type = infer_type(expr, locals_types, context)?;
+            let existing_type = locals_types.get(&identifier.0).ok_or_else(|| {
+                Diagnostic::new(format!("Unknown identifier `{}`", identifier.0)).with_span(*span)
+            })?;
+
+            if &value_type != existing_type {
+                return Err(Diagnostic::new(format!(
+                    "Cannot assign value of different type to `{}`",
+                    identifier.0
+                ))
+                .with_span(*span));
+            }
+
+            Ok(value_type)
+        }
         Expression::FunctionCall { .. } => Ok(WasmType::I32),
         Expression::PropertyAccess {
             object,
@@ -645,6 +665,16 @@ fn extract_identifier_from_pattern(pattern: BindingPattern) -> Result<String, Di
     }
 }
 
+fn unwrap_pattern(mut pattern: BindingPattern) -> BindingPattern {
+    loop {
+        pattern = match pattern {
+            BindingPattern::Annotated { pattern, .. } => *pattern,
+            BindingPattern::TypeHint(inner, _, _) => *inner,
+            other => return other,
+        };
+    }
+}
+
 fn collect_locals(
     expr: &Expression,
     locals_types: &mut std::collections::HashMap<String, WasmType>,
@@ -663,6 +693,21 @@ fn collect_locals(
             )?;
 
             locals.extend(collect_locals(&binding.expr, locals_types, context)?);
+        }
+        Expression::Assignment {
+            identifier,
+            expr,
+            span,
+        } => {
+            if !locals_types.contains_key(&identifier.0) {
+                return Err(Diagnostic::new(format!(
+                    "Identifier `{}` is not a local variable or parameter",
+                    identifier.0
+                ))
+                .with_span(*span));
+            }
+
+            locals.extend(collect_locals(expr, locals_types, context)?);
         }
         Expression::Block(exprs, _) => {
             for e in exprs {
@@ -830,6 +875,23 @@ fn emit_expression(
             func.instruction(&Instruction::LocalGet(local_index));
             Ok(())
         }
+        Expression::Assignment {
+            identifier,
+            expr,
+            span,
+        } => {
+            let local_index = locals.get(&identifier.0).copied().ok_or_else(|| {
+                Diagnostic::new(format!(
+                    "Identifier `{}` is not a local variable or parameter",
+                    identifier.0
+                ))
+                .with_span(*span)
+            })?;
+
+            emit_expression(expr, locals, locals_types, func, type_ctx, context)?;
+            func.instruction(&Instruction::LocalTee(local_index));
+            Ok(())
+        }
         Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, op), _) => {
             match op {
                 BinaryIntrinsicOperator::BooleanAnd => {
@@ -957,12 +1019,13 @@ fn emit_expression(
             Ok(())
         }
         Expression::Binding(binding, _) => {
+            let pattern = unwrap_pattern(binding.pattern.clone());
             if let BindingPattern::EnumVariant {
                 enum_type,
                 variant,
                 payload,
                 span: pattern_span,
-            } = &binding.pattern
+            } = &pattern
             {
                 let value_type = infer_type(&binding.expr, locals_types, context)?;
                 let WasmType::Struct(fields) = value_type else {
@@ -1080,7 +1143,7 @@ fn emit_expression(
             if let (
                 BindingPattern::Struct(pattern_fields, _),
                 Expression::Struct(value_fields, _),
-            ) = (&binding.pattern, &binding.expr)
+            ) = (&pattern, &binding.expr)
             {
                 let mut comparisons_emitted = false;
                 for (field_identifier, field_pattern) in pattern_fields {
@@ -1143,7 +1206,7 @@ fn emit_expression(
                 Ok(())
             } else {
                 emit_expression(&binding.expr, locals, locals_types, func, type_ctx, context)?;
-                let name = extract_identifier_from_pattern(binding.pattern.clone())?;
+                let name = extract_identifier_from_pattern(pattern)?;
                 let local_index = locals
                     .get(&name)
                     .copied()
