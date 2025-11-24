@@ -1533,10 +1533,7 @@ foo = 2
     let Expression::Assignment { target, .. } = &parsed[1] else {
         panic!("expected assignment expression")
     };
-    assert!(matches!(
-        target,
-        LValue::Identifier(Identifier(ref name), _) if name == "foo"
-    ));
+    assert!(matches!(target, LValue::Identifier(Identifier(name), _) if name == "foo"));
 }
 
 #[test]
@@ -1631,8 +1628,8 @@ foo(123)
         panic!("first expression should be binding");
     };
     assert!(matches!(
-        binding.pattern,
-        BindingPattern::Identifier(Identifier(ref name), _) if name == "foo"
+        &binding.pattern,
+        BindingPattern::Identifier(Identifier(name), _) if name == "foo"
     ));
 
     let Expression::Function {
@@ -1649,16 +1646,16 @@ foo(123)
         panic!("parameter should include type hint");
     };
     assert!(matches!(
-        **inner,
-        BindingPattern::Identifier(Identifier(ref name), _) if name == "bar"
+        inner.as_ref(),
+        BindingPattern::Identifier(Identifier(name), _) if name == "bar"
     ));
     assert!(matches!(
-        **type_hint,
-        Expression::Identifier(Identifier(ref name), _) if name == "i32"
+        type_hint.as_ref(),
+        Expression::Identifier(Identifier(name), _) if name == "i32"
     ));
     assert!(matches!(
-        **return_type,
-        Expression::Identifier(Identifier(ref name), _) if name == "i32"
+        return_type.as_ref(),
+        Expression::Identifier(Identifier(name), _) if name == "i32"
     ));
     assert!(matches!(
         **body,
@@ -1677,8 +1674,8 @@ foo(123)
         panic!("expected function call as second expression");
     };
     assert!(matches!(
-        **function,
-        Expression::Identifier(Identifier(ref name), _) if name == "foo"
+        function.as_ref(),
+        Expression::Identifier(Identifier(name), _) if name == "foo"
     ));
     assert!(matches!(
         **argument,
@@ -1711,12 +1708,12 @@ fn parse_function_struct_parameter_pattern() {
         panic!("expected type hint for first parameter");
     };
     assert!(matches!(
-        **first_inner,
-        BindingPattern::Identifier(Identifier(ref name), _) if name == "bar1"
+        first_inner.as_ref(),
+        BindingPattern::Identifier(Identifier(name), _) if name == "bar1"
     ));
     assert!(matches!(
-        **first_type,
-        Expression::Identifier(Identifier(ref name), _) if name == "i32"
+        first_type.as_ref(),
+        Expression::Identifier(Identifier(name), _) if name == "i32"
     ));
 
     let (second_name, second_pattern) = &fields[1];
@@ -1725,12 +1722,12 @@ fn parse_function_struct_parameter_pattern() {
         panic!("expected type hint for second parameter");
     };
     assert!(matches!(
-        **second_inner,
-        BindingPattern::Identifier(Identifier(ref name), _) if name == "bar2"
+        second_inner.as_ref(),
+        BindingPattern::Identifier(Identifier(name), _) if name == "bar2"
     ));
     assert!(matches!(
-        **second_type,
-        Expression::Identifier(Identifier(ref name), _) if name == "i32"
+        second_type.as_ref(),
+        Expression::Identifier(Identifier(name), _) if name == "i32"
     ));
 }
 
@@ -1786,7 +1783,7 @@ fn parse_struct_property_access_chain() {
     assert_eq!(inner_property, "bar");
     assert!(matches!(
         *inner_object,
-        Expression::Identifier(Identifier(ref name), _) if name == "foo"
+        Expression::Identifier(Identifier(name), _) if name == "foo"
     ));
 }
 
@@ -1805,7 +1802,7 @@ fn parse_struct_property_access_then_call() {
     };
     assert!(matches!(
         *argument,
-        Expression::Identifier(Identifier(ref name), _) if name == "baz"
+        Expression::Identifier(Identifier(name), _) if name == "baz"
     ));
     let Expression::PropertyAccess {
         object,
@@ -1818,7 +1815,7 @@ fn parse_struct_property_access_then_call() {
     assert_eq!(property, "bar");
     assert!(matches!(
         *object,
-        Expression::Identifier(Identifier(ref name), _) if name == "foo"
+        Expression::Identifier(Identifier(name), _) if name == "foo"
     ));
 }
 

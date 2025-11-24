@@ -816,7 +816,10 @@ fn get_type_of_expression(
 
             if !types_equivalent(&target_type, &value_type) {
                 return Err(diagnostic(
-                    "Cannot assign value of mismatched type to target",
+                    format!(
+                        "Cannot assign value of mismatched type to {}",
+                        lvalue_display_name(target)
+                    ),
                     *span,
                 ));
             }
@@ -1223,6 +1226,15 @@ fn ensure_lvalue_mutable(
     }
 }
 
+fn lvalue_display_name(lvalue: &LValue) -> String {
+    match lvalue {
+        LValue::Identifier(Identifier(name), _) => name.clone(),
+        LValue::PropertyAccess { object, property, .. } => {
+            format!("{}.{}", lvalue_display_name(object), property)
+        }
+    }
+}
+
 fn get_lvalue_type(
     target: &LValue,
     context: &mut Context,
@@ -1411,7 +1423,10 @@ fn apply_assignment(
     if let Some(actual_type) = value_type {
         if !types_equivalent(&target_type, &actual_type) {
             return Err(diagnostic(
-                "Cannot assign value of mismatched type to target",
+                format!(
+                    "Cannot assign value of mismatched type to {}",
+                    lvalue_display_name(&target)
+                ),
                 span,
             ));
         }
