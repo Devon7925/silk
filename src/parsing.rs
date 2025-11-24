@@ -134,6 +134,11 @@ pub enum Expression {
         right: Box<Expression>,
         span: SourceSpan,
     },
+    Assignment {
+        identifier: Identifier,
+        expr: Box<Expression>,
+        span: SourceSpan,
+    },
     FunctionCall {
         function: Box<Expression>,
         argument: Box<Expression>,
@@ -161,6 +166,7 @@ impl Expression {
             | Expression::Identifier(_, span)
             | Expression::Binding(_, span)
             | Expression::Block(_, span)
+            | Expression::Assignment { span, .. }
             | Expression::EnumValue { span, .. }
             | Expression::EnumConstructor { span, .. } => *span,
             Expression::AttachImplementation { span, .. }
@@ -182,6 +188,7 @@ pub struct Binding {
 #[derive(Clone, Debug)]
 pub enum BindingAnnotation {
     Export(Expression, SourceSpan),
+    Mutable(SourceSpan),
 }
 
 fn parse_if_expression<'a>(
@@ -983,6 +990,46 @@ fn parse_operation_expression_with_guard<'a>(
     parse_operation_expression_with_min_precedence(source, file, stop_before_grouping, 0)
 }
 
+fn parse_assignment_expression_with_source<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Result<(Expression, &'a str), Diagnostic> {
+    parse_assignment_expression_with_guard(source, file, false)
+}
+
+fn parse_assignment_expression_with_guard<'a>(
+    source: &'a str,
+    file: &'a str,
+    stop_before_grouping: bool,
+) -> Result<(Expression, &'a str), Diagnostic> {
+    let trimmed = parse_optional_whitespace(file);
+    let start_slice = trimmed;
+    if let Some((identifier, after_identifier)) = parse_identifier(trimmed) {
+        let after_identifier = parse_optional_whitespace(after_identifier);
+        if let Some(after_equals) = after_identifier.strip_prefix('=') {
+            if !after_equals.starts_with('=') {
+                let after_equals = parse_optional_whitespace(after_equals);
+                let (expr, remaining) = parse_operation_expression_with_guard(
+                    source,
+                    after_equals,
+                    stop_before_grouping,
+                )?;
+                let span = consumed_span(source, start_slice, remaining);
+                return Ok((
+                    Expression::Assignment {
+                        identifier,
+                        expr: Box::new(expr),
+                        span,
+                    },
+                    remaining,
+                ));
+            }
+        }
+    }
+
+    parse_operation_expression_with_guard(source, file, stop_before_grouping)
+}
+
 fn parse_operation_expression_with_min_precedence<'a>(
     source: &'a str,
     file: &'a str,
@@ -1099,6 +1146,7 @@ fn parse_binding_annotation<'a>(
     file: &'a str,
 ) -> Option<Result<(BindingAnnotation, &'a str), Diagnostic>> {
     parse_export_binding_annotation(source, file)
+        .or_else(|| parse_mut_binding_annotation(source, file))
 }
 
 fn parse_export_binding_annotation<'a>(
@@ -1136,6 +1184,31 @@ fn parse_export_binding_annotation<'a>(
             },
         ),
     )
+}
+
+fn parse_mut_binding_annotation<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Option<Result<(BindingAnnotation, &'a str), Diagnostic>> {
+    const KEYWORD: &str = "mut";
+    if !file.starts_with(KEYWORD) {
+        return None;
+    }
+
+    let after_keyword = &file[KEYWORD.len()..];
+    if after_keyword
+        .chars()
+        .next()
+        .map(|c| c.is_alphanumeric() || c == '_')
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let annotation_start_slice = file;
+    let rest = parse_optional_whitespace(after_keyword);
+    let span = consumed_span(source, annotation_start_slice, rest);
+    Some(Ok((BindingAnnotation::Mutable(span), rest)))
 }
 
 fn parse_binding<'a>(
@@ -1181,7 +1254,7 @@ fn parse_individual_expression_with_source<'a>(
     if let Some(binding_parse) = parse_binding(source, file, false) {
         return binding_parse;
     }
-    parse_operation_expression_with_source(source, file)
+    parse_assignment_expression_with_source(source, file)
 }
 
 pub fn parse_block(file: &str) -> Result<(Expression, &str), Diagnostic> {
@@ -1334,6 +1407,7 @@ bar
             Expression::Identifier(identifier, _) => assert_eq!(identifier.0, "js"),
             other => panic!("expected target identifier, got {:?}", other),
         },
+        other => panic!("unexpected annotation: {:?}", other),
     }
 
     let Expression::Binding(binding2, _) = &parsed[1] else {
@@ -1374,6 +1448,38 @@ foo_binding
         panic!("expected annotated foo field")
     };
     assert_eq!(annotations.len(), 1);
+}
+
+#[test]
+fn parse_mutable_binding_and_assignment() {
+    let parsed = parse_block(
+        "
+let mut foo = 1;
+foo = 2
+    ",
+    )
+    .unwrap();
+
+    let (Expression::Block(parsed, _), "") = parsed else {
+        panic!()
+    };
+
+    let Expression::Binding(binding, _) = &parsed[0] else {
+        panic!("expected binding expression")
+    };
+    let BindingPattern::Annotated { annotations, .. } = &binding.pattern else {
+        panic!("expected annotated pattern for mutable binding")
+    };
+    assert!(
+        annotations
+            .iter()
+            .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)))
+    );
+
+    let Expression::Assignment { identifier, .. } = &parsed[1] else {
+        panic!("expected assignment expression")
+    };
+    assert_eq!(identifier.0, "foo");
 }
 
 #[test]
