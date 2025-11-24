@@ -231,9 +231,10 @@ fn simplify_binding_pattern(pattern: BindingPattern) -> Result<BindingPattern, D
 
 fn simplify_binding_context(binding_context: BindingContext) -> Result<BindingContext, Diagnostic> {
     match binding_context {
-        BindingContext::Bound(expression, preserve_behavior) => {
-            Ok(BindingContext::Bound(simplify_expression(expression)?, preserve_behavior))
-        }
+        BindingContext::Bound(expression, preserve_behavior) => Ok(BindingContext::Bound(
+            simplify_expression(expression)?,
+            preserve_behavior,
+        )),
         BindingContext::UnboundWithType(expression) => Ok(BindingContext::UnboundWithType(
             simplify_expression(expression)?,
         )),

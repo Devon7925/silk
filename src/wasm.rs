@@ -537,9 +537,7 @@ fn resolve_type(context: &interpret::Context, expr: &Expression) -> Result<WasmT
         Expression::Identifier(identifier, span) => {
             if let Some((binding, _)) = context.bindings.get(&identifier.0) {
                 match binding {
-                    interpret::BindingContext::Bound(value, _) => {
-                        resolve_type(context, value)
-                    }
+                    interpret::BindingContext::Bound(value, _) => resolve_type(context, value),
                     _ => Err(Diagnostic::new(format!(
                         "Type alias `{}` is not bound to a value",
                         identifier.0
