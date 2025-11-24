@@ -70,6 +70,20 @@ test("struct props can be mutated", async () => {
     expect(destructure_mut()).toBe(7);
 }, TEST_TIMEOUT_MS);
 
+test("nested dependent struct and tuple props can be mutated", async () => {
+    const silkCode = `
+    let export(wasm) destructure_mut = fn(bar: i32) -> i32 (
+        let mut foo = { first = {bar, 3}, second = 4 };
+        foo.first.0 = foo.first.0 + foo.second;
+        foo.first.0
+    );
+    {}
+  `;
+
+    const { destructure_mut } = await compileAndLoad(silkCode);
+    expect(destructure_mut(3)).toBe(7);
+}, TEST_TIMEOUT_MS);
+
 test("partial mutability in destructured wasm bindings", async () => {
     const silkCode = `
     let export(wasm) destructure_mut = fn{} -> i32 (
