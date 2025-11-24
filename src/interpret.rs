@@ -1304,7 +1304,8 @@ fn bind_pattern_from_value(
                 && *usage_count > 1
                 && !is_resolved_constant(value)
             {
-                identifier_preserve_behavior = identifier_preserve_behavior.max(PreserveBehavior::PreserveUsage);
+                identifier_preserve_behavior =
+                    identifier_preserve_behavior.max(PreserveBehavior::PreserveUsage);
             }
             context.bindings.insert(
                 identifier.0,
@@ -1429,22 +1430,31 @@ fn bind_pattern_from_value(
             pattern,
             annotations,
             ..
-        } => bind_pattern_from_value(
-            *pattern,
-            value,
-            context,
-            passed_annotations
+        } => {
+            let new_annotations = annotations
                 .into_iter()
-                .chain(
-                    annotations
-                        .into_iter()
-                        .map(|ann| parse_binding_annotation(ann, context))
-                        .collect::<Result<Vec<_>, _>>()?,
-                )
-                .collect(),
-            preserve_behavior,
-            usage_counter,
-        ),
+                .map(|ann| parse_binding_annotation(ann, context))
+                .collect::<Result<Vec<_>, _>>()?;
+            let new_preserve_behavior = if new_annotations
+                .iter()
+                .any(|ann| matches!(ann, BindingAnnotation::Export(_, _)))
+            {
+                preserve_behavior.max(PreserveBehavior::PreserveBinding)
+            } else {
+                preserve_behavior
+            };
+            bind_pattern_from_value(
+                *pattern,
+                value,
+                context,
+                passed_annotations
+                    .into_iter()
+                    .chain(new_annotations.into_iter())
+                    .collect(),
+                new_preserve_behavior,
+                usage_counter,
+            )
+        }
     }
 }
 
@@ -2222,7 +2232,7 @@ let Level1 = enum { Some = Level2, None = {} };
 let export(wasm) check = fn(x: i32) -> i32 (
     let foo = if x > 0 (Level1::Some(Level2::Some(x))) else (Level1::None);
 
-    if let Level1::Some(a) = foo && let Level2::Some(b) = a (
+    if let Level1::Some(Level2::Some(b)) = foo (
         b
     ) else (
         0
