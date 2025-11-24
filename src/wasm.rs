@@ -8,7 +8,7 @@ use crate::{
     interpret::{self, AnnotatedBinding},
     parsing::{
         BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, Expression,
-        ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, TargetLiteral,
+        ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, LValue, TargetLiteral,
     },
 };
 
@@ -102,6 +102,46 @@ fn materialize_enum_value(enum_value: &Expression) -> Option<Expression> {
         }
     }
     None
+}
+
+fn lvalue_to_expression(target: &LValue) -> Expression {
+    match target {
+        LValue::Identifier(identifier, span) => {
+            Expression::Identifier(identifier.clone(), *span)
+        }
+        LValue::PropertyAccess {
+            object,
+            property,
+            span,
+        } => Expression::PropertyAccess {
+            object: Box::new(lvalue_to_expression(object)),
+            property: property.clone(),
+            span: *span,
+        },
+    }
+}
+
+fn ensure_lvalue_local(
+    target: &LValue,
+    locals_types: &std::collections::HashMap<String, WasmType>,
+    span: SourceSpan,
+) -> Result<(), Diagnostic> {
+    match target {
+        LValue::Identifier(identifier, _) => {
+            if locals_types.contains_key(&identifier.0) {
+                Ok(())
+            } else {
+                Err(
+                    Diagnostic::new(format!(
+                        "Identifier `{}` is not a local variable or parameter",
+                        identifier.0
+                    ))
+                    .with_span(span),
+                )
+            }
+        }
+        LValue::PropertyAccess { object, .. } => ensure_lvalue_local(object, locals_types, span),
+    }
 }
 
 fn enum_wasm_type(
@@ -431,20 +471,14 @@ fn infer_type(
                 Diagnostic::new(format!("Unknown identifier `{}`", identifier.0)).with_span(*span)
             })
         }
-        Expression::Assignment {
-            identifier,
-            expr,
-            span,
-        } => {
+        Expression::Assignment { target, expr, span } => {
             let value_type = infer_type(expr, locals_types, context)?;
-            let existing_type = locals_types.get(&identifier.0).ok_or_else(|| {
-                Diagnostic::new(format!("Unknown identifier `{}`", identifier.0)).with_span(*span)
-            })?;
+            let target_expr = lvalue_to_expression(target);
+            let existing_type = infer_type(&target_expr, locals_types, context)?;
 
-            if &value_type != existing_type {
+            if value_type != existing_type {
                 return Err(Diagnostic::new(format!(
-                    "Cannot assign value of different type to `{}`",
-                    identifier.0
+                    "Cannot assign value of different type to target"
                 ))
                 .with_span(*span));
             }
@@ -694,19 +728,8 @@ fn collect_locals(
 
             locals.extend(collect_locals(&binding.expr, locals_types, context)?);
         }
-        Expression::Assignment {
-            identifier,
-            expr,
-            span,
-        } => {
-            if !locals_types.contains_key(&identifier.0) {
-                return Err(Diagnostic::new(format!(
-                    "Identifier `{}` is not a local variable or parameter",
-                    identifier.0
-                ))
-                .with_span(*span));
-            }
-
+        Expression::Assignment { target, expr, span } => {
+            ensure_lvalue_local(target, locals_types, *span)?;
             locals.extend(collect_locals(expr, locals_types, context)?);
         }
         Expression::Block(exprs, _) => {
@@ -875,22 +898,65 @@ fn emit_expression(
             func.instruction(&Instruction::LocalGet(local_index));
             Ok(())
         }
-        Expression::Assignment {
-            identifier,
-            expr,
-            span,
-        } => {
-            let local_index = locals.get(&identifier.0).copied().ok_or_else(|| {
-                Diagnostic::new(format!(
-                    "Identifier `{}` is not a local variable or parameter",
-                    identifier.0
-                ))
-                .with_span(*span)
-            })?;
+        Expression::Assignment { target, expr, span } => {
+            match target {
+                LValue::Identifier(identifier, _) => {
+                    let local_index = locals.get(&identifier.0).copied().ok_or_else(|| {
+                        Diagnostic::new(format!(
+                            "Identifier `{}` is not a local variable or parameter",
+                            identifier.0
+                        ))
+                        .with_span(*span)
+                    })?;
 
-            emit_expression(expr, locals, locals_types, func, type_ctx, context)?;
-            func.instruction(&Instruction::LocalTee(local_index));
-            Ok(())
+                    emit_expression(expr, locals, locals_types, func, type_ctx, context)?;
+                    func.instruction(&Instruction::LocalTee(local_index));
+                    Ok(())
+                }
+                LValue::PropertyAccess {
+                    object,
+                    property,
+                    span: target_span,
+                } => {
+                    let object_expr = lvalue_to_expression(object);
+                    let object_type = infer_type(&object_expr, locals_types, context)?;
+                    let WasmType::Struct(fields) = object_type else {
+                        return Err(
+                            Diagnostic::new("Property assignment on non-struct type")
+                                .with_span(*target_span),
+                        );
+                    };
+
+                    let field_index = fields
+                        .iter()
+                        .position(|(name, _)| name == property)
+                        .ok_or_else(|| {
+                            Diagnostic::new(format!("Field `{}` not found in struct", property))
+                                .with_span(*target_span)
+                        })? as u32;
+
+                    let type_index = type_ctx
+                        .get_type_index(&fields)
+                        .expect("Type should be registered");
+
+                    emit_expression(&object_expr, locals, locals_types, func, type_ctx, context)?;
+                    emit_expression(expr, locals, locals_types, func, type_ctx, context)?;
+                    func.instruction(&Instruction::StructSet {
+                        struct_type_index: type_index,
+                        field_index,
+                    });
+
+                    let full_target_expr = lvalue_to_expression(target);
+                    emit_expression(
+                        &full_target_expr,
+                        locals,
+                        locals_types,
+                        func,
+                        type_ctx,
+                        context,
+                    )
+                }
+            }
         }
         Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, op), _) => {
             match op {
@@ -1159,7 +1225,7 @@ fn emit_expression(
                             .with_span(field_pattern.span())
                         })?;
 
-                    match field_pattern {
+                    match unwrap_pattern(field_pattern.clone()) {
                         BindingPattern::Literal(ExpressionLiteral::Number(expected), _) => {
                             emit_expression(
                                 value_expr,
@@ -1169,7 +1235,7 @@ fn emit_expression(
                                 type_ctx,
                                 context,
                             )?;
-                            func.instruction(&Instruction::I32Const(*expected));
+                            func.instruction(&Instruction::I32Const(expected));
                             func.instruction(&Instruction::I32Eq);
                             if comparisons_emitted {
                                 func.instruction(&Instruction::I32And);

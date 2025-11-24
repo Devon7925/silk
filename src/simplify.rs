@@ -165,12 +165,8 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             },
             span,
         }),
-        Expression::Assignment {
-            identifier,
-            expr,
-            span,
-        } => Ok(Expression::Assignment {
-            identifier,
+        Expression::Assignment { target, expr, span } => Ok(Expression::Assignment {
+            target,
             expr: Box::new(simplify_expression(*expr)?),
             span,
         }),

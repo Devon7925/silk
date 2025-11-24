@@ -4,6 +4,25 @@ use crate::diagnostics::{Diagnostic, SourceSpan};
 pub struct Identifier(pub String);
 
 #[derive(Clone, Debug)]
+pub enum LValue {
+    Identifier(Identifier, SourceSpan),
+    PropertyAccess {
+        object: Box<LValue>,
+        property: String,
+        span: SourceSpan,
+    },
+}
+
+impl LValue {
+    pub fn span(&self) -> SourceSpan {
+        match self {
+            LValue::Identifier(_, span) => *span,
+            LValue::PropertyAccess { span, .. } => *span,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum BindingPattern {
     Identifier(Identifier, SourceSpan),
     Literal(ExpressionLiteral, SourceSpan),
@@ -135,7 +154,7 @@ pub enum Expression {
         span: SourceSpan,
     },
     Assignment {
-        identifier: Identifier,
+        target: LValue,
         expr: Box<Expression>,
         span: SourceSpan,
     },
@@ -1004,9 +1023,9 @@ fn parse_assignment_expression_with_guard<'a>(
 ) -> Result<(Expression, &'a str), Diagnostic> {
     let trimmed = parse_optional_whitespace(file);
     let start_slice = trimmed;
-    if let Some((identifier, after_identifier)) = parse_identifier(trimmed) {
-        let after_identifier = parse_optional_whitespace(after_identifier);
-        if let Some(after_equals) = after_identifier.strip_prefix('=') {
+    if let Some(Ok((target, after_target))) = parse_lvalue(source, trimmed) {
+        let after_target = parse_optional_whitespace(after_target);
+        if let Some(after_equals) = after_target.strip_prefix('=') {
             if !after_equals.starts_with('=') {
                 let after_equals = parse_optional_whitespace(after_equals);
                 let (expr, remaining) = parse_operation_expression_with_guard(
@@ -1017,7 +1036,7 @@ fn parse_assignment_expression_with_guard<'a>(
                 let span = consumed_span(source, start_slice, remaining);
                 return Ok((
                     Expression::Assignment {
-                        identifier,
+                        target,
                         expr: Box::new(expr),
                         span,
                     },
@@ -1028,6 +1047,41 @@ fn parse_assignment_expression_with_guard<'a>(
     }
 
     parse_operation_expression_with_guard(source, file, stop_before_grouping)
+}
+
+fn parse_lvalue<'a>(source: &'a str, file: &'a str) -> Option<Result<(LValue, &'a str), Diagnostic>> {
+    let trimmed = parse_optional_whitespace(file);
+    let start_slice = trimmed;
+    let (identifier, mut remaining) = parse_identifier(trimmed)?;
+    let mut current_span = consumed_span(source, start_slice, remaining);
+    let mut lvalue = LValue::Identifier(identifier, current_span);
+
+    loop {
+        let lookahead = parse_optional_whitespace(remaining);
+        let Some(after_dot) = lookahead.strip_prefix('.') else {
+            break;
+        };
+
+        let after_dot = parse_optional_whitespace(after_dot);
+        let Some((property_identifier, rest)) = parse_identifier(after_dot) else {
+            return Some(Err(diagnostic_here(
+                source,
+                after_dot,
+                after_dot.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
+                "Expected identifier after . in assignment target",
+            )));
+        };
+
+        current_span = consumed_span(source, start_slice, rest);
+        lvalue = LValue::PropertyAccess {
+            object: Box::new(lvalue),
+            property: property_identifier.0,
+            span: current_span,
+        };
+        remaining = rest;
+    }
+
+    Some(Ok((lvalue, remaining)))
 }
 
 fn parse_operation_expression_with_min_precedence<'a>(
@@ -1476,10 +1530,13 @@ foo = 2
             .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)))
     );
 
-    let Expression::Assignment { identifier, .. } = &parsed[1] else {
+    let Expression::Assignment { target, .. } = &parsed[1] else {
         panic!("expected assignment expression")
     };
-    assert_eq!(identifier.0, "foo");
+    assert!(matches!(
+        target,
+        LValue::Identifier(Identifier(ref name), _) if name == "foo"
+    ));
 }
 
 #[test]
