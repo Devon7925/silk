@@ -72,3 +72,27 @@ fn empty_struct_branches_are_type_checked() {
         err.message
     );
 }
+
+#[test]
+fn return_allows_unbalanced_if_in_statement_position() {
+    let program = "
+        let export(wasm) early_exit_loopish = fn(flag: bool) -> i32 (
+            if flag (
+                return 1;
+            ) else (
+                false
+            );
+            2
+        );
+
+        early_exit_loopish false
+        ";
+
+    let (expr, _) = evaluate_text_to_expression(program)
+        .expect("if expression with return in one branch should evaluate");
+
+    match expr {
+        Expression::Literal(ExpressionLiteral::Number(value), _) => assert_eq!(value, 2),
+        other => panic!("Expected numeric literal, got {:?}", other),
+    }
+}

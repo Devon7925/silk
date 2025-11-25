@@ -330,11 +330,19 @@ pub fn interpret_expression(
             let resolved_condition = resolve_operations(condition_for_pattern, context)?;
             collect_bindings(&resolved_condition, &mut then_context)?;
 
-            let (interpreted_then, then_type) = branch_type(&then_branch, &then_context)?;
-            let (interpreted_else, else_type) = branch_type(&inferred_else_expr, &base_context)?;
+            let (interpreted_then, then_type, then_returns) =
+                branch_type(&then_branch, &then_context)?;
+            let (interpreted_else, else_type, else_returns) =
+                branch_type(&inferred_else_expr, &base_context)?;
 
             if !types_equivalent(&then_type, &else_type) {
-                return Err(diagnostic("Type mismatch between if branches", span));
+                if then_returns && !else_returns {
+                    // The then branch exits, so the resulting type is determined by the else branch.
+                } else if else_returns && !then_returns {
+                    // The else branch exits, so the resulting type is determined by the then branch.
+                } else {
+                    return Err(diagnostic("Type mismatch between if branches", span));
+                }
             }
 
             let resolved_condition = resolve_expression(interpreted_condition.clone(), context);
@@ -356,28 +364,21 @@ pub fn interpret_expression(
             }
         }
         Expression::Identifier(identifier, span) => {
-            if let Some(binding) = context.bindings.get(&identifier.0) {
-                let is_mutable = binding
-                    .1
-                    .iter()
-                    .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)));
-                match &binding.0 {
-                    BindingContext::Bound(_, PreserveBehavior::PreserveUsage) => {
-                        return Ok(Expression::Identifier(identifier, span));
-                    }
-                    BindingContext::Bound(expr, PreserveBehavior::PreserveBinding) => {
-                        if is_mutable {
+            if let Some((binding_ctx, _)) = context.bindings.get(&identifier.0) {
+                match binding_ctx.clone() {
+                    BindingContext::Bound(expr, preserve_behavior) => {
+                        let resolved = resolve_value(expr, context)?;
+                        if matches!(&resolved, Expression::Identifier(id, _) if id.0 == identifier.0)
+                            && matches!(preserve_behavior, PreserveBehavior::PreserveUsage)
+                        {
                             return Ok(Expression::Identifier(identifier, span));
                         }
-                        return Ok(expr.clone());
+                        return Ok(resolved);
                     }
-                    BindingContext::Bound(expr, PreserveBehavior::Inline) => {
-                        return Ok(expr.clone());
+                    BindingContext::UnboundWithType(_) | BindingContext::UnboundWithoutType => {
+                        Ok(Expression::Identifier(identifier, span))
                     }
-                    BindingContext::UnboundWithType(_) => {}
-                    _ => {}
                 }
-                Ok(Expression::Identifier(identifier, span))
             } else {
                 Err(diagnostic(
                     format!("Unbound identifier: {}", identifier.0),
@@ -411,10 +412,31 @@ pub fn interpret_expression(
                 None => empty_struct_expr(span),
             };
 
+            let resolved_value = resolve_value(evaluated_value, context)?;
+
             Ok(Expression::Return {
-                value: Some(Box::new(evaluated_value)),
+                value: Some(Box::new(resolved_value)),
                 span,
             })
+        }
+        Expression::Loop { body, span } => {
+            let mut iteration_count = 0usize;
+            loop {
+                if iteration_count > 10_000 {
+                    return Err(diagnostic("Loop did not produce a return value", span));
+                }
+
+                iteration_count += 1;
+                let iteration_value = match *body.clone() {
+                    Expression::Block(exprs, block_span) => {
+                        interpret_loop_block(exprs, block_span, context)?
+                    }
+                    other => interpret_expression(other, context)?,
+                };
+                if matches!(iteration_value, Expression::Return { .. }) {
+                    return Ok(iteration_value);
+                }
+            }
         }
         Expression::Assignment { target, expr, span } => {
             let value = interpret_expression(*expr, context)?;
@@ -459,6 +481,7 @@ pub fn interpret_expression(
 
                 if is_direct || returns_type {
                     let mut call_context = context.clone();
+                    let parameter_clone = parameter.clone();
                     bind_pattern_from_value(
                         parameter,
                         &argument_value,
@@ -467,6 +490,19 @@ pub fn interpret_expression(
                         PreserveBehavior::Inline,
                         None,
                     )?;
+                    force_bindings(&parameter_clone, &argument_value, &mut call_context);
+                    if let Some(identifier) = parameter_identifier(&parameter_clone) {
+                        call_context.bindings.insert(
+                            identifier.0.clone(),
+                            (
+                                BindingContext::Bound(
+                                    argument_value.clone(),
+                                    PreserveBehavior::Inline,
+                                ),
+                                Vec::new(),
+                            ),
+                        );
+                    }
                     let body_value = interpret_expression(*body, &mut call_context)?;
                     if let Expression::Return { value, .. } = body_value {
                         return Ok(*value.expect("Return value should be populated"));
@@ -622,9 +658,11 @@ pub fn interpret_expression(
         }),
         Expression::IntrinsicOperation(intrinsic_operation, span) => match intrinsic_operation {
             IntrinsicOperation::Binary(left, right, operator) => {
-                let evaluated_left = interpret_expression(*left, context)?;
-                let evaluated_right = interpret_expression(*right, context)?;
-                if !is_resolved_constant(&evaluated_left) || !is_resolved_constant(&evaluated_right)
+                let evaluated_left = resolve_value(interpret_expression(*left, context)?, context)?;
+                let evaluated_right =
+                    resolve_value(interpret_expression(*right, context)?, context)?;
+                if !is_resolved_constant(&evaluated_left)
+                    || !is_resolved_constant(&evaluated_right)
                 {
                     return Ok(Expression::IntrinsicOperation(
                         IntrinsicOperation::Binary(
@@ -863,7 +901,16 @@ fn get_type_of_expression(
             let mut else_context = context.clone();
             let else_type = get_type_of_expression(&inferred_else, &mut else_context)?;
             if !types_equivalent(&then_type, &else_type) {
-                return Err(diagnostic("Type mismatch between if branches", *span));
+                let then_returns = expression_contains_return(then_branch);
+                let else_returns = expression_contains_return(&inferred_else);
+
+                if then_returns && !else_returns {
+                    return Ok(else_type);
+                } else if else_returns && !then_returns {
+                    return Ok(then_type);
+                } else {
+                    return Err(diagnostic("Type mismatch between if branches", *span));
+                }
             }
             Ok(then_type)
         }
@@ -932,6 +979,10 @@ fn get_type_of_expression(
             let mut block_context = context.clone();
             let (value, _) = interpret_block(exprs.clone(), *span, &mut block_context)?;
             get_type_of_expression(&value, &mut block_context)
+        }
+        Expression::Loop { body, .. } => {
+            let mut loop_context = context.clone();
+            get_type_of_expression(body, &mut loop_context)
         }
         Expression::FunctionCall {
             function,
@@ -1077,14 +1128,76 @@ fn get_type_of_binding_pattern(
     }
 }
 
+fn expression_contains_return(expr: &Expression) -> bool {
+    match expr {
+        Expression::Return { .. } => true,
+        Expression::Block(exprs, _) => exprs.iter().any(expression_contains_return),
+        Expression::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expression_contains_return(then_branch)
+                || else_branch
+                    .as_ref()
+                    .map(|branch| expression_contains_return(branch))
+                    .unwrap_or(false)
+        }
+        Expression::Binding(binding, _) => expression_contains_return(&binding.expr),
+        Expression::Assignment { expr, .. } => expression_contains_return(expr),
+        Expression::FunctionCall { function, argument, .. } => {
+            expression_contains_return(function) || expression_contains_return(argument)
+        }
+        Expression::Function { body, .. } => expression_contains_return(body),
+        Expression::Loop { body, .. } => expression_contains_return(body),
+        Expression::PropertyAccess { object, .. } => expression_contains_return(object),
+        Expression::Operation { left, right, .. } => {
+            expression_contains_return(left) || expression_contains_return(right)
+        }
+        Expression::AttachImplementation { type_expr, implementation, .. } => {
+            expression_contains_return(type_expr) || expression_contains_return(implementation)
+        }
+        Expression::EnumAccess { enum_expr, .. } => expression_contains_return(enum_expr),
+        Expression::EnumValue { enum_type, payload, .. } => {
+            expression_contains_return(enum_type)
+                || payload
+                    .as_ref()
+                    .map(|payload| expression_contains_return(payload))
+                    .unwrap_or(false)
+        }
+        Expression::EnumConstructor {
+            enum_type,
+            payload_type,
+            ..
+        } => {
+            expression_contains_return(enum_type)
+                || expression_contains_return(payload_type)
+        }
+        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _span) => {
+            expression_contains_return(left) || expression_contains_return(right)
+        }
+        Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, _) => false,
+        Expression::Literal(_, _)
+        | Expression::Identifier(_, _)
+        | Expression::IntrinsicType(_, _)
+        | Expression::EnumType(_, _)
+        | Expression::FunctionType { .. }
+        | Expression::Struct(_, _) => false,
+    }
+}
+
 fn branch_type(
     branch: &Expression,
     context: &Context,
-) -> Result<(Expression, Expression), Diagnostic> {
+) -> Result<(Expression, Expression, bool), Diagnostic> {
     let mut branch_context = context.clone();
     let evaluated_branch = interpret_expression(branch.clone(), &mut branch_context)?;
     let branch_type = get_type_of_expression(&evaluated_branch, &mut branch_context)?;
-    Ok((evaluated_branch, branch_type))
+    Ok((
+        evaluated_branch.clone(),
+        branch_type,
+        matches!(evaluated_branch, Expression::Return { .. }),
+    ))
 }
 
 fn get_trait_prop_of_type(
@@ -1211,6 +1324,38 @@ fn interpret_block(
             block_context,
         ))
     }
+}
+
+fn interpret_loop_block(
+    expressions: Vec<Expression>,
+    span: SourceSpan,
+    context: &mut Context,
+) -> Result<Expression, Diagnostic> {
+    let mut last_value: Option<Expression> = None;
+
+    for expression in expressions {
+        let value = match expression {
+            Expression::Binding(binding, _) => {
+                interpret_binding(*binding, context, None)?;
+                Expression::Literal(ExpressionLiteral::Boolean(true), dummy_span())
+            }
+            Expression::Assignment { target, expr, span } => {
+                let interpreted_expr = interpret_expression(*expr, context)?;
+                let resolved_expr = resolve_expression(interpreted_expr, context)?;
+                apply_assignment(target, resolved_expr.clone(), span, context)?;
+                resolved_expr
+            }
+            other => resolve_expression(other, context)?,
+        };
+
+        if matches!(value, Expression::Return { .. }) {
+            return Ok(value);
+        }
+
+        last_value = Some(value);
+    }
+
+    last_value.ok_or_else(|| diagnostic("Cannot evaluate empty block", span))
 }
 
 pub fn interpret_program(
@@ -1811,6 +1956,32 @@ fn bind_pattern_from_value(
     }
 }
 
+fn force_bindings(pattern: &BindingPattern, value: &Expression, context: &mut Context) {
+    match pattern {
+        BindingPattern::Identifier(identifier, _) => {
+            context.bindings.insert(
+                identifier.0.clone(),
+                (
+                    BindingContext::Bound(value.clone(), PreserveBehavior::Inline),
+                    Vec::new(),
+                ),
+            );
+        }
+        BindingPattern::TypeHint(inner, _, _) => force_bindings(inner, value, context),
+        BindingPattern::Annotated { pattern, .. } => force_bindings(pattern, value, context),
+        _ => {}
+    }
+}
+
+fn parameter_identifier(pattern: &BindingPattern) -> Option<&Identifier> {
+    match pattern {
+        BindingPattern::Identifier(identifier, _) => Some(identifier),
+        BindingPattern::TypeHint(inner, _, _) => parameter_identifier(inner),
+        BindingPattern::Annotated { pattern, .. } => parameter_identifier(pattern),
+        _ => None,
+    }
+}
+
 fn interpret_numeric_intrinsic<F>(
     left: Expression,
     right: Expression,
@@ -2278,12 +2449,12 @@ fn resolve_value(expr: Expression, context: &mut Context) -> Result<Expression, 
         Expression::Identifier(ident, span) => {
             if let Some(binding) = context.bindings.get(&ident.0) {
                 match &binding.0 {
-                    BindingContext::Bound(
-                        val,
-                        PreserveBehavior::Inline | PreserveBehavior::PreserveBinding,
-                    ) => resolve_value(val.clone(), context),
-                    BindingContext::Bound(_, PreserveBehavior::PreserveUsage) => {
-                        Ok(Expression::Identifier(ident, span))
+                    BindingContext::Bound(val, _) => {
+                        if matches!(val, Expression::Identifier(id, _) if id.0 == ident.0) {
+                            Ok(Expression::Identifier(ident, span))
+                        } else {
+                            resolve_value(val.clone(), context)
+                        }
                     }
                     _ => Ok(Expression::Identifier(ident, span)),
                 }
@@ -2296,8 +2467,13 @@ fn resolve_value(expr: Expression, context: &mut Context) -> Result<Expression, 
 }
 
 fn resolve_expression(expr: Expression, context: &mut Context) -> Result<Expression, Diagnostic> {
-    let evaluated = interpret_expression(expr, context)?;
-    resolve_value(evaluated, context)
+    match expr {
+        Expression::Identifier(..) => resolve_value(expr, context),
+        other => {
+            let evaluated = interpret_expression(other, context)?;
+            resolve_value(evaluated, context)
+        }
+    }
 }
 
 struct UsageCounter {
@@ -2340,6 +2516,9 @@ impl UsageCounter {
             } => {
                 self.count(function);
                 self.count(argument);
+            }
+            Expression::Loop { body, .. } => {
+                self.count(body);
             }
             Expression::Return { value, .. } => {
                 if let Some(expr) = value {
