@@ -3,7 +3,7 @@ use crate::{
     Diagnostic,
     enum_normalization::normalize_enum_application,
     interpret::BindingContext,
-    parsing::{Binding, BindingPattern, Expression, IntrinsicOperation},
+    parsing::{Binding, BindingPattern, BinaryIntrinsicOperator, Expression, IntrinsicOperation},
 };
 
 #[cfg(test)]
@@ -60,6 +60,10 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             return_type: Box::new(simplify_expression(*return_type)?),
             span,
         }),
+        Expression::Loop { body, span } => Ok(Expression::Loop {
+            body: Box::new(simplify_expression(*body)?),
+            span,
+        }),
         Expression::Struct(items, source_span) => {
             let simplified_items = items
                 .into_iter()
@@ -67,10 +71,33 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
                 .collect::<Result<_, Diagnostic>>()?;
             Ok(Expression::Struct(simplified_items, source_span))
         }
-        Expression::Operation { span, .. } => Err(Diagnostic::new(format!(
-            "Invalid state: uninterpreted operator expression",
-        ))
-        .with_span(span)),
+        Expression::Operation {
+            operator,
+            left,
+            right,
+            span,
+        } => {
+            if let Some(intrinsic) = intrinsic_operator(&operator) {
+                Ok(Expression::IntrinsicOperation(
+                    IntrinsicOperation::Binary(
+                        Box::new(simplify_expression(*left)?),
+                        Box::new(simplify_expression(*right)?),
+                        intrinsic,
+                    ),
+                    span,
+                ))
+            } else {
+                Ok(Expression::FunctionCall {
+                    function: Box::new(Expression::PropertyAccess {
+                        object: Box::new(simplify_expression(*left)?),
+                        property: operator,
+                        span,
+                    }),
+                    argument: Box::new(simplify_expression(*right)?),
+                    span,
+                })
+            }
+        }
         Expression::FunctionCall {
             function,
             argument,
@@ -194,6 +221,25 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
         expr @ (Expression::Identifier(..)
         | Expression::IntrinsicType(..)
         | Expression::Literal(..)) => Ok(expr),
+    }
+}
+
+fn intrinsic_operator(operator: &str) -> Option<BinaryIntrinsicOperator> {
+    match operator {
+        "+" => Some(BinaryIntrinsicOperator::I32Add),
+        "-" => Some(BinaryIntrinsicOperator::I32Subtract),
+        "*" => Some(BinaryIntrinsicOperator::I32Multiply),
+        "/" => Some(BinaryIntrinsicOperator::I32Divide),
+        "==" => Some(BinaryIntrinsicOperator::I32Equal),
+        "!=" => Some(BinaryIntrinsicOperator::I32NotEqual),
+        "<" => Some(BinaryIntrinsicOperator::I32LessThan),
+        ">" => Some(BinaryIntrinsicOperator::I32GreaterThan),
+        "<=" => Some(BinaryIntrinsicOperator::I32LessThanOrEqual),
+        ">=" => Some(BinaryIntrinsicOperator::I32GreaterThanOrEqual),
+        "&&" => Some(BinaryIntrinsicOperator::BooleanAnd),
+        "||" => Some(BinaryIntrinsicOperator::BooleanOr),
+        "^" => Some(BinaryIntrinsicOperator::BooleanXor),
+        _ => None,
     }
 }
 

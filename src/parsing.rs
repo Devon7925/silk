@@ -174,6 +174,10 @@ pub enum Expression {
         value: Option<Box<Expression>>,
         span: SourceSpan,
     },
+    Loop {
+        body: Box<Expression>,
+        span: SourceSpan,
+    },
 }
 
 impl Expression {
@@ -190,6 +194,7 @@ impl Expression {
             | Expression::Binding(_, span)
             | Expression::Block(_, span)
             | Expression::Return { span, .. }
+            | Expression::Loop { span, .. }
             | Expression::Assignment { span, .. }
             | Expression::EnumValue { span, .. }
             | Expression::EnumConstructor { span, .. } => *span,
@@ -878,6 +883,51 @@ fn parse_return_expression_with_source<'a>(
     )))
 }
 
+fn parse_loop_expression_with_source<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Option<Result<(Expression, &'a str), Diagnostic>> {
+    const KEYWORD: &str = "loop";
+    if !file.starts_with(KEYWORD) {
+        return None;
+    }
+
+    let after_keyword = &file[KEYWORD.len()..];
+    if after_keyword
+        .chars()
+        .next()
+        .map(|c| c.is_alphanumeric() || c == '_')
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let start_slice = file;
+    let remaining = parse_optional_whitespace(after_keyword);
+    let Some(group_parsed) = parse_grouping_expression_with_source(source, remaining) else {
+        return Some(Err(diagnostic_here(
+            source,
+            remaining,
+            1,
+            "Expected loop body expression",
+        )));
+    };
+
+    match group_parsed {
+        Ok((body, rest)) => {
+            let span = consumed_span(source, start_slice, rest);
+            Some(Ok((
+                Expression::Loop {
+                    body: Box::new(body),
+                    span,
+                },
+                rest,
+            )))
+        }
+        Err(err) => Some(Err(err)),
+    }
+}
+
 #[cfg(test)]
 pub fn parse_isolated_expression(file: &str) -> Result<(Expression, &str), Diagnostic> {
     parse_isolated_expression_with_source(file, file)
@@ -902,6 +952,9 @@ fn parse_isolated_expression_with_source_with_guard<'a>(
         parse_return_expression_with_source(source, file, stop_before_grouping)
     {
         return return_parse;
+    }
+    if let Some(loop_parse) = parse_loop_expression_with_source(source, file) {
+        return loop_parse;
     }
     if let Some(function_parse) = parse_function_literal(source, file) {
         return function_parse;
