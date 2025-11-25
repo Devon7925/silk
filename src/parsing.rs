@@ -174,6 +174,10 @@ pub enum Expression {
         value: Option<Box<Expression>>,
         span: SourceSpan,
     },
+    Break {
+        value: Option<Box<Expression>>,
+        span: SourceSpan,
+    },
     Loop {
         body: Box<Expression>,
         span: SourceSpan,
@@ -194,6 +198,7 @@ impl Expression {
             | Expression::Binding(_, span)
             | Expression::Block(_, span)
             | Expression::Return { span, .. }
+            | Expression::Break { span, .. }
             | Expression::Loop { span, .. }
             | Expression::Assignment { span, .. }
             | Expression::EnumValue { span, .. }
@@ -883,6 +888,48 @@ fn parse_return_expression_with_source<'a>(
     )))
 }
 
+fn parse_break_expression_with_source<'a>(
+    source: &'a str,
+    file: &'a str,
+    stop_before_grouping: bool,
+) -> Option<Result<(Expression, &'a str), Diagnostic>> {
+    const KEYWORD: &str = "break";
+    if !file.starts_with(KEYWORD) {
+        return None;
+    }
+
+    let after_keyword = &file[KEYWORD.len()..];
+    if after_keyword
+        .chars()
+        .next()
+        .map(|c| c.is_alphanumeric() || c == '_')
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let start_slice = file;
+    let remaining = parse_optional_whitespace(after_keyword);
+
+    let (value, rest) = if remaining.is_empty() {
+        (None, remaining)
+    } else {
+        match parse_operation_expression_with_guard(source, remaining, stop_before_grouping) {
+            Ok((expr, rest)) => (Some(expr), rest),
+            Err(err) => return Some(Err(err)),
+        }
+    };
+
+    let span = consumed_span(source, start_slice, rest);
+    Some(Ok((
+        Expression::Break {
+            value: value.map(Box::new),
+            span,
+        },
+        rest,
+    )))
+}
+
 fn parse_loop_expression_with_source<'a>(
     source: &'a str,
     file: &'a str,
@@ -952,6 +999,11 @@ fn parse_isolated_expression_with_source_with_guard<'a>(
         parse_return_expression_with_source(source, file, stop_before_grouping)
     {
         return return_parse;
+    }
+    if let Some(break_parse) =
+        parse_break_expression_with_source(source, file, stop_before_grouping)
+    {
+        return break_parse;
     }
     if let Some(loop_parse) = parse_loop_expression_with_source(source, file) {
         return loop_parse;

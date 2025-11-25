@@ -3,7 +3,7 @@ use crate::{
     Diagnostic,
     enum_normalization::normalize_enum_application,
     interpret::BindingContext,
-    parsing::{Binding, BindingPattern, BinaryIntrinsicOperator, Expression, IntrinsicOperation},
+    parsing::{BinaryIntrinsicOperator, Binding, BindingPattern, Expression, IntrinsicOperation},
 };
 
 #[cfg(test)]
@@ -117,6 +117,13 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             span,
         }),
         Expression::Return { value, span } => Ok(Expression::Return {
+            value: match value {
+                Some(expr) => Some(Box::new(simplify_expression(*expr)?)),
+                None => None,
+            },
+            span,
+        }),
+        Expression::Break { value, span } => Ok(Expression::Break {
             value: match value {
                 Some(expr) => Some(Box::new(simplify_expression(*expr)?)),
                 None => None,

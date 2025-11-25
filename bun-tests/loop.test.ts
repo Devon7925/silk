@@ -4,14 +4,18 @@ import { writeFileSync, unlinkSync } from "fs";
 
 const ROOT_DIR = join(import.meta.dir, "..");
 const FIXTURES_DIR = join(ROOT_DIR, "fixtures");
-const TEMP_WASM = join(FIXTURES_DIR, "loop_factorial.wasm");
-const TEMP_SILK = join(FIXTURES_DIR, "loop_factorial.silk");
+const TEMP_FILES = new Set<string>();
 const TEST_TIMEOUT_MS = 20000;
 
-async function compileAndLoad(silkCode: string) {
-    writeFileSync(TEMP_SILK, silkCode);
+async function compileAndLoad(silkCode: string, basename: string) {
+    const wasmPath = join(FIXTURES_DIR, `${basename}.wasm`);
+    const silkPath = join(FIXTURES_DIR, `${basename}.silk`);
+    TEMP_FILES.add(wasmPath);
+    TEMP_FILES.add(silkPath);
 
-    const proc = Bun.spawn(["cargo", "run", "--", TEMP_SILK, "-o", TEMP_WASM], {
+    writeFileSync(silkPath, silkCode);
+
+    const proc = Bun.spawn(["cargo", "run", "--", silkPath, "-o", wasmPath], {
         cwd: ROOT_DIR,
         stderr: "pipe",
     });
@@ -22,7 +26,7 @@ async function compileAndLoad(silkCode: string) {
         throw new Error(`Compilation failed:\n${stderr}`);
     }
 
-    const wasmBuffer = await Bun.file(TEMP_WASM).arrayBuffer();
+    const wasmBuffer = await Bun.file(wasmPath).arrayBuffer();
     const { instance } = await WebAssembly.instantiate(wasmBuffer);
     return instance.exports as any;
 }
@@ -43,15 +47,33 @@ test("loop can compute factorial", async () => {
     {};
     `;
 
-    const exports = await compileAndLoad(silkCode);
+    const exports = await compileAndLoad(silkCode, "loop_factorial");
     expect(exports.factorial(5)).toBe(120);
 }, TEST_TIMEOUT_MS);
 
+test("loop break returns value", async () => {
+    const silkCode = `
+    let export(wasm) first_non_positive = fn(start: i32) -> i32 (
+        let mut current = start;
+        loop (
+            if current <= 0 (
+                break current;
+            );
+            current = current - 1;
+        )
+    );
+    {};
+    `;
+
+    const exports = await compileAndLoad(silkCode, "loop_break_value");
+    expect(exports.first_non_positive(3)).toBe(0);
+    expect(exports.first_non_positive(-2)).toBe(-2);
+}, TEST_TIMEOUT_MS);
+
 afterAll(() => {
-    try {
-        unlinkSync(TEMP_SILK);
-    } catch (e) {}
-    try {
-        unlinkSync(TEMP_WASM);
-    } catch (e) {}
+    for (const file of TEMP_FILES) {
+        try {
+            unlinkSync(file);
+        } catch (e) {}
+    }
 });
