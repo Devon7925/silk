@@ -310,6 +310,8 @@ pub fn compile_exports(context: &interpret::Context) -> Result<Vec<u8>, Diagnost
         let mut local_indices = std::collections::HashMap::new();
         let mut locals_types = std::collections::HashMap::new();
 
+        let body_produces_value = expression_produces_value(&export.body);
+
         // Add parameters
         for (j, param) in export.params.iter().enumerate() {
             local_indices.insert(param.name.clone(), j as u32);
@@ -335,7 +337,7 @@ pub fn compile_exports(context: &interpret::Context) -> Result<Vec<u8>, Diagnost
             &type_ctx,
             context,
         )?;
-        if expression_contains_return(&export.body) {
+        if !body_produces_value {
             func.instruction(&Instruction::Unreachable);
         }
         func.instruction(&Instruction::End);
@@ -483,6 +485,38 @@ fn expression_contains_return(expr: &Expression) -> bool {
             ..
         } => expression_contains_return(type_expr) || expression_contains_return(implementation),
         _ => false,
+    }
+}
+
+fn expression_produces_value(expr: &Expression) -> bool {
+    match expr {
+        Expression::Return { .. } => false,
+        Expression::Loop { .. } => false,
+        Expression::Block(exprs, _) => exprs
+            .last()
+            .map(|expr| expression_produces_value(expr))
+            .unwrap_or(true),
+        Expression::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let then_returns = expression_contains_return(then_branch);
+            let else_returns = else_branch
+                .as_ref()
+                .map(|branch| expression_contains_return(branch))
+                .unwrap_or(false);
+
+            let then_produces = expression_produces_value(then_branch);
+            let else_produces = else_branch
+                .as_ref()
+                .map(|branch| expression_produces_value(branch))
+                .unwrap_or(true);
+
+            (then_produces || then_returns) && (else_produces || else_returns)
+        }
+        Expression::Binding(binding, _) => expression_produces_value(&binding.expr),
+        _ => true,
     }
 }
 
