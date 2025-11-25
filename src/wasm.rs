@@ -335,6 +335,9 @@ pub fn compile_exports(context: &interpret::Context) -> Result<Vec<u8>, Diagnost
             &type_ctx,
             context,
         )?;
+        if expression_contains_return(&export.body) {
+            func.instruction(&Instruction::Unreachable);
+        }
         func.instruction(&Instruction::End);
         code_section.function(&func);
 
@@ -415,6 +418,9 @@ fn collect_types(
                     .with_span(*span),
             );
         }
+        Expression::Loop { body, .. } => {
+            collect_types(body, ctx, locals_types, context)?;
+        }
         Expression::PropertyAccess { object, .. } => {
             collect_types(object, ctx, locals_types, context)?;
         }
@@ -440,6 +446,44 @@ fn collect_types(
         _ => {}
     }
     Ok(())
+}
+
+fn expression_contains_return(expr: &Expression) -> bool {
+    match expr {
+        Expression::Return { .. } => true,
+        Expression::Block(exprs, _) => exprs.iter().any(expression_contains_return),
+        Expression::If {
+            then_branch,
+            else_branch,
+            ..
+        } => expression_contains_return(then_branch)
+            || else_branch
+                .as_ref()
+                .map(|branch| expression_contains_return(branch))
+                .unwrap_or(false),
+        Expression::Binding(binding, _) => expression_contains_return(&binding.expr),
+        Expression::Assignment { expr, .. } => expression_contains_return(expr),
+        Expression::FunctionCall { function, argument, .. } => {
+            expression_contains_return(function) || expression_contains_return(argument)
+        }
+        Expression::Loop { body, .. } => expression_contains_return(body),
+        Expression::PropertyAccess { object, .. } => expression_contains_return(object),
+        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _span) => {
+            expression_contains_return(left) || expression_contains_return(right)
+        }
+        Expression::EnumAccess { enum_expr, .. } => expression_contains_return(enum_expr),
+        Expression::EnumConstructor {
+            enum_type,
+            payload_type,
+            ..
+        } => expression_contains_return(enum_type) || expression_contains_return(payload_type),
+        Expression::AttachImplementation {
+            type_expr,
+            implementation,
+            ..
+        } => expression_contains_return(type_expr) || expression_contains_return(implementation),
+        _ => false,
+    }
 }
 
 fn infer_type(
@@ -488,6 +532,7 @@ fn infer_type(
                 .unwrap_or_else(|| Expression::Struct(vec![], *span));
             infer_type(&inner_expr, locals_types, context)
         }
+        Expression::Loop { body, .. } => infer_type(body, locals_types, context),
         Expression::FunctionCall { .. } => Ok(WasmType::I32),
         Expression::PropertyAccess {
             object,
@@ -1026,6 +1071,13 @@ fn emit_expression(
             Diagnostic::new("enum intrinsic should be resolved before wasm lowering")
                 .with_span(*span),
         ),
+        Expression::Loop { body, .. } => {
+            func.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
+            emit_expression(body, locals, locals_types, func, type_ctx, context)?;
+            func.instruction(&Instruction::Br(0));
+            func.instruction(&Instruction::End);
+            Ok(())
+        }
         Expression::FunctionCall {
             function,
             argument,
@@ -1062,25 +1114,32 @@ fn emit_expression(
             emit_expression(condition, locals, locals_types, func, type_ctx, context)?;
             let result_type = infer_type(then_branch, locals_types, context)?;
             let wasm_result_type = result_type.to_val_type(type_ctx);
+            let then_returns = expression_contains_return(then_branch);
+            let else_returns = else_branch
+                .as_ref()
+                .map(|branch| expression_contains_return(branch))
+                .unwrap_or(false);
 
-            func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
-                wasm_result_type,
-            )));
-            emit_expression(then_branch, locals, locals_types, func, type_ctx, context)?;
-            func.instruction(&Instruction::Else);
-            if let Some(else_expr) = else_branch {
-                emit_expression(else_expr, locals, locals_types, func, type_ctx, context)?;
+            if else_branch.is_none() && (then_returns || !matches!(wasm_result_type, ValType::I32)) {
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+                emit_expression(then_branch, locals, locals_types, func, type_ctx, context)?;
+                func.instruction(&Instruction::End);
             } else {
-                if matches!(wasm_result_type, ValType::I32) {
-                    func.instruction(&Instruction::I32Const(0));
+                let block_type = if then_returns && else_returns {
+                    wasm_encoder::BlockType::Empty
                 } else {
-                    return Err(Diagnostic::new(
-                        "If expression returning struct must have else branch",
-                    )
-                    .with_span(expr.span()));
+                    wasm_encoder::BlockType::Result(wasm_result_type)
+                };
+                func.instruction(&Instruction::If(block_type));
+                emit_expression(then_branch, locals, locals_types, func, type_ctx, context)?;
+                func.instruction(&Instruction::Else);
+                if let Some(else_expr) = else_branch {
+                    emit_expression(else_expr, locals, locals_types, func, type_ctx, context)?;
+                } else {
+                    func.instruction(&Instruction::I32Const(0));
                 }
+                func.instruction(&Instruction::End);
             }
-            func.instruction(&Instruction::End);
             Ok(())
         }
         Expression::Binding(binding, _) => {
