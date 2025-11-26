@@ -160,6 +160,14 @@ fn types_equivalent(left: &Expression, right: &Expression) -> bool {
                 type_expr: b_type, ..
             },
         ) => types_equivalent(a_type, b_type),
+        (
+            Expression::AttachImplementation { type_expr, .. },
+            other,
+        ) => types_equivalent(type_expr, other),
+        (
+            other,
+            Expression::AttachImplementation { type_expr, .. },
+        ) => types_equivalent(other, type_expr),
         (Expression::EnumType(a_variants, _), Expression::EnumType(b_variants, _)) => {
             if a_variants.len() != b_variants.len() {
                 return false;
@@ -295,12 +303,20 @@ fn collect_bindings(expr: &Expression, context: &mut Context) -> Result<(), Diag
     match expr {
         Expression::Binding(binding, _) => {
             let mut type_context = context.clone();
-            let value_type = get_type_of_expression(&binding.expr, &mut type_context).ok();
-            let resolved_type = if let Some(ty) = value_type {
-                resolve_expression(ty, context).ok()
-            } else {
-                None
-            };
+            let value_type = get_type_of_expression(&binding.expr, &mut type_context)
+                .or_else(|_| {
+                    interpret_expression(binding.expr.clone(), &mut type_context)
+                        .and_then(|evaluated| {
+                            get_type_of_expression(&evaluated, &mut type_context)
+                        })
+                })
+                .ok();
+
+            let resolved_type = value_type
+                .as_ref()
+                .and_then(|ty| resolve_expression(ty.clone(), context).ok())
+                .or(value_type);
+
             bind_pattern_blanks(binding.pattern.clone(), context, Vec::new(), resolved_type)?;
         }
         Expression::IntrinsicOperation(
@@ -2014,8 +2030,14 @@ fn bind_pattern_blanks(
             Ok(())
         }
         BindingPattern::EnumVariant {
-            variant, payload, ..
+            enum_type,
+            variant,
+            payload,
+            ..
         } => {
+            let type_hint = type_hint
+                .or_else(|| resolve_enum_type_expression(&enum_type, context));
+
             let payload_hint = type_hint
                 .as_ref()
                 .and_then(|hint| enum_variant_info(hint, &variant).map(|(_, ty)| ty));
