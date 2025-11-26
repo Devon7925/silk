@@ -790,7 +790,6 @@ fn expression_emits_value(
         Expression::Loop { body, .. } => {
             Ok(determine_loop_result_type(body, locals_types, context)?.is_some())
         }
-        Expression::Struct(items, _) if items.is_empty() => Ok(false),
         _ => Ok(true),
     }
 }
@@ -1855,9 +1854,6 @@ fn emit_expression(
             Ok(())
         }
         Expression::Struct(items, _span) => {
-            if items.is_empty() {
-                return Ok(());
-            }
             let mut sorted_items = items.clone();
             sorted_items.sort_by(|a, b| a.0.0.cmp(&b.0.0));
 
