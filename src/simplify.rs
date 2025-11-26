@@ -60,6 +60,19 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             return_type: Box::new(simplify_expression(*return_type)?),
             span,
         }),
+        Expression::While {
+            condition,
+            body,
+            span,
+        } => Ok(Expression::Loop {
+            body: Box::new(Expression::If {
+                condition: Box::new(simplify_expression(*condition)?),
+                then_branch: Box::new(simplify_expression(*body)?),
+                else_branch: Some(Box::new(Expression::Break { value: None, span })),
+                span,
+            }),
+            span,
+        }),
         Expression::Loop { body, span } => Ok(Expression::Loop {
             body: Box::new(simplify_expression(*body)?),
             span,

@@ -182,6 +182,11 @@ pub enum Expression {
         body: Box<Expression>,
         span: SourceSpan,
     },
+    While {
+        condition: Box<Expression>,
+        body: Box<Expression>,
+        span: SourceSpan,
+    },
 }
 
 impl Expression {
@@ -200,6 +205,7 @@ impl Expression {
             | Expression::Return { span, .. }
             | Expression::Break { span, .. }
             | Expression::Loop { span, .. }
+            | Expression::While { span, .. }
             | Expression::Assignment { span, .. }
             | Expression::EnumValue { span, .. }
             | Expression::EnumConstructor { span, .. } => *span,
@@ -975,6 +981,59 @@ fn parse_loop_expression_with_source<'a>(
     }
 }
 
+fn parse_while_expression_with_source<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Option<Result<(Expression, &'a str), Diagnostic>> {
+    const KEYWORD: &str = "while";
+    if !file.starts_with(KEYWORD) {
+        return None;
+    }
+
+    let after_keyword = &file[KEYWORD.len()..];
+    if after_keyword
+        .chars()
+        .next()
+        .map(|c| c.is_alphanumeric() || c == '_')
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let start_slice = file;
+    let mut remaining = parse_optional_whitespace(after_keyword);
+    let (condition, after_condition) =
+        match parse_operation_expression_with_guard(source, remaining, true) {
+            Ok(parsed) => parsed,
+            Err(err) => return Some(Err(err)),
+        };
+
+    remaining = parse_optional_whitespace(after_condition);
+    let Some(group_parsed) = parse_grouping_expression_with_source(source, remaining) else {
+        return Some(Err(diagnostic_here(
+            source,
+            remaining,
+            1,
+            "Expected while body expression",
+        )));
+    };
+
+    match group_parsed {
+        Ok((body, rest)) => {
+            let span = consumed_span(source, start_slice, rest);
+            Some(Ok((
+                Expression::While {
+                    condition: Box::new(condition),
+                    body: Box::new(body),
+                    span,
+                },
+                rest,
+            )))
+        }
+        Err(err) => Some(Err(err)),
+    }
+}
+
 #[cfg(test)]
 pub fn parse_isolated_expression(file: &str) -> Result<(Expression, &str), Diagnostic> {
     parse_isolated_expression_with_source(file, file)
@@ -1004,6 +1063,9 @@ fn parse_isolated_expression_with_source_with_guard<'a>(
         parse_break_expression_with_source(source, file, stop_before_grouping)
     {
         return break_parse;
+    }
+    if let Some(while_parse) = parse_while_expression_with_source(source, file) {
+        return while_parse;
     }
     if let Some(loop_parse) = parse_loop_expression_with_source(source, file) {
         return loop_parse;
