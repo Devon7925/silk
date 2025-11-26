@@ -105,6 +105,26 @@ fn intrinsic_type_expr(ty: IntrinsicType) -> Expression {
     Expression::IntrinsicType(ty, dummy_span())
 }
 
+fn ensure_boolean_condition(
+    condition: &Expression,
+    span: SourceSpan,
+    context: &Context,
+    construct_name: &str,
+) -> Result<(), Diagnostic> {
+    let mut condition_context = context.clone();
+    let condition_type = get_type_of_expression(condition, &mut condition_context)?;
+    let expected_bool = intrinsic_type_expr(IntrinsicType::Boolean);
+
+    if !types_equivalent(&condition_type, &expected_bool) {
+        return Err(diagnostic(
+            format!("{} condition did not resolve to a boolean value", construct_name),
+            span,
+        ));
+    }
+
+    Ok(())
+}
+
 fn types_equivalent(left: &Expression, right: &Expression) -> bool {
     match (left, right) {
         (Expression::IntrinsicType(a, _), Expression::IntrinsicType(b, _)) => a == b,
@@ -434,6 +454,50 @@ pub fn interpret_expression(
                 value: Some(Box::new(evaluated_value)),
                 span,
             })
+        }
+        Expression::While {
+            condition,
+            body,
+            span,
+        } => {
+            let mut iteration_count = 0usize;
+            loop {
+                if iteration_count > 10_000 {
+                    return Err(diagnostic("Loop did not produce a return value", span));
+                }
+
+                iteration_count += 1;
+                let condition_value = interpret_expression((*condition).clone(), context)?;
+                let resolved_condition = resolve_expression(condition_value.clone(), context);
+                let condition_bool = match resolved_condition {
+                    Ok(Expression::Literal(ExpressionLiteral::Boolean(value), _)) => value,
+                    _ => {
+                        return Err(diagnostic(
+                            "While condition did not resolve to a boolean value",
+                            span,
+                        ));
+                    }
+                };
+
+                if !condition_bool {
+                    return Ok(empty_struct_expr(span));
+                }
+
+                let iteration_value = match *body.clone() {
+                    Expression::Block(exprs, block_span) => {
+                        interpret_loop_block(exprs, block_span, context)?
+                    }
+                    other => interpret_expression(other, context)?,
+                };
+
+                match iteration_value {
+                    Expression::Return { .. } => return Ok(iteration_value),
+                    Expression::Break { value, .. } => {
+                        return Ok(*value.unwrap_or_else(|| Box::new(empty_struct_expr(span))));
+                    }
+                    _ => {}
+                }
+            }
         }
         Expression::Loop { body, span } => {
             let mut iteration_count = 0usize;
@@ -925,11 +989,13 @@ fn get_type_of_expression(
             get_type_of_expression(&inner_value, context)
         }
         Expression::If {
+            condition,
             then_branch,
             else_branch,
             span,
-            ..
         } => {
+            ensure_boolean_condition(condition, *span, context, "If")?;
+
             let inferred_else = else_branch
                 .as_ref()
                 .map(|expr| expr.as_ref().clone())
@@ -1017,6 +1083,29 @@ fn get_type_of_expression(
             let mut block_context = context.clone();
             let (value, _) = interpret_block(exprs.clone(), *span, &mut block_context)?;
             get_type_of_expression(&value, &mut block_context)
+        }
+        Expression::While {
+            condition,
+            body,
+            span,
+        } => {
+            ensure_boolean_condition(condition, *span, context, "While")?;
+
+            get_type_of_expression(
+                &Expression::Loop {
+                    body: Box::new(Expression::If {
+                        condition: condition.clone(),
+                        then_branch: body.clone(),
+                        else_branch: Some(Box::new(Expression::Break {
+                            value: None,
+                            span: *span,
+                        })),
+                        span: *span,
+                    }),
+                    span: *span,
+                },
+                context,
+            )
         }
         Expression::Loop { body, .. } => {
             let mut loop_context = context.clone();
@@ -1187,6 +1276,9 @@ fn expression_contains_return(expr: &Expression) -> bool {
             function, argument, ..
         } => expression_contains_return(function) || expression_contains_return(argument),
         Expression::Function { body, .. } => expression_contains_return(body),
+        Expression::While {
+            condition, body, ..
+        } => expression_contains_return(condition) || expression_contains_return(body),
         Expression::Loop { body, .. } => expression_contains_return(body),
         Expression::PropertyAccess { object, .. } => expression_contains_return(object),
         Expression::Operation { left, right, .. } => {
@@ -1227,7 +1319,7 @@ fn expression_contains_return(expr: &Expression) -> bool {
 
 fn expression_contains_loop(expr: &Expression) -> bool {
     match expr {
-        Expression::Loop { .. } => true,
+        Expression::While { .. } | Expression::Loop { .. } => true,
         Expression::Block(exprs, _) => exprs.iter().any(expression_contains_loop),
         Expression::If {
             condition,
@@ -1291,7 +1383,7 @@ fn expression_contains_loop(expr: &Expression) -> bool {
 
 fn expression_contains_mutation(expr: &Expression) -> bool {
     match expr {
-        Expression::Assignment { .. } | Expression::Loop { .. } => true,
+        Expression::Assignment { .. } | Expression::Loop { .. } | Expression::While { .. } => true,
         Expression::Binding(binding, _) => {
             pattern_has_mutable_annotation(&binding.pattern)
                 || expression_contains_mutation(&binding.expr)
@@ -2709,6 +2801,12 @@ impl UsageCounter {
             } => {
                 self.count(function);
                 self.count(argument);
+            }
+            Expression::While {
+                condition, body, ..
+            } => {
+                self.count(condition);
+                self.count(body);
             }
             Expression::Loop { body, .. } => {
                 self.count(body);
