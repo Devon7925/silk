@@ -18,8 +18,8 @@ fn loop_can_compute_factorial() {
         factorial 5
     ";
 
-    let (expr, _) = evaluate_text_to_expression(program)
-        .unwrap_or_else(|err| panic!("{}", err.message));
+    let (expr, _) =
+        evaluate_text_to_expression(program).unwrap_or_else(|err| panic!("{}", err.message));
 
     match expr {
         silk::parsing::Expression::Literal(silk::parsing::ExpressionLiteral::Number(value), _) => {

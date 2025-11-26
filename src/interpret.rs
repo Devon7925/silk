@@ -424,6 +424,17 @@ pub fn interpret_expression(
                 span,
             })
         }
+        Expression::Break { value, span } => {
+            let evaluated_value = match value {
+                Some(expr) => interpret_expression(*expr, context)?,
+                None => empty_struct_expr(span),
+            };
+
+            Ok(Expression::Break {
+                value: Some(Box::new(evaluated_value)),
+                span,
+            })
+        }
         Expression::Loop { body, span } => {
             let mut iteration_count = 0usize;
             loop {
@@ -438,8 +449,12 @@ pub fn interpret_expression(
                     }
                     other => interpret_expression(other, context)?,
                 };
-                if matches!(iteration_value, Expression::Return { .. }) {
-                    return Ok(iteration_value);
+                match iteration_value {
+                    Expression::Return { .. } => return Ok(iteration_value),
+                    Expression::Break { value, .. } => {
+                        return Ok(*value.unwrap_or_else(|| Box::new(empty_struct_expr(span))));
+                    }
+                    _ => {}
                 }
             }
         }
@@ -902,6 +917,13 @@ fn get_type_of_expression(
                 .unwrap_or_else(|| empty_struct_expr(*span));
             get_type_of_expression(&inner_value, context)
         }
+        Expression::Break { value, span } => {
+            let inner_value = value
+                .as_ref()
+                .map(|expr| expr.as_ref().clone())
+                .unwrap_or_else(|| empty_struct_expr(*span));
+            get_type_of_expression(&inner_value, context)
+        }
         Expression::If {
             then_branch,
             else_branch,
@@ -1146,7 +1168,7 @@ fn get_type_of_binding_pattern(
 
 fn expression_contains_return(expr: &Expression) -> bool {
     match expr {
-        Expression::Return { .. } => true,
+        Expression::Return { .. } | Expression::Break { .. } => true,
         Expression::Block(exprs, _) => exprs.iter().any(expression_contains_return),
         Expression::If {
             then_branch,
@@ -1161,20 +1183,24 @@ fn expression_contains_return(expr: &Expression) -> bool {
         }
         Expression::Binding(binding, _) => expression_contains_return(&binding.expr),
         Expression::Assignment { expr, .. } => expression_contains_return(expr),
-        Expression::FunctionCall { function, argument, .. } => {
-            expression_contains_return(function) || expression_contains_return(argument)
-        }
+        Expression::FunctionCall {
+            function, argument, ..
+        } => expression_contains_return(function) || expression_contains_return(argument),
         Expression::Function { body, .. } => expression_contains_return(body),
         Expression::Loop { body, .. } => expression_contains_return(body),
         Expression::PropertyAccess { object, .. } => expression_contains_return(object),
         Expression::Operation { left, right, .. } => {
             expression_contains_return(left) || expression_contains_return(right)
         }
-        Expression::AttachImplementation { type_expr, implementation, .. } => {
-            expression_contains_return(type_expr) || expression_contains_return(implementation)
-        }
+        Expression::AttachImplementation {
+            type_expr,
+            implementation,
+            ..
+        } => expression_contains_return(type_expr) || expression_contains_return(implementation),
         Expression::EnumAccess { enum_expr, .. } => expression_contains_return(enum_expr),
-        Expression::EnumValue { enum_type, payload, .. } => {
+        Expression::EnumValue {
+            enum_type, payload, ..
+        } => {
             expression_contains_return(enum_type)
                 || payload
                     .as_ref()
@@ -1185,10 +1211,7 @@ fn expression_contains_return(expr: &Expression) -> bool {
             enum_type,
             payload_type,
             ..
-        } => {
-            expression_contains_return(enum_type)
-                || expression_contains_return(payload_type)
-        }
+        } => expression_contains_return(enum_type) || expression_contains_return(payload_type),
         Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _span) => {
             expression_contains_return(left) || expression_contains_return(right)
         }
@@ -1211,28 +1234,32 @@ fn expression_contains_loop(expr: &Expression) -> bool {
             then_branch,
             else_branch,
             ..
-        } => expression_contains_loop(condition)
-            || expression_contains_loop(then_branch)
-            || else_branch
-                .as_ref()
-                .map(|branch| expression_contains_loop(branch))
-                .unwrap_or(false),
+        } => {
+            expression_contains_loop(condition)
+                || expression_contains_loop(then_branch)
+                || else_branch
+                    .as_ref()
+                    .map(|branch| expression_contains_loop(branch))
+                    .unwrap_or(false)
+        }
         Expression::Binding(binding, _) => expression_contains_loop(&binding.expr),
         Expression::Assignment { expr, .. } => expression_contains_loop(expr),
-        Expression::FunctionCall { function, argument, .. } => {
-            expression_contains_loop(function) || expression_contains_loop(argument)
-        }
+        Expression::FunctionCall {
+            function, argument, ..
+        } => expression_contains_loop(function) || expression_contains_loop(argument),
         Expression::Function { body, .. } => expression_contains_loop(body),
         Expression::PropertyAccess { object, .. } => expression_contains_loop(object),
         Expression::Operation { left, right, .. } => {
             expression_contains_loop(left) || expression_contains_loop(right)
         }
-        Expression::Return { value, .. } => value
+        Expression::Return { value, .. } | Expression::Break { value, .. } => value
             .as_ref()
             .map(|val| expression_contains_loop(val))
             .unwrap_or(false),
         Expression::EnumAccess { enum_expr, .. } => expression_contains_loop(enum_expr),
-        Expression::EnumValue { enum_type, payload, .. } => {
+        Expression::EnumValue {
+            enum_type, payload, ..
+        } => {
             expression_contains_loop(enum_type)
                 || payload
                     .as_ref()
@@ -1275,22 +1302,26 @@ fn expression_contains_mutation(expr: &Expression) -> bool {
             then_branch,
             else_branch,
             ..
-        } => expression_contains_mutation(condition)
-            || expression_contains_mutation(then_branch)
-            || else_branch
-                .as_ref()
-                .map(|branch| expression_contains_mutation(branch))
-                .unwrap_or(false),
-        Expression::FunctionCall { function, argument, .. } => {
-            expression_contains_mutation(function) || expression_contains_mutation(argument)
+        } => {
+            expression_contains_mutation(condition)
+                || expression_contains_mutation(then_branch)
+                || else_branch
+                    .as_ref()
+                    .map(|branch| expression_contains_mutation(branch))
+                    .unwrap_or(false)
         }
+        Expression::FunctionCall {
+            function, argument, ..
+        } => expression_contains_mutation(function) || expression_contains_mutation(argument),
         Expression::Function { body, .. } => expression_contains_mutation(body),
         Expression::PropertyAccess { object, .. } => expression_contains_mutation(object),
         Expression::Operation { left, right, .. } => {
             expression_contains_mutation(left) || expression_contains_mutation(right)
         }
         Expression::EnumAccess { enum_expr, .. } => expression_contains_mutation(enum_expr),
-        Expression::EnumValue { enum_type, payload, .. } => {
+        Expression::EnumValue {
+            enum_type, payload, ..
+        } => {
             expression_contains_mutation(enum_type)
                 || payload
                     .as_ref()
@@ -1301,8 +1332,7 @@ fn expression_contains_mutation(expr: &Expression) -> bool {
             enum_type,
             payload_type,
             ..
-        } => expression_contains_mutation(enum_type)
-            || expression_contains_mutation(payload_type),
+        } => expression_contains_mutation(enum_type) || expression_contains_mutation(payload_type),
         Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _span) => {
             expression_contains_mutation(left) || expression_contains_mutation(right)
         }
@@ -1310,9 +1340,10 @@ fn expression_contains_mutation(expr: &Expression) -> bool {
             type_expr,
             implementation,
             ..
-        } => expression_contains_mutation(type_expr)
-            || expression_contains_mutation(implementation),
-        Expression::Return { value, .. } => value
+        } => {
+            expression_contains_mutation(type_expr) || expression_contains_mutation(implementation)
+        }
+        Expression::Return { value, .. } | Expression::Break { value, .. } => value
             .as_ref()
             .map(|val| expression_contains_mutation(val))
             .unwrap_or(false),
@@ -1444,7 +1475,7 @@ fn interpret_block(
                 val
             }
         };
-        if matches!(value, Expression::Return { .. }) {
+        if matches!(value, Expression::Return { .. } | Expression::Break { .. }) {
             return Ok((value, block_context));
         }
 
@@ -1488,7 +1519,7 @@ fn interpret_loop_block(
             other => interpret_expression(other, context)?,
         };
 
-        if matches!(value, Expression::Return { .. }) {
+        if matches!(value, Expression::Return { .. } | Expression::Break { .. }) {
             return Ok(value);
         }
 
@@ -2682,7 +2713,7 @@ impl UsageCounter {
             Expression::Loop { body, .. } => {
                 self.count(body);
             }
-            Expression::Return { value, .. } => {
+            Expression::Return { value, .. } | Expression::Break { value, .. } => {
                 if let Some(expr) = value {
                     self.count(expr);
                 }

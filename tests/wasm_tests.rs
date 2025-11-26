@@ -31,14 +31,14 @@ answer
                     Operator::I32Const { value } => const_values.push(value),
                     other => panic!("unexpected operator: {:?}", other),
                 }
-                assert!(
-                    matches!(reader.read().expect("end"), Operator::End),
-                    "expected function to end after constant"
-                );
-                assert!(
-                    reader.read().is_err(),
-                    "expected no more operators in function body"
-                );
+                match reader.read().expect("terminator") {
+                    Operator::Return => assert!(
+                        matches!(reader.read().expect("end"), Operator::End),
+                        "expected function to end after return"
+                    ),
+                    Operator::End => assert!(reader.read().is_err()),
+                    other => panic!("unexpected terminator: {:?}", other),
+                }
             }
             _ => {}
         }
@@ -87,14 +87,11 @@ let export(wasm) add_one = fn(x: i32) -> i32 (
                     Operator::I32Add => {}
                     other => panic!("expected i32.add, saw {:?}", other),
                 }
-                match reader.read().expect("end") {
-                    Operator::End => {}
-                    other => panic!("expected end, saw {:?}", other),
+                match reader.read().expect("terminator") {
+                    Operator::Return => assert!(matches!(reader.read().expect("end"), Operator::End)),
+                    Operator::End => assert!(reader.read().is_err()),
+                    other => panic!("unexpected terminator: {:?}", other),
                 }
-                assert!(
-                    reader.read().is_err(),
-                    "expected no extra operators in function body"
-                );
                 found_body = true;
             }
             _ => {}
