@@ -103,6 +103,12 @@ pub enum Expression {
     IntrinsicType(IntrinsicType, SourceSpan),
     IntrinsicOperation(IntrinsicOperation, SourceSpan),
     EnumType(Vec<(Identifier, Expression)>, SourceSpan),
+    Match {
+        value: Box<Expression>,
+        branches: Vec<(BindingPattern, Expression)>,
+        else_branch: Option<Box<Expression>>,
+        span: SourceSpan,
+    },
     EnumValue {
         enum_type: Box<Expression>,
         variant: Identifier,
@@ -198,6 +204,7 @@ impl Expression {
             | Expression::EnumAccess { span, .. }
             | Expression::Struct(_, span)
             | Expression::If { span, .. }
+            | Expression::Match { span, .. }
             | Expression::Literal(_, span)
             | Expression::Identifier(_, span)
             | Expression::Binding(_, span)
@@ -250,6 +257,106 @@ fn parse_if_expression<'a>(
     }
 
     Some(parse_if_expression_with_source(source, file))
+}
+
+fn parse_match_expression<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Option<Result<(Expression, &'a str), Diagnostic>> {
+    const KEYWORD: &str = "match";
+    if !file.starts_with(KEYWORD) {
+        return None;
+    }
+
+    let after_keyword = &file[KEYWORD.len()..];
+    if after_keyword
+        .chars()
+        .next()
+        .filter(|c| c.is_alphanumeric() || *c == '_')
+        .is_some()
+    {
+        return None;
+    }
+
+    Some(parse_match_expression_with_source(source, file))
+}
+
+fn parse_match_expression_with_source<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Result<(Expression, &'a str), Diagnostic> {
+    let start_slice = file;
+    let mut remaining = file
+        .strip_prefix("match")
+        .ok_or_else(|| diagnostic_here(source, file, 5, "Expected match"))?;
+
+    remaining = parse_optional_whitespace(remaining);
+    let (value, mut remaining) = parse_operation_expression_with_guard(source, remaining, true)?;
+    remaining = parse_optional_whitespace(remaining);
+
+    let mut branches = Vec::new();
+    let mut else_branch = None;
+
+    remaining = remaining
+        .strip_prefix("{")
+        .ok_or_else(|| diagnostic_here(source, remaining, 1, "Expected { to start match"))?;
+
+    loop {
+        remaining = parse_optional_whitespace(remaining);
+        if let Some(rest) = remaining.strip_prefix("}") {
+            remaining = rest;
+            break;
+        }
+
+        if let Some(rest) = remaining.strip_prefix("else") {
+            let after_else = parse_optional_whitespace(rest);
+            let (branch_expr, rest) = parse_grouping_expression_with_source(source, after_else)
+                .unwrap_or_else(|| {
+                    Err(diagnostic_here(
+                        source,
+                        after_else,
+                        after_else.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
+                        "Expected grouping expression for else branch",
+                    ))
+                })?;
+            else_branch = Some(branch_expr);
+            remaining = parse_optional_whitespace(rest);
+        } else {
+            let (pattern, rest) = parse_binding_pattern_with_source(source, remaining)?;
+            let rest = parse_optional_whitespace(rest);
+            let rest = rest.strip_prefix("=>").ok_or_else(|| {
+                diagnostic_here(source, rest, 2, "Expected => after match pattern")
+            })?;
+            let rest = parse_optional_whitespace(rest);
+            let (branch_expr, rest) = parse_grouping_expression_with_source(source, rest)
+                .unwrap_or_else(|| {
+                    Err(diagnostic_here(
+                        source,
+                        rest,
+                        rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
+                        "Expected grouping expression for match branch",
+                    ))
+                })?;
+            branches.push((pattern, branch_expr));
+            remaining = parse_optional_whitespace(rest);
+        }
+
+        if let Some(rest) = remaining.strip_prefix(";") {
+            remaining = parse_optional_whitespace(rest);
+        }
+    }
+
+    let span = consumed_span(source, start_slice, remaining);
+
+    Ok((
+        Expression::Match {
+            value: Box::new(value),
+            branches,
+            else_branch: else_branch.map(Box::new),
+            span,
+        },
+        remaining,
+    ))
 }
 
 fn parse_if_expression_with_source<'a>(
@@ -1072,6 +1179,9 @@ fn parse_isolated_expression_with_source_with_guard<'a>(
     }
     if let Some(function_parse) = parse_function_literal(source, file) {
         return function_parse;
+    }
+    if let Some(match_parse) = parse_match_expression(source, file) {
+        return match_parse;
     }
     if let Some(if_parse) = parse_if_expression(source, file) {
         return if_parse;

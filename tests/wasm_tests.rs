@@ -88,7 +88,9 @@ let export(wasm) add_one = fn(x: i32) -> i32 (
                     other => panic!("expected i32.add, saw {:?}", other),
                 }
                 match reader.read().expect("terminator") {
-                    Operator::Return => assert!(matches!(reader.read().expect("end"), Operator::End)),
+                    Operator::Return => {
+                        assert!(matches!(reader.read().expect("end"), Operator::End))
+                    }
                     Operator::End => assert!(reader.read().is_err()),
                     other => panic!("unexpected terminator: {:?}", other),
                 }

@@ -40,6 +40,28 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             },
             span,
         }),
+        Expression::Match {
+            value,
+            branches,
+            else_branch,
+            span,
+        } => Ok(Expression::Match {
+            value: Box::new(simplify_expression(*value)?),
+            branches: branches
+                .into_iter()
+                .map(|(pattern, expr)| {
+                    Ok((
+                        simplify_binding_pattern(pattern)?,
+                        simplify_expression(expr)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, Diagnostic>>()?,
+            else_branch: match else_branch {
+                Some(branch) => Some(Box::new(simplify_expression(*branch)?)),
+                None => None,
+            },
+            span,
+        }),
         Expression::Function {
             parameter,
             return_type,
