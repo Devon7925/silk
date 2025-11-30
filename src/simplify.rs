@@ -173,32 +173,31 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             span,
         } => {
             let simplified_enum = simplify_expression(*enum_expr)?;
-            if let Expression::EnumType(variants, _) = &simplified_enum {
-                if let Some((variant_index, (_id, payload_type))) = variants
+            if let Expression::EnumType(variants, _) = &simplified_enum
+                && let Some((variant_index, (_id, payload_type))) = variants
                     .iter()
                     .enumerate()
                     .find(|(_, (id, _))| id.0 == variant.0)
+            {
+                if let Expression::Struct(fields, _) = payload_type
+                    && fields.is_empty()
                 {
-                    if let Expression::Struct(fields, _) = payload_type {
-                        if fields.is_empty() {
-                            return Ok(Expression::EnumValue {
-                                enum_type: Box::new(simplified_enum.clone()),
-                                variant,
-                                variant_index,
-                                payload: None,
-                                span,
-                            });
-                        }
-                    }
-
-                    return Ok(Expression::EnumConstructor {
+                    return Ok(Expression::EnumValue {
                         enum_type: Box::new(simplified_enum.clone()),
                         variant,
                         variant_index,
-                        payload_type: Box::new(payload_type.clone()),
+                        payload: None,
                         span,
                     });
                 }
+
+                return Ok(Expression::EnumConstructor {
+                    enum_type: Box::new(simplified_enum.clone()),
+                    variant,
+                    variant_index,
+                    payload_type: Box::new(payload_type.clone()),
+                    span,
+                });
             }
 
             Ok(Expression::EnumAccess {

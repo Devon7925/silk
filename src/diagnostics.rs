@@ -1,24 +1,24 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct SourceSpan {
     start: usize,
-    len: usize,
+    length: usize,
 }
 
 impl SourceSpan {
-    pub fn new(start: usize, len: usize) -> Self {
-        Self { start, len }
+    pub fn new(start: usize, length: usize) -> Self {
+        Self { start, length }
     }
 
     pub fn start(&self) -> usize {
         self.start
     }
 
-    pub fn len(&self) -> usize {
-        self.len
+    pub fn length(&self) -> usize {
+        self.length
     }
 
     pub fn end(&self) -> usize {
-        self.start.saturating_add(self.len)
+        self.start.saturating_add(self.length)
     }
 
     pub fn merge(&self, other: &SourceSpan) -> SourceSpan {

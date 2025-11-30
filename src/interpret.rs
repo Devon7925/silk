@@ -13,21 +13,6 @@ pub enum PreserveBehavior {
     Inline,
 }
 
-impl PartialOrd for PreserveBehavior {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        use PreserveBehavior::*;
-        Some(match (self, other) {
-            (PreserveUsage, PreserveUsage) => std::cmp::Ordering::Equal,
-            (PreserveUsage, _) => std::cmp::Ordering::Greater,
-            (_, PreserveUsage) => std::cmp::Ordering::Less,
-            (PreserveBinding, PreserveBinding) => std::cmp::Ordering::Equal,
-            (PreserveBinding, Inline) => std::cmp::Ordering::Greater,
-            (Inline, PreserveBinding) => std::cmp::Ordering::Less,
-            (Inline, Inline) => std::cmp::Ordering::Equal,
-        })
-    }
-}
-
 impl Ord for PreserveBehavior {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         use PreserveBehavior::*;
@@ -40,6 +25,12 @@ impl Ord for PreserveBehavior {
             (Inline, PreserveBinding) => std::cmp::Ordering::Less,
             (Inline, Inline) => std::cmp::Ordering::Equal,
         }
+    }
+}
+
+impl PartialOrd for PreserveBehavior {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -336,7 +327,7 @@ pub fn interpret_expression(
 ) -> Result<Expression, Diagnostic> {
     let expr = normalize_enum_application(expr);
 
-    let result = match expr {
+    match expr {
         Expression::EnumType(variants, span) => {
             let mut evaluated_variants = Vec::with_capacity(variants.len());
             for (id, ty_expr) in variants {
@@ -747,16 +738,16 @@ pub fn interpret_expression(
             let resolved_enum = resolve_expression(interpreted_enum.clone(), context)?;
             if let Some((variant_index, payload_type)) = enum_variant_info(&resolved_enum, &variant)
             {
-                if let Expression::Struct(fields, _payload_span) = &payload_type {
-                    if fields.is_empty() {
-                        return Ok(Expression::EnumValue {
-                            enum_type: Box::new(resolved_enum),
-                            variant,
-                            variant_index,
-                            payload: None,
-                            span,
-                        });
-                    }
+                if let Expression::Struct(fields, _payload_span) = &payload_type
+                    && fields.is_empty()
+                {
+                    return Ok(Expression::EnumValue {
+                        enum_type: Box::new(resolved_enum),
+                        variant,
+                        variant_index,
+                        payload: None,
+                        span,
+                    });
                 }
 
                 Ok(Expression::EnumConstructor {
@@ -913,8 +904,7 @@ pub fn interpret_expression(
                 }),
             }
         }
-    };
-    result
+    }
 }
 
 fn interpret_binding_pattern(
@@ -1118,10 +1108,10 @@ fn get_type_of_expression(
         } => {
             let enum_type = get_type_of_expression(enum_expr, context)?;
             if let Some((_, payload_type)) = enum_variant_info(&enum_type, variant) {
-                if let Expression::Struct(fields, _) = &payload_type {
-                    if fields.is_empty() {
-                        return Ok(enum_type);
-                    }
+                if let Expression::Struct(fields, _) = &payload_type
+                    && fields.is_empty()
+                {
+                    return Ok(enum_type);
                 }
                 Ok(Expression::FunctionType {
                     parameter: Box::new(payload_type),
@@ -1250,7 +1240,7 @@ fn get_type_of_expression(
             span,
             ..
         } => Ok(Expression::FunctionType {
-            parameter: Box::new(get_type_of_binding_pattern(&parameter, context)?),
+            parameter: Box::new(get_type_of_binding_pattern(parameter, context)?),
             return_type: return_type.clone(),
             span: *span,
         }),
@@ -1592,10 +1582,10 @@ fn get_trait_prop_of_type(
             implementation,
             ..
         } => {
-            if let Expression::Struct(ref items, _) = **implementation {
-                if let Some(field) = get_struct_field(items, trait_prop) {
-                    return Ok(field);
-                }
+            if let Expression::Struct(ref items, _) = **implementation
+                && let Some(field) = get_struct_field(items, trait_prop)
+            {
+                return Ok(field);
             }
 
             get_trait_prop_of_type(type_expr, trait_prop, span)
@@ -1635,10 +1625,10 @@ fn interpret_block(
                         Expression::Binding(binding, _)
                             if pattern_has_mutable_annotation(&binding.pattern)
                     );
-                if should_preserve_binding {
-                    if let Expression::Binding(binding, _) = binding_expr.clone() {
-                        preserved_expressions.push(Expression::Binding(binding, span));
-                    }
+                if should_preserve_binding
+                    && let Expression::Binding(binding, _) = binding_expr.clone()
+                {
+                    preserved_expressions.push(Expression::Binding(binding, span));
                 }
                 Expression::Literal(ExpressionLiteral::Boolean(true), dummy_span())
             }
@@ -1900,13 +1890,13 @@ fn apply_lvalue_update(
                 BindingContext::UnboundWithoutType => None,
             };
 
-            if let (Some(expected_ty), Some(actual_ty)) = (expected_type, value_type) {
-                if !types_equivalent(&expected_ty, &actual_ty) {
-                    return Err(diagnostic(
-                        format!("Cannot assign value of mismatched type to {}", identifier.0),
-                        span,
-                    ));
-                }
+            if let (Some(expected_ty), Some(actual_ty)) = (expected_type, value_type)
+                && !types_equivalent(&expected_ty, &actual_ty)
+            {
+                return Err(diagnostic(
+                    format!("Cannot assign value of mismatched type to {}", identifier.0),
+                    span,
+                ));
             }
 
             let preserve_behavior = match binding_ctx {
@@ -1963,16 +1953,16 @@ fn apply_assignment(
     let value_type = get_type_of_expression(&value, &mut type_context).ok();
     let target_type = get_lvalue_type(&target, &mut type_context, span)?;
 
-    if let Some(actual_type) = value_type {
-        if !types_equivalent(&target_type, &actual_type) {
-            return Err(diagnostic(
-                format!(
-                    "Cannot assign value of mismatched type to {}",
-                    lvalue_display_name(&target)
-                ),
-                span,
-            ));
-        }
+    if let Some(actual_type) = value_type
+        && !types_equivalent(&target_type, &actual_type)
+    {
+        return Err(diagnostic(
+            format!(
+                "Cannot assign value of mismatched type to {}",
+                lvalue_display_name(&target)
+            ),
+            span,
+        ));
     }
 
     apply_lvalue_update(target, value.clone(), context, span)?;
@@ -2321,7 +2311,7 @@ fn bind_pattern_from_value(
                 context,
                 passed_annotations
                     .into_iter()
-                    .chain(new_annotations.into_iter())
+                    .chain(new_annotations)
                     .collect(),
                 new_preserve_behavior,
                 usage_counter,
@@ -2492,8 +2482,8 @@ fn is_resolved_constant(expr: &Expression) -> bool {
                 bind_pattern_blanks(parameter.clone(), &mut ctx, Vec::new(), None).unwrap();
                 ctx
             };
-            is_resolved_constant(&return_type)
-                && is_resolved_const_function_expression(&body, &new_function_context)
+            is_resolved_constant(return_type)
+                && is_resolved_const_function_expression(body, &new_function_context)
         }
         Expression::FunctionType {
             parameter,
@@ -2530,8 +2520,8 @@ fn is_resolved_const_function_expression(expr: &Expression, function_context: &C
                 bind_pattern_blanks(parameter.clone(), &mut ctx, Vec::new(), None).unwrap();
                 ctx
             };
-            is_resolved_const_function_expression(&return_type, &new_function_context)
-                && is_resolved_const_function_expression(&body, &new_function_context)
+            is_resolved_const_function_expression(return_type, &new_function_context)
+                && is_resolved_const_function_expression(body, &new_function_context)
         }
         Expression::FunctionType {
             parameter,
@@ -2541,7 +2531,7 @@ fn is_resolved_const_function_expression(expr: &Expression, function_context: &C
             is_resolved_const_function_expression(parameter, function_context)
                 && is_resolved_const_function_expression(return_type, function_context)
         }
-        Expression::Identifier(ident, _) => function_context.bindings.get(&ident.0).is_some(),
+        Expression::Identifier(ident, _) => function_context.bindings.contains_key(&ident.0),
         Expression::IntrinsicOperation(intrinsic_operation, _) => match intrinsic_operation {
             IntrinsicOperation::Binary(left, right, _) => {
                 is_resolved_const_function_expression(left, function_context)

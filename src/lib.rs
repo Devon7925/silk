@@ -24,7 +24,7 @@ pub fn compile(file: String) -> Result<Vec<u8>, Diagnostic> {
             .map(|c| c.len_utf8())
             .sum::<usize>()
             .max(1);
-        let start = file.len().checked_sub(leftover.len()).unwrap_or(0);
+        let start = file.len().saturating_sub(leftover.len());
         let span = SourceSpan::new(start, token_len);
         return Err(Diagnostic::new("Unexpected trailing input").with_span(span));
     }

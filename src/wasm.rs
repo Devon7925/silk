@@ -101,32 +101,30 @@ fn materialize_enum_value(enum_value: &Expression) -> Option<Expression> {
         payload,
         span,
     } = enum_value
+        && let Expression::EnumType(variants, _) = enum_type.as_ref()
     {
-        if let Expression::EnumType(variants, _) = enum_type.as_ref() {
-            let mut payload_fields = Vec::new();
-            for (idx, (name, ty)) in variants.iter().enumerate() {
-                let value = if idx == *variant_index {
-                    match payload {
-                        Some(val) => *val.clone(),
-                        None => default_value_for_type(ty)?,
-                    }
-                } else {
-                    default_value_for_type(ty)?
-                };
-                payload_fields.push((Identifier(name.0.clone()), value));
-            }
-
-            let payload_struct = Expression::Struct(payload_fields, *span);
-            let tag_expr =
-                Expression::Literal(ExpressionLiteral::Number(*variant_index as i32), *span);
-            return Some(Expression::Struct(
-                vec![
-                    (Identifier("payload".to_string()), payload_struct),
-                    (Identifier("tag".to_string()), tag_expr),
-                ],
-                *span,
-            ));
+        let mut payload_fields = Vec::new();
+        for (idx, (name, ty)) in variants.iter().enumerate() {
+            let value = if idx == *variant_index {
+                match payload {
+                    Some(val) => *val.clone(),
+                    None => default_value_for_type(ty)?,
+                }
+            } else {
+                default_value_for_type(ty)?
+            };
+            payload_fields.push((Identifier(name.0.clone()), value));
         }
+
+        let payload_struct = Expression::Struct(payload_fields, *span);
+        let tag_expr = Expression::Literal(ExpressionLiteral::Number(*variant_index as i32), *span);
+        return Some(Expression::Struct(
+            vec![
+                (Identifier("payload".to_string()), payload_struct),
+                (Identifier("tag".to_string()), tag_expr),
+            ],
+            *span,
+        ));
     }
     None
 }
@@ -201,14 +199,12 @@ fn enum_variant_index_from_context(
     let mut ctx = context.clone();
     if let Some(Expression::EnumType(variants, _)) =
         interpret::resolve_enum_type_expression(enum_expr, &mut ctx)
-    {
-        if let Some((index, _)) = variants
+        && let Some((index, _)) = variants
             .iter()
             .enumerate()
             .find(|(_, (id, _))| id.0 == variant.0)
-        {
-            return Ok(index);
-        }
+    {
+        return Ok(index);
     }
 
     Err(Diagnostic::new("Unknown enum or variant in wasm lowering").with_span(span))
@@ -330,9 +326,7 @@ pub fn compile_exports(context: &interpret::Context) -> Result<Vec<u8>, Diagnost
         next_type_index += 1;
     }
 
-    let mut next_function_index = 0u32;
-
-    for (_i, export) in exports.iter().enumerate() {
+    for (function_index, export) in exports.iter().enumerate() {
         let mut locals = Vec::new();
         let mut local_indices = std::collections::HashMap::new();
         let mut locals_types = std::collections::HashMap::new();
@@ -378,8 +372,7 @@ pub fn compile_exports(context: &interpret::Context) -> Result<Vec<u8>, Diagnost
         func.instruction(&Instruction::End);
         code_section.function(&func);
 
-        export_section.export(&export.name, ExportKind::Func, next_function_index);
-        next_function_index += 1;
+        export_section.export(&export.name, ExportKind::Func, function_index as u32);
     }
 
     module.section(&type_section);
@@ -424,7 +417,6 @@ fn collect_types(
                 ty,
                 locals_types,
                 &mut locals,
-                context,
             )?;
         }
         Expression::FunctionCall {
@@ -697,10 +689,7 @@ fn expression_produces_value(expr: &Expression) -> bool {
     match expr {
         Expression::Return { .. } | Expression::Break { .. } => false,
         Expression::Loop { body, .. } => loop_contains_break(body),
-        Expression::Block(exprs, _) => exprs
-            .last()
-            .map(|expr| expression_produces_value(expr))
-            .unwrap_or(true),
+        Expression::Block(exprs, _) => exprs.last().map(expression_produces_value).unwrap_or(true),
         Expression::If {
             then_branch,
             else_branch,
@@ -730,7 +719,7 @@ fn expression_always_transfers_control(expr: &Expression) -> bool {
         Expression::Return { .. } | Expression::Break { .. } => true,
         Expression::Block(exprs, _) => exprs
             .last()
-            .map(|e| expression_always_transfers_control(e))
+            .map(expression_always_transfers_control)
             .unwrap_or(false),
         Expression::If {
             then_branch,
@@ -832,9 +821,9 @@ fn infer_type(
             let existing_type = infer_type(&target_expr, locals_types, context)?;
 
             if value_type != existing_type {
-                return Err(Diagnostic::new(format!(
-                    "Cannot assign value of different type to target"
-                ))
+                return Err(Diagnostic::new(
+                    "Cannot assign value of different type to target".to_string(),
+                )
                 .with_span(*span));
             }
 
@@ -993,14 +982,10 @@ fn resolve_type(context: &interpret::Context, expr: &Expression) -> Result<WasmT
 
 fn wasm_annotation_span(annotations: &[BindingAnnotation]) -> Option<SourceSpan> {
     annotations.iter().find_map(|annotation| match annotation {
-        BindingAnnotation::Export(target_expr, span)
-            if matches!(
-                target_expr,
-                Expression::Literal(ExpressionLiteral::Target(TargetLiteral::WasmTarget), _)
-            ) =>
-        {
-            Some(*span)
-        }
+        BindingAnnotation::Export(
+            Expression::Literal(ExpressionLiteral::Target(TargetLiteral::WasmTarget), _),
+            span,
+        ) => Some(*span),
         _ => None,
     })
 }
@@ -1106,7 +1091,6 @@ fn collect_locals(
                 expr_type,
                 locals_types,
                 &mut locals,
-                context,
             )?;
 
             locals.extend(collect_locals(&binding.expr, locals_types, context)?);
@@ -1158,7 +1142,6 @@ fn collect_locals(
                     value_type,
                     locals_types,
                     &mut locals,
-                    context,
                 )?;
                 locals.extend(collect_locals(branch, locals_types, context)?);
             }
@@ -1173,7 +1156,6 @@ fn collect_locals_for_pattern(
     expr_type: WasmType,
     locals_types: &mut std::collections::HashMap<String, WasmType>,
     locals: &mut Vec<(String, WasmType)>,
-    context: &interpret::Context,
 ) -> Result<(), Diagnostic> {
     match pattern {
         BindingPattern::Identifier(identifier, _) => {
@@ -1205,16 +1187,15 @@ fn collect_locals_for_pattern(
                     field_type,
                     locals_types,
                     locals,
-                    context,
                 )?;
             }
             Ok(())
         }
         BindingPattern::TypeHint(inner, _, _) => {
-            collect_locals_for_pattern(*inner, expr_type, locals_types, locals, context)
+            collect_locals_for_pattern(*inner, expr_type, locals_types, locals)
         }
         BindingPattern::Annotated { pattern, .. } => {
-            collect_locals_for_pattern(*pattern, expr_type, locals_types, locals, context)
+            collect_locals_for_pattern(*pattern, expr_type, locals_types, locals)
         }
         BindingPattern::EnumVariant {
             variant,
@@ -1261,7 +1242,6 @@ fn collect_locals_for_pattern(
                     payload_type,
                     locals_types,
                     locals,
-                    context,
                 )?;
             }
             Ok(())
@@ -1559,8 +1539,8 @@ fn emit_expression(
 
             let break_depth = control_stack
                 .len()
-                .checked_sub(loop_ctx.break_target_index + 1)
-                .unwrap_or(0) as u32;
+                .saturating_sub(loop_ctx.break_target_index + 1)
+                as u32;
             func.instruction(&Instruction::Br(break_depth));
             Ok(())
         }
@@ -1978,43 +1958,24 @@ fn emit_expression(
             variant,
             span,
         } => {
-            if let Expression::EnumType(variants, _) = enum_expr.as_ref() {
-                if let Some((variant_index, (_, payload_type))) = variants
+            if let Expression::EnumType(variants, _) = enum_expr.as_ref()
+                && let Some((variant_index, (_, payload_type))) = variants
                     .iter()
                     .enumerate()
                     .find(|(_, (id, _))| id.0 == variant.0)
+            {
+                if let Expression::Struct(fields, _) = payload_type
+                    && fields.is_empty()
                 {
-                    if let Expression::Struct(fields, _) = payload_type {
-                        if fields.is_empty() {
-                            let value = Expression::EnumValue {
-                                enum_type: enum_expr.clone(),
-                                variant: variant.clone(),
-                                variant_index,
-                                payload: None,
-                                span: *span,
-                            };
-                            return emit_expression(
-                                &value,
-                                locals,
-                                locals_types,
-                                func,
-                                type_ctx,
-                                context,
-                                control_stack,
-                                loop_stack,
-                            );
-                        }
-                    }
-
-                    let constructor = Expression::EnumConstructor {
+                    let value = Expression::EnumValue {
                         enum_type: enum_expr.clone(),
                         variant: variant.clone(),
                         variant_index,
-                        payload_type: Box::new(payload_type.clone()),
+                        payload: None,
                         span: *span,
                     };
                     return emit_expression(
-                        &constructor,
+                        &value,
                         locals,
                         locals_types,
                         func,
@@ -2024,6 +1985,24 @@ fn emit_expression(
                         loop_stack,
                     );
                 }
+
+                let constructor = Expression::EnumConstructor {
+                    enum_type: enum_expr.clone(),
+                    variant: variant.clone(),
+                    variant_index,
+                    payload_type: Box::new(payload_type.clone()),
+                    span: *span,
+                };
+                return emit_expression(
+                    &constructor,
+                    locals,
+                    locals_types,
+                    func,
+                    type_ctx,
+                    context,
+                    control_stack,
+                    loop_stack,
+                );
             }
 
             Err(

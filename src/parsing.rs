@@ -487,7 +487,7 @@ pub fn parse_identifier(file: &str) -> Option<(Identifier, &str)> {
         return None;
     }
 
-    if identifier.chars().next().unwrap().is_digit(10) {
+    if identifier.chars().next().unwrap().is_ascii_digit() {
         return None;
     }
 
@@ -502,7 +502,7 @@ pub fn parse_literal(file: &str) -> Option<(ExpressionLiteral, &str)> {
     let digits = file
         .chars()
         .skip(is_negative as usize)
-        .take_while(|c| c.is_digit(10))
+        .take_while(|c| c.is_ascii_digit())
         .collect::<String>();
 
     if digits.is_empty() {
@@ -807,7 +807,7 @@ pub fn parse_operator(file: &str) -> Option<(String, &str)> {
         }
     }
 
-    let stop_words = vec![
+    let stop_words = [
         "if", "then", "else", "match", "with", "fn", "let", "return", "break", "loop", "while",
         "do",
     ];
@@ -1305,21 +1305,20 @@ fn parse_assignment_expression_with_guard<'a>(
     let start_slice = trimmed;
     if let Some(Ok((target, after_target))) = parse_lvalue(source, trimmed) {
         let after_target = parse_optional_whitespace(after_target);
-        if let Some(after_equals) = after_target.strip_prefix('=') {
-            if !after_equals.starts_with('=') {
-                let after_equals = parse_optional_whitespace(after_equals);
-                let (expr, remaining) =
-                    parse_operation_expression_with_guard(source, after_equals)?;
-                let span = consumed_span(source, start_slice, remaining);
-                return Ok((
-                    Expression::Assignment {
-                        target,
-                        expr: Box::new(expr),
-                        span,
-                    },
-                    remaining,
-                ));
-            }
+        if let Some(after_equals) = after_target.strip_prefix('=')
+            && !after_equals.starts_with('=')
+        {
+            let after_equals = parse_optional_whitespace(after_equals);
+            let (expr, remaining) = parse_operation_expression_with_guard(source, after_equals)?;
+            let span = consumed_span(source, start_slice, remaining);
+            return Ok((
+                Expression::Assignment {
+                    target,
+                    expr: Box::new(expr),
+                    span,
+                },
+                remaining,
+            ));
         }
     }
 
@@ -1490,9 +1489,10 @@ fn parse_operation_expression_with_min_precedence<'a>(
         let next_expression = expression_iter
             .next()
             .ok_or_else(|| diagnostic_at_eof(source, "Expected expression after operator"))?;
-        while operator_stack.last().map_or(false, |existing| {
-            operator_precedence(existing) >= operator_precedence(&operator)
-        }) {
+        while operator_stack
+            .last()
+            .is_some_and(|existing| operator_precedence(existing) >= operator_precedence(&operator))
+        {
             reduce_stacks(&mut operand_stack, &mut operator_stack, source)?;
         }
         operator_stack.push(operator);
@@ -1570,10 +1570,10 @@ fn parse_block_with_terminators<'a>(
             break;
         }
 
-        if let Some(ch) = remaining.chars().next() {
-            if terminators.contains(&ch) {
-                break;
-            }
+        if let Some(ch) = remaining.chars().next()
+            && terminators.contains(&ch)
+        {
+            break;
         }
 
         let (expression, rest) = parse_individual_expression_with_source(source, remaining)?;
@@ -1585,10 +1585,10 @@ fn parse_block_with_terminators<'a>(
             break;
         }
 
-        if let Some(ch) = remaining.chars().next() {
-            if terminators.contains(&ch) {
-                break;
-            }
+        if let Some(ch) = remaining.chars().next()
+            && terminators.contains(&ch)
+        {
+            break;
         }
 
         let rest = parse_semicolon(source, remaining)?;
@@ -1605,13 +1605,11 @@ fn parse_block_with_terminators<'a>(
         ));
     }
 
-    if ended_with_semicolon {
-        if let Some(last_span) = expressions.last().map(|expr| expr.span()) {
-            expressions.push(Expression::Struct(
-                vec![],
-                SourceSpan::new(last_span.end(), 0),
-            ));
-        }
+    if ended_with_semicolon && let Some(last_span) = expressions.last().map(|expr| expr.span()) {
+        expressions.push(Expression::Struct(
+            vec![],
+            SourceSpan::new(last_span.end(), 0),
+        ));
     }
 
     if expressions.len() == 1 {
