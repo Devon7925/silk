@@ -3,7 +3,7 @@ use silk::test_support::evaluate_text_to_expression;
 
 #[test]
 fn if_expression_returns_then_branch() {
-    let (expr, _) = evaluate_text_to_expression("if true ( 1 ) else ( 2 )")
+    let (expr, _) = evaluate_text_to_expression("if true then 1 else 2")
         .expect("if expression should evaluate");
     match expr {
         Expression::Literal(ExpressionLiteral::Number(value), _) => {
@@ -15,7 +15,7 @@ fn if_expression_returns_then_branch() {
 
 #[test]
 fn else_branch_is_used_when_condition_is_false() {
-    let (expr, _) = evaluate_text_to_expression("if false ( 1 ) else ( 2 )")
+    let (expr, _) = evaluate_text_to_expression("if false then 1 else 2")
         .expect("if expression should evaluate");
     match expr {
         Expression::Literal(ExpressionLiteral::Number(value), _) => {
@@ -27,7 +27,7 @@ fn else_branch_is_used_when_condition_is_false() {
 
 #[test]
 fn else_if_chains_resolve_first_true_branch() {
-    let (expr, _) = evaluate_text_to_expression("if false ( 1 ) else if true ( 2 ) else ( 3 )")
+    let (expr, _) = evaluate_text_to_expression("if false then 1 else if true then 2 else 3")
         .expect("else if chain should evaluate");
     match expr {
         Expression::Literal(ExpressionLiteral::Number(value), _) => {
@@ -49,7 +49,7 @@ fn block_with_trailing_semicolon_returns_empty_struct() {
 
 #[test]
 fn mismatched_branch_types_report_diagnostic() {
-    let err = match evaluate_text_to_expression("if true ( 1 ) else ( true )") {
+    let err = match evaluate_text_to_expression("if true then 1 else true") {
         Ok(_) => panic!("expected diagnostic"),
         Err(err) => err,
     };
@@ -62,7 +62,7 @@ fn mismatched_branch_types_report_diagnostic() {
 
 #[test]
 fn empty_struct_branches_are_type_checked() {
-    let err = match evaluate_text_to_expression("if true ( 1; ) else ( 2 )") {
+    let err = match evaluate_text_to_expression("if true then ( 1; ) else ( 2 )") {
         Ok(_) => panic!("expected diagnostic"),
         Err(err) => err,
     };
@@ -76,8 +76,8 @@ fn empty_struct_branches_are_type_checked() {
 #[test]
 fn return_allows_unbalanced_if_in_statement_position() {
     let program = "
-        let export(wasm) early_exit_loopish = fn(flag: bool) -> i32 (
-            if flag (
+        let (export wasm) early_exit_loopish = fn(flag: bool) -> i32 (
+            if flag then (
                 return 1;
             ) else (
                 false

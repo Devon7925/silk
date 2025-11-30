@@ -9,7 +9,7 @@ fn while_accumulates_until_limit() {
         let sum_until = fn(limit: i32) -> i32 (
             let mut acc = 0;
             let mut iter = 0;
-            while iter < limit (
+            while iter < limit do (
                 acc = acc + iter;
                 iter = iter + 1;
             );
@@ -34,7 +34,7 @@ fn while_accumulates_until_limit() {
 fn while_with_initially_false_condition_skips_body() {
     let program = "
         let mut value = 3;
-        while value < 0 (
+        while value < 0 do (
             value = value - 1;
         );
         value
@@ -55,7 +55,7 @@ fn while_with_initially_false_condition_skips_body() {
 fn while_condition_must_be_boolean() {
     let program = "
         let mut value = 1;
-        while value (
+        while value do (
             value = value - 1;
         );
     ";

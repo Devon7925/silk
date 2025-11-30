@@ -34,15 +34,15 @@ test("wasm structref: passing and returning generic structs", async () => {
         { x = ty, y = ty }
     );
     
-    let export(wasm) create_point = fn({x: i32, y: i32}) -> Point(i32) (
+    let (export wasm) create_point = fn({x: i32, y: i32}) -> Point(i32) (
         { x = x, y = y }
     );
 
-    let export(wasm) get_x = fn(p: Point(i32)) -> i32 (
+    let (export wasm) get_x = fn(p: Point(i32)) -> i32 (
         p.x
     );
 
-    let export(wasm) get_y = fn(p: Point(i32)) -> i32 (
+    let (export wasm) get_y = fn(p: Point(i32)) -> i32 (
         p.y
     );
     `;
@@ -70,14 +70,14 @@ test("wasm structref: nested generic structs", async () => {
         { top_left = Point(ty), bottom_right = Point(ty) }
     );
 
-    let export(wasm) create_rect = fn({x1: i32, y1: i32, x2: i32, y2: i32}) -> Rect(i32) (
+    let (export wasm) create_rect = fn({x1: i32, y1: i32, x2: i32, y2: i32}) -> Rect(i32) (
         {
             top_left = { x = x1, y = y1 },
             bottom_right = { x = x2, y = y2 },
         }
     );
 
-    let export(wasm) get_width = fn(r: Rect(i32)) -> i32 (
+    let (export wasm) get_width = fn(r: Rect(i32)) -> i32 (
         r.bottom_right.x - r.top_left.x
     );
     `;

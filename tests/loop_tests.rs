@@ -9,7 +9,7 @@ fn loop_can_compute_factorial() {
             loop (
                 acc = acc * iter;
                 iter = iter - 1;
-                if iter <= 0 (
+                if iter <= 0 then (
                     return acc;
                 )
             )

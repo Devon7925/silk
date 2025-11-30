@@ -29,8 +29,8 @@ async function compileAndLoad(silkCode: string) {
 
 test("return exits a function early", async () => {
     const silkCode = `
-    let export(wasm) early = fn(x: i32) -> i32 (
-        if x > 0 (
+    let (export wasm) early = fn(x: i32) -> i32 (
+        if x > 0 then (
             return x + 2;
         ) else (
             x - 100
@@ -46,9 +46,9 @@ test("return exits a function early", async () => {
 
 test("return inside let binding expressions still exits early", async () => {
     const silkCode = `
-    let export(wasm) let_return = fn(x: i32) -> i32 (
+    let (export wasm) let_return = fn(x: i32) -> i32 (
         let y = (
-            if x == 0 (
+            if x == 0 then (
                 return 99;
             ) else (
                 x * 2
@@ -66,8 +66,8 @@ test("return inside let binding expressions still exits early", async () => {
 
 test("return doesn't break branch type matching", async () => {
     const silkCode = `
-    let export(wasm) branch_types = fn(flag: bool) -> i32 (
-        let value = if flag (
+    let (export wasm) branch_types = fn(flag: bool) -> i32 (
+        let value = if flag then (
             return 5;
         ) else (
             42
@@ -84,7 +84,7 @@ test("return doesn't break branch type matching", async () => {
 
 test("returning a complex expression works", async () => {
     const silkCode = `
-    let export(wasm) complex = fn({ x: i32, y: i32 }) -> i32 (
+    let (export wasm) complex = fn({ x: i32, y: i32 }) -> i32 (
         return (x + y) * (y - x) + (x * x) - (y / 2);
     );
     {};
@@ -98,9 +98,9 @@ test("returning a complex expression works", async () => {
 afterAll(() => {
     try {
         unlinkSync(TEMP_SILK);
-    } catch (e) {}
+    } catch (e) { }
     try {
         unlinkSync(TEMP_WASM);
-    } catch (e) {}
+    } catch (e) { }
 });
 

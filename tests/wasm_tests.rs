@@ -4,7 +4,7 @@ use wasmparser::{Operator, Parser, Payload};
 #[test]
 fn compiles_const_wasm_export() {
     let program = r#"
-let export(wasm) answer = fn{} -> i32 (
+let (export wasm) answer = fn{} -> i32 (
     42
 );
 answer
@@ -51,7 +51,7 @@ answer
 #[test]
 fn compiles_parameterized_wasm_export() {
     let program = r#"
-let export(wasm) add_one = fn(x: i32) -> i32 (
+let (export wasm) add_one = fn(x: i32) -> i32 (
     x + 1
 );
 {}
@@ -88,7 +88,9 @@ let export(wasm) add_one = fn(x: i32) -> i32 (
                     other => panic!("expected i32.add, saw {:?}", other),
                 }
                 match reader.read().expect("terminator") {
-                    Operator::Return => assert!(matches!(reader.read().expect("end"), Operator::End)),
+                    Operator::Return => {
+                        assert!(matches!(reader.read().expect("end"), Operator::End))
+                    }
                     Operator::End => assert!(reader.read().is_err()),
                     other => panic!("unexpected terminator: {:?}", other),
                 }
@@ -115,7 +117,7 @@ answer
 #[test]
 fn exporting_non_function_reports_diagnostic() {
     let program = r#"
-let export(wasm) answer: i32 = 42;
+let (export wasm) answer: i32 = 42;
 answer
 "#;
     let err = compile(program.to_string()).expect_err("expected failure");
@@ -130,7 +132,7 @@ answer
 #[test]
 fn compiles_wasm_export_with_bindings() {
     let program = r#"
-        let export(wasm) double_add = fn(x: i32) -> i32 (
+        let (export wasm) double_add = fn(x: i32) -> i32 (
             let y = x * 2;
             y + y
         );
@@ -143,7 +145,7 @@ fn compiles_wasm_export_with_bindings() {
 #[test]
 fn wasm_emits_assignment_updates() {
     let program = r#"
-        let export(wasm) increment_twice = fn(x: i32) -> i32 (
+        let (export wasm) increment_twice = fn(x: i32) -> i32 (
             let mut total = x;
             total = total + 1;
             total = total + 1;
@@ -201,7 +203,7 @@ fn wasm_emits_assignment_updates() {
 #[test]
 fn wasm_supports_destructured_mut_locals() {
     let program = r#"
-        let export(wasm) destructure_mut = fn{} -> i32 (
+        let (export wasm) destructure_mut = fn{} -> i32 (
             let mut { first = a, second = b } = { first = 3, second = 4 };
             a = a + b;
             a
