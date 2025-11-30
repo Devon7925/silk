@@ -1,0 +1,36 @@
+let Range = {
+    value = i32,
+    min = i32,
+    max = i32,
+};
+
+let Option = fn(T: type) -> type (
+    enum {
+        Some = T,
+        None = {},
+    }
+);
+
+let (export wasm) construct_range = fn{min: i32, max: i32} -> Range (
+    {
+        value = min,
+        min = min,
+        max = max,
+    }
+);
+
+let range_next = fn(mut range: Range) -> Option(i32) (
+    if range.value < range.max then (
+        range.value = range.value + 1;
+        Option(i32)::Some(range.value)
+    ) else Option(i32)::None
+);
+
+let (export wasm) sum_range = fn(range: Range) -> i32 (
+    let mut total = 0;
+    let mut current_range = range;
+    while let Option(i32)::Some(value) = range_next(current_range) do (
+        total = total + value;
+    );
+    total
+);

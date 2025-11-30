@@ -34,6 +34,7 @@ function compileFixtureToBytes(fixture: string) {
     const result = runSilk([programPath, "--output", outputPath]);
     if (result.exitCode !== 0) {
       console.error("Compilation failed:", result.stderr);
+      console.error("With stdout:", result.stdout);
     }
     expect(result.exitCode).toBe(0);
     const bytes = readFileSync(outputPath);
@@ -86,6 +87,18 @@ test("runs add_one module and returns incremented value", async () => {
   expect(typeof addOne).toBe("function");
   expect(addOne(41)).toBe(42);
   expect(addOne(-1)).toBe(0);
+}, TEST_TIMEOUT_MS);
+
+test("runs range_sum module and returns incremented value", async () => {
+  const moduleBytes = compileFixtureToBytes("range_sum.silk");
+  const { instance } = await WebAssembly.instantiate(moduleBytes);
+  const constructRange = instance.exports.construct_range as (min: any, max: any) => any;
+  const rangeSum = instance.exports.range_sum as (range: any) => number;
+
+  expect(typeof constructRange).toBe("function");
+  expect(typeof rangeSum).toBe("function");
+  expect(rangeSum(constructRange(0, 1))).toBe(1);
+  expect(rangeSum(constructRange(1, 3))).toBe(5);
 }, TEST_TIMEOUT_MS);
 
 test("runs binding_in_function module and returns correct value", async () => {
