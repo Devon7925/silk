@@ -33,10 +33,10 @@ async function compileAndLoad(silkCode: string, basename: string) {
 
 test("while loops accumulate until reaching limit", async () => {
     const silkCode = `
-    let export(wasm) sum_until = fn(limit: i32) -> i32 (
+    let (export wasm) sum_until = fn(limit: i32) -> i32 (
         let mut acc = 0;
         let mut iter = 0;
-        while iter < limit (
+        while iter < limit do (
             acc = acc + iter;
             iter = iter + 1;
         );
@@ -51,9 +51,9 @@ test("while loops accumulate until reaching limit", async () => {
 
 test("while loops stop when the guard is false", async () => {
     const silkCode = `
-    let export(wasm) decrement_to_zero = fn(start: i32) -> i32 (
+    let (export wasm) decrement_to_zero = fn(start: i32) -> i32 (
         let mut value = start;
-        while value > 0 (
+        while value > 0 do (
             value = value - 1;
         );
         value
@@ -70,6 +70,6 @@ afterAll(() => {
     for (const file of TEMP_FILES) {
         try {
             unlinkSync(file);
-        } catch (e) {}
+        } catch (e) { }
     }
 });

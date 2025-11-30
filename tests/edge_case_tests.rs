@@ -37,7 +37,7 @@ fn assert_final_number(result: Expression, expected: i32) {
 #[test]
 fn test_shadowing_in_block() {
     let program = "
-        let export(wasm) test_shadow = fn(x: i32) -> i32 (
+        let (export wasm) test_shadow = fn(x: i32) -> i32 (
             let y = 10;
             (
                 let y = 20;
@@ -59,7 +59,7 @@ fn test_shadowing_in_block() {
 #[test]
 fn test_unused_bindings() {
     let program = "
-        let export(wasm) unused_test = fn(x: i32) -> i32 (
+        let (export wasm) unused_test = fn(x: i32) -> i32 (
             let unused = 100;
             x
         );
@@ -71,7 +71,7 @@ fn test_unused_bindings() {
 #[test]
 fn test_nested_arithmetic() {
     let program = "
-        let export(wasm) math_test = fn(x: i32) -> i32 (
+        let (export wasm) math_test = fn(x: i32) -> i32 (
             let a = x * 2;
             let b = a + 5;
             b / 2
@@ -84,7 +84,7 @@ fn test_nested_arithmetic() {
 #[test]
 fn test_division_by_zero_errors() {
     let program = "
-        let export(wasm) div_zero = 1 / 0;
+        let (export wasm) div_zero = 1 / 0;
         {}
         ";
     let (expression, remaining) = parse_block(program).expect("Failed to parse program text");
@@ -105,7 +105,7 @@ fn test_division_by_zero_errors() {
 #[test]
 fn test_negative_number_literal() {
     let program = "
-        let export(wasm) negative_literal = -5;
+        let (export wasm) negative_literal = -5;
         {}
         ";
     let (_result, context) =

@@ -43,7 +43,6 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
         Expression::Match {
             value,
             branches,
-            else_branch,
             span,
         } => Ok(Expression::Match {
             value: Box::new(simplify_expression(*value)?),
@@ -56,10 +55,6 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
                     ))
                 })
                 .collect::<Result<Vec<_>, Diagnostic>>()?,
-            else_branch: match else_branch {
-                Some(branch) => Some(Box::new(simplify_expression(*branch)?)),
-                None => None,
-            },
             span,
         }),
         Expression::Function {
@@ -378,7 +373,7 @@ fn evaluate_text_to_simplified_expression(
 #[test]
 fn interpret_exported_function() {
     let program = "
-let export(js) add_one = fn(x: i32) -> i32 (
+let (export js) add_one = fn(x: i32) -> i32 (
     x + 1
 );
 {}

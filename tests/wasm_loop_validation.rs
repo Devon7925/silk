@@ -25,13 +25,13 @@ fn validate_wasm(bytes: &[u8]) {
 #[test]
 fn wasm_loop_with_internal_return_validates() {
     let program = r#"
-let export(wasm) factorial = fn(limit: i32) -> i32 (
+let (export wasm) factorial = fn(limit: i32) -> i32 (
     let mut acc = 1;
     let mut iter = limit;
     loop (
         acc = acc * iter;
         iter = iter - 1;
-        if iter <= 0 (
+        if iter <= 0 then (
             return acc;
         )
     )
@@ -46,10 +46,10 @@ let export(wasm) factorial = fn(limit: i32) -> i32 (
 #[test]
 fn wasm_loop_with_break_value_validates() {
     let program = r#"
-let export(wasm) first_non_positive = fn(start: i32) -> i32 (
+let (export wasm) first_non_positive = fn(start: i32) -> i32 (
     let mut current = start;
     loop (
-        if current <= 0 (
+        if current <= 0 then (
             break current;
         );
         current = current - 1;

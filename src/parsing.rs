@@ -106,7 +106,6 @@ pub enum Expression {
     Match {
         value: Box<Expression>,
         branches: Vec<(BindingPattern, Expression)>,
-        else_branch: Option<Box<Expression>>,
         span: SourceSpan,
     },
     EnumValue {
@@ -291,57 +290,37 @@ fn parse_match_expression_with_source<'a>(
         .ok_or_else(|| diagnostic_here(source, file, 5, "Expected match"))?;
 
     remaining = parse_optional_whitespace(remaining);
-    let (value, mut remaining) = parse_operation_expression_with_guard(source, remaining, true)?;
+    let (value, mut remaining) = parse_operation_expression_with_guard(source, remaining)?;
+    remaining = parse_optional_whitespace(remaining);
+    remaining = remaining
+        .strip_prefix("with")
+        .ok_or_else(|| diagnostic_here(source, remaining, 4, "Expected with after match value"))?;
     remaining = parse_optional_whitespace(remaining);
 
     let mut branches = Vec::new();
-    let mut else_branch = None;
 
     remaining = remaining
-        .strip_prefix("{")
-        .ok_or_else(|| diagnostic_here(source, remaining, 1, "Expected { to start match"))?;
+        .strip_prefix("(")
+        .ok_or_else(|| diagnostic_here(source, remaining, 1, "Expected ( to start match"))?;
 
     loop {
         remaining = parse_optional_whitespace(remaining);
-        if let Some(rest) = remaining.strip_prefix("}") {
+        if let Some(rest) = remaining.strip_prefix(")") {
             remaining = rest;
             break;
         }
 
-        if let Some(rest) = remaining.strip_prefix("else") {
-            let after_else = parse_optional_whitespace(rest);
-            let (branch_expr, rest) = parse_grouping_expression_with_source(source, after_else)
-                .unwrap_or_else(|| {
-                    Err(diagnostic_here(
-                        source,
-                        after_else,
-                        after_else.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
-                        "Expected grouping expression for else branch",
-                    ))
-                })?;
-            else_branch = Some(branch_expr);
-            remaining = parse_optional_whitespace(rest);
-        } else {
-            let (pattern, rest) = parse_binding_pattern_with_source(source, remaining)?;
-            let rest = parse_optional_whitespace(rest);
-            let rest = rest.strip_prefix("=>").ok_or_else(|| {
-                diagnostic_here(source, rest, 2, "Expected => after match pattern")
-            })?;
-            let rest = parse_optional_whitespace(rest);
-            let (branch_expr, rest) = parse_grouping_expression_with_source(source, rest)
-                .unwrap_or_else(|| {
-                    Err(diagnostic_here(
-                        source,
-                        rest,
-                        rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
-                        "Expected grouping expression for match branch",
-                    ))
-                })?;
-            branches.push((pattern, branch_expr));
-            remaining = parse_optional_whitespace(rest);
-        }
+        let (pattern, rest) = parse_binding_pattern_with_source(source, remaining)?;
+        let rest = parse_optional_whitespace(rest);
+        let rest = rest
+            .strip_prefix("=>")
+            .ok_or_else(|| diagnostic_here(source, rest, 2, "Expected => after match pattern"))?;
+        let rest = parse_optional_whitespace(rest);
+        let (branch_expr, rest) = parse_individual_expression_with_source(source, rest)?;
+        branches.push((pattern, branch_expr));
+        remaining = parse_optional_whitespace(rest);
 
-        if let Some(rest) = remaining.strip_prefix(";") {
+        if let Some(rest) = remaining.strip_prefix(",") {
             remaining = parse_optional_whitespace(rest);
         }
     }
@@ -352,7 +331,6 @@ fn parse_match_expression_with_source<'a>(
         Expression::Match {
             value: Box::new(value),
             branches,
-            else_branch: else_branch.map(Box::new),
             span,
         },
         remaining,
@@ -369,60 +347,33 @@ fn parse_if_expression_with_source<'a>(
         .ok_or_else(|| diagnostic_here(source, file, 2, "Expected if"))?;
 
     remaining = parse_optional_whitespace(remaining);
-    let (mut condition, mut after_condition) =
-        parse_operation_expression_with_guard(source, remaining, true)?;
+    let (condition, mut after_condition) =
+        parse_assignment_expression_with_source(source, remaining)?;
+    println!("Parsed if condition: {:?}", condition);
     after_condition = parse_optional_whitespace(after_condition);
+    let remaining = after_condition.strip_prefix("then").ok_or_else(|| {
+        diagnostic_here(
+            source,
+            after_condition,
+            4,
+            "Expected then after if condition",
+        )
+    })?;
 
-    let mut inferred_then_branch: Option<Expression> = None;
-    if !after_condition.starts_with('(') {
-        if let Expression::FunctionCall {
-            function, argument, ..
-        } = condition.clone()
-        {
-            if let Expression::Block(_, _) = *argument {
-                inferred_then_branch = Some(*argument);
-                condition = *function;
-            }
-        }
-    }
+    let remaining = parse_optional_whitespace(remaining);
 
-    let (then_branch, mut remaining) = if let Some(branch) = inferred_then_branch {
-        (branch, after_condition)
-    } else {
-        match parse_grouping_expression_with_source(source, after_condition) {
-            Some(result) => result?,
-            None => {
-                return Err(diagnostic_here(
-                    source,
-                    after_condition,
-                    after_condition
-                        .chars()
-                        .next()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(1),
-                    "Expected ( to start if body",
-                ));
-            }
-        }
-    };
+    let (then_branch, remaining) = parse_operation_expression_with_source(source, remaining)?;
 
-    remaining = parse_optional_whitespace(remaining);
+    let remaining = parse_optional_whitespace(remaining);
 
     let else_branch = if let Some(rest) = remaining.strip_prefix("else") {
         let rest = parse_optional_whitespace(rest);
         if let Some(if_parse) = parse_if_expression(source, rest) {
             let (else_expr, remaining) = if_parse?;
             Some((Some(else_expr), remaining))
-        } else if let Some(group_parse) = parse_grouping_expression_with_source(source, rest) {
-            let (else_expr, remaining) = group_parse?;
-            Some((Some(else_expr), remaining))
         } else {
-            return Err(diagnostic_here(
-                source,
-                rest,
-                rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
-                "Expected ( to start else body",
-            ));
+            let (else_expr, remaining) = parse_operation_expression_with_source(source, rest)?;
+            Some((Some(else_expr), remaining))
         }
     } else {
         None
@@ -479,6 +430,14 @@ fn diagnostic_at_eof(source: &str, message: impl Into<String>) -> Diagnostic {
 }
 
 pub fn parse_let(file: &str) -> Option<&str> {
+    if file
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect::<String>()
+        != "let"
+    {
+        return None;
+    }
     file.strip_prefix("let")
 }
 
@@ -563,113 +522,191 @@ pub fn parse_literal(file: &str) -> Option<(ExpressionLiteral, &str)> {
     ))
 }
 
-fn parse_simple_binding_pattern<'a>(
-    source: &'a str,
-    file: &'a str,
-) -> Result<(BindingPattern, &'a str), Diagnostic> {
-    let search_slice = if let Some(eq_index) = file.find('=') {
-        &file[..eq_index]
-    } else {
-        file
-    };
-
-    if let Some(sep_index) = search_slice.find("::") {
-        let start_slice = file;
-        let (enum_part, after_enum) = file.split_at(sep_index);
-        let (enum_type, _enum_remaining) =
-            parse_operation_expression_with_source(source, enum_part)?;
-
-        let mut after_enum = &after_enum["::".len()..];
-        after_enum = parse_optional_whitespace(after_enum);
-        let (variant_identifier, after_variant) =
-            parse_identifier(after_enum).ok_or_else(|| {
-                diagnostic_here(
-                    source,
-                    after_enum,
-                    after_enum.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
-                    "Expected variant identifier after ::",
-                )
-            })?;
-
-        let after_variant = parse_optional_whitespace(after_variant);
-        let (payload, remaining) = if let Some(after_paren) = after_variant.strip_prefix("(") {
-            let after_paren = parse_optional_whitespace(after_paren);
-            let (payload, rest) = parse_binding_pattern_with_source(source, after_paren)?;
-            let rest = parse_optional_whitespace(rest);
-            let rest = rest.strip_prefix(")").ok_or_else(|| {
-                diagnostic_here(
-                    source,
-                    rest,
-                    rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
-                    "Expected ) after enum payload pattern",
-                )
-            })?;
-            (Some(Box::new(payload)), rest)
-        } else {
-            (None, after_variant)
-        };
-        let span = consumed_span(source, start_slice, remaining);
-        return Ok((
-            BindingPattern::EnumVariant {
-                enum_type: Box::new(enum_type),
-                variant: variant_identifier,
-                payload,
-                span,
-            },
-            remaining,
-        ));
-    }
-    if let Some((identifier, remaining)) = parse_identifier(file) {
-        let span = consumed_span(source, file, remaining);
-        return Ok((BindingPattern::Identifier(identifier, span), remaining));
-    }
-    if let Some((literal, remaining)) = parse_literal(file) {
-        let span = consumed_span(source, file, remaining);
-        return Ok((BindingPattern::Literal(literal, span), remaining));
-    }
-    Err(diagnostic_here(source, file, 1, "Expected binding pattern"))
-}
-
-fn parse_type_hint<'a>(
-    source: &'a str,
-    file: &'a str,
-) -> Option<Result<(Expression, &'a str), Diagnostic>> {
-    let file = parse_optional_whitespace(file);
-    let file = parse_type_decl(file)?;
-    let file = parse_optional_whitespace(file);
-
-    Some(parse_operation_expression_with_source(source, file))
-}
-
 fn parse_binding_pattern_with_source<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Result<(BindingPattern, &'a str), Diagnostic> {
     let file = parse_optional_whitespace(file);
     let annotation_start_slice = file;
-    let (annotations, file) = parse_binding_annotations(source, file)?;
-    let (mut pattern, mut remaining) = if file.starts_with("{") {
-        parse_struct_binding_pattern_with_source(source, file)?
-    } else {
-        parse_simple_binding_pattern(source, file)?
-    };
-    if let Some(type_hint_parse) = parse_type_hint(source, remaining) {
-        let (type_expr, new_remaining) = type_hint_parse?;
-        let span = pattern.span().merge(&type_expr.span());
-        pattern = BindingPattern::TypeHint(Box::new(pattern), Box::new(type_expr), span);
-        remaining = new_remaining;
-    }
+    let (pattern_expression, remaining) = parse_operation_expression_with_guard(source, file)?;
 
-    if !annotations.is_empty() {
-        let span = consumed_span(source, annotation_start_slice, remaining);
-        pattern = BindingPattern::Annotated {
-            annotations,
-            pattern: Box::new(pattern),
-            span,
-        };
-    }
+    let pattern =
+        pattern_expression_to_binding_pattern(source, pattern_expression, annotation_start_slice)?;
 
     Ok((pattern, remaining))
+}
+
+#[test]
+fn test_enum_pattern_parse2() {
+    let source = "Option::Some(value)";
+    let (pattern, remaining) = parse_binding_pattern_with_source(source, source).unwrap();
+    assert!(remaining.is_empty());
+
+    match pattern {
+        BindingPattern::EnumVariant {
+            enum_type,
+            variant,
+            payload,
+            ..
+        } => {
+            match *enum_type {
+                Expression::Identifier(Identifier(ref name), _) if name == "Option" => {}
+                _ => panic!("Expected enum type identifier 'Option'"),
+            }
+            assert_eq!(variant.0, "Some");
+            match payload {
+                Some(boxed_pattern) => match *boxed_pattern {
+                    BindingPattern::Identifier(Identifier(ref name), _) if name == "value" => {}
+                    _ => panic!("Expected payload identifier 'value'"),
+                },
+                None => panic!("Expected payload in enum variant pattern"),
+            }
+        }
+        _ => panic!("Expected EnumVariant binding pattern"),
+    }
+}
+
+fn pattern_expression_to_binding_pattern(
+    source: &str,
+    pattern_expression: Expression,
+    annotation_start_slice: &str,
+) -> Result<BindingPattern, Diagnostic> {
+    println!("Converting pattern expression: {:?}", pattern_expression);
+    match pattern_expression {
+        Expression::Literal(expression_literal, source_span) => {
+            Ok(BindingPattern::Literal(expression_literal, source_span))
+        }
+        Expression::Identifier(identifier, source_span) => {
+            Ok(BindingPattern::Identifier(identifier, source_span))
+        }
+        Expression::Struct(items, source_span) => {
+            let mut field_patterns = Vec::new();
+            for (identifier, expr) in items {
+                let field_pattern =
+                    pattern_expression_to_binding_pattern(source, expr, annotation_start_slice)?;
+                field_patterns.push((identifier, field_pattern));
+            }
+            Ok(BindingPattern::Struct(field_patterns, source_span))
+        }
+        Expression::Operation {
+            operator,
+            left,
+            right,
+            span,
+        } if operator == ":" => {
+            let left_pattern =
+                pattern_expression_to_binding_pattern(source, *left, annotation_start_slice)?;
+            Ok(BindingPattern::TypeHint(
+                Box::new(left_pattern),
+                right,
+                span,
+            ))
+        }
+        Expression::FunctionCall {
+            function,
+            argument,
+            span,
+        } => match *function {
+            Expression::EnumAccess {
+                enum_expr, variant, ..
+            } => Ok(BindingPattern::EnumVariant {
+                enum_type: enum_expr,
+                variant,
+                payload: Some(Box::new(pattern_expression_to_binding_pattern(
+                    source,
+                    *argument,
+                    annotation_start_slice,
+                )?)),
+                span,
+            }),
+            other => Ok(BindingPattern::Annotated {
+                annotations: extract_binding_annotations_from_expression(
+                    source,
+                    other,
+                    annotation_start_slice,
+                )?,
+                pattern: Box::new(pattern_expression_to_binding_pattern(
+                    source,
+                    *argument,
+                    annotation_start_slice,
+                )?),
+                span,
+            }),
+        },
+        Expression::EnumAccess {
+            enum_expr,
+            variant,
+            span,
+        } => Ok(BindingPattern::EnumVariant {
+            enum_type: enum_expr,
+            variant,
+            payload: None,
+            span,
+        }),
+
+        Expression::EnumValue { .. }
+        | Expression::EnumConstructor { .. }
+        | Expression::PropertyAccess { .. }
+        | Expression::IntrinsicType(..)
+        | Expression::If { .. }
+        | Expression::AttachImplementation { .. }
+        | Expression::Function { .. }
+        | Expression::FunctionType { .. }
+        | Expression::IntrinsicOperation(..)
+        | Expression::EnumType(..)
+        | Expression::Match { .. }
+        | Expression::Operation { .. }
+        | Expression::Assignment { .. }
+        | Expression::Binding(..)
+        | Expression::Block(..)
+        | Expression::Return { .. }
+        | Expression::Break { .. }
+        | Expression::Loop { .. }
+        | Expression::While { .. } => Err(diagnostic_here(
+            source,
+            annotation_start_slice,
+            1, //todo: improve span
+            "Invalid binding pattern expression",
+        )),
+    }
+}
+
+fn extract_binding_annotations_from_expression(
+    source: &str,
+    expression: Expression,
+    annotation_start_slice: &str,
+) -> Result<Vec<BindingAnnotation>, Diagnostic> {
+    match expression {
+        Expression::Identifier(Identifier(id), span) if id == "mut" => {
+            Ok(vec![BindingAnnotation::Mutable(span)])
+        }
+        Expression::FunctionCall {
+            function, argument, ..
+        } => match *function {
+            Expression::Identifier(Identifier(id), ann_span) if id == "export" => {
+                Ok(vec![BindingAnnotation::Export(*argument, ann_span)])
+            }
+            other => {
+                let mut annotations = extract_binding_annotations_from_expression(
+                    source,
+                    other,
+                    annotation_start_slice,
+                )?;
+                annotations.extend(extract_binding_annotations_from_expression(
+                    source,
+                    *argument,
+                    annotation_start_slice,
+                )?);
+                Ok(annotations)
+            }
+        },
+        _ => Err(diagnostic_here(
+            source,
+            annotation_start_slice,
+            1, //todo: improve span
+            "Invalid binding annotation",
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -759,17 +796,39 @@ fn parse_grouping_expression_with_source<'a>(
 }
 
 pub fn parse_operator(file: &str) -> Option<(String, &str)> {
-    let operator_chars: Vec<char> = vec!['+', '-', '*', '/', '=', '!', '<', '>', '&', '|', '^'];
+    let operator_chars: Vec<char> = vec![
+        '+', '-', '*', '/', '=', '!', '<', '>', '&', '|', '^', ':', '.',
+    ];
+
+    let stop_sequences = vec![";", ")", ",", "}", "]"];
+    for stop_sequence in stop_sequences {
+        if file.starts_with(stop_sequence) {
+            return None;
+        }
+    }
+
+    let stop_words = vec![
+        "if", "then", "else", "match", "with", "fn", "let", "return", "break", "loop", "while",
+        "do",
+    ];
+    let word = file
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect::<String>();
+    if stop_words.contains(&word.as_str()) {
+        return None;
+    }
+
+    if file.is_empty() {
+        return None;
+    }
+
     let operator = file
         .chars()
         .take_while(|c| operator_chars.contains(c))
         .collect::<String>();
 
-    if operator.is_empty() {
-        return None;
-    }
-
-    if operator == "=" {
+    if operator == "=" || operator == "=>" {
         return None;
     }
 
@@ -779,6 +838,8 @@ pub fn parse_operator(file: &str) -> Option<(String, &str)> {
 
 fn operator_precedence(operator: &str) -> u8 {
     match operator {
+        "" | "::" | "." => 6,
+        ":" => 5,
         "*" | "/" => 4,
         "+" | "-" => 3,
         "==" | "!=" | "<" | ">" | "<=" | ">=" => 2,
@@ -962,7 +1023,6 @@ fn parse_struct_expression<'a>(
 fn parse_return_expression_with_source<'a>(
     source: &'a str,
     file: &'a str,
-    stop_before_grouping: bool,
 ) -> Option<Result<(Expression, &'a str), Diagnostic>> {
     const KEYWORD: &str = "return";
     if !file.starts_with(KEYWORD) {
@@ -985,7 +1045,7 @@ fn parse_return_expression_with_source<'a>(
     let (value, rest) = if remaining.is_empty() {
         (None, remaining)
     } else {
-        match parse_operation_expression_with_guard(source, remaining, stop_before_grouping) {
+        match parse_operation_expression_with_guard(source, remaining) {
             Ok((expr, rest)) => (Some(expr), rest),
             Err(err) => return Some(Err(err)),
         }
@@ -1004,7 +1064,6 @@ fn parse_return_expression_with_source<'a>(
 fn parse_break_expression_with_source<'a>(
     source: &'a str,
     file: &'a str,
-    stop_before_grouping: bool,
 ) -> Option<Result<(Expression, &'a str), Diagnostic>> {
     const KEYWORD: &str = "break";
     if !file.starts_with(KEYWORD) {
@@ -1027,7 +1086,7 @@ fn parse_break_expression_with_source<'a>(
     let (value, rest) = if remaining.is_empty() {
         (None, remaining)
     } else {
-        match parse_operation_expression_with_guard(source, remaining, stop_before_grouping) {
+        match parse_operation_expression_with_guard(source, remaining) {
             Ok((expr, rest)) => (Some(expr), rest),
             Err(err) => return Some(Err(err)),
         }
@@ -1108,14 +1167,23 @@ fn parse_while_expression_with_source<'a>(
     }
 
     let start_slice = file;
-    let mut remaining = parse_optional_whitespace(after_keyword);
+    let remaining = parse_optional_whitespace(after_keyword);
     let (condition, after_condition) =
-        match parse_operation_expression_with_guard(source, remaining, true) {
+        match parse_operation_expression_with_source(source, remaining) {
             Ok(parsed) => parsed,
             Err(err) => return Some(Err(err)),
         };
 
-    remaining = parse_optional_whitespace(after_condition);
+    let remaining = parse_optional_whitespace(after_condition);
+    let Some(remaining) = remaining.strip_prefix("do") else {
+        return Some(Err(diagnostic_here(
+            source,
+            remaining,
+            2,
+            "Expected do after while condition",
+        )));
+    };
+    let remaining = parse_optional_whitespace(remaining);
     let Some(group_parsed) = parse_grouping_expression_with_source(source, remaining) else {
         return Some(Err(diagnostic_here(
             source,
@@ -1150,25 +1218,20 @@ fn parse_isolated_expression_with_source<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Result<(Expression, &'a str), Diagnostic> {
-    parse_isolated_expression_with_source_with_guard(source, file, false)
+    parse_isolated_expression_with_source_with_guard(source, file)
 }
 
 fn parse_isolated_expression_with_source_with_guard<'a>(
     source: &'a str,
     file: &'a str,
-    stop_before_grouping: bool,
 ) -> Result<(Expression, &'a str), Diagnostic> {
-    if let Some(binding_parse) = parse_binding(source, file, stop_before_grouping) {
+    if let Some(binding_parse) = parse_binding(source, file) {
         return binding_parse;
     }
-    if let Some(return_parse) =
-        parse_return_expression_with_source(source, file, stop_before_grouping)
-    {
+    if let Some(return_parse) = parse_return_expression_with_source(source, file) {
         return return_parse;
     }
-    if let Some(break_parse) =
-        parse_break_expression_with_source(source, file, stop_before_grouping)
-    {
+    if let Some(break_parse) = parse_break_expression_with_source(source, file) {
         return break_parse;
     }
     if let Some(while_parse) = parse_while_expression_with_source(source, file) {
@@ -1200,141 +1263,11 @@ fn parse_isolated_expression_with_source_with_guard<'a>(
         let span = consumed_span(source, file, remaining);
         return Ok((Expression::Literal(literal, span), remaining));
     }
-    let preview = file.chars().take(10).collect::<String>();
-    if file.is_empty() {
-        Err(diagnostic_at_eof(
-            source,
-            format!("Expected expression near end of input"),
-        ))
-    } else {
-        Err(diagnostic_here(
-            source,
-            file,
-            file.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
-            format!("Expected expression at: {preview}"),
-        ))
-    }
-}
-
-fn parse_property_access<'a>(
-    source: &'a str,
-    file: &'a str,
-    stop_before_grouping: bool,
-) -> Result<(Expression, &'a str), Diagnostic> {
-    let expression_start = file;
-    let (mut expr, mut remaining) =
-        parse_isolated_expression_with_source_with_guard(source, file, stop_before_grouping)?;
-
-    loop {
-        let lookahead = parse_optional_whitespace(remaining);
-        let (after_separator, is_enum_access) = if let Some(rest) = lookahead.strip_prefix("::") {
-            (rest, true)
-        } else if let Some(rest) = lookahead.strip_prefix(".") {
-            (rest, false)
-        } else {
-            break;
-        };
-
-        let after_separator = parse_optional_whitespace(after_separator);
-        let (property_identifier, rest) =
-            if let Some((identifier, rest)) = parse_identifier(after_separator) {
-                (identifier, rest)
-            } else if !is_enum_access {
-                let tuple_index = after_separator
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect::<String>();
-
-                if tuple_index.is_empty() {
-                    return Err(diagnostic_here(
-                        source,
-                        after_separator,
-                        after_separator
-                            .chars()
-                            .next()
-                            .map(|c| c.len_utf8())
-                            .unwrap_or(1),
-                        "Expected identifier after . in property access",
-                    ));
-                }
-
-                let rest = &after_separator[tuple_index.len()..];
-                (Identifier(tuple_index), rest)
-            } else {
-                return Err(diagnostic_here(
-                    source,
-                    after_separator,
-                    after_separator
-                        .chars()
-                        .next()
-                        .map(|c| c.len_utf8())
-                        .unwrap_or(1),
-                    "Expected identifier after :: in enum access",
-                ));
-            };
-        let span = consumed_span(source, expression_start, rest);
-        expr = if is_enum_access {
-            Expression::EnumAccess {
-                enum_expr: Box::new(expr),
-                variant: property_identifier,
-                span,
-            }
-        } else {
-            Expression::PropertyAccess {
-                object: Box::new(expr),
-                property: property_identifier.0,
-                span,
-            }
-        };
-        remaining = rest;
-    }
-
-    Ok((expr, remaining))
-}
-
-fn parse_function_call<'a>(
-    source: &'a str,
-    file: &'a str,
-    stop_before_grouping: bool,
-) -> Result<(Expression, &'a str), Diagnostic> {
-    let mut exprs = vec![];
-    let (function_expr, mut remaining) = parse_property_access(source, file, stop_before_grouping)?;
-    remaining = parse_optional_whitespace(remaining);
-    exprs.push(function_expr);
-    loop {
-        let lookahead = parse_optional_whitespace(remaining);
-        if stop_before_grouping && lookahead.starts_with('(') {
-            break;
-        }
-
-        let Ok((argument_expr, rest)) =
-            parse_property_access(source, remaining, stop_before_grouping)
-        else {
-            break;
-        };
-
-        if stop_before_grouping {
-            if let Expression::Block(_, _) = argument_expr {
-                break;
-            }
-        }
-
-        remaining = parse_optional_whitespace(rest);
-        exprs.push(argument_expr);
-    }
-    Ok((
-        exprs
-            .into_iter()
-            .reduce(|function, argument| {
-                let span = function.span().merge(&argument.span());
-                Expression::FunctionCall {
-                    function: Box::new(function),
-                    argument: Box::new(argument),
-                    span,
-                }
-            })
-            .unwrap(),
-        remaining,
+    Err(diagnostic_here(
+        source,
+        file,
+        file.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
+        "Expected expression",
     ))
 }
 
@@ -1347,28 +1280,26 @@ fn parse_operation_expression_with_source<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Result<(Expression, &'a str), Diagnostic> {
-    parse_operation_expression_with_guard(source, file, false)
+    parse_operation_expression_with_guard(source, file)
 }
 
 fn parse_operation_expression_with_guard<'a>(
     source: &'a str,
     file: &'a str,
-    stop_before_grouping: bool,
 ) -> Result<(Expression, &'a str), Diagnostic> {
-    parse_operation_expression_with_min_precedence(source, file, stop_before_grouping, 0)
+    parse_operation_expression_with_min_precedence(source, file, 0)
 }
 
 fn parse_assignment_expression_with_source<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Result<(Expression, &'a str), Diagnostic> {
-    parse_assignment_expression_with_guard(source, file, false)
+    parse_assignment_expression_with_guard(source, file)
 }
 
 fn parse_assignment_expression_with_guard<'a>(
     source: &'a str,
     file: &'a str,
-    stop_before_grouping: bool,
 ) -> Result<(Expression, &'a str), Diagnostic> {
     let trimmed = parse_optional_whitespace(file);
     let start_slice = trimmed;
@@ -1377,11 +1308,8 @@ fn parse_assignment_expression_with_guard<'a>(
         if let Some(after_equals) = after_target.strip_prefix('=') {
             if !after_equals.starts_with('=') {
                 let after_equals = parse_optional_whitespace(after_equals);
-                let (expr, remaining) = parse_operation_expression_with_guard(
-                    source,
-                    after_equals,
-                    stop_before_grouping,
-                )?;
+                let (expr, remaining) =
+                    parse_operation_expression_with_guard(source, after_equals)?;
                 let span = consumed_span(source, start_slice, remaining);
                 return Ok((
                     Expression::Assignment {
@@ -1395,7 +1323,7 @@ fn parse_assignment_expression_with_guard<'a>(
         }
     }
 
-    parse_operation_expression_with_guard(source, file, stop_before_grouping)
+    parse_operation_expression_with_guard(source, file)
 }
 
 fn parse_lvalue<'a>(
@@ -1452,18 +1380,16 @@ fn parse_lvalue<'a>(
 fn parse_operation_expression_with_min_precedence<'a>(
     source: &'a str,
     file: &'a str,
-    stop_before_grouping: bool,
     min_precedence: u8,
 ) -> Result<(Expression, &'a str), Diagnostic> {
     fn parse_operations<'a>(
         source: &'a str,
         file: &'a str,
-        stop_before_grouping: bool,
         min_precedence: u8,
     ) -> Result<(Vec<Expression>, Vec<String>, &'a str), Diagnostic> {
         let mut expressions: Vec<Expression> = Vec::new();
         let mut operators: Vec<String> = Vec::new();
-        let (expression, mut remaining) = parse_function_call(source, file, stop_before_grouping)?;
+        let (expression, mut remaining) = parse_isolated_expression_with_source(source, file)?;
         remaining = parse_optional_whitespace(remaining);
         expressions.push(expression);
         while let Some((operator, rest)) = parse_operator(remaining) {
@@ -1472,7 +1398,7 @@ fn parse_operation_expression_with_min_precedence<'a>(
                 break;
             }
             let rest = parse_optional_whitespace(rest);
-            let (next_expression, rest) = parse_function_call(source, rest, stop_before_grouping)?;
+            let (next_expression, rest) = parse_isolated_expression_with_source(source, rest)?;
             let rest = parse_optional_whitespace(rest);
             operators.push(operator);
             expressions.push(next_expression);
@@ -1481,8 +1407,7 @@ fn parse_operation_expression_with_min_precedence<'a>(
         Ok((expressions, operators, remaining))
     }
 
-    let (expressions, operators, remaining) =
-        parse_operations(source, file, stop_before_grouping, min_precedence)?;
+    let (expressions, operators, remaining) = parse_operations(source, file, min_precedence)?;
 
     fn reduce_stacks(
         operand_stack: &mut Vec<Expression>,
@@ -1499,11 +1424,55 @@ fn parse_operation_expression_with_min_precedence<'a>(
             diagnostic_at_eof(source, "Expected left operand when reducing operation")
         })?;
         let span = left.span().merge(&right.span());
-        operand_stack.push(Expression::Operation {
-            operator,
-            left: Box::new(left),
-            right: Box::new(right),
-            span,
+        operand_stack.push(match operator.as_str() {
+            "::" => {
+                let Expression::Identifier(variant, _) = right else {
+                    return Err(diagnostic_here(
+                        source,
+                        "",
+                        1,
+                        "Expected identifier as enum variant in enum access",
+                    ));
+                };
+                Expression::EnumAccess {
+                    enum_expr: Box::new(left),
+                    variant,
+                    span,
+                }
+            }
+            "." => match right {
+                Expression::Identifier(property, _) => Expression::PropertyAccess {
+                    object: Box::new(left),
+                    property: property.0,
+                    span,
+                },
+                Expression::Literal(ExpressionLiteral::Number(num), _) => {
+                    Expression::PropertyAccess {
+                        object: Box::new(left),
+                        property: num.to_string(),
+                        span,
+                    }
+                }
+                _ => {
+                    return Err(diagnostic_here(
+                        source,
+                        "",
+                        1,
+                        "Expected identifier as property name in property access",
+                    ));
+                }
+            },
+            "" => Expression::FunctionCall {
+                function: Box::new(left),
+                argument: Box::new(right),
+                span,
+            },
+            operator => Expression::Operation {
+                operator: operator.to_string(),
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            },
         });
         Ok(())
     }
@@ -1540,100 +1509,9 @@ fn parse_operation_expression_with_min_precedence<'a>(
     Ok((final_expression, remaining))
 }
 
-fn parse_binding_annotations<'a>(
-    source: &'a str,
-    file: &'a str,
-) -> Result<(Vec<BindingAnnotation>, &'a str), Diagnostic> {
-    let mut annotations = Vec::new();
-    let mut remaining = file;
-
-    loop {
-        let trimmed = parse_optional_whitespace(remaining);
-        match parse_binding_annotation(source, trimmed) {
-            Some(result) => {
-                let (annotation, rest) = result?;
-                annotations.push(annotation);
-                remaining = rest;
-            }
-            None => return Ok((annotations, trimmed)),
-        }
-    }
-}
-
-fn parse_binding_annotation<'a>(
-    source: &'a str,
-    file: &'a str,
-) -> Option<Result<(BindingAnnotation, &'a str), Diagnostic>> {
-    parse_export_binding_annotation(source, file)
-        .or_else(|| parse_mut_binding_annotation(source, file))
-}
-
-fn parse_export_binding_annotation<'a>(
-    source: &'a str,
-    file: &'a str,
-) -> Option<Result<(BindingAnnotation, &'a str), Diagnostic>> {
-    const KEYWORD: &str = "export";
-    if !file.starts_with(KEYWORD) {
-        return None;
-    }
-
-    let after_keyword = &file[KEYWORD.len()..];
-    let after_keyword = parse_optional_whitespace(after_keyword);
-    if !after_keyword.starts_with('(') {
-        return None;
-    }
-
-    let annotation_start_slice = file;
-    let after_paren = &after_keyword[1..];
-    let after_paren = parse_optional_whitespace(after_paren);
-    Some(
-        parse_isolated_expression_with_source(source, after_paren).and_then(
-            |(target_expr, rest)| {
-                let rest = parse_optional_whitespace(rest);
-                let rest = rest.strip_prefix(")").ok_or_else(|| {
-                    diagnostic_here(
-                        source,
-                        rest,
-                        rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
-                        "Expected ) to close export annotation",
-                    )
-                })?;
-                let span = consumed_span(source, annotation_start_slice, rest);
-                Ok((BindingAnnotation::Export(target_expr, span), rest))
-            },
-        ),
-    )
-}
-
-fn parse_mut_binding_annotation<'a>(
-    source: &'a str,
-    file: &'a str,
-) -> Option<Result<(BindingAnnotation, &'a str), Diagnostic>> {
-    const KEYWORD: &str = "mut";
-    if !file.starts_with(KEYWORD) {
-        return None;
-    }
-
-    let after_keyword = &file[KEYWORD.len()..];
-    if after_keyword
-        .chars()
-        .next()
-        .map(|c| c.is_alphanumeric() || c == '_')
-        .unwrap_or(false)
-    {
-        return None;
-    }
-
-    let annotation_start_slice = file;
-    let rest = parse_optional_whitespace(after_keyword);
-    let span = consumed_span(source, annotation_start_slice, rest);
-    Some(Ok((BindingAnnotation::Mutable(span), rest)))
-}
-
 fn parse_binding<'a>(
     source: &'a str,
     file: &'a str,
-    stop_before_grouping: bool,
 ) -> Option<Result<(Expression, &'a str), Diagnostic>> {
     let start_slice = file;
     let file = parse_let(file)?;
@@ -1641,7 +1519,6 @@ fn parse_binding<'a>(
     fn parse_binding_inner<'a>(
         source: &'a str,
         file: &'a str,
-        stop_before_grouping: bool,
     ) -> Result<(Binding, &'a str), Diagnostic> {
         let file = parse_whitespace(file)
             .ok_or_else(|| diagnostic_here(source, file, 1, "Expected whitespace after let"))?;
@@ -1652,14 +1529,13 @@ fn parse_binding<'a>(
         let file = parse_optional_whitespace(file);
         // Use min_precedence=2 to stop before && (precedence 1) and || (precedence 0)
         // This enables let chains: "let x = a && b" parses as "(let x = a) && b"
-        let (expr, file) =
-            parse_operation_expression_with_min_precedence(source, file, stop_before_grouping, 2)?;
+        let (expr, file) = parse_operation_expression_with_min_precedence(source, file, 2)?;
 
         Ok((Binding { pattern, expr }, file))
     }
 
     Some(
-        parse_binding_inner(source, file, stop_before_grouping).map(|(binding, remaining)| {
+        parse_binding_inner(source, file).map(|(binding, remaining)| {
             let span = consumed_span(source, start_slice, remaining);
             (Expression::Binding(Box::new(binding), span), remaining)
         }),
@@ -1670,7 +1546,7 @@ fn parse_individual_expression_with_source<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Result<(Expression, &'a str), Diagnostic> {
-    if let Some(binding_parse) = parse_binding(source, file, false) {
+    if let Some(binding_parse) = parse_binding(source, file) {
         return binding_parse;
     }
     parse_assignment_expression_with_source(source, file)
@@ -1797,8 +1673,8 @@ let y: i32 = x
 fn parse_binding_with_export_annotation() {
     let parsed = parse_block(
         "
-let export(js) foo = 42;
-let export(wasm) export(js) bar = foo;
+let (export js) foo = 42;
+let (export wasm) (export js) bar = foo;
 bar
     ",
     )
@@ -1841,10 +1717,45 @@ bar
 }
 
 #[test]
+fn parse_struct_pattern_with_inner_multiple_annotations() {
+    let parsed = parse_block(
+        "
+let { foo = (export js) mut foo_binding, bar } = value;
+foo_binding
+    ",
+    )
+    .unwrap();
+
+    let (Expression::Block(parsed, _), "") = parsed else {
+        panic!()
+    };
+    let Expression::Binding(binding, _) = &parsed[0] else {
+        panic!()
+    };
+    let BindingPattern::Struct(fields, _) = &binding.pattern else {
+        panic!("expected struct pattern")
+    };
+    let (_, foo_pattern) = fields
+        .iter()
+        .find(|(identifier, _)| identifier.0 == "foo")
+        .expect("missing foo field");
+    let BindingPattern::Annotated { annotations, .. } = foo_pattern else {
+        panic!("expected annotated foo field")
+    };
+    assert_eq!(annotations.len(), 2);
+    let BindingAnnotation::Export(_, _) = &annotations[0] else {
+        panic!("expected export annotation first")
+    };
+    let BindingAnnotation::Mutable(_) = &annotations[1] else {
+        panic!("expected mutable annotation second")
+    };
+}
+
+#[test]
 fn parse_struct_pattern_with_inner_export_annotation() {
     let parsed = parse_block(
         "
-let { foo = export(js) foo_binding, bar } = value;
+let { foo = (export js) foo_binding, bar } = value;
 foo_binding
     ",
     )
@@ -2189,7 +2100,7 @@ fn diagnostics_include_binding_pattern_source_reference() {
     let source = "let = 5;";
     let err = parse_block(source).expect_err("binding should fail");
     let rendered = err.render_with_source(source);
-    assert!(rendered.contains("Expected binding pattern"));
+    assert!(rendered.contains("Expected expression"));
     assert!(rendered.contains("line 1, column 5"));
     assert!(rendered.contains("^"));
 }

@@ -1,2 +1,2 @@
-let export(wasm) answer: i32 = 42;
+let (export wasm) answer: i32 = 42;
 answer

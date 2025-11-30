@@ -33,13 +33,13 @@ async function compileAndLoad(silkCode: string, basename: string) {
 
 test("loop can compute factorial", async () => {
     const silkCode = `
-    let export(wasm) factorial = fn(limit: i32) -> i32 (
+    let (export wasm) factorial = fn(limit: i32) -> i32 (
         let mut acc = 1;
         let mut iter = limit;
         loop (
             acc = acc * iter;
             iter = iter - 1;
-            if iter <= 0 (
+            if iter <= 0 then (
                 return acc;
             )
         )
@@ -53,10 +53,10 @@ test("loop can compute factorial", async () => {
 
 test("loop break returns value", async () => {
     const silkCode = `
-    let export(wasm) first_non_positive = fn(start: i32) -> i32 (
+    let (export wasm) first_non_positive = fn(start: i32) -> i32 (
         let mut current = start;
         loop (
-            if current <= 0 (
+            if current <= 0 then (
                 break current;
             );
             current = current - 1;
@@ -74,6 +74,6 @@ afterAll(() => {
     for (const file of TEMP_FILES) {
         try {
             unlinkSync(file);
-        } catch (e) {}
+        } catch (e) { }
     }
 });

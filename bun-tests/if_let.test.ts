@@ -29,7 +29,7 @@ async function compileAndLoad(silkCode: string) {
 
 test("let as expression", async () => {
     const silkCode = `
-    let export(wasm) let_as_expr = fn(x: i32) -> bool (
+    let (export wasm) let_as_expr = fn(x: i32) -> bool (
         let y = x // binding succeeds, so it resolves to true
     );
     {}
@@ -40,8 +40,8 @@ test("let as expression", async () => {
 
 test("let in if condition", async () => {
     const silkCode = `
-    let export(wasm) let_as_expr = fn(x: i32) -> i32 (
-        if let y = x (
+    let (export wasm) let_as_expr = fn(x: i32) -> i32 (
+        if let y = x then (
             y
         ) else (
             0
@@ -55,8 +55,8 @@ test("let in if condition", async () => {
 
 test("refutable let in if condition", async () => {
     const silkCode = `
-    let export(wasm) let_as_expr = fn(x: i32) -> i32 (
-        if let { 5, y } = { x, x + 5 } (
+    let (export wasm) let_as_expr = fn(x: i32) -> i32 (
+        if let { 5, y } = { x, x + 5 } then (
             y
         ) else (
             0
@@ -72,9 +72,9 @@ test("refutable let in if condition", async () => {
 test("let chain with boolean condition", async () => {
     const silkCode = `
     let Option = enum { Some = i32, None = {} };
-    let export(wasm) check = fn(x: i32) -> i32 (
+    let (export wasm) check = fn(x: i32) -> i32 (
         let foo = Option::Some(x);
-        if let Option::Some(a) = foo && a == 5 (
+        if let Option::Some(a) = foo && a == 5 then (
             1
         ) else (
             0
@@ -92,10 +92,9 @@ test("let chain with multiple lets", async () => {
     let Level2 = enum { Some = i32, None = {} };
     let Level1 = enum { Some = Level2, None = {} };
     
-    let export(wasm) check = fn(x: i32) -> i32 (
-    let foo = if x > 0 (Level1::Some(Level2::Some(x))) else (Level1::None);
-
-        if let Level1::Some(a) = foo && let Level2::Some(b) = a (
+    let (export wasm) check = fn(x: i32) -> i32 (
+    let foo = if x > 0 then (Level1::Some(Level2::Some(x))) else (Level1::None);
+        if let Level1::Some(a) = foo && let Level2::Some(b) = a then (
             b
         ) else (
             0
@@ -113,10 +112,10 @@ test("if let with multiple unwraps", async () => {
     let Level2 = enum { Some = i32, None = {} };
     let Level1 = enum { Some = Level2, None = {} };
     
-    let export(wasm) check = fn(x: i32) -> i32 (
-    let foo = if x > 0 (Level1::Some(Level2::Some(x))) else (Level1::None);
+    let (export wasm) check = fn(x: i32) -> i32 (
+    let foo = if x > 0 then (Level1::Some(Level2::Some(x))) else (Level1::None);
 
-        if let Level1::Some(Level2::Some(b)) = foo (
+        if let Level1::Some(Level2::Some(b)) = foo then (
             b
         ) else (
             0

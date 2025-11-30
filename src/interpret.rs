@@ -50,7 +50,7 @@ pub enum BindingContext {
     UnboundWithoutType,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Context {
     pub bindings: std::collections::HashMap<String, (BindingContext, Vec<BindingAnnotation>)>,
 }
@@ -349,10 +349,17 @@ pub fn interpret_expression(
         Expression::Match {
             value,
             branches,
-            else_branch,
             span,
         } => {
             let interpreted_value = interpret_expression(*value, context)?;
+
+            if !is_resolved_constant(&interpreted_value) {
+                return Ok(Expression::Match {
+                    value: Box::new(interpreted_value),
+                    branches,
+                    span,
+                });
+            }
 
             for (pattern, branch) in branches {
                 let mut branch_context = context.clone();
@@ -372,11 +379,7 @@ pub fn interpret_expression(
                 }
             }
 
-            if let Some(else_branch) = else_branch {
-                interpret_expression(*else_branch, context)
-            } else {
-                Err(diagnostic("No match branches matched", span))
-            }
+            Err(diagnostic("No match branches matched", span))
         }
         Expression::If {
             condition,
@@ -1068,7 +1071,6 @@ fn get_type_of_expression(
         Expression::Match {
             value,
             branches,
-            else_branch,
             span,
         } => {
             let value_type = get_type_of_expression(value, &mut context.clone())?;
@@ -1096,24 +1098,7 @@ fn get_type_of_expression(
                 any_returning_branch = any_returning_branch || expression_contains_return(branch);
             }
 
-            let inferred_else = else_branch
-                .as_ref()
-                .map(|expr| expr.as_ref().clone())
-                .unwrap_or_else(|| empty_struct_expr(SourceSpan::new(span.end(), 0)));
-            let mut else_context = context.clone();
-            let else_type = get_type_of_expression(&inferred_else, &mut else_context)?;
-
-            if let Some(branch_ty) = branch_type {
-                if !types_equivalent(&branch_ty, &else_type) {
-                    if any_returning_branch {
-                        return Ok(else_type);
-                    }
-                    return Err(diagnostic("Type mismatch between match branches", *span));
-                }
-                Ok(branch_ty)
-            } else {
-                Ok(else_type)
-            }
+            branch_type.ok_or(diagnostic("Match has no branches", *span))
         }
         Expression::Binding(binding, _) => {
             let mut binding_context = context.clone();
@@ -1402,19 +1387,12 @@ fn expression_contains_return(expr: &Expression) -> bool {
             ..
         } => expression_contains_return(enum_type) || expression_contains_return(payload_type),
         Expression::Match {
-            value,
-            branches,
-            else_branch,
-            ..
+            value, branches, ..
         } => {
             expression_contains_return(value)
                 || branches
                     .iter()
                     .any(|(_, branch)| expression_contains_return(branch))
-                || else_branch
-                    .as_ref()
-                    .map(|branch| expression_contains_return(branch))
-                    .unwrap_or(false)
         }
         Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _span) => {
             expression_contains_return(left) || expression_contains_return(right)
@@ -1484,19 +1462,12 @@ fn expression_contains_loop(expr: &Expression) -> bool {
             ..
         } => expression_contains_loop(type_expr) || expression_contains_loop(implementation),
         Expression::Match {
-            value,
-            branches,
-            else_branch,
-            ..
+            value, branches, ..
         } => {
             expression_contains_loop(value)
                 || branches
                     .iter()
                     .any(|(_, branch)| expression_contains_loop(branch))
-                || else_branch
-                    .as_ref()
-                    .map(|branch| expression_contains_loop(branch))
-                    .unwrap_or(false)
         }
         Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, _)
         | Expression::Literal(_, _)
@@ -1563,19 +1534,12 @@ fn expression_contains_mutation(expr: &Expression) -> bool {
             expression_contains_mutation(type_expr) || expression_contains_mutation(implementation)
         }
         Expression::Match {
-            value,
-            branches,
-            else_branch,
-            ..
+            value, branches, ..
         } => {
             expression_contains_mutation(value)
                 || branches
                     .iter()
                     .any(|(_, branch)| expression_contains_mutation(branch))
-                || else_branch
-                    .as_ref()
-                    .map(|branch| expression_contains_mutation(branch))
-                    .unwrap_or(false)
         }
         Expression::Return { value, .. } | Expression::Break { value, .. } => value
             .as_ref()
@@ -2812,6 +2776,7 @@ pub fn intrinsic_context() -> Context {
     context
 }
 
+#[cfg(test)]
 pub fn evaluate_text_to_raw_expression(program: &str) -> Result<(Expression, Context), Diagnostic> {
     let (expression, remaining) =
         crate::parsing::parse_block(program).expect("Failed to parse program text");
@@ -2825,8 +2790,7 @@ pub fn evaluate_text_to_raw_expression(program: &str) -> Result<(Expression, Con
 }
 
 pub fn evaluate_text_to_expression(program: &str) -> Result<(Expression, Context), Diagnostic> {
-    let (expression, remaining) =
-        crate::parsing::parse_block(program).expect("Failed to parse program text");
+    let (expression, remaining) = crate::parsing::parse_block(program)?;
     assert!(
         remaining.trim().is_empty(),
         "Parser did not consume entire input, remaining: {remaining:?}"
@@ -2976,17 +2940,11 @@ impl UsageCounter {
                 }
             }
             Expression::Match {
-                value,
-                branches,
-                else_branch,
-                ..
+                value, branches, ..
             } => {
                 self.count(value);
                 for (_, branch) in branches {
                     self.count(branch);
-                }
-                if let Some(else_branch) = else_branch {
-                    self.count(else_branch);
                 }
             }
             Expression::Operation { left, right, .. } => {
@@ -3097,42 +3055,6 @@ impl UsageCounter {
             BindingPattern::Identifier(..) | BindingPattern::Literal(..) => {}
         }
     }
-
-    fn get_preserve_behavior(&self, pattern: &BindingPattern) -> PreserveBehavior {
-        match pattern {
-            BindingPattern::Identifier(ident, _) => {
-                (self.counts.get(&ident.0).copied().unwrap_or(0) > 1)
-                    .then(|| PreserveBehavior::PreserveUsage)
-                    .unwrap_or(PreserveBehavior::Inline)
-            }
-            BindingPattern::Literal(..) => PreserveBehavior::Inline,
-            BindingPattern::TypeHint(inner, _, _) => self.get_preserve_behavior(inner),
-            BindingPattern::Annotated {
-                pattern,
-                annotations,
-                ..
-            } => Ord::max(
-                self.get_preserve_behavior(pattern),
-                annotations
-                    .iter()
-                    .map(|ann| match ann {
-                        BindingAnnotation::Export(..) => PreserveBehavior::PreserveBinding,
-                        BindingAnnotation::Mutable(..) => PreserveBehavior::PreserveBinding,
-                    })
-                    .max()
-                    .unwrap_or(PreserveBehavior::Inline),
-            ),
-            BindingPattern::Struct(items, _) => items
-                .iter()
-                .map(|(_, pat)| self.get_preserve_behavior(pat))
-                .max()
-                .unwrap_or(PreserveBehavior::Inline),
-            BindingPattern::EnumVariant { payload, .. } => payload
-                .as_ref()
-                .map(|p| self.get_preserve_behavior(p))
-                .unwrap_or(PreserveBehavior::Inline),
-        }
-    }
 }
 
 #[test]
@@ -3233,14 +3155,10 @@ fn interpret_let_binding_function() {
 let Level2 = enum { Some = i32, None = {} };
 let Level1 = enum { Some = Level2, None = {} };
 
-let export(wasm) check = fn(x: i32) -> i32 (
-    let foo = if x > 0 (Level1::Some(Level2::Some(x))) else (Level1::None);
+let (export wasm) check = fn(x: i32) -> i32 (
+    let foo = if x > 0 then Level1::Some(Level2::Some(x)) else Level1::None;
 
-    if let Level1::Some(Level2::Some(b)) = foo (
-        b
-    ) else (
-        0
-    )
+    if let Level1::Some(Level2::Some(b)) = foo then b else 0
 );
 {}
     ";
@@ -3295,7 +3213,7 @@ container.inc(41)
 #[test]
 fn interpret_binding_with_export_annotation() {
     let program = "
-let export(js) answer: i32 = 42;
+let (export js) answer: i32 = 42;
 answer
     ";
     assert_eq!(evaluate_text_to_number(program), 42);
@@ -3328,7 +3246,7 @@ fn interpret_reports_calling_non_function_span() {
 #[test]
 fn interpret_preserves_bindings_in_function() {
     let program = "
-    let export(wasm) double_add = fn(x: i32) -> i32 (
+    let (export wasm) double_add = fn(x: i32) -> i32 (
         let y = x * 2;
         y + y
     );
@@ -3366,7 +3284,7 @@ fn interpret_preserves_bindings_in_function() {
 #[test]
 fn interpret_inlines_single_use() {
     let program = "
-    let export(wasm) add_one = fn(x: i32) -> i32 (
+    let (export wasm) add_one = fn(x: i32) -> i32 (
         let y = x + 1;
         y
     );
@@ -3394,18 +3312,10 @@ fn interpret_inlines_single_use() {
 fn interpret_basic_enum_flow() {
     let program = "
     let IntOption = enum { Some = i32, None = {} };
-    let export(wasm) pick_positive = fn(x: i32) -> i32 (
-        let opt = if x > 0 (
-            IntOption::Some(x)
-        ) else (
-            IntOption::None
-        );
+    let (export wasm) pick_positive = fn(x: i32) -> i32 (
+        let opt = if x > 0 then IntOption::Some(x) else IntOption::None;
 
-        if let IntOption::Some(value) = opt (
-            value
-        ) else (
-            0
-        )
+        if let IntOption::Some(value) = opt then value else 0
     );
     pick_positive(3)
     ";
@@ -3478,18 +3388,19 @@ fn enum_pattern_rejects_unknown_type() {
     let program = "
     let Opt = enum { Some = i32, None = {} };
     let value = Opt::Some(1);
-    if let Missing::Some(v) = value ( v ) else ( 0 )
+    if let Missing::Some(v) = value then v else 0
     ";
 
     let error = match evaluate_text_to_expression(program) {
         Ok(_) => panic!("Expected error for unknown enum"),
         Err(err) => err,
     };
-    assert!(
-        error
-            .message
-            .contains("Enum pattern references unknown type: Missing")
-    );
+    if !error
+        .message
+        .contains("Enum pattern references unknown type: Missing")
+    {
+        panic!("unexpected error message: {}", error.message);
+    }
 }
 
 #[test]
@@ -3499,7 +3410,7 @@ fn enum_pattern_requires_matching_type() {
     let Second = enum { Some = {}, None = {} };
     let check = fn{} -> i32 (
         let value = First::Some(5);
-        if let Second::Some = value ( 1 ) else ( 0 )
+        if let Second::Some = value then 1 else 0
     );
     check{}
     ";

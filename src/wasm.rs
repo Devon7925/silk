@@ -446,17 +446,11 @@ fn collect_types(
             }
         }
         Expression::Match {
-            value,
-            branches,
-            else_branch,
-            ..
+            value, branches, ..
         } => {
             collect_types(value, ctx, locals_types, context)?;
             for (_, branch) in branches {
                 collect_types(branch, ctx, locals_types, context)?;
-            }
-            if let Some(else_branch) = else_branch {
-                collect_types(else_branch, ctx, locals_types, context)?;
             }
         }
         Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _) => {
@@ -897,6 +891,13 @@ fn infer_type(
             }
         }
         Expression::Binding(..) => Ok(WasmType::I32),
+        Expression::Match { branches, .. } => {
+            if let Some((_, branch)) = branches.first() {
+                infer_type(branch, locals_types, context)
+            } else {
+                Ok(WasmType::I32) // todo: should be never type
+            }
+        }
         Expression::EnumType(_, _) => enum_wasm_type(expr, context),
         Expression::EnumConstructor { enum_type, .. }
         | Expression::EnumAccess {
@@ -1140,6 +1141,26 @@ fn collect_locals(
             locals.extend(collect_locals(then_branch, locals_types, context)?);
             if let Some(else_branch) = else_branch {
                 locals.extend(collect_locals(else_branch, locals_types, context)?);
+            }
+        }
+        Expression::Match {
+            value,
+            branches,
+            span,
+        } => {
+            let value_type = infer_type(value, locals_types, context)?;
+            locals.push((format!("__match_val_{}", span.start()), value_type));
+            locals.extend(collect_locals(value, locals_types, context)?);
+            for (pattern, branch) in branches {
+                let value_type = infer_type(value, locals_types, context)?;
+                collect_locals_for_pattern(
+                    pattern.clone(),
+                    value_type,
+                    locals_types,
+                    &mut locals,
+                    context,
+                )?;
+                locals.extend(collect_locals(branch, locals_types, context)?);
             }
         }
         _ => {}
@@ -1902,6 +1923,34 @@ fn emit_expression(
                     func.instruction(&Instruction::I32Const(1));
                 }
                 Ok(())
+            } else if let BindingPattern::Literal(literal, _) = &pattern {
+                emit_expression(
+                    &binding.expr,
+                    locals,
+                    locals_types,
+                    func,
+                    type_ctx,
+                    context,
+                    control_stack,
+                    loop_stack,
+                )?;
+                match literal {
+                    ExpressionLiteral::Number(val) => {
+                        func.instruction(&Instruction::I32Const(*val));
+                        func.instruction(&Instruction::I32Eq);
+                    }
+                    ExpressionLiteral::Boolean(val) => {
+                        func.instruction(&Instruction::I32Const(if *val { 1 } else { 0 }));
+                        func.instruction(&Instruction::I32Eq);
+                    }
+                    _ => {
+                        return Err(Diagnostic::new(
+                            "Unsupported literal pattern in binding for wasm emission",
+                        )
+                        .with_span(pattern.span()));
+                    }
+                }
+                Ok(())
             } else {
                 emit_expression(
                     &binding.expr,
@@ -2095,6 +2144,87 @@ fn emit_expression(
             } else {
                 Err(Diagnostic::new("Property access on non-struct type").with_span(*span))
             }
+        }
+        Expression::Match {
+            value,
+            branches,
+            span,
+        } => {
+            emit_expression(
+                value,
+                locals,
+                locals_types,
+                func,
+                type_ctx,
+                context,
+                control_stack,
+                loop_stack,
+            )?;
+
+            let temp_local_name = format!("__match_val_{}", span.start());
+            let temp_local_index = locals
+                .get(&temp_local_name)
+                .copied()
+                .expect("Temp local should exist");
+            func.instruction(&Instruction::LocalSet(temp_local_index));
+
+            let result_type = infer_type(
+                branches
+                    .first()
+                    .map(|(_, b)| b)
+                    .expect("Match must have branches"),
+                locals_types,
+                context,
+            )?;
+            let wasm_result_type = result_type.to_val_type(type_ctx);
+            let block_type = wasm_encoder::BlockType::Result(wasm_result_type);
+
+            control_stack.push(ControlFrame::Block);
+            func.instruction(&Instruction::Block(block_type));
+
+            for (pattern, branch) in branches {
+                let check_expr = Expression::Binding(
+                    Box::new(Binding {
+                        pattern: pattern.clone(),
+                        expr: Expression::Identifier(Identifier(temp_local_name.clone()), *span),
+                    }),
+                    *span,
+                );
+
+                emit_expression(
+                    &check_expr,
+                    locals,
+                    locals_types,
+                    func,
+                    type_ctx,
+                    context,
+                    control_stack,
+                    loop_stack,
+                )?;
+
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+
+                emit_expression(
+                    branch,
+                    locals,
+                    locals_types,
+                    func,
+                    type_ctx,
+                    context,
+                    control_stack,
+                    loop_stack,
+                )?;
+
+                func.instruction(&Instruction::Br(1));
+                func.instruction(&Instruction::End);
+            }
+
+            func.instruction(&Instruction::Unreachable);
+
+            func.instruction(&Instruction::End);
+            control_stack.pop();
+
+            Ok(())
         }
         other => Err(
             Diagnostic::new("Expression is not supported in wasm exports yet")

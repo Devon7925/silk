@@ -29,7 +29,7 @@ async function compileAndLoad(silkCode: string) {
 
 test("shadowing in block", async () => {
     const silkCode = `
-    let export(wasm) shadow_test = fn(x: i32) -> i32 (
+    let (export wasm) shadow_test = fn(x: i32) -> i32 (
         let y = 10;
         (
             let y = 20;
@@ -45,8 +45,8 @@ test("shadowing in block", async () => {
 
 test("multiple exports", async () => {
     const silkCode = `
-    let export(wasm) add = fn(x: i32) -> i32 ( x + 1 );
-    let export(wasm) sub = fn(x: i32) -> i32 ( x - 1 );
+    let (export wasm) add = fn(x: i32) -> i32 ( x + 1 );
+    let (export wasm) sub = fn(x: i32) -> i32 ( x - 1 );
     {}
     `;
     const exports = await compileAndLoad(silkCode);
@@ -56,7 +56,7 @@ test("multiple exports", async () => {
 
 test("arithmetic edge cases", async () => {
     const silkCode = `
-    let export(wasm) div_test = fn(x: i32) -> i32 ( 100 / x );
+    let (export wasm) div_test = fn(x: i32) -> i32 ( 100 / x );
     {}
     `;
     const exports = await compileAndLoad(silkCode);
@@ -66,7 +66,7 @@ test("arithmetic edge cases", async () => {
 
 test("deeply nested bindings", async () => {
     const silkCode = `
-    let export(wasm) nested_test = fn(x: i32) -> i32 (
+    let (export wasm) nested_test = fn(x: i32) -> i32 (
         let a = x + 1;
         let b = a * 2;
         let c = b + a; 
@@ -84,11 +84,11 @@ test("deeply nested bindings", async () => {
 
 test("if expressions evaluate and type check", async () => {
     const silkCode = `
-    let export(wasm) choose = fn(flag: bool) -> i32 (
-        if flag ( 10 ) else ( 20 )
+    let (export wasm) choose = fn(flag: bool) -> i32 (
+        if flag then 10 else 20
     );
-    let export(wasm) ladder = fn(flag: bool) -> i32 (
-        if false ( 1 ) else if flag ( 2 ) else ( 3 )
+    let (export wasm) ladder = fn(flag: bool) -> i32 (
+        if false then 1 else if flag then 2 else 3
     );
     {} 
     `;
@@ -101,8 +101,8 @@ test("if expressions evaluate and type check", async () => {
 
 test("if branch type mismatches are reported", async () => {
     const silkCode = `
-    let export(wasm) bad = fn{} -> i32 (
-        if true ( 1; ) else ( 2 )
+    let (export wasm) bad = fn{} -> i32 (
+        if true then ( 1; ) else ( 2 )
     );
     {}
     `;
