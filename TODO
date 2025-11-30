@@ -1,15 +1,21 @@
+# TODO
+
 * [x] if
 * [x] else
 * [x] if let
-* [ ] loop
-* [ ] while
+* [x] loop
+* [x] while
 * [ ] while let
 * [ ] break;
-* [ ] break value;
-* [ ] return;
+* [x] break value;
+* [x] return;
 * [ ] for (Iterator trait)
-* [ ] match
+* [x] match
 * [ ] mutable borrow
+
+* [ ] Traits
+* [ ] User implementation
+* [ ] User trait implementation
 
 * [ ] Array
 * [ ] Char
@@ -22,9 +28,13 @@
 * [x] WASM output
 * [ ] JS output
 * [ ] WGSL output
+* [ ] WASM <-> JS interface helper
+* [ ] WGSL <-> JS interface helper
 
 * [ ] macros
 
+* [ ] Remove wasm-encoder library dependency
+* [ ] Conduct bun tests through wasm binary instead of platform binary
 * [ ] Bootstrap
 
 * [ ] Remove bound variables in function call during interpretation
