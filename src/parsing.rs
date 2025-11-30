@@ -349,7 +349,6 @@ fn parse_if_expression_with_source<'a>(
     remaining = parse_optional_whitespace(remaining);
     let (condition, mut after_condition) =
         parse_assignment_expression_with_source(source, remaining)?;
-    println!("Parsed if condition: {:?}", condition);
     after_condition = parse_optional_whitespace(after_condition);
     let remaining = after_condition.strip_prefix("then").ok_or_else(|| {
         diagnostic_here(
@@ -571,7 +570,6 @@ fn pattern_expression_to_binding_pattern(
     pattern_expression: Expression,
     annotation_start_slice: &str,
 ) -> Result<BindingPattern, Diagnostic> {
-    println!("Converting pattern expression: {:?}", pattern_expression);
     match pattern_expression {
         Expression::Literal(expression_literal, source_span) => {
             Ok(BindingPattern::Literal(expression_literal, source_span))
