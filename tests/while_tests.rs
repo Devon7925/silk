@@ -6,7 +6,7 @@ use silk::{
 #[test]
 fn while_accumulates_until_limit() {
     let program = "
-        let sum_until = (limit: i32) => i32 (
+        let sum_until = (limit: i32) => (
             let mut acc = 0;
             let mut iter = 0;
             while iter < limit do (

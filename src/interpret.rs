@@ -1157,6 +1157,7 @@ fn get_type_of_expression(
             let mut block_context = context.clone();
             let (value, _) = interpret_block(exprs.clone(), *span, &mut block_context)?;
             if let Expression::Block(expressions, span) = &value {
+                //TODO: bind bindings from block context
                 let Some(last_expr) = expressions.last() else {
                     return Err(Diagnostic::new(
                         "Cannot determine type of empty block".to_string(),

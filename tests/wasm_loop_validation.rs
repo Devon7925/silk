@@ -34,7 +34,8 @@ let (export wasm) factorial = (limit: i32) => (
         if iter <= 0 then (
             return acc;
         )
-    )
+    );
+    1
 );
 {};
 "#;
