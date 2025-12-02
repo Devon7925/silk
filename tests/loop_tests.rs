@@ -16,7 +16,34 @@ fn loop_can_compute_factorial() {
             1
         );
 
-        factorial 1
+        factorial 5
+    ";
+
+    let (expr, _) =
+        evaluate_text_to_expression(program).unwrap_or_else(|err| panic!("{}", err.message));
+
+    match expr {
+        silk::parsing::Expression::Literal(silk::parsing::ExpressionLiteral::Number(value), _) => {
+            assert_eq!(value, 120)
+        }
+        other => panic!("Expected numeric literal, got {:?}", other),
+    }
+}
+
+#[test]
+fn while_can_compute_factorial() {
+    let program = "
+        let factorial = (limit: i32) => (
+            let mut acc = 1;
+            let mut iter = limit;
+            while iter > 0 do (
+                acc = acc * iter;
+                iter = iter - 1;
+            );
+            acc
+        );
+
+        factorial 5
     ";
 
     let (expr, _) =

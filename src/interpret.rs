@@ -34,7 +34,7 @@ impl PartialOrd for PreserveBehavior {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BindingContext {
     Bound(Expression, PreserveBehavior),
     UnboundWithType(Expression),
@@ -509,14 +509,19 @@ pub fn interpret_expression(
 
                 iteration_count += 1;
                 let condition_value = interpret_expression((*condition).clone(), context)?;
-                let resolved_condition = resolve_expression(condition_value.clone(), context);
-                let condition_bool = match resolved_condition {
-                    Ok(Expression::Literal(ExpressionLiteral::Boolean(value), _)) => value,
-                    _ => {
+                let resolved_condition = resolve_expression(condition_value.clone(), context)?;
+                let Expression::Literal(ExpressionLiteral::Boolean(condition_bool), _) = resolved_condition else {
+                    if is_resolved_constant(&resolved_condition) {
                         return Err(diagnostic(
                             "While condition did not resolve to a boolean value",
                             span,
                         ));
+                    } else {
+                        return Ok(Expression::While {
+                            condition: Box::new(condition_value),
+                            body: body.clone(),
+                            span,
+                        });
                     }
                 };
 
@@ -548,12 +553,18 @@ pub fn interpret_expression(
                 }
 
                 iteration_count += 1;
+                let prev_context = context.clone();
                 let iteration_value = match *body.clone() {
                     Expression::Block(exprs, block_span) => {
                         interpret_loop_block(exprs, block_span, context)?
                     }
                     other => interpret_expression(other, context)?,
                 };
+                if prev_context.bindings == context.bindings {
+                    // No mutations occurred; infinite loop detected, possibly due to inability to evaluate condition that would've led to a divergence.
+                    // TODO: There is probably more efficient logic that could be used here
+                    return Ok(Expression::Loop { body, span });
+                }
                 match iteration_value {
                     Expression::Return { .. } => return Ok(iteration_value),
                     Expression::Break { value, .. } => {
@@ -1628,12 +1639,7 @@ fn interpret_block(
             Expression::Binding(binding, span) => {
                 let (binding_expr, preserve_behavior) =
                     interpret_binding(*binding, &mut block_context, None)?;
-                let should_preserve_binding = preserve_behavior != PreserveBehavior::Inline
-                    || matches!(
-                        &binding_expr,
-                        Expression::Binding(binding, _)
-                            if pattern_has_mutable_annotation(&binding.pattern)
-                    );
+                let should_preserve_binding = preserve_behavior != PreserveBehavior::Inline;
                 if should_preserve_binding
                     && let Expression::Binding(binding, _) = binding_expr.clone()
                 {
@@ -2032,7 +2038,6 @@ fn interpret_binding(
         },
         usage_counter,
     )?;
-    let force_preserve = pattern_has_mutable_annotation(&binding.pattern);
     let binding_expr = Expression::Binding(
         Box::new(Binding {
             pattern: binding.pattern,
@@ -2042,19 +2047,14 @@ fn interpret_binding(
     );
 
     Ok((
-        if force_preserve
-            || preserve_behavior != PreserveBehavior::Inline
+        if preserve_behavior != PreserveBehavior::Inline
             || (!value_is_constant && !bound_success)
         {
             binding_expr
         } else {
             Expression::Literal(ExpressionLiteral::Boolean(bound_success), dummy_span())
         },
-        if force_preserve {
-            preserve_behavior.max(PreserveBehavior::PreserveBinding)
-        } else {
-            preserve_behavior
-        },
+        preserve_behavior,
     ))
 }
 

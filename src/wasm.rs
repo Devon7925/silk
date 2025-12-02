@@ -412,12 +412,7 @@ fn collect_types(
             collect_types(&binding.expr, ctx, locals_types, context)?;
             let ty = infer_type(&binding.expr, locals_types, context)?;
             let mut locals = Vec::new();
-            collect_locals_for_pattern(
-                binding.pattern.clone(),
-                ty,
-                locals_types,
-                &mut locals,
-            )?;
+            collect_locals_for_pattern(binding.pattern.clone(), ty, locals_types, &mut locals)?;
         }
         Expression::FunctionCall {
             function, argument, ..
@@ -1137,12 +1132,7 @@ fn collect_locals(
             locals.extend(collect_locals(value, locals_types, context)?);
             for (pattern, branch) in branches {
                 let value_type = infer_type(value, locals_types, context)?;
-                collect_locals_for_pattern(
-                    pattern.clone(),
-                    value_type,
-                    locals_types,
-                    &mut locals,
-                )?;
+                collect_locals_for_pattern(pattern.clone(), value_type, locals_types, &mut locals)?;
                 locals.extend(collect_locals(branch, locals_types, context)?);
             }
         }
@@ -1182,12 +1172,7 @@ fn collect_locals_for_pattern(
                         ))
                         .with_span(field_pattern.span())
                     })?;
-                collect_locals_for_pattern(
-                    field_pattern,
-                    field_type,
-                    locals_types,
-                    locals,
-                )?;
+                collect_locals_for_pattern(field_pattern, field_type, locals_types, locals)?;
             }
             Ok(())
         }
@@ -1237,12 +1222,7 @@ fn collect_locals_for_pattern(
             };
 
             if let Some(payload_pattern) = payload {
-                collect_locals_for_pattern(
-                    *payload_pattern,
-                    payload_type,
-                    locals_types,
-                    locals,
-                )?;
+                collect_locals_for_pattern(*payload_pattern, payload_type, locals_types, locals)?;
             }
             Ok(())
         }

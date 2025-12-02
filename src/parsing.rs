@@ -1,9 +1,9 @@
 use crate::diagnostics::{Diagnostic, SourceSpan};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Identifier(pub String);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LValue {
     Identifier(Identifier, SourceSpan),
     PropertyAccess {
@@ -22,7 +22,7 @@ impl LValue {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BindingPattern {
     Identifier(Identifier, SourceSpan),
     Literal(ExpressionLiteral, SourceSpan),
@@ -54,13 +54,13 @@ impl BindingPattern {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TargetLiteral {
     JSTarget,
     WasmTarget,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpressionLiteral {
     Number(i32),
     Boolean(bool),
@@ -75,7 +75,7 @@ pub enum IntrinsicType {
     Target,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BinaryIntrinsicOperator {
     I32Add,
     I32Subtract,
@@ -92,13 +92,13 @@ pub enum BinaryIntrinsicOperator {
     BooleanXor,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntrinsicOperation {
     Binary(Box<Expression>, Box<Expression>, BinaryIntrinsicOperator),
     EnumFromStruct,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expression {
     IntrinsicType(IntrinsicType, SourceSpan),
     IntrinsicOperation(IntrinsicOperation, SourceSpan),
@@ -225,13 +225,13 @@ impl Expression {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Binding {
     pub pattern: BindingPattern,
     pub expr: Expression,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BindingAnnotation {
     Export(Expression, SourceSpan),
     Mutable(SourceSpan),
@@ -660,12 +660,7 @@ fn pattern_expression_to_binding_pattern(
         | Expression::Return { .. }
         | Expression::Break { .. }
         | Expression::Loop { .. }
-        | Expression::While { .. } => Err(diagnostic_here(
-            source,
-            annotation_start_slice,
-            1, //todo: improve span
-            "Invalid binding pattern expression",
-        )),
+        | Expression::While { .. } => Err(Diagnostic::new("Invalid binding pattern expression").with_span(pattern_expression.span())),
     }
 }
 
@@ -1326,13 +1321,11 @@ fn parse_operation_expression_with_min_precedence<'a>(
                     span,
                 }
             }
-            "->" => {
-                Expression::FunctionType {
-                    parameter: Box::new(left),
-                    return_type: Box::new(right),
-                    span,
-                }
-            }
+            "->" => Expression::FunctionType {
+                parameter: Box::new(left),
+                return_type: Box::new(right),
+                span,
+            },
             "::" => {
                 let Expression::Identifier(variant, _) = right else {
                     return Err(diagnostic_here(
@@ -1820,7 +1813,10 @@ foo(123)
         span: _,
     } = &binding.expr
     else {
-        panic!("binding should store function expression, got {:?}", binding.expr);
+        panic!(
+            "binding should store function expression, got {:?}",
+            binding.expr
+        );
     };
 
     let BindingPattern::TypeHint(inner, type_hint, _) = parameter else {
