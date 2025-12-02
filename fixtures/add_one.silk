@@ -1,4 +1,4 @@
-let (export wasm) add_one = fn(x: i32) -> i32 (
+let (export wasm) add_one = (x: i32) => i32 (
     x + 1
 );
 {}

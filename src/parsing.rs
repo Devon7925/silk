@@ -140,7 +140,7 @@ pub enum Expression {
     },
     Function {
         parameter: BindingPattern,
-        return_type: Box<Expression>,
+        return_type: Option<Box<Expression>>,
         body: Box<Expression>,
         span: SourceSpan,
     },
@@ -826,7 +826,7 @@ pub fn parse_operator(file: &str) -> Option<(String, &str)> {
         .take_while(|c| operator_chars.contains(c))
         .collect::<String>();
 
-    if operator == "=" || operator == "=>" {
+    if operator == "=" {
         return None;
     }
 
@@ -836,117 +836,15 @@ pub fn parse_operator(file: &str) -> Option<(String, &str)> {
 
 fn operator_precedence(operator: &str) -> u8 {
     match operator {
-        "" | "::" | "." => 6,
-        ":" => 5,
-        "*" | "/" => 4,
-        "+" | "-" => 3,
-        "==" | "!=" | "<" | ">" | "<=" | ">=" => 2,
-        "&&" => 1,
-        "||" | "^" => 0,
+        "" | "::" | "." => 7,
+        ":" => 6,
+        "*" | "/" => 5,
+        "+" | "-" => 4,
+        "==" | "!=" | "<" | ">" | "<=" | ">=" => 3,
+        "&&" => 2,
+        "||" | "^" => 1,
+        "=>" | "->" => 0,
         _ => 0,
-    }
-}
-
-fn parse_function_literal<'a>(
-    source: &'a str,
-    file: &'a str,
-) -> Option<Result<(Expression, &'a str), Diagnostic>> {
-    fn parse_function_literal_inner<'a>(
-        source: &'a str,
-        file: &'a str,
-    ) -> Result<(Expression, &'a str), Diagnostic> {
-        let start_slice = file;
-        let file = file
-            .strip_prefix("fn")
-            .ok_or_else(|| diagnostic_here(source, file, 2, "Expected fn"))?;
-        let file = parse_optional_whitespace(file);
-        let (parameter, file) = parse_function_parameter(source, file)?;
-        let file = parse_optional_whitespace(file);
-        let file = file.strip_prefix("->").ok_or_else(|| {
-            diagnostic_here(source, file, 2, "Expected -> after function parameter")
-        })?;
-        let file = parse_optional_whitespace(file);
-        let (return_type, file) = parse_operation_expression_with_source(source, file)?;
-        let file = parse_optional_whitespace(file);
-        let (return_type, body, file) = if file.starts_with("(") {
-            match parse_grouping_expression_with_source(source, file) {
-                Some(Ok((body, file))) => (return_type, body, file),
-                Some(Err(err)) => return Err(err),
-                None => {
-                    return Err(diagnostic_here(
-                        source,
-                        file,
-                        1,
-                        "Expected function body expression",
-                    ));
-                }
-            }
-        } else {
-            match return_type {
-                Expression::FunctionCall {
-                    function,
-                    argument,
-                    span: _,
-                } => (*function, *argument, file),
-                _ => {
-                    return Err(diagnostic_here(
-                        source,
-                        file,
-                        1,
-                        "Expected function body expression",
-                    ));
-                }
-            }
-        };
-        let span = consumed_span(source, start_slice, file);
-        Ok((
-            Expression::Function {
-                parameter,
-                return_type: Box::new(return_type),
-                body: Box::new(body),
-                span,
-            },
-            file,
-        ))
-    }
-
-    if !file.starts_with("fn") {
-        return None;
-    }
-    let after_fn = &file[2..];
-    if after_fn
-        .chars()
-        .next()
-        .filter(|c| c.is_alphanumeric() || *c == '_')
-        .is_some()
-    {
-        return None;
-    }
-    Some(parse_function_literal_inner(source, file))
-}
-
-fn parse_function_parameter<'a>(
-    source: &'a str,
-    file: &'a str,
-) -> Result<(BindingPattern, &'a str), Diagnostic> {
-    let file = parse_optional_whitespace(file);
-    if let Some(remaining) = file.strip_prefix("(") {
-        let remaining = parse_optional_whitespace(remaining);
-        let (pattern, remaining) = parse_binding_pattern_with_source(source, remaining)?;
-        let remaining = parse_optional_whitespace(remaining);
-        let remaining = remaining.strip_prefix(")").ok_or_else(|| {
-            diagnostic_here(source, remaining, 1, "Expected ) after function parameter")
-        })?;
-        Ok((pattern, remaining))
-    } else if file.starts_with("{") {
-        parse_struct_binding_pattern_with_source(source, file)
-    } else {
-        Err(diagnostic_here(
-            source,
-            file,
-            2,
-            "Expected function parameter after fn",
-        ))
     }
 }
 
@@ -1238,9 +1136,6 @@ fn parse_isolated_expression_with_source_with_guard<'a>(
     if let Some(loop_parse) = parse_loop_expression_with_source(source, file) {
         return loop_parse;
     }
-    if let Some(function_parse) = parse_function_literal(source, file) {
-        return function_parse;
-    }
     if let Some(match_parse) = parse_match_expression(source, file) {
         return match_parse;
     }
@@ -1422,6 +1317,22 @@ fn parse_operation_expression_with_min_precedence<'a>(
         })?;
         let span = left.span().merge(&right.span());
         operand_stack.push(match operator.as_str() {
+            "=>" => {
+                let pattern = pattern_expression_to_binding_pattern(source, left, source)?; // todo: improve/check span
+                Expression::Function {
+                    parameter: pattern,
+                    return_type: None,
+                    body: Box::new(right),
+                    span,
+                }
+            }
+            "->" => {
+                Expression::FunctionType {
+                    parameter: Box::new(left),
+                    return_type: Box::new(right),
+                    span,
+                }
+            }
             "::" => {
                 let Expression::Identifier(variant, _) = right else {
                     return Err(diagnostic_here(
@@ -1527,7 +1438,7 @@ fn parse_binding<'a>(
         let file = parse_optional_whitespace(file);
         // Use min_precedence=2 to stop before && (precedence 1) and || (precedence 0)
         // This enables let chains: "let x = a && b" parses as "(let x = a) && b"
-        let (expr, file) = parse_operation_expression_with_min_precedence(source, file, 2)?;
+        let (expr, file) = parse_operation_expression_with_min_precedence(source, file, 0)?;
 
         Ok((Binding { pattern, expr }, file))
     }
@@ -1881,9 +1792,7 @@ fn parse_operation_expression_precedence() {
 fn parse_function_binding_and_call() {
     let (expr, remaining) = parse_block(
         "
-let foo = fn(bar: i32) -> i32 (
-    bar + 1
-);
+let foo = (bar: i32) => bar + 1;
 foo(123)
     ",
     )
@@ -1911,7 +1820,7 @@ foo(123)
         span: _,
     } = &binding.expr
     else {
-        panic!("binding should store function expression");
+        panic!("binding should store function expression, got {:?}", binding.expr);
     };
 
     let BindingPattern::TypeHint(inner, type_hint, _) = parameter else {
@@ -1925,10 +1834,7 @@ foo(123)
         type_hint.as_ref(),
         Expression::Identifier(Identifier(name), _) if name == "i32"
     ));
-    assert!(matches!(
-        return_type.as_ref(),
-        Expression::Identifier(Identifier(name), _) if name == "i32"
-    ));
+    assert!(matches!(return_type.as_ref(), None));
     assert!(matches!(
         **body,
         Expression::Operation {
@@ -1957,11 +1863,10 @@ foo(123)
 
 #[test]
 fn parse_function_struct_parameter_pattern() {
-    let (expr, remaining) = parse_isolated_expression(
-        "fn{bar1: i32, bar2: i32} -> i32 (
+    let (expr, remaining) = parse_operation_expression(
+        "{bar1: i32, bar2: i32} => (
     bar1 + bar2
-)
-    ",
+)",
     )
     .unwrap();
     assert!(remaining.trim().is_empty());

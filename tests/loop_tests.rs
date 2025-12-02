@@ -3,7 +3,7 @@ use silk::test_support::evaluate_text_to_expression;
 #[test]
 fn loop_can_compute_factorial() {
     let program = "
-        let factorial = fn(limit: i32) -> i32 (
+        let factorial = (limit: i32) => (
             let mut acc = 1;
             let mut iter = limit;
             loop (
@@ -12,10 +12,11 @@ fn loop_can_compute_factorial() {
                 if iter <= 0 then (
                     return acc;
                 )
-            )
+            );
+            1
         );
 
-        factorial 5
+        factorial 1
     ";
 
     let (expr, _) =

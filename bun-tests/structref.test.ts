@@ -32,15 +32,15 @@ test("wasm structref: passing and returning structs", async () => {
     const source = `
     let Point: type = { x = i32, y = i32 };
     
-    let (export wasm) create_point = fn({x: i32, y: i32}) -> Point (
+    let (export wasm) create_point = ({x: i32, y: i32}) => Point (
         { x = x, y = y }
     );
 
-    let (export wasm) get_x = fn(p: Point) -> i32 (
+    let (export wasm) get_x = (p: Point) => i32 (
         p.x
     );
 
-    let (export wasm) get_y = fn(p: Point) -> i32 (
+    let (export wasm) get_y = (p: Point) => i32 (
         p.y
     );
     `;
@@ -64,14 +64,14 @@ test("wasm structref: nested structs", async () => {
     let Point: type = { x = i32, y = i32 };
     let Rect: type = { top_left = Point, bottom_right = Point };
 
-    let (export wasm) create_rect = fn({x1: i32, y1: i32, x2: i32, y2: i32}) -> Rect (
+    let (export wasm) create_rect = ({x1: i32, y1: i32, x2: i32, y2: i32}) => Rect (
         {
             top_left = { x = x1, y = y1 },
             bottom_right = { x = x2, y = y2 },
         }
     );
 
-    let (export wasm) get_width = fn(r: Rect) -> i32 (
+    let (export wasm) get_width = (r: Rect) => i32 (
         r.bottom_right.x - r.top_left.x
     );
     `;

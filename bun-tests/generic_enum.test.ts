@@ -30,11 +30,11 @@ async function compileToInstance(code: string) {
 
 test("generic enum: Option<T>", async () => {
     const source = `
-    let Option = fn(T: type) -> type (
+    let Option = (T: type) => type (
         enum { Some = T, None = {} }
     );
 
-    let (export wasm) unwrap_or_zero = fn(x: i32) -> i32 (
+    let (export wasm) unwrap_or_zero = (x: i32) => i32 (
         let val: Option(i32) = if x > 0 then (
             Option(i32)::Some(x)
         ) else (
@@ -58,14 +58,14 @@ test("generic enum: Option<T>", async () => {
 
 test("generic enum: nested generics", async () => {
     const source = `
-    let Option = fn(T: type) -> type (
+    let Option = (T: type) => type (
         enum { Some = T, None = {} }
     );
-    let Container = fn(T: type) -> type (
+    let Container = (T: type) => type (
         enum { Wrapped = Option(T), Empty = {} }
     );
 
-    let (export wasm) check = fn(x: i32) -> i32 (
+    let (export wasm) check = (x: i32) => i32 (
         let c = Container(i32)::Wrapped(Option(i32)::Some(x));
         
         if let Container(i32)::Wrapped(opt) = c then (

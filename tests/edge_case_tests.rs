@@ -37,7 +37,7 @@ fn assert_final_number(result: Expression, expected: i32) {
 #[test]
 fn test_shadowing_in_block() {
     let program = "
-        let (export wasm) test_shadow = fn(x: i32) -> i32 (
+        let (export wasm) test_shadow = (x: i32) => (
             let y = 10;
             (
                 let y = 20;
@@ -59,7 +59,7 @@ fn test_shadowing_in_block() {
 #[test]
 fn test_unused_bindings() {
     let program = "
-        let (export wasm) unused_test = fn(x: i32) -> i32 (
+        let (export wasm) unused_test = (x: i32) => (
             let unused = 100;
             x
         );
@@ -71,7 +71,7 @@ fn test_unused_bindings() {
 #[test]
 fn test_nested_arithmetic() {
     let program = "
-        let (export wasm) math_test = fn(x: i32) -> i32 (
+        let (export wasm) math_test = (x: i32) => (
             let a = x * 2;
             let b = a + 5;
             b / 2

@@ -936,7 +936,7 @@ fn lower_function_export(
         .with_span(annotation_span));
     };
 
-    let return_type = resolve_type(context, &return_type)?;
+    let return_type = resolve_type(context, &return_type.unwrap())?;
     let params = extract_function_params(context, parameter)?;
 
     Ok(WasmFunctionExport {

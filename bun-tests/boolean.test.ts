@@ -28,8 +28,8 @@ async function compileAndRun(code: string, callback: (instance: WebAssembly.Inst
 
 test("boolean literals", async () => {
     const code = `
-    let (export wasm) get_true = fn{} -> bool ( true );
-    let (export wasm) get_false = fn{} -> bool ( false );
+    let (export wasm) get_true = {} => bool ( true );
+    let (export wasm) get_false = {} => bool ( false );
     {}
     `;
     await compileAndRun(code, async (instance) => {
@@ -45,14 +45,14 @@ test("boolean literals", async () => {
 test("boolean comparisons", async () => {
     await compileAndRun(
         `
-    let (export wasm) is_true = fn(a: bool) -> bool ( a == true );
-    let (export wasm) is_false = fn(a: bool) -> bool ( a == false );
-    let (export wasm) check_eq_5 = fn(a: i32) -> bool ( a == 5 );
-    let (export wasm) check_neq_5 = fn(a: i32) -> bool ( a != 5 );
-    let (export wasm) check_lt_10 = fn(a: i32) -> bool ( a < 10 );
-    let (export wasm) check_gt_10 = fn(a: i32) -> bool ( a > 10 );
-    let (export wasm) check_le_10 = fn(a: i32) -> bool ( a <= 10 );
-    let (export wasm) check_ge_10 = fn(a: i32) -> bool ( a >= 10 );
+    let (export wasm) is_true = (a: bool) => bool ( a == true );
+    let (export wasm) is_false = (a: bool) => bool ( a == false );
+    let (export wasm) check_eq_5 = (a: i32) => bool ( a == 5 );
+    let (export wasm) check_neq_5 = (a: i32) => bool ( a != 5 );
+    let (export wasm) check_lt_10 = (a: i32) => bool ( a < 10 );
+    let (export wasm) check_gt_10 = (a: i32) => bool ( a > 10 );
+    let (export wasm) check_le_10 = (a: i32) => bool ( a <= 10 );
+    let (export wasm) check_ge_10 = (a: i32) => bool ( a >= 10 );
         `,
         async (instance) => {
             const exports = instance.exports as any;
@@ -88,12 +88,12 @@ test("boolean comparisons", async () => {
 test("boolean operators", async () => {
     await compileAndRun(
         `
-    let (export wasm) and_true = fn(a: bool) -> bool ( a && true );
-    let (export wasm) and_false = fn(a: bool) -> bool ( a && false );
-    let (export wasm) or_true = fn(a: bool) -> bool ( a || true );
-    let (export wasm) or_false = fn(a: bool) -> bool ( a || false );
-    let (export wasm) xor_true = fn(a: bool) -> bool ( a ^ true );
-    let (export wasm) xor_false = fn(a: bool) -> bool ( a ^ false );
+    let (export wasm) and_true = (a: bool) => bool ( a && true );
+    let (export wasm) and_false = (a: bool) => bool ( a && false );
+    let (export wasm) or_true = (a: bool) => bool ( a || true );
+    let (export wasm) or_false = (a: bool) => bool ( a || false );
+    let (export wasm) xor_true = (a: bool) => bool ( a ^ true );
+    let (export wasm) xor_false = (a: bool) => bool ( a ^ false );
         `,
         async (instance) => {
             const exports = instance.exports as any;
@@ -121,12 +121,12 @@ test("boolean operators", async () => {
 test("boolean operator chaining", async () => {
     await compileAndRun(
         `
-    let (export wasm) all_true = fn{} -> bool ( true && true && true );
-    let (export wasm) short_circuit_false = fn{} -> bool ( true && true && false );
-    let (export wasm) any_true = fn{} -> bool ( false || false || true );
-    let (export wasm) all_false = fn{} -> bool ( false || false || false );
-    let (export wasm) odd_true = fn{} -> bool ( true ^ true ^ true );
-    let (export wasm) odd_false = fn{} -> bool ( true ^ false ^ true );
+    let (export wasm) all_true = {} => bool ( true && true && true );
+    let (export wasm) short_circuit_false = {} => bool ( true && true && false );
+    let (export wasm) any_true = {} => bool ( false || false || true );
+    let (export wasm) all_false = {} => bool ( false || false || false );
+    let (export wasm) odd_true = {} => bool ( true ^ true ^ true );
+    let (export wasm) odd_false = {} => bool ( true ^ false ^ true );
         `,
         async (instance) => {
             const exports = instance.exports as any;

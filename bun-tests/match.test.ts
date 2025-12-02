@@ -35,7 +35,7 @@ async function compileAndLoad(silkCode: string, basename: string) {
 describe("match expressions", () => {
   test("match literal number", async () => {
     const code = `
-      let (export wasm) main = fn{} -> i32 (
+      let (export wasm) main = {} => i32 (
         let x = 10;
         match x with (
           10 => 1,
@@ -51,7 +51,7 @@ describe("match expressions", () => {
 
   test("match literal number else", async () => {
     const code = `
-      let (export wasm) main = fn{} -> i32 (
+      let (export wasm) main = {} => i32 (
         let x = 30;
         match x with (
           10 => 1,
@@ -67,7 +67,7 @@ describe("match expressions", () => {
 
   test("match boolean", async () => {
     const code = `
-      let (export wasm) main = fn{} -> i32 (
+      let (export wasm) main = {} => i32 (
         let x = true;
         match x with (
           true => 1,
@@ -84,7 +84,7 @@ describe("match expressions", () => {
     const code = `
       let Color = enum { Red = {}, Green = {}, Blue = {} };
 
-      let (export wasm) main = fn{} -> i32 (
+      let (export wasm) main = {} => i32 (
         let c = Color::Green;
         match c with (
           Color::Red => 1,
@@ -102,7 +102,7 @@ describe("match expressions", () => {
     const code = `
       let Result = enum { Ok = i32, Err = i32 };
 
-      let (export wasm) main = fn{} -> i32 (
+      let (export wasm) main = {} => i32 (
         let r = Result::Ok(42);
         match r with (
           Result::Ok(v) => v,
@@ -119,7 +119,7 @@ describe("match expressions", () => {
     const code = `
       let Result = enum { Ok = i32, Err = i32 };
 
-      let (export wasm) main = fn{} -> i32 (
+      let (export wasm) main = {} => i32 (
         let r = Result::Err(10);
         match r with (
           Result::Ok(v) => v,
@@ -134,7 +134,7 @@ describe("match expressions", () => {
 
   test("match with block bodies", async () => {
     const code = `
-      let (export wasm) main = fn{} -> i32 (
+      let (export wasm) main = {} => i32 (
         let x = 1;
         match x with (
           1 => (

@@ -64,7 +64,7 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             span,
         } => Ok(Expression::Function {
             parameter: simplify_binding_pattern(parameter)?,
-            return_type: Box::new(simplify_expression(*return_type)?),
+            return_type: Some(Box::new(simplify_expression(*return_type.unwrap())?)),
             body: Box::new(simplify_expression(*body)?),
             span,
         }),
@@ -372,7 +372,7 @@ fn evaluate_text_to_simplified_expression(
 #[test]
 fn interpret_exported_function() {
     let program = "
-let (export js) add_one = fn(x: i32) -> i32 (
+let (export js) add_one = (x: i32) => (
     x + 1
 );
 {}

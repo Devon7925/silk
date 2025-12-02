@@ -4,19 +4,19 @@ use silk::test_support::evaluate_text_to_expression;
 #[test]
 fn functions_can_be_passed_as_arguments() {
     let program = "
-        let apply = fn{ func = func, value = value } -> i32 (
+        let apply = { func = func: (i32 -> i32), value = value: i32 } => (
             func value
         );
 
-        let increment = fn(x: i32) -> i32 (
+        let increment = (x: i32) => (
             x + 1
         );
 
         apply { func = increment, value = 41 }
     ";
 
-    let (expr, _) =
-        evaluate_text_to_expression(program).unwrap_or_else(|err| panic!("{}", err.message));
+    let (expr, _) = evaluate_text_to_expression(program)
+        .unwrap_or_else(|err| panic!("{}", err.render_with_source(program)));
 
     match expr {
         Expression::Literal(ExpressionLiteral::Number(value), _) => assert_eq!(value, 42),
@@ -27,8 +27,8 @@ fn functions_can_be_passed_as_arguments() {
 #[test]
 fn functions_can_be_returned() {
     let program = "
-        let make_adder = fn(base: i32) -> i32 (
-            fn(offset: i32) -> i32 (
+        let make_adder = (base: i32) => (
+            (offset: i32) => (
                 base + offset
             )
         );
@@ -49,7 +49,7 @@ fn functions_can_be_returned() {
 #[test]
 fn return_exits_function_early() {
     let program = "
-        let early = fn(x: i32) -> i32 (
+        let early = (x: i32) => (
             return x + 1;
             x + 100
         );

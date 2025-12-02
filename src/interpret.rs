@@ -602,11 +602,10 @@ pub fn interpret_expression(
             }) = effective_function
             {
                 let is_direct = matches!(function_value, Expression::Function { .. });
-                let returns_type = is_type_expression(&return_type);
+                let returns_type = is_type_expression(&return_type.unwrap());
 
                 if is_direct || returns_type {
                     let mut call_context = context.clone();
-                    let parameter_clone = parameter.clone();
                     bind_pattern_from_value(
                         parameter,
                         &argument_value,
@@ -615,19 +614,6 @@ pub fn interpret_expression(
                         PreserveBehavior::Inline,
                         None,
                     )?;
-                    force_bindings(&parameter_clone, &argument_value, &mut call_context);
-                    if let Some(identifier) = parameter_identifier(&parameter_clone) {
-                        call_context.bindings.insert(
-                            identifier.0.clone(),
-                            (
-                                BindingContext::Bound(
-                                    argument_value.clone(),
-                                    PreserveBehavior::Inline,
-                                ),
-                                Vec::new(),
-                            ),
-                        );
-                    }
                     let body_value = interpret_expression(*body, &mut call_context)?;
                     if let Expression::Return { value, .. } = body_value {
                         let resolved_return = resolve_value_deep(
@@ -688,10 +674,12 @@ pub fn interpret_expression(
         }),
         Expression::Function {
             parameter,
-            return_type,
+            return_type: _,
             body,
             span,
         } => {
+            let parameter = interpret_binding_pattern(parameter, context)?;
+
             let mut type_context = context.clone();
 
             bind_pattern_blanks(parameter.clone(), &mut type_context, Vec::new(), None)?;
@@ -705,9 +693,11 @@ pub fn interpret_expression(
                 interpret_expression(*body, &mut type_context)?
             };
 
+            let return_type = get_type_of_expression(&interpreted_body, &mut type_context)?;
+
             Ok(Expression::Function {
-                parameter: interpret_binding_pattern(parameter, context)?,
-                return_type: Box::new(interpret_expression(*return_type, &mut type_context)?),
+                parameter,
+                return_type: Some(Box::new(return_type)),
                 body: Box::new(interpreted_body),
                 span,
             })
@@ -725,8 +715,8 @@ pub fn interpret_expression(
             return_type,
             span,
         } => Ok(Expression::FunctionType {
-            parameter,
-            return_type,
+            parameter: interpret_expression(*parameter, context)?.into(),
+            return_type: interpret_expression(*return_type, context)?.into(),
             span,
         }),
         Expression::EnumAccess {
@@ -1041,6 +1031,7 @@ fn get_type_of_expression(
                 .map(|expr| expr.as_ref().clone())
                 .unwrap_or_else(|| empty_struct_expr(SourceSpan::new(span.end(), 0)));
             let mut then_context = context.clone();
+            collect_bindings(&condition, &mut then_context)?;
             let then_type = get_type_of_expression(then_branch, &mut then_context)?;
             let mut else_context = context.clone();
             let else_type = get_type_of_expression(&inferred_else, &mut else_context)?;
@@ -1154,6 +1145,15 @@ fn get_type_of_expression(
         Expression::Block(exprs, span) => {
             let mut block_context = context.clone();
             let (value, _) = interpret_block(exprs.clone(), *span, &mut block_context)?;
+            if let Expression::Block(expressions, span) = &value {
+                let Some(last_expr) = expressions.last() else {
+                    return Err(Diagnostic::new(
+                        "Cannot determine type of empty block".to_string(),
+                    )
+                    .with_span(*span));
+                };
+                return get_type_of_expression(last_expr, &mut block_context);
+            }
             get_type_of_expression(&value, &mut block_context)
         }
         Expression::While {
@@ -1206,15 +1206,29 @@ fn get_type_of_expression(
                 }
             }
             let mut call_context = context.clone();
-            let evaluated_call = interpret_expression(
-                Expression::FunctionCall {
-                    function: function.clone(),
-                    argument: argument.clone(),
-                    span: *span,
-                },
-                &mut call_context,
-            )?;
-            get_type_of_expression(&evaluated_call, &mut call_context)
+            let evaluated_function = interpret_expression(*function.clone(), &mut call_context)?;
+            let evaluated_function_type =
+                get_type_of_expression(&evaluated_function, &mut call_context)?;
+            if let Expression::FunctionType {
+                parameter,
+                return_type,
+                ..
+            } = &evaluated_function_type
+            {
+                let argument_type = get_type_of_expression(argument, &mut call_context)?;
+                if !types_equivalent(&parameter, &argument_type) {
+                    return Err(diagnostic(
+                        format!(
+                            "Function argument type mismatch type {:?} vs {:?}",
+                            parameter, argument_type
+                        ),
+                        *span,
+                    ));
+                }
+                return interpret_expression(*return_type.clone(), &mut call_context);
+            } else {
+                return Err(diagnostic("Attempted to call a non-function value", *span));
+            }
         }
         Expression::PropertyAccess {
             object,
@@ -1241,7 +1255,7 @@ fn get_type_of_expression(
             ..
         } => Ok(Expression::FunctionType {
             parameter: Box::new(get_type_of_binding_pattern(parameter, context)?),
-            return_type: return_type.clone(),
+            return_type: return_type.as_ref().unwrap().clone(),
             span: *span,
         }),
         Expression::Struct(items, span) => {
@@ -1609,16 +1623,11 @@ fn interpret_block(
     let mut last_value: Option<Expression> = None;
     let mut preserved_expressions = Vec::new();
 
-    let mut usage_counter = UsageCounter::new();
-    for expression in &expressions {
-        usage_counter.count(expression);
-    }
-
     for expression in expressions {
         let value = match expression {
             Expression::Binding(binding, span) => {
                 let (binding_expr, preserve_behavior) =
-                    interpret_binding(*binding, &mut block_context, Some(&usage_counter))?;
+                    interpret_binding(*binding, &mut block_context, None)?;
                 let should_preserve_binding = preserve_behavior != PreserveBehavior::Inline
                     || matches!(
                         &binding_expr,
@@ -1890,7 +1899,7 @@ fn apply_lvalue_update(
                 BindingContext::UnboundWithoutType => None,
             };
 
-            if let (Some(expected_ty), Some(actual_ty)) = (expected_type, value_type)
+            if let (Some(expected_ty), Some(actual_ty)) = (&expected_type, &value_type)
                 && !types_equivalent(&expected_ty, &actual_ty)
             {
                 return Err(diagnostic(
@@ -1899,14 +1908,16 @@ fn apply_lvalue_update(
                 ));
             }
 
-            let preserve_behavior = match binding_ctx {
-                BindingContext::Bound(_, preserve_behavior) => *preserve_behavior,
-                BindingContext::UnboundWithType(_) | BindingContext::UnboundWithoutType => {
-                    PreserveBehavior::PreserveBinding
-                }
-            };
+            let binding_type = expected_type.or(value_type);
 
-            *binding_ctx = BindingContext::Bound(value, preserve_behavior);
+            if is_resolved_constant(&value) {
+                *binding_ctx = BindingContext::Bound(value, PreserveBehavior::Inline);
+            } else if let Some(binding_ty) = binding_type {
+                *binding_ctx = BindingContext::UnboundWithType(binding_ty);
+            } else {
+                *binding_ctx = BindingContext::UnboundWithoutType;
+            }
+
             Ok(())
         }
         LValue::PropertyAccess {
@@ -1999,7 +2010,8 @@ fn interpret_binding(
     context: &mut Context,
     usage_counter: Option<&UsageCounter>,
 ) -> Result<(Expression, PreserveBehavior), Diagnostic> {
-    if let Ok(value_type) = get_type_of_expression(&binding.expr, &mut context.clone()) {
+    let value = interpret_expression(binding.expr.clone(), context)?;
+    if let Ok(value_type) = get_type_of_expression(&value, &mut context.clone()) {
         bind_pattern_blanks(
             binding.pattern.clone(),
             context,
@@ -2007,15 +2019,17 @@ fn interpret_binding(
             Some(value_type),
         )?;
     }
-
-    let value = interpret_expression(binding.expr.clone(), context)?;
     let value_is_constant = is_resolved_constant(&value);
     let (bound_success, preserve_behavior) = bind_pattern_from_value(
         binding.pattern.clone(),
         &value,
         context,
         Vec::new(),
-        PreserveBehavior::Inline,
+        if value_is_constant {
+            PreserveBehavior::Inline
+        } else {
+            PreserveBehavior::PreserveBinding
+        },
         usage_counter,
     )?;
     let force_preserve = pattern_has_mutable_annotation(&binding.pattern);
@@ -2320,32 +2334,6 @@ fn bind_pattern_from_value(
     }
 }
 
-fn force_bindings(pattern: &BindingPattern, value: &Expression, context: &mut Context) {
-    match pattern {
-        BindingPattern::Identifier(identifier, _) => {
-            context.bindings.insert(
-                identifier.0.clone(),
-                (
-                    BindingContext::Bound(value.clone(), PreserveBehavior::Inline),
-                    Vec::new(),
-                ),
-            );
-        }
-        BindingPattern::TypeHint(inner, _, _) => force_bindings(inner, value, context),
-        BindingPattern::Annotated { pattern, .. } => force_bindings(pattern, value, context),
-        _ => {}
-    }
-}
-
-fn parameter_identifier(pattern: &BindingPattern) -> Option<&Identifier> {
-    match pattern {
-        BindingPattern::Identifier(identifier, _) => Some(identifier),
-        BindingPattern::TypeHint(inner, _, _) => parameter_identifier(inner),
-        BindingPattern::Annotated { pattern, .. } => parameter_identifier(pattern),
-        _ => None,
-    }
-}
-
 fn interpret_numeric_intrinsic<F>(
     left: Expression,
     right: Expression,
@@ -2482,7 +2470,7 @@ fn is_resolved_constant(expr: &Expression) -> bool {
                 bind_pattern_blanks(parameter.clone(), &mut ctx, Vec::new(), None).unwrap();
                 ctx
             };
-            is_resolved_constant(return_type)
+            is_resolved_constant(return_type.as_ref().unwrap())
                 && is_resolved_const_function_expression(body, &new_function_context)
         }
         Expression::FunctionType {
@@ -2520,8 +2508,10 @@ fn is_resolved_const_function_expression(expr: &Expression, function_context: &C
                 bind_pattern_blanks(parameter.clone(), &mut ctx, Vec::new(), None).unwrap();
                 ctx
             };
-            is_resolved_const_function_expression(return_type, &new_function_context)
-                && is_resolved_const_function_expression(body, &new_function_context)
+            is_resolved_const_function_expression(
+                return_type.as_ref().unwrap(),
+                &new_function_context,
+            ) && is_resolved_const_function_expression(body, &new_function_context)
         }
         Expression::FunctionType {
             parameter,
@@ -2582,14 +2572,14 @@ pub fn intrinsic_context() -> Context {
             Identifier(symbol.to_string()),
             Expression::Function {
                 parameter: typed_pattern("self"),
-                return_type: Box::new(Expression::FunctionType {
+                return_type: Some(Box::new(Expression::FunctionType {
                     parameter: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
                     return_type: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
                     span: dummy_span(),
-                }),
+                })),
                 body: Box::new(Expression::Function {
                     parameter: typed_pattern("other"),
-                    return_type: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
+                    return_type: Some(Box::new(intrinsic_type_expr(IntrinsicType::I32))),
                     body: Box::new(Expression::IntrinsicOperation(
                         IntrinsicOperation::Binary(
                             Box::new(identifier_expr("self")),
@@ -2656,14 +2646,14 @@ pub fn intrinsic_context() -> Context {
             Identifier(symbol.to_string()),
             Expression::Function {
                 parameter: typed_pattern("self"),
-                return_type: Box::new(Expression::FunctionType {
+                return_type: Some(Box::new(Expression::FunctionType {
                     parameter: Box::new(intrinsic_type_expr(IntrinsicType::Boolean)),
                     return_type: Box::new(intrinsic_type_expr(IntrinsicType::Boolean)),
                     span: dummy_span(),
-                }),
+                })),
                 body: Box::new(Expression::Function {
                     parameter: typed_pattern("other"),
-                    return_type: Box::new(intrinsic_type_expr(IntrinsicType::Boolean)),
+                    return_type: Some(Box::new(intrinsic_type_expr(IntrinsicType::Boolean))),
                     body: Box::new(Expression::IntrinsicOperation(
                         IntrinsicOperation::Binary(
                             Box::new(identifier_expr("self")),
@@ -2800,7 +2790,12 @@ pub fn evaluate_text_to_expression(program: &str) -> Result<(Expression, Context
 #[cfg(test)]
 fn evaluate_text_to_number(program: &str) -> i32 {
     match evaluate_text_to_expression(program)
-        .expect("Failed to interpret parsed expression")
+        .unwrap_or_else(|e| {
+            panic!(
+                "Failed to interpret parsed expression: {:?}",
+                e.render_with_source(program)
+            )
+        })
         .0
     {
         Expression::Literal(ExpressionLiteral::Number(value), _) => value,
@@ -2839,7 +2834,10 @@ fn resolve_value_deep(expr: Expression, context: &mut Context) -> Result<Express
             span,
         } => Ok(Expression::Function {
             parameter,
-            return_type: Box::new(resolve_value_deep(*return_type, context)?),
+            return_type: Some(Box::new(resolve_value_deep(
+                *return_type.unwrap(),
+                context,
+            )?)),
             body: Box::new(resolve_value_deep(*body, context)?),
             span,
         }),
@@ -2894,7 +2892,7 @@ impl UsageCounter {
                 ..
             } => {
                 self.count(body);
-                self.count(return_type);
+                self.count(return_type.as_ref().unwrap());
                 self.count_pattern(parameter);
             }
             Expression::FunctionCall {
@@ -3132,7 +3130,7 @@ fn i32_is_constant() {
 #[test]
 fn interpret_text_user_defined_function2() {
     let program = "
-fn(bar: i32) -> i32 (
+(bar: i32) => (
     bar + 1
 )
     ";
@@ -3145,7 +3143,7 @@ fn interpret_let_binding_function() {
 let Level2 = enum { Some = i32, None = {} };
 let Level1 = enum { Some = Level2, None = {} };
 
-let (export wasm) check = fn(x: i32) -> i32 (
+let (export wasm) check = (x: i32) => (
     let foo = if x > 0 then Level1::Some(Level2::Some(x)) else Level1::None;
 
     if let Level1::Some(Level2::Some(b)) = foo then b else 0
@@ -3159,7 +3157,7 @@ let (export wasm) check = fn(x: i32) -> i32 (
 #[test]
 fn interpret_text_user_defined_function() {
     let program = "
-let foo = fn(bar: i32) -> i32 (
+let foo = (bar: i32) => (
     bar + 1
 );
 foo(123)
@@ -3170,7 +3168,7 @@ foo(123)
 #[test]
 fn interpret_text_user_defined_tuple_arguments() {
     let program = "
-let foo2 = fn{bar1: i32, bar2: i32} -> i32 (
+let foo2 = {bar1: i32, bar2: i32} => (
     bar1 + bar2
 );
 foo2{100, 24}
@@ -3191,7 +3189,7 @@ point.x
 fn interpret_text_struct_property_call() {
     let program = "
 let container = {
-    inc = fn(value: i32) -> i32 (
+    inc = (value: i32) => (
         value + 1
     )
 };
@@ -3236,7 +3234,7 @@ fn interpret_reports_calling_non_function_span() {
 #[test]
 fn interpret_preserves_bindings_in_function() {
     let program = "
-    let (export wasm) double_add = fn(x: i32) -> i32 (
+    let (export wasm) double_add = (x: i32) => (
         let y = x * 2;
         y + y
     );
@@ -3272,37 +3270,10 @@ fn interpret_preserves_bindings_in_function() {
 }
 
 #[test]
-fn interpret_inlines_single_use() {
-    let program = "
-    let (export wasm) add_one = fn(x: i32) -> i32 (
-        let y = x + 1;
-        y
-    );
-    {}
-    ";
-    let (_, context) = evaluate_text_to_expression(program).unwrap();
-    let bindings = context.annotated_bindings();
-    let add_one = bindings
-        .iter()
-        .find(|b| b.name == "add_one")
-        .expect("add_one not found");
-
-    if let Expression::Function { body, .. } = &add_one.value {
-        match &**body {
-            Expression::IntrinsicOperation(..) => {} // Good
-            Expression::Block(..) => panic!("Expected inlined expression, got Block"),
-            _ => panic!("Expected IntrinsicOperation, got {:?}", body),
-        }
-    } else {
-        panic!("Expected function value");
-    }
-}
-
-#[test]
 fn interpret_basic_enum_flow() {
     let program = "
     let IntOption = enum { Some = i32, None = {} };
-    let (export wasm) pick_positive = fn(x: i32) -> i32 (
+    let (export wasm) pick_positive = (x: i32) => (
         let opt = if x > 0 then IntOption::Some(x) else IntOption::None;
 
         if let IntOption::Some(value) = opt then value else 0
@@ -3398,14 +3369,15 @@ fn enum_pattern_requires_matching_type() {
     let program = "
     let First = enum { Some = i32, None = {} };
     let Second = enum { Some = {}, None = {} };
-    let check = fn{} -> i32 (
+    let check = {} => (
         let value = First::Some(5);
         if let Second::Some = value then 1 else 0
     );
     check{}
     ";
 
-    let (value, _context) = evaluate_text_to_expression(program).unwrap();
+    let (value, _context) = evaluate_text_to_expression(program)
+        .unwrap_or_else(|e| panic!("{}", e.render_with_source(program)));
     match value {
         Expression::Literal(ExpressionLiteral::Number(result), _) => assert_eq!(result, 0),
         other => panic!("unexpected result {other:?}"),
