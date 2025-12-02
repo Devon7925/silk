@@ -5,7 +5,7 @@ use silk::test_support::evaluate_text_to_expression;
 fn match_selects_correct_branch() {
     let program = "
         let Option = enum { Some = i32, None = {} };
-        let choose = (option: Option) => i32 (
+        let choose = (option: Option) => (
             match option with (
                 Option::Some(value) => value,
                 Option::None => 0

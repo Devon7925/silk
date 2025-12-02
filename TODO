@@ -11,6 +11,15 @@
 * [x] return;
 * [ ] for (Iterator trait)
 * [x] match
+* [ ] replace old match with new match
+
+```silk
+param |> match {
+    Option::Some(x) => x,
+    Option::None => 0,
+}
+```
+
 * [ ] mutable borrow
 
 * [ ] Traits

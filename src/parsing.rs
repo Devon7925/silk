@@ -309,15 +309,16 @@ fn parse_match_expression_with_source<'a>(
             remaining = rest;
             break;
         }
-
-        let (pattern, rest) = parse_binding_pattern_with_source(source, remaining)?;
-        let rest = parse_optional_whitespace(rest);
-        let rest = rest
-            .strip_prefix("=>")
-            .ok_or_else(|| diagnostic_here(source, rest, 2, "Expected => after match pattern"))?;
-        let rest = parse_optional_whitespace(rest);
-        let (branch_expr, rest) = parse_individual_expression_with_source(source, rest)?;
-        branches.push((pattern, branch_expr));
+        let (branch_expr, rest) = parse_individual_expression_with_source(source, remaining)?;
+        let Expression::Function { parameter, body, .. } = branch_expr else {
+            return Err(diagnostic_here(
+                source,
+                remaining,
+                1,
+                "Expected match branch to be a function",
+            ));
+        };
+        branches.push((parameter, *body));
         remaining = parse_optional_whitespace(rest);
 
         if let Some(rest) = remaining.strip_prefix(",") {
