@@ -396,11 +396,10 @@ pub fn interpret_expression(
             let (interpreted_else, else_type, else_diverges) =
                 branch_type(&inferred_else_expr, &base_context)?;
 
-            if !types_equivalent(&then_type, &else_type) {
-                if !then_diverges && !else_diverges {
+            if !types_equivalent(&then_type, &else_type)
+                && !then_diverges && !else_diverges {
                     return Err(diagnostic("Type mismatch between if branches", span));
                 }
-            }
 
             let resolved_condition = resolve_expression(interpreted_condition.clone(), context);
             if let Ok(Expression::Literal(ExpressionLiteral::Boolean(condition_value), _)) =
@@ -1048,7 +1047,7 @@ fn get_type_of_expression(
                 .map(|expr| expr.as_ref().clone())
                 .unwrap_or_else(|| empty_struct_expr(SourceSpan::new(span.end(), 0)));
             let mut then_context = context.clone();
-            collect_bindings(&condition, &mut then_context)?;
+            collect_bindings(condition, &mut then_context)?;
             let then_type = get_type_of_expression(then_branch, &mut then_context)?;
             let mut else_context = context.clone();
             let else_type = get_type_of_expression(&inferred_else, &mut else_context)?;
@@ -1158,7 +1157,7 @@ fn get_type_of_expression(
             context,
         ),
         Expression::Block(exprs, span) => {
-            let (value, mut block_context) = interpret_block(exprs.clone(), *span, &context)?;
+            let (value, mut block_context) = interpret_block(exprs.clone(), *span, context)?;
             if let Expression::Block(expressions, span) = &value {
                 let Some(last_expr) = expressions.last() else {
                     return Err(Diagnostic::new(
@@ -1247,7 +1246,7 @@ fn get_type_of_expression(
             } = &evaluated_function_type
             {
                 let argument_type = get_type_of_expression(argument, &mut call_context)?;
-                if !types_equivalent(&parameter, &argument_type) {
+                if !types_equivalent(parameter, &argument_type) {
                     return Err(diagnostic(
                         format!(
                             "Function argument type mismatch type {:?} vs {:?}",
@@ -1256,9 +1255,9 @@ fn get_type_of_expression(
                         *span,
                     ));
                 }
-                return interpret_expression(*return_type.clone(), &mut call_context);
+                interpret_expression(*return_type.clone(), &mut call_context)
             } else {
-                return Err(diagnostic("Attempted to call a non-function value", *span));
+                Err(diagnostic("Attempted to call a non-function value", *span))
             }
         }
         Expression::PropertyAccess {
@@ -2068,7 +2067,7 @@ fn apply_lvalue_update(
             };
 
             if let (Some(expected_ty), Some(actual_ty)) = (&expected_type, &value_type)
-                && !types_equivalent(&expected_ty, &actual_ty)
+                && !types_equivalent(expected_ty, actual_ty)
             {
                 return Err(diagnostic(
                     format!("Cannot assign value of mismatched type to {}", identifier.0),
