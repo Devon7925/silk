@@ -361,7 +361,6 @@ pub fn interpret_expression(
                     &mut branch_context,
                     Vec::new(),
                     PreserveBehavior::Inline,
-                    None,
                 )?;
 
                 if matched {
@@ -469,7 +468,7 @@ pub fn interpret_expression(
             context,
         ),
         Expression::Binding(binding, _) => {
-            interpret_binding(*binding, context, None).map(|(binding_result, _)| binding_result)
+            interpret_binding(*binding, context).map(|(binding_result, _)| binding_result)
         }
         Expression::Diverge {
             value,
@@ -633,7 +632,6 @@ pub fn interpret_expression(
                         &mut call_context,
                         Vec::new(),
                         PreserveBehavior::Inline,
-                        None,
                     )?;
                     let body_value = interpret_expression(*body, &mut call_context)?;
                     if let Expression::Diverge {
@@ -1395,7 +1393,9 @@ pub fn collect_break_values(expr: &Expression) -> Vec<Expression> {
                     collect_break_values_impl(val, values);
                 }
             }
-            Expression::EnumAccess { enum_expr, .. } => collect_break_values_impl(enum_expr, values),
+            Expression::EnumAccess { enum_expr, .. } => {
+                collect_break_values_impl(enum_expr, values)
+            }
             Expression::EnumValue {
                 enum_type, payload, ..
             } => {
@@ -1788,7 +1788,7 @@ fn interpret_block(
         let value = match expression {
             Expression::Binding(binding, span) => {
                 let (binding_expr, preserve_behavior) =
-                    interpret_binding(*binding, &mut block_context, None)?;
+                    interpret_binding(*binding, &mut block_context)?;
                 let should_preserve_binding = preserve_behavior != PreserveBehavior::Inline;
                 if should_preserve_binding
                     && let Expression::Binding(binding, _) = binding_expr.clone()
@@ -1866,7 +1866,7 @@ fn interpret_loop_block(
     for expression in expressions {
         let value = match expression {
             Expression::Binding(binding, _) => {
-                interpret_binding(*binding, context, None)?;
+                interpret_binding(*binding, context)?;
                 Expression::Literal(ExpressionLiteral::Boolean(true), dummy_span())
             }
             Expression::Assignment { target, expr, span } => {
@@ -2176,7 +2176,6 @@ fn pattern_has_mutable_annotation(pattern: &BindingPattern) -> bool {
 fn interpret_binding(
     binding: Binding,
     context: &mut Context,
-    usage_counter: Option<&UsageCounter>,
 ) -> Result<(Expression, PreserveBehavior), Diagnostic> {
     let value = interpret_expression(binding.expr.clone(), context)?;
     if let Ok(value_type) = get_type_of_expression(&value, &mut context.clone()) {
@@ -2198,7 +2197,6 @@ fn interpret_binding(
         } else {
             PreserveBehavior::PreserveBinding
         },
-        usage_counter,
     )?;
     let binding_expr = Expression::Binding(
         Box::new(Binding {
@@ -2330,27 +2328,17 @@ fn bind_pattern_from_value(
     context: &mut Context,
     passed_annotations: Vec<BindingAnnotation>,
     preserve_behavior: PreserveBehavior,
-    usage_counter: Option<&UsageCounter>,
 ) -> Result<(bool, PreserveBehavior), Diagnostic> {
     match pattern {
         BindingPattern::Identifier(identifier, _) => {
-            let mut identifier_preserve_behavior = preserve_behavior;
-            if let Some(usage_counter) = usage_counter
-                && let Some(usage_count) = usage_counter.counts.get(&identifier.0)
-                && *usage_count > 1
-                && !is_resolved_constant(value)
-            {
-                identifier_preserve_behavior =
-                    identifier_preserve_behavior.max(PreserveBehavior::PreserveUsage);
-            }
             context.bindings.insert(
                 identifier.0,
                 (
-                    BindingContext::Bound(value.clone(), identifier_preserve_behavior),
+                    BindingContext::Bound(value.clone(), preserve_behavior),
                     passed_annotations.clone(),
                 ),
             );
-            Ok((true, identifier_preserve_behavior))
+            Ok((true, preserve_behavior))
         }
         BindingPattern::Literal(literal, _) => match (literal, value) {
             (
@@ -2388,7 +2376,6 @@ fn bind_pattern_from_value(
                     context,
                     passed_annotations.clone(),
                     preserve_behavior,
-                    usage_counter,
                 )?;
                 preserve_behavior = Ord::max(preserve_behavior, new_preserve_behavior);
                 if !matched {
@@ -2448,7 +2435,6 @@ fn bind_pattern_from_value(
                     context,
                     passed_annotations,
                     preserve_behavior,
-                    usage_counter,
                 )
             } else {
                 Ok((true, preserve_behavior))
@@ -2460,7 +2446,6 @@ fn bind_pattern_from_value(
             context,
             passed_annotations,
             preserve_behavior,
-            usage_counter,
         ),
         BindingPattern::Annotated {
             pattern,
@@ -2488,7 +2473,6 @@ fn bind_pattern_from_value(
                     .chain(new_annotations)
                     .collect(),
                 new_preserve_behavior,
-                usage_counter,
             )
         }
     }
@@ -3018,191 +3002,6 @@ fn resolve_value_deep(expr: Expression, context: &mut Context) -> Result<Express
 fn resolve_expression(expr: Expression, context: &mut Context) -> Result<Expression, Diagnostic> {
     let evaluated = interpret_expression(expr, context)?;
     resolve_value(evaluated, context)
-}
-
-struct UsageCounter {
-    counts: std::collections::HashMap<String, usize>,
-}
-
-impl UsageCounter {
-    fn new() -> Self {
-        Self {
-            counts: std::collections::HashMap::new(),
-        }
-    }
-
-    fn count(&mut self, expr: &Expression) {
-        match expr {
-            Expression::Identifier(ident, _) => {
-                *self.counts.entry(ident.0.clone()).or_default() += 1;
-            }
-            Expression::Assignment { target, expr, .. } => {
-                self.count_lvalue(target);
-                self.count(expr);
-            }
-            Expression::Block(exprs, _) => {
-                for e in exprs {
-                    self.count(e);
-                }
-            }
-            Expression::Function {
-                body,
-                parameter,
-                return_type,
-                ..
-            } => {
-                self.count(body);
-                self.count(return_type.as_ref().unwrap());
-                self.count_pattern(parameter);
-            }
-            Expression::FunctionCall {
-                function, argument, ..
-            } => {
-                self.count(function);
-                self.count(argument);
-            }
-            Expression::While {
-                condition, body, ..
-            } => {
-                self.count(condition);
-                self.count(body);
-            }
-            Expression::Loop { body, .. } => {
-                self.count(body);
-            }
-            Expression::Diverge { value, .. } => {
-                if let Some(expr) = value {
-                    self.count(expr);
-                }
-            }
-            Expression::If {
-                condition,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                self.count(condition);
-                self.count(then_branch);
-                if let Some(else_branch) = else_branch {
-                    self.count(else_branch);
-                }
-            }
-            Expression::Match {
-                value, branches, ..
-            } => {
-                self.count(value);
-                for (_, branch) in branches {
-                    self.count(branch);
-                }
-            }
-            Expression::Operation { left, right, .. } => {
-                self.count(left);
-                self.count(right);
-            }
-            Expression::Binding(binding, _) => {
-                self.count(&binding.expr);
-                self.count_pattern(&binding.pattern);
-            }
-            Expression::IntrinsicOperation(op, _) => match op {
-                IntrinsicOperation::Binary(left, right, _) => {
-                    self.count(left);
-                    self.count(right);
-                }
-                IntrinsicOperation::EnumFromStruct => {}
-            },
-            Expression::Struct(items, _) => {
-                for (_, expr) in items {
-                    self.count(expr);
-                }
-            }
-            Expression::EnumValue {
-                enum_type, payload, ..
-            } => {
-                self.count(enum_type);
-                if let Some(payload) = payload {
-                    self.count(payload);
-                }
-            }
-            Expression::EnumConstructor {
-                enum_type,
-                payload_type,
-                ..
-            } => {
-                self.count(enum_type);
-                self.count(payload_type);
-            }
-            Expression::EnumAccess { enum_expr, .. } => {
-                self.count(enum_expr);
-            }
-            Expression::EnumType(variants, _) => {
-                for (_, ty) in variants {
-                    self.count(ty);
-                }
-            }
-            Expression::PropertyAccess { object, .. } => {
-                self.count(object);
-            }
-            Expression::AttachImplementation {
-                type_expr,
-                implementation,
-                ..
-            } => {
-                self.count(type_expr);
-                self.count(implementation);
-            }
-            Expression::FunctionType {
-                parameter,
-                return_type,
-                ..
-            } => {
-                self.count(parameter);
-                self.count(return_type);
-            }
-            Expression::Literal(..) | Expression::IntrinsicType(..) => {}
-        }
-    }
-
-    fn count_lvalue(&mut self, target: &LValue) {
-        match target {
-            LValue::Identifier(identifier, _) => {
-                *self.counts.entry(identifier.0.clone()).or_default() += 1;
-            }
-            LValue::PropertyAccess { object, .. } => self.count_lvalue(object),
-        }
-    }
-
-    fn count_pattern(&mut self, pattern: &BindingPattern) {
-        match pattern {
-            BindingPattern::TypeHint(inner, type_expr, _) => {
-                self.count_pattern(inner);
-                self.count(type_expr);
-            }
-            BindingPattern::Annotated {
-                pattern,
-                annotations,
-                ..
-            } => {
-                self.count_pattern(pattern);
-                for ann in annotations {
-                    match ann {
-                        BindingAnnotation::Export(expr, _) => self.count(expr),
-                        BindingAnnotation::Mutable(_) => {}
-                    }
-                }
-            }
-            BindingPattern::Struct(items, _) => {
-                for (_, pat) in items {
-                    self.count_pattern(pat);
-                }
-            }
-            BindingPattern::EnumVariant { payload, .. } => {
-                if let Some(payload) = payload {
-                    self.count_pattern(payload);
-                }
-            }
-            BindingPattern::Identifier(..) | BindingPattern::Literal(..) => {}
-        }
-    }
 }
 
 #[test]
