@@ -510,7 +510,9 @@ pub fn interpret_expression(
                 iteration_count += 1;
                 let condition_value = interpret_expression((*condition).clone(), context)?;
                 let resolved_condition = resolve_expression(condition_value.clone(), context)?;
-                let Expression::Literal(ExpressionLiteral::Boolean(condition_bool), _) = resolved_condition else {
+                let Expression::Literal(ExpressionLiteral::Boolean(condition_bool), _) =
+                    resolved_condition
+                else {
                     if is_resolved_constant(&resolved_condition) {
                         return Err(diagnostic(
                             "While condition did not resolve to a boolean value",
@@ -1154,10 +1156,8 @@ fn get_type_of_expression(
             context,
         ),
         Expression::Block(exprs, span) => {
-            let mut block_context = context.clone();
-            let (value, _) = interpret_block(exprs.clone(), *span, &mut block_context)?;
+            let (value, mut block_context) = interpret_block(exprs.clone(), *span, &context)?;
             if let Expression::Block(expressions, span) = &value {
-                //TODO: bind bindings from block context
                 let Some(last_expr) = expressions.last() else {
                     return Err(Diagnostic::new(
                         "Cannot determine type of empty block".to_string(),
@@ -1629,7 +1629,7 @@ fn get_trait_prop_of_type(
 fn interpret_block(
     expressions: Vec<Expression>,
     span: SourceSpan,
-    context: &mut Context,
+    context: &Context,
 ) -> Result<(Expression, Context), Diagnostic> {
     let mut block_context = context.clone();
     let mut last_value: Option<Expression> = None;
@@ -2048,9 +2048,7 @@ fn interpret_binding(
     );
 
     Ok((
-        if preserve_behavior != PreserveBehavior::Inline
-            || (!value_is_constant && !bound_success)
-        {
+        if preserve_behavior != PreserveBehavior::Inline || (!value_is_constant && !bound_success) {
             binding_expr
         } else {
             Expression::Literal(ExpressionLiteral::Boolean(bound_success), dummy_span())
