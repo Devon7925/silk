@@ -104,7 +104,6 @@ pub enum DivergeExpressionType {
     Break,
 }
 
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expression {
     IntrinsicType(IntrinsicType, SourceSpan),
@@ -313,7 +312,10 @@ fn parse_match_expression_with_source<'a>(
             break;
         }
         let (branch_expr, rest) = parse_individual_expression_with_source(source, remaining)?;
-        let Expression::Function { parameter, body, .. } = branch_expr else {
+        let Expression::Function {
+            parameter, body, ..
+        } = branch_expr
+        else {
             return Err(diagnostic_here(
                 source,
                 remaining,
@@ -663,7 +665,8 @@ fn pattern_expression_to_binding_pattern(
         | Expression::Block(..)
         | Expression::Diverge { .. }
         | Expression::Loop { .. }
-        | Expression::While { .. } => Err(Diagnostic::new("Invalid binding pattern expression").with_span(pattern_expression.span())),
+        | Expression::While { .. } => Err(Diagnostic::new("Invalid binding pattern expression")
+            .with_span(pattern_expression.span())),
     }
 }
 

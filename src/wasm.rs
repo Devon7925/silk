@@ -7,7 +7,9 @@ use crate::{
     diagnostics::{Diagnostic, SourceSpan},
     interpret::{self, AnnotatedBinding},
     parsing::{
-        BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, DivergeExpressionType, Expression, ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, LValue, TargetLiteral
+        BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, DivergeExpressionType,
+        Expression, ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, LValue,
+        TargetLiteral,
     },
 };
 
@@ -523,7 +525,10 @@ fn expression_contains_return(expr: &Expression) -> bool {
 
 fn loop_contains_break(expr: &Expression) -> bool {
     match expr {
-        Expression::Diverge { divergance_type: DivergeExpressionType::Break, .. } => true,
+        Expression::Diverge {
+            divergance_type: DivergeExpressionType::Break,
+            ..
+        } => true,
         Expression::Block(exprs, _) => exprs.iter().any(loop_contains_break),
         Expression::If {
             then_branch,
@@ -570,90 +575,18 @@ fn loop_contains_break(expr: &Expression) -> bool {
     }
 }
 
-fn collect_break_types(
-    expr: &Expression,
-    locals_types: &std::collections::HashMap<String, WasmType>,
-    context: &interpret::Context,
-    types: &mut Vec<WasmType>,
-) -> Result<(), Diagnostic> {
-    match expr {
-        Expression::Diverge { value, divergance_type: DivergeExpressionType::Break, span } => {
-            let inner_expr = value
-                .as_ref()
-                .map(|expr| expr.as_ref().clone())
-                .unwrap_or_else(|| Expression::Struct(vec![], *span));
-            let ty = infer_type(&inner_expr, locals_types, context)?;
-            types.push(ty);
-        }
-        Expression::Block(exprs, _) => {
-            for e in exprs {
-                collect_break_types(e, locals_types, context, types)?;
-            }
-        }
-        Expression::If {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            collect_break_types(then_branch, locals_types, context, types)?;
-            if let Some(else_branch) = else_branch {
-                collect_break_types(else_branch, locals_types, context, types)?;
-            }
-        }
-        Expression::Binding(binding, _) => {
-            collect_break_types(&binding.expr, locals_types, context, types)?;
-        }
-        Expression::Assignment { expr, .. } => {
-            collect_break_types(expr, locals_types, context, types)?;
-        }
-        Expression::FunctionCall {
-            function, argument, ..
-        } => {
-            collect_break_types(function, locals_types, context, types)?;
-            collect_break_types(argument, locals_types, context, types)?;
-        }
-        Expression::PropertyAccess { object, .. } => {
-            collect_break_types(object, locals_types, context, types)?;
-        }
-        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _span) => {
-            collect_break_types(left, locals_types, context, types)?;
-            collect_break_types(right, locals_types, context, types)?;
-        }
-        Expression::EnumAccess { enum_expr, .. } => {
-            collect_break_types(enum_expr, locals_types, context, types)?;
-        }
-        Expression::EnumConstructor {
-            enum_type,
-            payload_type,
-            ..
-        } => {
-            collect_break_types(enum_type, locals_types, context, types)?;
-            collect_break_types(payload_type, locals_types, context, types)?;
-        }
-        Expression::AttachImplementation {
-            type_expr,
-            implementation,
-            ..
-        } => {
-            collect_break_types(type_expr, locals_types, context, types)?;
-            collect_break_types(implementation, locals_types, context, types)?;
-        }
-        // Do not descend into nested loops because their breaks should not affect the
-        // surrounding loop's result type.
-        Expression::Loop { .. } => {}
-        _ => {}
-    }
-
-    Ok(())
-}
-
 fn determine_loop_result_type(
     body: &Expression,
     locals_types: &std::collections::HashMap<String, WasmType>,
     context: &interpret::Context,
 ) -> Result<Option<WasmType>, Diagnostic> {
+    let break_values = interpret::collect_break_values(body);
     let mut break_types = Vec::new();
-    collect_break_types(body, locals_types, context, &mut break_types)?;
+
+    for val in break_values {
+        let ty = infer_type(&val, locals_types, context)?;
+        break_types.push(ty);
+    }
 
     if let Some(first_type) = break_types.first() {
         let mut mismatched = None;
@@ -1476,7 +1409,11 @@ fn emit_expression(
             Diagnostic::new("enum intrinsic should be resolved before wasm lowering")
                 .with_span(*span),
         ),
-        Expression::Diverge { value, divergance_type: DivergeExpressionType::Break, span } => {
+        Expression::Diverge {
+            value,
+            divergance_type: DivergeExpressionType::Break,
+            span,
+        } => {
             let loop_ctx = loop_stack.last().cloned().ok_or_else(|| {
                 Diagnostic::new("`break` used outside of a loop").with_span(*span)
             })?;
@@ -2006,7 +1943,11 @@ fn emit_expression(
             }
             Ok(())
         }
-        Expression::Diverge { value, divergance_type: DivergeExpressionType::Return, .. } => {
+        Expression::Diverge {
+            value,
+            divergance_type: DivergeExpressionType::Return,
+            ..
+        } => {
             if value.is_none() {
                 eprintln!("return without value");
             }

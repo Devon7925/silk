@@ -1030,11 +1030,7 @@ fn get_type_of_expression(
 
             Ok(target_type)
         }
-        Expression::Diverge {
-            value,
-            span,
-            ..
-        } => {
+        Expression::Diverge { value, span, .. } => {
             let inner_value = value
                 .as_ref()
                 .map(|expr| expr.as_ref().clone())
@@ -1090,7 +1086,9 @@ fn get_type_of_expression(
                 )?;
                 let branch_ty = get_type_of_expression(branch, &mut branch_context)?;
                 if let Some(existing) = &branch_type {
-                    if !types_equivalent(existing, &branch_ty) && !expression_does_diverge(branch, false) {
+                    if !types_equivalent(existing, &branch_ty)
+                        && !expression_does_diverge(branch, false)
+                    {
                         return Err(diagnostic("Type mismatch between match branches", *span));
                     }
                 } else {
@@ -1200,7 +1198,23 @@ fn get_type_of_expression(
         }
         Expression::Loop { body, .. } => {
             let mut loop_context = context.clone();
-            get_type_of_expression(body, &mut loop_context)
+            let break_values = collect_break_values(body);
+            if break_values.is_empty() {
+                get_type_of_expression(body, &mut loop_context)
+            } else {
+                let mut first_type: Option<Expression> = None;
+                for val in break_values {
+                    let ty = get_type_of_expression(&val, &mut loop_context)?;
+                    if let Some(ref first) = first_type {
+                        if !types_equivalent(first, &ty) {
+                            return Err(diagnostic("Inconsistent break types in loop", val.span()));
+                        }
+                    } else {
+                        first_type = Some(ty);
+                    }
+                }
+                Ok(first_type.unwrap())
+            }
         }
         Expression::FunctionCall {
             function,
@@ -1332,6 +1346,109 @@ fn get_type_of_expression(
     }
 }
 
+pub fn collect_break_values(expr: &Expression) -> Vec<Expression> {
+    fn collect_break_values_impl(expr: &Expression, values: &mut Vec<Expression>) {
+        match expr {
+            Expression::Diverge {
+                value,
+                divergance_type: DivergeExpressionType::Break,
+                span,
+            } => {
+                let val = value
+                    .as_ref()
+                    .map(|v| *v.clone())
+                    .unwrap_or_else(|| empty_struct_expr(*span));
+                values.push(val);
+            }
+            Expression::Loop { .. } => {}
+            Expression::Block(exprs, _) => {
+                for e in exprs {
+                    collect_break_values_impl(e, values);
+                }
+            }
+            Expression::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                collect_break_values_impl(then_branch, values);
+                if let Some(else_branch) = else_branch {
+                    collect_break_values_impl(else_branch, values);
+                }
+            }
+            Expression::Binding(binding, _) => collect_break_values_impl(&binding.expr, values),
+            Expression::Assignment { expr, .. } => collect_break_values_impl(expr, values),
+            Expression::FunctionCall {
+                function, argument, ..
+            } => {
+                collect_break_values_impl(function, values);
+                collect_break_values_impl(argument, values);
+            }
+            Expression::Function { .. } => {}
+            Expression::PropertyAccess { object, .. } => collect_break_values_impl(object, values),
+            Expression::Operation { left, right, .. } => {
+                collect_break_values_impl(left, values);
+                collect_break_values_impl(right, values);
+            }
+            Expression::Diverge { value, .. } => {
+                if let Some(val) = value {
+                    collect_break_values_impl(val, values);
+                }
+            }
+            Expression::EnumAccess { enum_expr, .. } => collect_break_values_impl(enum_expr, values),
+            Expression::EnumValue {
+                enum_type, payload, ..
+            } => {
+                collect_break_values_impl(enum_type, values);
+                if let Some(payload) = payload {
+                    collect_break_values_impl(payload, values);
+                }
+            }
+            Expression::EnumConstructor {
+                enum_type,
+                payload_type,
+                ..
+            } => {
+                collect_break_values_impl(enum_type, values);
+                collect_break_values_impl(payload_type, values);
+            }
+            Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _) => {
+                collect_break_values_impl(left, values);
+                collect_break_values_impl(right, values);
+            }
+            Expression::AttachImplementation {
+                type_expr,
+                implementation,
+                ..
+            } => {
+                collect_break_values_impl(type_expr, values);
+                collect_break_values_impl(implementation, values);
+            }
+            Expression::Match {
+                value, branches, ..
+            } => {
+                collect_break_values_impl(value, values);
+                for (_, branch) in branches {
+                    collect_break_values_impl(branch, values);
+                }
+            }
+            Expression::While { condition, .. } => {
+                collect_break_values_impl(condition, values);
+            }
+            Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, _)
+            | Expression::Literal(_, _)
+            | Expression::Identifier(_, _)
+            | Expression::IntrinsicType(_, _)
+            | Expression::EnumType(_, _)
+            | Expression::FunctionType { .. }
+            | Expression::Struct(_, _) => {}
+        }
+    }
+    let mut values = Vec::new();
+    collect_break_values_impl(expr, &mut values);
+    values
+}
+
 fn get_type_of_binding_pattern(
     pattern: &BindingPattern,
     context: &mut Context,
@@ -1370,7 +1487,9 @@ fn expression_does_diverge(expr: &Expression, in_inner_loop: bool) -> bool {
             divergance_type: DivergeExpressionType::Return,
             ..
         } => true,
-        Expression::Block(exprs, _) => exprs.iter().any(|expr| expression_does_diverge(expr, in_inner_loop)),
+        Expression::Block(exprs, _) => exprs
+            .iter()
+            .any(|expr| expression_does_diverge(expr, in_inner_loop)),
         Expression::If {
             then_branch,
             else_branch,
@@ -1393,20 +1512,26 @@ fn expression_does_diverge(expr: &Expression, in_inner_loop: bool) -> bool {
         Expression::While {
             condition, body, ..
         } => {
-             //todo verify condition handling is correct here
+            //todo verify condition handling is correct here
             expression_does_diverge(condition, in_inner_loop) || expression_does_diverge(body, true)
         }
         Expression::Loop { body, .. } => expression_does_diverge(body, true),
         Expression::PropertyAccess { object, .. } => expression_does_diverge(object, in_inner_loop),
         Expression::Operation { left, right, .. } => {
-            expression_does_diverge(left, in_inner_loop) || expression_does_diverge(right, in_inner_loop)
+            expression_does_diverge(left, in_inner_loop)
+                || expression_does_diverge(right, in_inner_loop)
         }
         Expression::AttachImplementation {
             type_expr,
             implementation,
             ..
-        } => expression_does_diverge(type_expr, in_inner_loop) || expression_does_diverge(implementation, in_inner_loop),
-        Expression::EnumAccess { enum_expr, .. } => expression_does_diverge(enum_expr, in_inner_loop),
+        } => {
+            expression_does_diverge(type_expr, in_inner_loop)
+                || expression_does_diverge(implementation, in_inner_loop)
+        }
+        Expression::EnumAccess { enum_expr, .. } => {
+            expression_does_diverge(enum_expr, in_inner_loop)
+        }
         Expression::EnumValue {
             enum_type, payload, ..
         } => {
@@ -1420,7 +1545,10 @@ fn expression_does_diverge(expr: &Expression, in_inner_loop: bool) -> bool {
             enum_type,
             payload_type,
             ..
-        } => expression_does_diverge(enum_type, in_inner_loop) || expression_does_diverge(payload_type, in_inner_loop),
+        } => {
+            expression_does_diverge(enum_type, in_inner_loop)
+                || expression_does_diverge(payload_type, in_inner_loop)
+        }
         Expression::Match {
             value, branches, ..
         } => {
@@ -1430,7 +1558,8 @@ fn expression_does_diverge(expr: &Expression, in_inner_loop: bool) -> bool {
                     .all(|(_, branch)| expression_does_diverge(branch, in_inner_loop))
         }
         Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _span) => {
-            expression_does_diverge(left, in_inner_loop) || expression_does_diverge(right, in_inner_loop)
+            expression_does_diverge(left, in_inner_loop)
+                || expression_does_diverge(right, in_inner_loop)
         }
         Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, _)
         | Expression::Literal(_, _)
