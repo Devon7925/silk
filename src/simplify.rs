@@ -85,7 +85,7 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             body: Box::new(Expression::If {
                 condition: Box::new(simplify_expression(*condition)?),
                 then_branch: Box::new(simplify_expression(*body)?),
-                else_branch: Some(Box::new(Expression::Break { value: None, span })),
+                else_branch: Some(Box::new(Expression::Diverge { value: None, divergance_type: crate::parsing::DivergeExpressionType::Break, span })),
                 span,
             }),
             span,
@@ -146,18 +146,12 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             property,
             span,
         }),
-        Expression::Return { value, span } => Ok(Expression::Return {
+        Expression::Diverge { value, divergance_type, span } => Ok(Expression::Diverge {
             value: match value {
                 Some(expr) => Some(Box::new(simplify_expression(*expr)?)),
                 None => None,
             },
-            span,
-        }),
-        Expression::Break { value, span } => Ok(Expression::Break {
-            value: match value {
-                Some(expr) => Some(Box::new(simplify_expression(*expr)?)),
-                None => None,
-            },
+            divergance_type,
             span,
         }),
         Expression::EnumType(variants, span) => Ok(Expression::EnumType(

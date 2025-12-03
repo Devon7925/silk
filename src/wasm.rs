@@ -7,8 +7,7 @@ use crate::{
     diagnostics::{Diagnostic, SourceSpan},
     interpret::{self, AnnotatedBinding},
     parsing::{
-        BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, Expression,
-        ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, LValue, TargetLiteral,
+        BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, DivergeExpressionType, Expression, ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, LValue, TargetLiteral
     },
 };
 
@@ -482,7 +481,7 @@ fn collect_types(
 
 fn expression_contains_return(expr: &Expression) -> bool {
     match expr {
-        Expression::Return { .. } | Expression::Break { .. } => true,
+        Expression::Diverge { .. } => true,
         Expression::Block(exprs, _) => exprs.iter().any(expression_contains_return),
         Expression::If {
             then_branch,
@@ -524,7 +523,7 @@ fn expression_contains_return(expr: &Expression) -> bool {
 
 fn loop_contains_break(expr: &Expression) -> bool {
     match expr {
-        Expression::Break { .. } => true,
+        Expression::Diverge { divergance_type: DivergeExpressionType::Break, .. } => true,
         Expression::Block(exprs, _) => exprs.iter().any(loop_contains_break),
         Expression::If {
             then_branch,
@@ -578,7 +577,7 @@ fn collect_break_types(
     types: &mut Vec<WasmType>,
 ) -> Result<(), Diagnostic> {
     match expr {
-        Expression::Break { value, span } => {
+        Expression::Diverge { value, divergance_type: DivergeExpressionType::Break, span } => {
             let inner_expr = value
                 .as_ref()
                 .map(|expr| expr.as_ref().clone())
@@ -682,7 +681,7 @@ fn determine_loop_result_type(
 
 fn expression_produces_value(expr: &Expression) -> bool {
     match expr {
-        Expression::Return { .. } | Expression::Break { .. } => false,
+        Expression::Diverge { .. } => false,
         Expression::Loop { body, .. } => loop_contains_break(body),
         Expression::Block(exprs, _) => exprs.last().map(expression_produces_value).unwrap_or(true),
         Expression::If {
@@ -711,7 +710,7 @@ fn expression_produces_value(expr: &Expression) -> bool {
 
 fn expression_always_transfers_control(expr: &Expression) -> bool {
     match expr {
-        Expression::Return { .. } | Expression::Break { .. } => true,
+        Expression::Diverge { .. } => true,
         Expression::Block(exprs, _) => exprs
             .last()
             .map(expression_always_transfers_control)
@@ -740,7 +739,7 @@ fn expression_emits_value(
     type_ctx: &TypeContext,
 ) -> Result<bool, Diagnostic> {
     match expr {
-        Expression::Return { .. } | Expression::Break { .. } => Ok(false),
+        Expression::Diverge { .. } => Ok(false),
         Expression::If {
             then_branch,
             else_branch,
@@ -824,14 +823,7 @@ fn infer_type(
 
             Ok(value_type)
         }
-        Expression::Return { value, span } => {
-            let inner_expr = value
-                .as_ref()
-                .map(|expr| expr.as_ref().clone())
-                .unwrap_or_else(|| Expression::Struct(vec![], *span));
-            infer_type(&inner_expr, locals_types, context)
-        }
-        Expression::Break { value, span } => {
+        Expression::Diverge { value, span, .. } => {
             let inner_expr = value
                 .as_ref()
                 .map(|expr| expr.as_ref().clone())
@@ -1484,7 +1476,7 @@ fn emit_expression(
             Diagnostic::new("enum intrinsic should be resolved before wasm lowering")
                 .with_span(*span),
         ),
-        Expression::Break { value, span } => {
+        Expression::Diverge { value, divergance_type: DivergeExpressionType::Break, span } => {
             let loop_ctx = loop_stack.last().cloned().ok_or_else(|| {
                 Diagnostic::new("`break` used outside of a loop").with_span(*span)
             })?;
@@ -2014,7 +2006,7 @@ fn emit_expression(
             }
             Ok(())
         }
-        Expression::Return { value, .. } => {
+        Expression::Diverge { value, divergance_type: DivergeExpressionType::Return, .. } => {
             if value.is_none() {
                 eprintln!("return without value");
             }

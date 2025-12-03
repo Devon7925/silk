@@ -2,8 +2,9 @@ use crate::{
     diagnostics::{Diagnostic, SourceSpan},
     enum_normalization::normalize_enum_application,
     parsing::{
-        BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, Expression,
-        ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, LValue, TargetLiteral,
+        BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, DivergeExpressionType,
+        Expression, ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, LValue,
+        TargetLiteral,
     },
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -391,17 +392,13 @@ pub fn interpret_expression(
             let resolved_condition = resolve_operations(condition_for_pattern, context)?;
             collect_bindings(&resolved_condition, &mut then_context)?;
 
-            let (interpreted_then, then_type, then_returns) =
+            let (interpreted_then, then_type, then_diverges) =
                 branch_type(&then_branch, &then_context)?;
-            let (interpreted_else, else_type, else_returns) =
+            let (interpreted_else, else_type, else_diverges) =
                 branch_type(&inferred_else_expr, &base_context)?;
 
             if !types_equivalent(&then_type, &else_type) {
-                if then_returns && !else_returns {
-                    // The then branch exits, so the resulting type is determined by the else branch.
-                } else if else_returns && !then_returns {
-                    // The else branch exits, so the resulting type is determined by the then branch.
-                } else {
+                if then_diverges || else_diverges {
                     return Err(diagnostic("Type mismatch between if branches", span));
                 }
             }
@@ -474,25 +471,19 @@ pub fn interpret_expression(
         Expression::Binding(binding, _) => {
             interpret_binding(*binding, context, None).map(|(binding_result, _)| binding_result)
         }
-        Expression::Return { value, span } => {
+        Expression::Diverge {
+            value,
+            divergance_type,
+            span,
+        } => {
             let evaluated_value = match value {
                 Some(expr) => interpret_expression(*expr, context)?,
                 None => empty_struct_expr(span),
             };
 
-            Ok(Expression::Return {
+            Ok(Expression::Diverge {
                 value: Some(Box::new(evaluated_value)),
-                span,
-            })
-        }
-        Expression::Break { value, span } => {
-            let evaluated_value = match value {
-                Some(expr) => interpret_expression(*expr, context)?,
-                None => empty_struct_expr(span),
-            };
-
-            Ok(Expression::Break {
-                value: Some(Box::new(evaluated_value)),
+                divergance_type,
                 span,
             })
         }
@@ -538,12 +529,20 @@ pub fn interpret_expression(
                     other => interpret_expression(other, context)?,
                 };
 
-                match iteration_value {
-                    Expression::Return { .. } => return Ok(iteration_value),
-                    Expression::Break { value, .. } => {
-                        return Ok(*value.unwrap_or_else(|| Box::new(empty_struct_expr(span))));
+                if let Expression::Diverge {
+                    value,
+                    divergance_type,
+                    span,
+                } = &iteration_value
+                {
+                    match divergance_type {
+                        DivergeExpressionType::Return => return Ok(iteration_value),
+                        DivergeExpressionType::Break => {
+                            return Ok(*value
+                                .clone()
+                                .unwrap_or_else(|| Box::new(empty_struct_expr(*span))));
+                        }
                     }
-                    _ => {}
                 }
             }
         }
@@ -567,12 +566,21 @@ pub fn interpret_expression(
                     // TODO: There is probably more efficient logic that could be used here
                     return Ok(Expression::Loop { body, span });
                 }
-                match iteration_value {
-                    Expression::Return { .. } => return Ok(iteration_value),
-                    Expression::Break { value, .. } => {
-                        return Ok(*value.unwrap_or_else(|| Box::new(empty_struct_expr(span))));
+
+                if let Expression::Diverge {
+                    value,
+                    divergance_type,
+                    span,
+                } = &iteration_value
+                {
+                    match divergance_type {
+                        DivergeExpressionType::Return => return Ok(iteration_value),
+                        DivergeExpressionType::Break => {
+                            return Ok(*value
+                                .clone()
+                                .unwrap_or_else(|| Box::new(empty_struct_expr(*span))));
+                        }
                     }
-                    _ => {}
                 }
             }
         }
@@ -628,7 +636,12 @@ pub fn interpret_expression(
                         None,
                     )?;
                     let body_value = interpret_expression(*body, &mut call_context)?;
-                    if let Expression::Return { value, .. } = body_value {
+                    if let Expression::Diverge {
+                        value,
+                        divergance_type: DivergeExpressionType::Return,
+                        ..
+                    } = body_value
+                    {
                         let resolved_return = resolve_value_deep(
                             *value.expect("Return value should be populated"),
                             &mut call_context,
@@ -1017,14 +1030,11 @@ fn get_type_of_expression(
 
             Ok(target_type)
         }
-        Expression::Return { value, span } => {
-            let inner_value = value
-                .as_ref()
-                .map(|expr| expr.as_ref().clone())
-                .unwrap_or_else(|| empty_struct_expr(*span));
-            get_type_of_expression(&inner_value, context)
-        }
-        Expression::Break { value, span } => {
+        Expression::Diverge {
+            value,
+            span,
+            ..
+        } => {
             let inner_value = value
                 .as_ref()
                 .map(|expr| expr.as_ref().clone())
@@ -1049,8 +1059,8 @@ fn get_type_of_expression(
             let mut else_context = context.clone();
             let else_type = get_type_of_expression(&inferred_else, &mut else_context)?;
             if !types_equivalent(&then_type, &else_type) {
-                let then_returns = expression_contains_return(then_branch);
-                let else_returns = expression_contains_return(&inferred_else);
+                let then_returns = expression_does_diverge(then_branch, false);
+                let else_returns = expression_does_diverge(&inferred_else, false);
 
                 if then_returns && !else_returns {
                     return Ok(else_type);
@@ -1069,7 +1079,6 @@ fn get_type_of_expression(
         } => {
             let value_type = get_type_of_expression(value, &mut context.clone())?;
             let mut branch_type: Option<Expression> = None;
-            let mut any_returning_branch = false;
 
             for (pattern, branch) in branches {
                 let mut branch_context = context.clone();
@@ -1081,15 +1090,12 @@ fn get_type_of_expression(
                 )?;
                 let branch_ty = get_type_of_expression(branch, &mut branch_context)?;
                 if let Some(existing) = &branch_type {
-                    if !types_equivalent(existing, &branch_ty)
-                        && !expression_contains_return(branch)
-                    {
+                    if !types_equivalent(existing, &branch_ty) && !expression_does_diverge(branch, false) {
                         return Err(diagnostic("Type mismatch between match branches", *span));
                     }
                 } else {
                     branch_type = Some(branch_ty.clone());
                 }
-                any_returning_branch = any_returning_branch || expression_contains_return(branch);
             }
 
             branch_type.ok_or(diagnostic("Match has no branches", *span))
@@ -1180,8 +1186,9 @@ fn get_type_of_expression(
                     body: Box::new(Expression::If {
                         condition: condition.clone(),
                         then_branch: body.clone(),
-                        else_branch: Some(Box::new(Expression::Break {
+                        else_branch: Some(Box::new(Expression::Diverge {
                             value: None,
+                            divergance_type: DivergeExpressionType::Break,
                             span: *span,
                         })),
                         span: *span,
@@ -1353,71 +1360,84 @@ fn get_type_of_binding_pattern(
     }
 }
 
-fn expression_contains_return(expr: &Expression) -> bool {
+fn expression_does_diverge(expr: &Expression, in_inner_loop: bool) -> bool {
     match expr {
-        Expression::Return { .. } | Expression::Break { .. } => true,
-        Expression::Block(exprs, _) => exprs.iter().any(expression_contains_return),
+        Expression::Diverge {
+            divergance_type: DivergeExpressionType::Break,
+            ..
+        } => !in_inner_loop,
+        Expression::Diverge {
+            divergance_type: DivergeExpressionType::Return,
+            ..
+        } => true,
+        Expression::Block(exprs, _) => exprs.iter().any(|expr| expression_does_diverge(expr, in_inner_loop)),
         Expression::If {
             then_branch,
             else_branch,
             ..
         } => {
-            expression_contains_return(then_branch)
-                || else_branch
+            expression_does_diverge(then_branch, in_inner_loop)
+                && else_branch
                     .as_ref()
-                    .map(|branch| expression_contains_return(branch))
+                    .map(|branch| expression_does_diverge(branch, in_inner_loop))
                     .unwrap_or(false)
         }
-        Expression::Binding(binding, _) => expression_contains_return(&binding.expr),
-        Expression::Assignment { expr, .. } => expression_contains_return(expr),
+        Expression::Binding(binding, _) => expression_does_diverge(&binding.expr, in_inner_loop),
+        Expression::Assignment { expr, .. } => expression_does_diverge(expr, in_inner_loop),
         Expression::FunctionCall {
             function, argument, ..
-        } => expression_contains_return(function) || expression_contains_return(argument),
-        Expression::Function { body, .. } => expression_contains_return(body),
+        } => {
+            expression_does_diverge(function, in_inner_loop)
+                || expression_does_diverge(argument, in_inner_loop)
+        }
         Expression::While {
             condition, body, ..
-        } => expression_contains_return(condition) || expression_contains_return(body),
-        Expression::Loop { body, .. } => expression_contains_return(body),
-        Expression::PropertyAccess { object, .. } => expression_contains_return(object),
+        } => {
+             //todo verify condition handling is correct here
+            expression_does_diverge(condition, in_inner_loop) || expression_does_diverge(body, true)
+        }
+        Expression::Loop { body, .. } => expression_does_diverge(body, true),
+        Expression::PropertyAccess { object, .. } => expression_does_diverge(object, in_inner_loop),
         Expression::Operation { left, right, .. } => {
-            expression_contains_return(left) || expression_contains_return(right)
+            expression_does_diverge(left, in_inner_loop) || expression_does_diverge(right, in_inner_loop)
         }
         Expression::AttachImplementation {
             type_expr,
             implementation,
             ..
-        } => expression_contains_return(type_expr) || expression_contains_return(implementation),
-        Expression::EnumAccess { enum_expr, .. } => expression_contains_return(enum_expr),
+        } => expression_does_diverge(type_expr, in_inner_loop) || expression_does_diverge(implementation, in_inner_loop),
+        Expression::EnumAccess { enum_expr, .. } => expression_does_diverge(enum_expr, in_inner_loop),
         Expression::EnumValue {
             enum_type, payload, ..
         } => {
-            expression_contains_return(enum_type)
+            expression_does_diverge(enum_type, in_inner_loop)
                 || payload
                     .as_ref()
-                    .map(|payload| expression_contains_return(payload))
+                    .map(|payload| expression_does_diverge(payload, in_inner_loop))
                     .unwrap_or(false)
         }
         Expression::EnumConstructor {
             enum_type,
             payload_type,
             ..
-        } => expression_contains_return(enum_type) || expression_contains_return(payload_type),
+        } => expression_does_diverge(enum_type, in_inner_loop) || expression_does_diverge(payload_type, in_inner_loop),
         Expression::Match {
             value, branches, ..
         } => {
-            expression_contains_return(value)
+            expression_does_diverge(value, in_inner_loop)
                 || branches
                     .iter()
-                    .any(|(_, branch)| expression_contains_return(branch))
+                    .all(|(_, branch)| expression_does_diverge(branch, in_inner_loop))
         }
         Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _span) => {
-            expression_contains_return(left) || expression_contains_return(right)
+            expression_does_diverge(left, in_inner_loop) || expression_does_diverge(right, in_inner_loop)
         }
-        Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, _) => false,
-        Expression::Literal(_, _)
+        Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, _)
+        | Expression::Literal(_, _)
         | Expression::Identifier(_, _)
         | Expression::IntrinsicType(_, _)
         | Expression::EnumType(_, _)
+        | Expression::Function { .. }
         | Expression::FunctionType { .. }
         | Expression::Struct(_, _) => false,
     }
@@ -1450,7 +1470,7 @@ fn expression_contains_loop(expr: &Expression) -> bool {
         Expression::Operation { left, right, .. } => {
             expression_contains_loop(left) || expression_contains_loop(right)
         }
-        Expression::Return { value, .. } | Expression::Break { value, .. } => value
+        Expression::Diverge { value, .. } => value
             .as_ref()
             .map(|val| expression_contains_loop(val))
             .unwrap_or(false),
@@ -1557,7 +1577,7 @@ fn expression_contains_mutation(expr: &Expression) -> bool {
                     .iter()
                     .any(|(_, branch)| expression_contains_mutation(branch))
         }
-        Expression::Return { value, .. } | Expression::Break { value, .. } => value
+        Expression::Diverge { value, .. } => value
             .as_ref()
             .map(|val| expression_contains_mutation(val))
             .unwrap_or(false),
@@ -1581,7 +1601,7 @@ fn branch_type(
     Ok((
         evaluated_branch.clone(),
         branch_type,
-        matches!(evaluated_branch, Expression::Return { .. }),
+        matches!(evaluated_branch, Expression::Diverge { .. }),
     ))
 }
 
@@ -1679,7 +1699,13 @@ fn interpret_block(
                 val
             }
         };
-        if matches!(value, Expression::Return { .. } | Expression::Break { .. }) {
+        if matches!(
+            value,
+            Expression::Diverge {
+                divergance_type: DivergeExpressionType::Break | DivergeExpressionType::Return,
+                ..
+            }
+        ) {
             return Ok((value, block_context));
         }
 
@@ -1723,7 +1749,13 @@ fn interpret_loop_block(
             other => interpret_expression(other, context)?,
         };
 
-        if matches!(value, Expression::Return { .. } | Expression::Break { .. }) {
+        if matches!(
+            value,
+            Expression::Diverge {
+                divergance_type: DivergeExpressionType::Break | DivergeExpressionType::Return,
+                ..
+            }
+        ) {
             return Ok(value);
         }
 
@@ -2909,7 +2941,7 @@ impl UsageCounter {
             Expression::Loop { body, .. } => {
                 self.count(body);
             }
-            Expression::Return { value, .. } | Expression::Break { value, .. } => {
+            Expression::Diverge { value, .. } => {
                 if let Some(expr) = value {
                     self.count(expr);
                 }

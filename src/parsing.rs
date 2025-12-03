@@ -99,6 +99,13 @@ pub enum IntrinsicOperation {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DivergeExpressionType {
+    Return,
+    Break,
+}
+
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expression {
     IntrinsicType(IntrinsicType, SourceSpan),
     IntrinsicOperation(IntrinsicOperation, SourceSpan),
@@ -175,12 +182,9 @@ pub enum Expression {
     },
     Binding(Box<Binding>, SourceSpan),
     Block(Vec<Expression>, SourceSpan),
-    Return {
+    Diverge {
         value: Option<Box<Expression>>,
-        span: SourceSpan,
-    },
-    Break {
-        value: Option<Box<Expression>>,
+        divergance_type: DivergeExpressionType,
         span: SourceSpan,
     },
     Loop {
@@ -208,8 +212,7 @@ impl Expression {
             | Expression::Identifier(_, span)
             | Expression::Binding(_, span)
             | Expression::Block(_, span)
-            | Expression::Return { span, .. }
-            | Expression::Break { span, .. }
+            | Expression::Diverge { span, .. }
             | Expression::Loop { span, .. }
             | Expression::While { span, .. }
             | Expression::Assignment { span, .. }
@@ -658,8 +661,7 @@ fn pattern_expression_to_binding_pattern(
         | Expression::Assignment { .. }
         | Expression::Binding(..)
         | Expression::Block(..)
-        | Expression::Return { .. }
-        | Expression::Break { .. }
+        | Expression::Diverge { .. }
         | Expression::Loop { .. }
         | Expression::While { .. } => Err(Diagnostic::new("Invalid binding pattern expression").with_span(pattern_expression.span())),
     }
@@ -945,7 +947,8 @@ fn parse_return_expression_with_source<'a>(
 
     let span = consumed_span(source, start_slice, rest);
     Some(Ok((
-        Expression::Return {
+        Expression::Diverge {
+            divergance_type: DivergeExpressionType::Return,
             value: value.map(Box::new),
             span,
         },
@@ -986,7 +989,8 @@ fn parse_break_expression_with_source<'a>(
 
     let span = consumed_span(source, start_slice, rest);
     Some(Ok((
-        Expression::Break {
+        Expression::Diverge {
+            divergance_type: DivergeExpressionType::Break,
             value: value.map(Box::new),
             span,
         },
