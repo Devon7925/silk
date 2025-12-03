@@ -33,7 +33,7 @@ async function compileAndLoad(silkCode: string, basename: string) {
 
 test("while loops accumulate until reaching limit", async () => {
     const silkCode = `
-    let (export wasm) sum_until = (limit: i32) => i32 (
+    let (export wasm) sum_until = (limit: i32) => (
         let mut acc = 0;
         let mut iter = 0;
         while iter < limit do (
@@ -51,7 +51,7 @@ test("while loops accumulate until reaching limit", async () => {
 
 test("while loops stop when the guard is false", async () => {
     const silkCode = `
-    let (export wasm) decrement_to_zero = (start: i32) => i32 (
+    let (export wasm) decrement_to_zero = (start: i32) => (
         let mut value = start;
         while value > 0 do (
             value = value - 1;

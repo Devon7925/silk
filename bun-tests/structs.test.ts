@@ -40,10 +40,10 @@ let rotate_pair = (point: Pair) => Pair (
         second = point.first,
     }
 );
-let len_squared = (point: Pair) => i32 (
+let len_squared = (point: Pair) => (
     point.first * point.first + point.second * point.second
 );
-let (export wasm) len_rotated_squared = (x:i32) => i32 (
+let (export wasm) len_rotated_squared = (x:i32) => (
     len_squared(rotate_pair{
         first = x,
         second = 2,
@@ -69,7 +69,7 @@ let normalize = (input: Point) => Point (
         y = input.y - input.x,
     }
 );
-let (export wasm) sum_coords = (value: i32) => i32 (
+let (export wasm) sum_coords = (value: i32) => (
     let normalized = normalize{
         x = value + 1,
         y = value - 1,

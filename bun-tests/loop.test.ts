@@ -33,7 +33,7 @@ async function compileAndLoad(silkCode: string, basename: string) {
 
 test("loop can compute factorial", async () => {
     const silkCode = `
-    let (export wasm) factorial = (limit: i32) => i32 (
+    let (export wasm) factorial = (limit: i32) => (
         let mut acc = 1;
         let mut iter = limit;
         loop (
@@ -53,7 +53,7 @@ test("loop can compute factorial", async () => {
 
 test("loop break returns value", async () => {
     const silkCode = `
-    let (export wasm) first_non_positive = (start: i32) => i32 (
+    let (export wasm) first_non_positive = (start: i32) => (
         let mut current = start;
         loop (
             if current <= 0 then (

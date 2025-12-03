@@ -26,7 +26,7 @@ let range_next = (mut range: Range) => Option(i32) (
     ) else Option(i32)::None
 );
 
-let (export wasm) sum_range = (range: Range) => i32 (
+let (export wasm) sum_range = (range: Range) => (
     let mut total = 0;
     let mut current_range = range;
     while let Option(i32)::Some(value) = range_next(current_range) do (

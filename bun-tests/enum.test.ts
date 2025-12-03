@@ -43,7 +43,7 @@ async function compileExpectError(silkCode: string) {
 test("enum construction and matching", async () => {
     const silkCode = `
     let IntOption = enum { Some = i32, None = {} };
-    let (export wasm) unwrap_or_zero = (x: i32) => i32 (
+    let (export wasm) unwrap_or_zero = (x: i32) => (
         let value = if x > 0 then (
             IntOption::Some(x)
         ) else (
@@ -79,7 +79,7 @@ test("enum intrinsic can be aliased", async () => {
     const silkCode = `
     let EnumFactory = enum;
     let Flag = EnumFactory { On = {}, Off = {} };
-    let (export wasm) as_bool = {flag: i32} => i32 (
+    let (export wasm) as_bool = {flag: i32} => (
         let value = if flag > 0 then (
             Flag::On
         ) else (
@@ -103,7 +103,7 @@ test("enum intrinsic can be aliased", async () => {
 test("enum patterns require defined enum types", async () => {
     const silkCode = `
     let Opt = enum { Some = i32, None = {} };
-    let (export wasm) demo = {} => i32 (
+    let (export wasm) demo = {} => (
         let value = Opt::Some(1);
         if let Missing::Some(v) = value then ( v ) else ( 0 )
     );
@@ -119,7 +119,7 @@ test("enum patterns respect variant enum types", async () => {
     const silkCode = `
     let First = enum { Some = i32, None = {} };
     let Second = enum { Some = {}, None = {} };
-    let (export wasm) check = {} => i32 (
+    let (export wasm) check = {} => (
         let value = First::Some(3);
         if let Second::Some = value then ( 1 ) else ( 0 )
     );
