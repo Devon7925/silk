@@ -713,6 +713,7 @@ pub fn parse_struct_binding_pattern(file: &str) -> Result<(BindingPattern, &str)
     parse_struct_binding_pattern_with_source(file, file)
 }
 
+#[cfg(test)]
 fn parse_struct_binding_pattern_with_source<'a>(
     source: &'a str,
     file: &'a str,
