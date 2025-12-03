@@ -311,7 +311,7 @@ fn parse_match_expression_with_source<'a>(
             remaining = rest;
             break;
         }
-        let (branch_expr, rest) = parse_individual_expression_with_source(source, remaining)?;
+        let (branch_expr, rest) = parse_operation_expression_with_guard(source, remaining)?;
         let Expression::Function {
             parameter, body, ..
         } = branch_expr
