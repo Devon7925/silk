@@ -398,7 +398,7 @@ pub fn interpret_expression(
                 branch_type(&inferred_else_expr, &base_context)?;
 
             if !types_equivalent(&then_type, &else_type) {
-                if then_diverges || else_diverges {
+                if !then_diverges && !else_diverges {
                     return Err(diagnostic("Type mismatch between if branches", span));
                 }
             }
