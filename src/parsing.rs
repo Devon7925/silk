@@ -216,8 +216,8 @@ impl Expression {
             | Expression::While { span, .. }
             | Expression::Assignment { span, .. }
             | Expression::EnumValue { span, .. }
-            | Expression::EnumConstructor { span, .. } => *span,
-            Expression::AttachImplementation { span, .. }
+            | Expression::EnumConstructor { span, .. }
+            | Expression::AttachImplementation { span, .. }
             | Expression::Function { span, .. }
             | Expression::FunctionType { span, .. }
             | Expression::Operation { span, .. }
@@ -434,34 +434,9 @@ fn diagnostic_at_eof(source: &str, message: impl Into<String>) -> Diagnostic {
     diagnostic_here(source, eof, 0, message)
 }
 
-pub fn parse_let(file: &str) -> Option<&str> {
-    if file
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect::<String>()
-        != "let"
-    {
-        return None;
-    }
-    file.strip_prefix("let")
-}
-
-pub fn parse_eq(file: &str) -> Option<&str> {
-    file.strip_prefix("=")
-}
-
-pub fn parse_type_decl(file: &str) -> Option<&str> {
-    file.strip_prefix(":")
-}
-
 fn parse_semicolon<'a>(source: &'a str, file: &'a str) -> Result<&'a str, Diagnostic> {
     file.strip_prefix(";")
         .ok_or_else(|| diagnostic_here(source, file, 1, "Expected ;"))
-}
-
-pub fn parse_whitespace(file: &str) -> Option<&str> {
-    file.starts_with(char::is_whitespace)
-        .then(|| file.trim_start())
 }
 
 pub fn parse_optional_whitespace(file: &str) -> &str {
@@ -527,25 +502,12 @@ pub fn parse_literal(file: &str) -> Option<(ExpressionLiteral, &str)> {
     ))
 }
 
-fn parse_binding_pattern_with_source<'a>(
-    source: &'a str,
-    file: &'a str,
-) -> Result<(BindingPattern, &'a str), Diagnostic> {
-    let file = parse_optional_whitespace(file);
-    let annotation_start_slice = file;
-    let (pattern_expression, remaining) = parse_operation_expression_with_guard(source, file)?;
-
-    let pattern =
-        pattern_expression_to_binding_pattern(source, pattern_expression, annotation_start_slice)?;
-
-    Ok((pattern, remaining))
-}
-
 #[test]
 fn test_enum_pattern_parse2() {
     let source = "Option::Some(value)";
-    let (pattern, remaining) = parse_binding_pattern_with_source(source, source).unwrap();
+    let (pattern, remaining) = parse_operation_expression_with_guard(source, source).unwrap();
     assert!(remaining.is_empty());
+    let pattern = pattern_expression_to_binding_pattern(pattern).unwrap();
 
     match pattern {
         BindingPattern::EnumVariant {
@@ -571,10 +533,51 @@ fn test_enum_pattern_parse2() {
     }
 }
 
+fn expression_to_lvalue(expression: Expression) -> Result<LValue, Diagnostic> {
+    match expression {
+        Expression::Identifier(identifier, source_span) => {
+            Ok(LValue::Identifier(identifier, source_span))
+        }
+        Expression::PropertyAccess {
+            object,
+            property,
+            span,
+        } => {
+            let object_lvalue = expression_to_lvalue(*object)?;
+            Ok(LValue::PropertyAccess {
+                object: Box::new(object_lvalue),
+                property,
+                span,
+            })
+        }
+        Expression::EnumAccess { .. }
+        | Expression::Struct { .. }
+        | Expression::Literal { .. }
+        | Expression::FunctionCall { .. }
+        | Expression::EnumValue { .. }
+        | Expression::EnumConstructor { .. }
+        | Expression::IntrinsicType(..)
+        | Expression::If { .. }
+        | Expression::AttachImplementation { .. }
+        | Expression::Function { .. }
+        | Expression::FunctionType { .. }
+        | Expression::IntrinsicOperation(..)
+        | Expression::EnumType(..)
+        | Expression::Match { .. }
+        | Expression::Operation { .. }
+        | Expression::Assignment { .. }
+        | Expression::Binding(..)
+        | Expression::Block(..)
+        | Expression::Diverge { .. }
+        | Expression::Loop { .. }
+        | Expression::While { .. } => {
+            Err(Diagnostic::new("Invalid binding pattern expression").with_span(expression.span()))
+        }
+    }
+}
+
 fn pattern_expression_to_binding_pattern(
-    source: &str,
     pattern_expression: Expression,
-    annotation_start_slice: &str,
 ) -> Result<BindingPattern, Diagnostic> {
     match pattern_expression {
         Expression::Literal(expression_literal, source_span) => {
@@ -586,8 +589,7 @@ fn pattern_expression_to_binding_pattern(
         Expression::Struct(items, source_span) => {
             let mut field_patterns = Vec::new();
             for (identifier, expr) in items {
-                let field_pattern =
-                    pattern_expression_to_binding_pattern(source, expr, annotation_start_slice)?;
+                let field_pattern = pattern_expression_to_binding_pattern(expr)?;
                 field_patterns.push((identifier, field_pattern));
             }
             Ok(BindingPattern::Struct(field_patterns, source_span))
@@ -598,8 +600,7 @@ fn pattern_expression_to_binding_pattern(
             right,
             span,
         } if operator == ":" => {
-            let left_pattern =
-                pattern_expression_to_binding_pattern(source, *left, annotation_start_slice)?;
+            let left_pattern = pattern_expression_to_binding_pattern(*left)?;
             Ok(BindingPattern::TypeHint(
                 Box::new(left_pattern),
                 right,
@@ -616,24 +617,12 @@ fn pattern_expression_to_binding_pattern(
             } => Ok(BindingPattern::EnumVariant {
                 enum_type: enum_expr,
                 variant,
-                payload: Some(Box::new(pattern_expression_to_binding_pattern(
-                    source,
-                    *argument,
-                    annotation_start_slice,
-                )?)),
+                payload: Some(Box::new(pattern_expression_to_binding_pattern(*argument)?)),
                 span,
             }),
             other => Ok(BindingPattern::Annotated {
-                annotations: extract_binding_annotations_from_expression(
-                    source,
-                    other,
-                    annotation_start_slice,
-                )?,
-                pattern: Box::new(pattern_expression_to_binding_pattern(
-                    source,
-                    *argument,
-                    annotation_start_slice,
-                )?),
+                annotations: extract_binding_annotations_from_expression(other)?,
+                pattern: Box::new(pattern_expression_to_binding_pattern(*argument)?),
                 span,
             }),
         },
@@ -671,9 +660,7 @@ fn pattern_expression_to_binding_pattern(
 }
 
 fn extract_binding_annotations_from_expression(
-    source: &str,
     expression: Expression,
-    annotation_start_slice: &str,
 ) -> Result<Vec<BindingAnnotation>, Diagnostic> {
     match expression {
         Expression::Identifier(Identifier(id), span) if id == "mut" => {
@@ -686,92 +673,12 @@ fn extract_binding_annotations_from_expression(
                 Ok(vec![BindingAnnotation::Export(*argument, ann_span)])
             }
             other => {
-                let mut annotations = extract_binding_annotations_from_expression(
-                    source,
-                    other,
-                    annotation_start_slice,
-                )?;
-                annotations.extend(extract_binding_annotations_from_expression(
-                    source,
-                    *argument,
-                    annotation_start_slice,
-                )?);
+                let mut annotations = extract_binding_annotations_from_expression(other)?;
+                annotations.extend(extract_binding_annotations_from_expression(*argument)?);
                 Ok(annotations)
             }
         },
-        _ => Err(diagnostic_here(
-            source,
-            annotation_start_slice,
-            1, //todo: improve span
-            "Invalid binding annotation",
-        )),
-    }
-}
-
-#[cfg(test)]
-pub fn parse_struct_binding_pattern(file: &str) -> Result<(BindingPattern, &str), Diagnostic> {
-    parse_struct_binding_pattern_with_source(file, file)
-}
-
-#[cfg(test)]
-fn parse_struct_binding_pattern_with_source<'a>(
-    source: &'a str,
-    file: &'a str,
-) -> Result<(BindingPattern, &'a str), Diagnostic> {
-    let start_slice = file;
-    let mut remaining = file.strip_prefix("{").ok_or_else(|| {
-        diagnostic_here(
-            source,
-            file,
-            1,
-            "Expected { to start struct binding pattern",
-        )
-    })?;
-    let mut fields = Vec::new();
-    let mut tuple_index = 0usize;
-
-    loop {
-        remaining = parse_optional_whitespace(remaining);
-
-        if let Some(rest) = remaining.strip_prefix("}") {
-            let span = consumed_span(source, start_slice, rest);
-            return Ok((BindingPattern::Struct(fields, span), rest));
-        }
-
-        if let Some((field_identifier, after_identifier)) = parse_identifier(remaining) {
-            let after_ws = parse_optional_whitespace(after_identifier);
-            if let Some(rest_after_equals) = after_ws.strip_prefix("=") {
-                let rest_after_equals = parse_optional_whitespace(rest_after_equals);
-                let (field_pattern, rest) =
-                    parse_binding_pattern_with_source(source, rest_after_equals)?;
-                fields.push((field_identifier, field_pattern));
-                remaining = parse_optional_whitespace(rest);
-            } else {
-                let (field_pattern, rest) = parse_binding_pattern_with_source(source, remaining)?;
-                fields.push((Identifier(tuple_index.to_string()), field_pattern));
-                tuple_index += 1;
-                remaining = parse_optional_whitespace(rest);
-            }
-        } else {
-            let (field_pattern, rest) = parse_binding_pattern_with_source(source, remaining)?;
-            fields.push((Identifier(tuple_index.to_string()), field_pattern));
-            tuple_index += 1;
-            remaining = parse_optional_whitespace(rest);
-        }
-
-        if let Some(rest) = remaining.strip_prefix("}") {
-            let span = consumed_span(source, start_slice, rest);
-            return Ok((BindingPattern::Struct(fields, span), rest));
-        }
-
-        remaining = remaining.strip_prefix(",").ok_or_else(|| {
-            diagnostic_here(
-                source,
-                remaining,
-                1,
-                "Expected , or } in struct binding pattern",
-            )
-        })?;
+        _ => Err(Diagnostic::new("Invalid binding annotation").with_span(expression.span())),
     }
 }
 
@@ -828,25 +735,22 @@ pub fn parse_operator(file: &str) -> Option<(String, &str)> {
         .take_while(|c| operator_chars.contains(c))
         .collect::<String>();
 
-    if operator == "=" {
-        return None;
-    }
-
     let remaining = &file[operator.len()..];
     Some((operator, remaining))
 }
 
 fn operator_precedence(operator: &str) -> u8 {
     match operator {
-        "" | "::" | "." => 7,
-        ":" => 6,
-        "*" | "/" => 5,
-        "+" | "-" => 4,
-        "==" | "!=" | "<" | ">" | "<=" | ">=" => 3,
-        "&&" => 2,
-        "||" | "^" => 1,
-        "=>" | "->" => 0,
-        _ => 0,
+        "" | "::" | "." => 8,
+        ":" => 7,
+        "*" | "/" => 6,
+        "+" | "-" => 5,
+        "==" | "!=" | "<" | ">" | "<=" | ">=" => 4,
+        "&&" => 3,
+        "||" | "^" => 2,
+        "=>" | "->" => 1,
+        ":=" | "=" => 0,
+        _ => 5,
     }
 }
 
@@ -1125,9 +1029,6 @@ fn parse_isolated_expression_with_source_with_guard<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Result<(Expression, &'a str), Diagnostic> {
-    if let Some(binding_parse) = parse_binding(source, file) {
-        return binding_parse;
-    }
     if let Some(return_parse) = parse_return_expression_with_source(source, file) {
         return return_parse;
     }
@@ -1321,8 +1222,26 @@ fn parse_operation_expression_with_min_precedence<'a>(
         })?;
         let span = left.span().merge(&right.span());
         operand_stack.push(match operator.as_str() {
+            "=" => {
+                let target = expression_to_lvalue(left)?;
+                Expression::Assignment {
+                    target,
+                    expr: Box::new(right),
+                    span,
+                }
+            }
+            ":=" => {
+                let pattern = pattern_expression_to_binding_pattern(left)?;
+                Expression::Binding(
+                    Box::new(Binding {
+                        pattern,
+                        expr: right,
+                    }),
+                    span,
+                )
+            }
             "=>" => {
-                let pattern = pattern_expression_to_binding_pattern(source, left, source)?; // todo: improve/check span
+                let pattern = pattern_expression_to_binding_pattern(left)?;
                 Expression::Function {
                     parameter: pattern,
                     return_type: None,
@@ -1420,49 +1339,6 @@ fn parse_operation_expression_with_min_precedence<'a>(
     Ok((final_expression, remaining))
 }
 
-fn parse_binding<'a>(
-    source: &'a str,
-    file: &'a str,
-) -> Option<Result<(Expression, &'a str), Diagnostic>> {
-    let start_slice = file;
-    let file = parse_let(file)?;
-
-    fn parse_binding_inner<'a>(
-        source: &'a str,
-        file: &'a str,
-    ) -> Result<(Binding, &'a str), Diagnostic> {
-        let file = parse_whitespace(file)
-            .ok_or_else(|| diagnostic_here(source, file, 1, "Expected whitespace after let"))?;
-        let (pattern, file) = parse_binding_pattern_with_source(source, file)?;
-        let file = parse_optional_whitespace(file);
-        let file = parse_eq(file)
-            .ok_or_else(|| diagnostic_here(source, file, 1, "Expected = after binding pattern"))?;
-        let file = parse_optional_whitespace(file);
-        // Use min_precedence=2 to stop before && (precedence 1) and || (precedence 0)
-        // This enables let chains: "let x = a && b" parses as "(let x = a) && b"
-        let (expr, file) = parse_operation_expression_with_min_precedence(source, file, 0)?;
-
-        Ok((Binding { pattern, expr }, file))
-    }
-
-    Some(
-        parse_binding_inner(source, file).map(|(binding, remaining)| {
-            let span = consumed_span(source, start_slice, remaining);
-            (Expression::Binding(Box::new(binding), span), remaining)
-        }),
-    )
-}
-
-fn parse_individual_expression_with_source<'a>(
-    source: &'a str,
-    file: &'a str,
-) -> Result<(Expression, &'a str), Diagnostic> {
-    if let Some(binding_parse) = parse_binding(source, file) {
-        return binding_parse;
-    }
-    parse_assignment_expression_with_source(source, file)
-}
-
 pub fn parse_block(file: &str) -> Result<(Expression, &str), Diagnostic> {
     parse_block_with_terminators(file, file, &[])
 }
@@ -1487,7 +1363,7 @@ fn parse_block_with_terminators<'a>(
             break;
         }
 
-        let (expression, rest) = parse_individual_expression_with_source(source, remaining)?;
+        let (expression, rest) = parse_operation_expression_with_guard(source, remaining)?;
         expressions.push(expression);
         remaining = parse_optional_whitespace(rest);
         ended_with_semicolon = false;
@@ -1538,8 +1414,8 @@ fn parse_block_with_terminators<'a>(
 fn parse_basic_let() {
     let parsed = parse_block(
         "
-let x = 42;
-let y: i32 = x
+x := 42;
+y: i32 := x
     ",
     )
     .unwrap();
@@ -1582,8 +1458,8 @@ let y: i32 = x
 fn parse_binding_with_export_annotation() {
     let parsed = parse_block(
         "
-let (export js) foo = 42;
-let (export wasm) (export js) bar = foo;
+(export js) foo := 42;
+(export wasm) (export js) bar := foo;
 bar
     ",
     )
@@ -1629,7 +1505,7 @@ bar
 fn parse_struct_pattern_with_inner_multiple_annotations() {
     let parsed = parse_block(
         "
-let { foo = (export js) mut foo_binding, bar } = value;
+{ foo = (export js) mut foo_binding, bar } := value;
 foo_binding
     ",
     )
@@ -1664,7 +1540,7 @@ foo_binding
 fn parse_struct_pattern_with_inner_export_annotation() {
     let parsed = parse_block(
         "
-let { foo = (export js) foo_binding, bar } = value;
+{ foo = (export js) foo_binding, bar } := value;
 foo_binding
     ",
     )
@@ -1693,7 +1569,7 @@ foo_binding
 fn parse_mutable_binding_and_assignment() {
     let parsed = parse_block(
         "
-let mut foo = 1;
+mut foo := 1;
 foo = 2
     ",
     )
@@ -1794,7 +1670,7 @@ fn parse_operation_expression_precedence() {
 fn parse_function_binding_and_call() {
     let (expr, remaining) = parse_block(
         "
-let foo = (bar: i32) => bar + 1;
+foo := (bar: i32) => bar + 1;
 foo(123)
     ",
     )
@@ -1928,9 +1804,11 @@ fn parse_struct_literal_named_and_tuple_fields() {
 
 #[test]
 fn parse_struct_binding_pattern_named_fields() {
+    let source = "{foo = first: i32, second: i32}";
     let (pattern, remaining) =
-        parse_struct_binding_pattern("{foo = first: i32, second: i32}").expect("pattern parse");
+        parse_operation_expression_with_guard(source, source).expect("pattern parse");
     assert!(remaining.trim().is_empty());
+    let pattern = pattern_expression_to_binding_pattern(pattern).unwrap();
     let BindingPattern::Struct(fields, _) = pattern else {
         panic!("expected struct pattern");
     };
@@ -2003,11 +1881,11 @@ fn parse_struct_property_access_then_call() {
 
 #[test]
 fn diagnostics_include_binding_pattern_source_reference() {
-    let source = "let = 5;";
+    let source = ":= 5;";
     let err = parse_block(source).expect_err("binding should fail");
     let rendered = err.render_with_source(source);
     assert!(rendered.contains("Expected expression"));
-    assert!(rendered.contains("line 1, column 5"));
+    assert!(rendered.contains("line 1, column 1"));
     assert!(rendered.contains("^"));
 }
 

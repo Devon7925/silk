@@ -29,10 +29,10 @@ async function compileAndLoad(silkCode: string) {
 
 test("shadowing in block", async () => {
     const silkCode = `
-    let (export wasm) shadow_test = (x: i32) => (
-        let y = 10;
+    (export wasm) shadow_test := (x: i32) => (
+        y := 10;
         (
-            let y = 20;
+            y := 20;
             x + y
         )
     );
@@ -45,8 +45,8 @@ test("shadowing in block", async () => {
 
 test("multiple exports", async () => {
     const silkCode = `
-    let (export wasm) add = (x: i32) => ( x + 1 );
-    let (export wasm) sub = (x: i32) => ( x - 1 );
+    (export wasm) add := (x: i32) => ( x + 1 );
+    (export wasm) sub := (x: i32) => ( x - 1 );
     {}
     `;
     const exports = await compileAndLoad(silkCode);
@@ -56,7 +56,7 @@ test("multiple exports", async () => {
 
 test("arithmetic edge cases", async () => {
     const silkCode = `
-    let (export wasm) div_test = (x: i32) => ( 100 / x );
+    (export wasm) div_test := (x: i32) => ( 100 / x );
     {}
     `;
     const exports = await compileAndLoad(silkCode);
@@ -66,10 +66,10 @@ test("arithmetic edge cases", async () => {
 
 test("deeply nested bindings", async () => {
     const silkCode = `
-    let (export wasm) nested_test = (x: i32) => (
-        let a = x + 1;
-        let b = a * 2;
-        let c = b + a; 
+    (export wasm) nested_test := (x: i32) => (
+        a := x + 1;
+        b := a * 2;
+        c := b + a; 
         c
     );
     {}
@@ -84,10 +84,10 @@ test("deeply nested bindings", async () => {
 
 test("if expressions evaluate and type check", async () => {
     const silkCode = `
-    let (export wasm) choose = (flag: bool) => (
+    (export wasm) choose := (flag: bool) => (
         if flag then 10 else 20
     );
-    let (export wasm) ladder = (flag: bool) => (
+    (export wasm) ladder := (flag: bool) => (
         if false then 1 else if flag then 2 else 3
     );
     {} 
@@ -101,7 +101,7 @@ test("if expressions evaluate and type check", async () => {
 
 test("if branch type mismatches are reported", async () => {
     const silkCode = `
-    let (export wasm) bad = {} => (
+    (export wasm) bad := {} => (
         if true then ( 1; ) else ( 2 )
     );
     {}

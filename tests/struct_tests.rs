@@ -4,14 +4,14 @@ use silk::test_support::evaluate_text_to_expression;
 #[test]
 fn functions_accept_struct_parameters() {
     let program = "
-        let rotate_pair = {first = first: i32, second = second: i32} => (
+        rotate_pair := {first = first: i32, second = second: i32} => (
             {
                 first = 0 - second,
                 second = first,
             }
         );
 
-        let rotated = rotate_pair { first = 3, second = 4 };
+        rotated := rotate_pair { first = 3, second = 4 };
         rotated.first + rotated.second
     ";
 
@@ -27,7 +27,7 @@ fn functions_accept_struct_parameters() {
 #[test]
 fn struct_patterns_require_all_fields() {
     let program = "
-        let sum_pair = {first = first: i32, second = second: i32} => (
+        sum_pair := {first = first: i32, second = second: i32} => (
             first + second
         );
 
@@ -47,8 +47,8 @@ fn struct_patterns_require_all_fields() {
 #[test]
 fn struct_variables_support_property_access() {
     let program = "
-        let pair = { first = 2, second = 5 };
-        let mirrored = { first = pair.second, second = pair.first };
+        pair := { first = 2, second = 5 };
+        mirrored := { first = pair.second, second = pair.first };
         mirrored.second
     ";
 
@@ -64,14 +64,14 @@ fn struct_variables_support_property_access() {
 #[test]
 fn functions_can_return_structs() {
     let program = "
-        let make_pair = (x: i32) => (
+        make_pair := (x: i32) => (
             {
                 first = x,
                 second = x + 1,
             }
         );
 
-        let pair = make_pair 5;
+        pair := make_pair 5;
         pair.second
     ";
 

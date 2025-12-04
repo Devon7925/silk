@@ -4,11 +4,11 @@ use silk::test_support::evaluate_text_to_expression;
 #[test]
 fn functions_can_be_passed_as_arguments() {
     let program = "
-        let apply = { func = func: (i32 -> i32), value = value: i32 } => (
+        apply := { func = func: (i32 -> i32), value = value: i32 } => (
             func value
         );
 
-        let increment = (x: i32) => (
+        increment := (x: i32) => (
             x + 1
         );
 
@@ -27,13 +27,13 @@ fn functions_can_be_passed_as_arguments() {
 #[test]
 fn functions_can_be_returned() {
     let program = "
-        let make_adder = (base: i32) => (
+        make_adder := (base: i32) => (
             (offset: i32) => (
                 base + offset
             )
         );
 
-        let add_three = make_adder 3;
+        add_three := make_adder 3;
         add_three 7
     ";
 
@@ -49,7 +49,7 @@ fn functions_can_be_returned() {
 #[test]
 fn return_exits_function_early() {
     let program = "
-        let early = (x: i32) => (
+        early := (x: i32) => (
             return x + 1;
             x + 100
         );

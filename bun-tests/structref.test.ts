@@ -30,17 +30,17 @@ async function compileToInstance(code: string) {
 
 test("wasm structref: passing and returning structs", async () => {
     const source = `
-    let Point: type = { x = i32, y = i32 };
+    Point: type := { x = i32, y = i32 };
     
-    let (export wasm) create_point = ({x: i32, y: i32}) => Point (
+    (export wasm) create_point := ({x: i32, y: i32}) => (
         { x = x, y = y }
     );
 
-    let (export wasm) get_x = (p: Point) => (
+    (export wasm) get_x := (p: Point) => (
         p.x
     );
 
-    let (export wasm) get_y = (p: Point) => (
+    (export wasm) get_y := (p: Point) => (
         p.y
     );
     `;
@@ -61,17 +61,17 @@ test("wasm structref: passing and returning structs", async () => {
 
 test("wasm structref: nested structs", async () => {
     const source = `
-    let Point: type = { x = i32, y = i32 };
-    let Rect: type = { top_left = Point, bottom_right = Point };
+    Point: type := { x = i32, y = i32 };
+    Rect: type := { top_left = Point, bottom_right = Point };
 
-    let (export wasm) create_rect = ({x1: i32, y1: i32, x2: i32, y2: i32}) => Rect (
+    (export wasm) create_rect := ({x1: i32, y1: i32, x2: i32, y2: i32}) => (
         {
             top_left = { x = x1, y = y1 },
             bottom_right = { x = x2, y = y2 },
         }
     );
 
-    let (export wasm) get_width = (r: Rect) => (
+    (export wasm) get_width := (r: Rect) => (
         r.bottom_right.x - r.top_left.x
     );
     `;

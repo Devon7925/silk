@@ -1,17 +1,17 @@
-let Range = {
+Range := {
     value = i32,
     min = i32,
     max = i32,
 };
 
-let Option = (T: type) => type (
+Option := (T: type) => (
     enum {
         Some = T,
         None = {},
     }
 );
 
-let (export wasm) construct_range = {min: i32, max: i32} => Range (
+(export wasm) construct_range := {min: i32, max: i32} => (
     {
         value = min,
         min = min,
@@ -19,17 +19,17 @@ let (export wasm) construct_range = {min: i32, max: i32} => Range (
     }
 );
 
-let range_next = (mut range: Range) => Option(i32) (
+range_next := (mut range: Range) => (
     if range.value < range.max then (
         range.value = range.value + 1;
         Option(i32)::Some(range.value)
     ) else Option(i32)::None
 );
 
-let (export wasm) sum_range = (range: Range) => (
-    let mut total = 0;
-    let mut current_range = range;
-    while let Option(i32)::Some(value) = range_next(current_range) do (
+(export wasm) sum_range := (range: Range) => (
+    mut total := 0;
+    mut current_range := range;
+    while Option(i32)::Some(value) := range_next(current_range) do (
         total = total + value;
     );
     total

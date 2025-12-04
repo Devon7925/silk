@@ -29,8 +29,8 @@ async function compileAndLoad(silkCode: string) {
 
 test("compiles and runs wasm with bindings", async () => {
     const silkCode = `
-    let (export wasm) double_add = (x: i32) => (
-        let y = x * 2;
+    (export wasm) double_add := (x: i32) => (
+        y := x * 2;
         y + y
     );
     {}
@@ -42,8 +42,8 @@ test("compiles and runs wasm with bindings", async () => {
 
 test("supports mutable assignments in wasm exports", async () => {
     const silkCode = `
-    let (export wasm) increment_twice = (x: i32) => (
-        let mut total = x;
+    (export wasm) increment_twice := (x: i32) => (
+        mut total := x;
         total = total + 1;
         total = total + 1;
         total

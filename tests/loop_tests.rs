@@ -3,9 +3,9 @@ use silk::test_support::evaluate_text_to_expression;
 #[test]
 fn loop_can_compute_factorial() {
     let program = "
-        let factorial = (limit: i32) => (
-            let mut acc = 1;
-            let mut iter = limit;
+        factorial := (limit: i32) => (
+            mut acc := 1;
+            mut iter := limit;
             loop (
                 acc = acc * iter;
                 iter = iter - 1;
@@ -33,9 +33,9 @@ fn loop_can_compute_factorial() {
 #[test]
 fn while_can_compute_factorial() {
     let program = "
-        let factorial = (limit: i32) => (
-            let mut acc = 1;
-            let mut iter = limit;
+        factorial := (limit: i32) => (
+            mut acc := 1;
+            mut iter := limit;
             while iter > 0 do (
                 acc = acc * iter;
                 iter = iter - 1;

@@ -4,8 +4,8 @@ use silk::test_support::evaluate_text_to_expression;
 #[test]
 fn match_selects_correct_branch() {
     let program = "
-        let Option = enum { Some = i32, None = {} };
-        let choose = (option: Option) => (
+        Option := enum { Some = i32, None = {} };
+        choose := (option: Option) => (
             match option with (
                 Option::Some(value) => value,
                 Option::None => 0
@@ -31,8 +31,8 @@ fn match_selects_correct_branch() {
 #[test]
 fn match_allows_literal_branch() {
     let program = "
-        let Option = enum { Some = i32, None = {} };
-        let choose = (option: Option) => (
+        Option := enum { Some = i32, None = {} };
+        choose := (option: Option) => (
             match option with (
                 Option::Some(value) => value,
                 else => 0
@@ -58,7 +58,7 @@ fn match_allows_literal_branch() {
 #[test]
 fn match_requires_exhaustive_or_else() {
     let program = "
-        let Option = enum { Some = i32, None = {} };
+        Option := enum { Some = i32, None = {} };
         match Option::None with (
             Option::Some(_) => 1
         )

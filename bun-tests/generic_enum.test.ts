@@ -30,18 +30,18 @@ async function compileToInstance(code: string) {
 
 test("generic enum: Option<T>", async () => {
     const source = `
-    let Option = (T: type) => type (
+    Option := (T: type) => (
         enum { Some = T, None = {} }
     );
 
-    let (export wasm) unwrap_or_zero = (x: i32) => (
-        let val: Option(i32) = if x > 0 then (
+    (export wasm) unwrap_or_zero := (x: i32) => (
+        val: Option(i32) := if x > 0 then (
             Option(i32)::Some(x)
         ) else (
             Option(i32)::None
         );
 
-        if let Option(i32)::Some(v) = val then (
+        if Option(i32)::Some(v) := val then (
             v
         ) else (
             0
@@ -58,18 +58,18 @@ test("generic enum: Option<T>", async () => {
 
 test("generic enum: nested generics", async () => {
     const source = `
-    let Option = (T: type) => type (
+    Option := (T: type) => (
         enum { Some = T, None = {} }
     );
-    let Container = (T: type) => type (
+    Container := (T: type) => (
         enum { Wrapped = Option(T), Empty = {} }
     );
 
-    let (export wasm) check = (x: i32) => (
-        let c = Container(i32)::Wrapped(Option(i32)::Some(x));
+    (export wasm) check := (x: i32) => (
+        c := Container(i32)::Wrapped(Option(i32)::Some(x));
         
-        if let Container(i32)::Wrapped(opt) = c then (
-            if let Option(i32)::Some(val) = opt then (
+        if Container(i32)::Wrapped(opt) := c then (
+            if Option(i32)::Some(val) := opt then (
                 val
             ) else ( 0 )
         ) else ( 0 )

@@ -1,4 +1,4 @@
-let (export wasm) add_one = (x: i32) => (
+(export wasm) add_one := (x: i32) => (
     x + 1
 );
 {}

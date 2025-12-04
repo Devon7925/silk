@@ -4,7 +4,7 @@ use wasmparser::{Operator, Parser, Payload};
 #[test]
 fn compiles_const_wasm_export() {
     let program = r#"
-let (export wasm) answer = {} => (
+(export wasm) answer := {} => (
     42
 );
 answer
@@ -51,7 +51,7 @@ answer
 #[test]
 fn compiles_parameterized_wasm_export() {
     let program = r#"
-let (export wasm) add_one = (x: i32) => (
+(export wasm) add_one := (x: i32) => (
     x + 1
 );
 {}
@@ -107,7 +107,7 @@ let (export wasm) add_one = (x: i32) => (
 #[test]
 fn compile_without_wasm_exports_returns_empty() {
     let program = r#"
-let answer = 5;
+answer := 5;
 answer
 "#;
     let wasm = compile(program.to_string()).expect("compilation should not fail");
@@ -117,7 +117,7 @@ answer
 #[test]
 fn exporting_non_function_reports_diagnostic() {
     let program = r#"
-let (export wasm) answer: i32 = 42;
+(export wasm) answer: i32 := 42;
 answer
 "#;
     let err = compile(program.to_string()).expect_err("expected failure");
@@ -132,8 +132,8 @@ answer
 #[test]
 fn compiles_wasm_export_with_bindings() {
     let program = r#"
-        let (export wasm) double_add = (x: i32) => (
-            let y = x * 2;
+        (export wasm) double_add := (x: i32) => (
+            y := x * 2;
             y + y
         );
         {}
@@ -145,8 +145,8 @@ fn compiles_wasm_export_with_bindings() {
 #[test]
 fn wasm_emits_assignment_updates() {
     let program = r#"
-        let (export wasm) increment_twice = (x: i32) => (
-            let mut total = x;
+        (export wasm) increment_twice := (x: i32) => (
+            mut total := x;
             total = total + 1;
             total = total + 1;
             total
@@ -203,8 +203,8 @@ fn wasm_emits_assignment_updates() {
 #[test]
 fn wasm_supports_destructured_mut_locals() {
     let program = r#"
-        let (export wasm) destructure_mut = {} => (
-            let mut { first = a, second = b } = { first = 3, second = 4 };
+        (export wasm) destructure_mut := {} => (
+            mut { first = a, second = b } := { first = 3, second = 4 };
             a = a + b;
             a
         );

@@ -6,9 +6,9 @@ use silk::{
 #[test]
 fn while_accumulates_until_limit() {
     let program = "
-        let sum_until = (limit: i32) => (
-            let mut acc = 0;
-            let mut iter = 0;
+        sum_until := (limit: i32) => (
+            mut acc := 0;
+            mut iter := 0;
             while iter < limit do (
                 acc = acc + iter;
                 iter = iter + 1;
@@ -33,7 +33,7 @@ fn while_accumulates_until_limit() {
 #[test]
 fn while_with_initially_false_condition_skips_body() {
     let program = "
-        let mut value = 3;
+        mut value := 3;
         while value < 0 do (
             value = value - 1;
         );
@@ -54,7 +54,7 @@ fn while_with_initially_false_condition_skips_body() {
 #[test]
 fn while_condition_must_be_boolean() {
     let program = "
-        let mut value = 1;
+        mut value := 1;
         while value do (
             value = value - 1;
         );

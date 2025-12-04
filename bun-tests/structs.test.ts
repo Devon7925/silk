@@ -30,20 +30,20 @@ async function compileToInstance(code: string) {
 
 test("compiles struct-heavy wasm export", async () => {
     const silkCode = `
-let Pair: type = {
+Pair: type := {
     first = i32,
     second = i32,
 };
-let rotate_pair = (point: Pair) => Pair (
+rotate_pair := (point: Pair) => (
     {
         first = 0 - point.second,
         second = point.first,
     }
 );
-let len_squared = (point: Pair) => (
+len_squared := (point: Pair) => (
     point.first * point.first + point.second * point.second
 );
-let (export wasm) len_rotated_squared = (x:i32) => (
+(export wasm) len_rotated_squared := (x:i32) => (
     len_squared(rotate_pair{
         first = x,
         second = 2,
@@ -59,18 +59,18 @@ let (export wasm) len_rotated_squared = (x:i32) => (
 
 test("allows structs to flow through wasm boundaries", async () => {
     const silkCode = `
-let Point: type = {
+Point: type := {
     x = i32,
     y = i32,
 };
-let normalize = (input: Point) => Point (
+normalize := (input: Point) => (
     {
         x = input.x - input.y,
         y = input.y - input.x,
     }
 );
-let (export wasm) sum_coords = (value: i32) => (
-    let normalized = normalize{
+(export wasm) sum_coords := (value: i32) => (
+    normalized := normalize{
         x = value + 1,
         y = value - 1,
     };

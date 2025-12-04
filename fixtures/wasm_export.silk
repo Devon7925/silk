@@ -1,4 +1,4 @@
-let (export wasm) answer = {} => (
+(export wasm) answer := {} => (
     42
 );
 answer

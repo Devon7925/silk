@@ -37,10 +37,10 @@ fn assert_final_number(result: Expression, expected: i32) {
 #[test]
 fn test_shadowing_in_block() {
     let program = "
-        let (export wasm) test_shadow = (x: i32) => (
-            let y = 10;
+        (export wasm) test_shadow := (x: i32) => (
+            y := 10;
             (
-                let y = 20;
+                y := 20;
                 x + y
             )
         );
@@ -59,8 +59,8 @@ fn test_shadowing_in_block() {
 #[test]
 fn test_unused_bindings() {
     let program = "
-        let (export wasm) unused_test = (x: i32) => (
-            let unused = 100;
+        (export wasm) unused_test := (x: i32) => (
+            unused := 100;
             x
         );
         {}
@@ -71,9 +71,9 @@ fn test_unused_bindings() {
 #[test]
 fn test_nested_arithmetic() {
     let program = "
-        let (export wasm) math_test = (x: i32) => (
-            let a = x * 2;
-            let b = a + 5;
+        (export wasm) math_test := (x: i32) => (
+            a := x * 2;
+            b := a + 5;
             b / 2
         );
         {}
@@ -84,7 +84,7 @@ fn test_nested_arithmetic() {
 #[test]
 fn test_division_by_zero_errors() {
     let program = "
-        let (export wasm) div_zero = 1 / 0;
+        (export wasm) div_zero := 1 / 0;
         {}
         ";
     let (expression, remaining) = parse_block(program).expect("Failed to parse program text");
@@ -105,7 +105,7 @@ fn test_division_by_zero_errors() {
 #[test]
 fn test_negative_number_literal() {
     let program = "
-        let (export wasm) negative_literal = -5;
+        (export wasm) negative_literal := -5;
         {}
         ";
     let (_result, context) =
@@ -126,7 +126,7 @@ fn test_negative_number_literal() {
 #[test]
 fn test_mutable_assignment_updates_binding() {
     let program = "
-        let mut counter = 1;
+        mut counter := 1;
         counter = counter + 1;
         counter
         ";
@@ -140,9 +140,9 @@ fn test_mutable_assignment_updates_binding() {
 #[test]
 fn test_shadowed_mutable_bindings_respect_scope() {
     let program = "
-        let mut x = 1;
+        mut x := 1;
         (
-            let mut x = 2;
+            mut x := 2;
             x = x + 5;
             x
         );
@@ -158,7 +158,7 @@ fn test_shadowed_mutable_bindings_respect_scope() {
 #[test]
 fn test_mutable_struct_destructuring_propagates_mut() {
     let program = "
-        let mut { first = a, second = b } = { first = 2, second = 3 };
+        mut { first = a, second = b } := { first = 2, second = 3 };
         a = a + b;
         a
         ";
@@ -172,7 +172,7 @@ fn test_mutable_struct_destructuring_propagates_mut() {
 #[test]
 fn test_mutable_struct_property_updates_through_rebinding() {
     let program = "
-        let mut pair = { first = 1, second = 2 };
+        mut pair := { first = 1, second = 2 };
         pair = { first = pair.first + 5, second = pair.second };
         pair.first
         ";
@@ -186,7 +186,7 @@ fn test_mutable_struct_property_updates_through_rebinding() {
 #[test]
 fn test_assignment_requires_mut_annotation() {
     let program = "
-        let counter = 1;
+        counter := 1;
         counter = 2;
         ";
 
@@ -208,7 +208,7 @@ fn test_assignment_requires_mut_annotation() {
 #[test]
 fn test_assignment_respects_type_hints() {
     let program = "
-        let mut counter: i32 = 1;
+        mut counter: i32 := 1;
         counter = true;
         ";
 

@@ -1,5 +1,5 @@
-let (export wasm) add_one_squared = (x: i32) => (
-    let val: i32 = x + 1;
+(export wasm) add_one_squared := (x: i32) => (
+    val: i32 := x + 1;
     val * val
 );
 {}

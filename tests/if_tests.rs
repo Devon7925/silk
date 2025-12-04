@@ -76,7 +76,7 @@ fn empty_struct_branches_are_type_checked() {
 #[test]
 fn return_allows_unbalanced_if_in_statement_position() {
     let program = "
-        let (export wasm) early_exit_loopish = (flag: bool) => (
+        (export wasm) early_exit_loopish := (flag: bool) => (
             if flag then (
                 return 1;
             ) else (

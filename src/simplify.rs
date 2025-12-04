@@ -374,7 +374,7 @@ fn evaluate_text_to_simplified_expression(
 #[test]
 fn interpret_exported_function() {
     let program = "
-let (export js) add_one = (x: i32) => (
+(export js) add_one := (x: i32) => (
     x + 1
 );
 {}

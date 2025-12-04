@@ -3098,13 +3098,13 @@ fn interpret_text_user_defined_function2() {
 #[test]
 fn interpret_let_binding_function() {
     let program = "
-let Level2 = enum { Some = i32, None = {} };
-let Level1 = enum { Some = Level2, None = {} };
+Level2 := enum { Some = i32, None = {} };
+Level1 := enum { Some = Level2, None = {} };
 
-let (export wasm) check = (x: i32) => (
-    let foo = if x > 0 then Level1::Some(Level2::Some(x)) else Level1::None;
+(export wasm) check := (x: i32) => (
+    foo := if x > 0 then Level1::Some(Level2::Some(x)) else Level1::None;
 
-    if let Level1::Some(Level2::Some(b)) = foo then b else 0
+    if Level1::Some(Level2::Some(b)) := foo then b else 0
 );
 {}
     ";
@@ -3115,7 +3115,7 @@ let (export wasm) check = (x: i32) => (
 #[test]
 fn interpret_text_user_defined_function() {
     let program = "
-let foo = (bar: i32) => (
+foo := (bar: i32) => (
     bar + 1
 );
 foo(123)
@@ -3126,7 +3126,7 @@ foo(123)
 #[test]
 fn interpret_text_user_defined_tuple_arguments() {
     let program = "
-let foo2 = {bar1: i32, bar2: i32} => (
+foo2 := {bar1: i32, bar2: i32} => (
     bar1 + bar2
 );
 foo2{100, 24}
@@ -3137,7 +3137,7 @@ foo2{100, 24}
 #[test]
 fn interpret_text_struct_property_access() {
     let program = "
-let point = { x = 5, y = 10 };
+point := { x = 5, y = 10 };
 point.x
     ";
     assert_eq!(evaluate_text_to_number(program), 5);
@@ -3146,7 +3146,7 @@ point.x
 #[test]
 fn interpret_text_struct_property_call() {
     let program = "
-let container = {
+container := {
     inc = (value: i32) => (
         value + 1
     )
@@ -3159,7 +3159,7 @@ container.inc(41)
 #[test]
 fn interpret_binding_with_export_annotation() {
     let program = "
-let (export js) answer: i32 = 42;
+(export js) answer: i32 := 42;
 answer
     ";
     assert_eq!(evaluate_text_to_number(program), 42);
@@ -3192,8 +3192,8 @@ fn interpret_reports_calling_non_function_span() {
 #[test]
 fn interpret_preserves_bindings_in_function() {
     let program = "
-    let (export wasm) double_add = (x: i32) => (
-        let y = x * 2;
+    (export wasm) double_add := (x: i32) => (
+        y := x * 2;
         y + y
     );
     {}
@@ -3230,11 +3230,11 @@ fn interpret_preserves_bindings_in_function() {
 #[test]
 fn interpret_basic_enum_flow() {
     let program = "
-    let IntOption = enum { Some = i32, None = {} };
-    let (export wasm) pick_positive = (x: i32) => (
-        let opt = if x > 0 then IntOption::Some(x) else IntOption::None;
+    IntOption := enum { Some = i32, None = {} };
+    (export wasm) pick_positive := (x: i32) => (
+        opt := if x > 0 then IntOption::Some(x) else IntOption::None;
 
-        if let IntOption::Some(value) = opt then value else 0
+        if IntOption::Some(value) := opt then value else 0
     );
     pick_positive(3)
     ";
@@ -3290,8 +3290,8 @@ fn enum_intrinsic_exposes_function_type() {
 #[test]
 fn enum_intrinsic_can_be_aliased() {
     let program = "
-    let Alias = enum;
-    let IntOption = Alias { Some = i32, None = {} };
+    Alias := enum;
+    IntOption := Alias { Some = i32, None = {} };
     IntOption::None
     ";
 
@@ -3305,9 +3305,9 @@ fn enum_intrinsic_can_be_aliased() {
 #[test]
 fn enum_pattern_rejects_unknown_type() {
     let program = "
-    let Opt = enum { Some = i32, None = {} };
-    let value = Opt::Some(1);
-    if let Missing::Some(v) = value then v else 0
+    Opt := enum { Some = i32, None = {} };
+    value := Opt::Some(1);
+    if Missing::Some(v) := value then v else 0
     ";
 
     let error = match evaluate_text_to_expression(program) {
@@ -3325,11 +3325,11 @@ fn enum_pattern_rejects_unknown_type() {
 #[test]
 fn enum_pattern_requires_matching_type() {
     let program = "
-    let First = enum { Some = i32, None = {} };
-    let Second = enum { Some = {}, None = {} };
-    let check = {} => (
-        let value = First::Some(5);
-        if let Second::Some = value then 1 else 0
+    First := enum { Some = i32, None = {} };
+    Second := enum { Some = {}, None = {} };
+    check := {} => (
+        value := First::Some(5);
+        if Second::Some := value then 1 else 0
     );
     check{}
     ";
@@ -3345,7 +3345,7 @@ fn enum_pattern_requires_matching_type() {
 #[test]
 fn enum_rejects_value_payloads() {
     let program = "
-    let Bad = enum { Value = 1 };
+    Bad := enum { Value = 1 };
     {};
     ";
 

@@ -35,8 +35,8 @@ async function compileAndLoad(silkCode: string, basename: string) {
 describe("match expressions", () => {
   test("match literal number", async () => {
     const code = `
-      let (export wasm) main = {} => (
-        let x = 10;
+      (export wasm) main := {} => (
+        x := 10;
         match x with (
           10 => 1,
           20 => 2,
@@ -51,8 +51,8 @@ describe("match expressions", () => {
 
   test("match literal number else", async () => {
     const code = `
-      let (export wasm) main = {} => (
-        let x = 30;
+      (export wasm) main := {} => (
+        x := 30;
         match x with (
           10 => 1,
           20 => 2,
@@ -67,8 +67,8 @@ describe("match expressions", () => {
 
   test("match boolean", async () => {
     const code = `
-      let (export wasm) main = {} => (
-        let x = true;
+      (export wasm) main := {} => (
+        x := true;
         match x with (
           true => 1,
           false => 0
@@ -82,10 +82,10 @@ describe("match expressions", () => {
 
   test("match enum variant without payload", async () => {
     const code = `
-      let Color = enum { Red = {}, Green = {}, Blue = {} };
+      Color := enum { Red = {}, Green = {}, Blue = {} };
 
-      let (export wasm) main = {} => (
-        let c = Color::Green;
+      (export wasm) main := {} => (
+        c := Color::Green;
         match c with (
           Color::Red => 1,
           Color::Green => 2,
@@ -100,10 +100,10 @@ describe("match expressions", () => {
 
   test("match enum variant with payload", async () => {
     const code = `
-      let Result = enum { Ok = i32, Err = i32 };
+      Result := enum { Ok = i32, Err = i32 };
 
-      let (export wasm) main = {} => (
-        let r = Result::Ok(42);
+      (export wasm) main := {} => (
+        r := Result::Ok(42);
         match r with (
           Result::Ok(v) => v,
           Result::Err(e) => e
@@ -117,10 +117,10 @@ describe("match expressions", () => {
 
   test("match enum variant with payload else", async () => {
     const code = `
-      let Result = enum { Ok = i32, Err = i32 };
+      Result := enum { Ok = i32, Err = i32 };
 
-      let (export wasm) main = {} => (
-        let r = Result::Err(10);
+      (export wasm) main := {} => (
+        r := Result::Err(10);
         match r with (
           Result::Ok(v) => v,
           else => 0
@@ -134,11 +134,11 @@ describe("match expressions", () => {
 
   test("match with block bodies", async () => {
     const code = `
-      let (export wasm) main = {} => (
-        let x = 1;
+      (export wasm) main := {} => (
+        x := 1;
         match x with (
           1 => (
-            let y = 2;
+            y := 2;
             y + 1
           ),
           else => 0

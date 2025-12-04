@@ -29,12 +29,12 @@ async function compileAndLoad(silkCode: string) {
 
 test("functions can be passed as arguments", async () => {
     const silkCode = `
-    let (export wasm) apply_increment = (x: i32) => (
-        let apply = { func = func, value = value } => (
+    (export wasm) apply_increment := (x: i32) => (
+        apply := { func = func: (i32 -> i32), value = value: i32 } => (
             func value
         );
 
-        let increment = (y: i32) => (
+        increment := (y: i32) => (
             y + 1
         );
 
@@ -49,14 +49,14 @@ test("functions can be passed as arguments", async () => {
 
 test("functions can be returned and invoked", async () => {
     const silkCode = `
-    let (export wasm) apply_offset = (offset: i32) => (
-        let make_adder = (base: i32) -> (fn(i32) => i32) (
+    (export wasm) apply_offset := (offset: i32) => (
+        make_adder := (base: i32) => (
             (y: i32) => (
                 base + y
             )
         );
 
-        let add_three = make_adder 3;
+        add_three := make_adder 3;
         add_three offset
     );
     {};
