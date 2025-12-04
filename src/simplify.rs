@@ -3,11 +3,227 @@ use crate::{
     Diagnostic,
     enum_normalization::normalize_enum_application,
     interpret::BindingContext,
-    parsing::{BinaryIntrinsicOperator, Binding, BindingPattern, Expression, IntrinsicOperation},
+    parsing::{
+        BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, Expression,
+        IntrinsicOperation,
+    },
 };
+use std::collections::HashSet;
 
 #[cfg(test)]
-use crate::parsing::{BindingAnnotation, ExpressionLiteral, TargetLiteral};
+use crate::parsing::{ExpressionLiteral, TargetLiteral};
+
+/// Recursively collect all identifier names referenced in an expression
+fn collect_identifiers_in_expression(expr: &Expression, identifiers: &mut HashSet<String>) {
+    match expr {
+        Expression::Identifier(id, _) => {
+            identifiers.insert(id.0.clone());
+        }
+        Expression::Function { body, .. } => {
+            collect_identifiers_in_expression(body, identifiers);
+        }
+        Expression::FunctionCall {
+            function, argument, ..
+        } => {
+            collect_identifiers_in_expression(function, identifiers);
+            collect_identifiers_in_expression(argument, identifiers);
+        }
+        Expression::Block(exprs, _) => {
+            for e in exprs {
+                collect_identifiers_in_expression(e, identifiers);
+            }
+        }
+        Expression::Binding(binding, _) => {
+            collect_identifiers_in_pattern(&binding.pattern, identifiers);
+            collect_identifiers_in_expression(&binding.expr, identifiers);
+        }
+        Expression::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_identifiers_in_expression(condition, identifiers);
+            collect_identifiers_in_expression(then_branch, identifiers);
+            if let Some(else_expr) = else_branch {
+                collect_identifiers_in_expression(else_expr, identifiers);
+            }
+        }
+        Expression::Match {
+            value, branches, ..
+        } => {
+            collect_identifiers_in_expression(value, identifiers);
+            for (branch_pattern, branch_expr) in branches {
+                collect_identifiers_in_pattern(branch_pattern, identifiers);
+                collect_identifiers_in_expression(branch_expr, identifiers);
+            }
+        }
+        Expression::While {
+            condition, body, ..
+        } => {
+            collect_identifiers_in_expression(condition, identifiers);
+            collect_identifiers_in_expression(body, identifiers);
+        }
+        Expression::Loop { body, .. } => {
+            collect_identifiers_in_expression(body, identifiers);
+        }
+        Expression::Struct(items, _) => {
+            for (_, expr) in items {
+                collect_identifiers_in_expression(expr, identifiers);
+            }
+        }
+        Expression::PropertyAccess { object, .. } => {
+            collect_identifiers_in_expression(object, identifiers);
+        }
+        Expression::Operation { left, right, .. } => {
+            collect_identifiers_in_expression(left, identifiers);
+            collect_identifiers_in_expression(right, identifiers);
+        }
+        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _) => {
+            collect_identifiers_in_expression(left, identifiers);
+            collect_identifiers_in_expression(right, identifiers);
+        }
+        Expression::Assignment { expr, .. } => {
+            collect_identifiers_in_expression(expr, identifiers);
+        }
+        Expression::Diverge { value, .. } => {
+            if let Some(v) = value {
+                collect_identifiers_in_expression(v, identifiers);
+            }
+        }
+        Expression::EnumValue { payload, .. } => {
+            if let Some(p) = payload {
+                collect_identifiers_in_expression(p, identifiers);
+            }
+        }
+        Expression::EnumAccess { enum_expr, .. } => {
+            collect_identifiers_in_expression(enum_expr, identifiers);
+        }
+        Expression::EnumConstructor {
+            enum_type,
+            payload_type,
+            ..
+        } => {
+            collect_identifiers_in_expression(enum_type, identifiers);
+            collect_identifiers_in_expression(payload_type, identifiers);
+        }
+        Expression::EnumType(variants, _) => {
+            for (_, ty) in variants {
+                collect_identifiers_in_expression(ty, identifiers);
+            }
+        }
+        Expression::FunctionType {
+            parameter,
+            return_type,
+            ..
+        } => {
+            collect_identifiers_in_expression(parameter, identifiers);
+            collect_identifiers_in_expression(return_type, identifiers);
+        }
+        Expression::AttachImplementation {
+            type_expr,
+            implementation,
+            ..
+        } => {
+            collect_identifiers_in_expression(type_expr, identifiers);
+            collect_identifiers_in_expression(implementation, identifiers);
+        }
+        // Base cases - no identifiers to collect
+        Expression::Literal(..)
+        | Expression::IntrinsicType(..)
+        | Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, _) => {}
+    }
+}
+
+fn collect_identifiers_in_pattern(pattern: &BindingPattern, identifiers: &mut HashSet<String>) {
+    match pattern {
+        BindingPattern::Struct(items, ..) => {
+            for (_, pat) in items {
+                collect_identifiers_in_pattern(pat, identifiers);
+            }
+        },
+        BindingPattern::EnumVariant { enum_type, payload, .. } => {
+            collect_identifiers_in_expression(enum_type, identifiers);
+            if let Some(payload_pattern) = payload {
+                collect_identifiers_in_pattern(payload_pattern, identifiers);
+            }
+        },
+        BindingPattern::TypeHint(binding_pattern, expression, ..) => {
+            collect_identifiers_in_pattern(binding_pattern, identifiers);
+            collect_identifiers_in_expression(expression, identifiers);
+        },
+        BindingPattern::Annotated { pattern, .. } => {
+            // TODO: Consider collecting identifiers from annotations if they can contain expressions
+            collect_identifiers_in_pattern(pattern, identifiers);
+        }
+        BindingPattern::Identifier(..)
+        | BindingPattern::Literal(..) => {},
+    }
+}
+
+/// Check if an expression has side effects (assignments/mutations)
+fn has_side_effects(expr: &Expression) -> bool {
+    match expr {
+        Expression::Assignment { .. } => true,
+        Expression::Function { body, .. } => has_side_effects(body),
+        Expression::FunctionCall {
+            function, argument, ..
+        } => has_side_effects(function) || has_side_effects(argument),
+        Expression::Block(exprs, _) => exprs.iter().any(has_side_effects),
+        Expression::Binding(binding, _) => has_side_effects(&binding.expr),
+        Expression::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            has_side_effects(condition)
+                || has_side_effects(then_branch)
+                || else_branch.as_ref().map_or(false, |e| has_side_effects(e))
+        }
+        Expression::Match {
+            value, branches, ..
+        } => has_side_effects(value) || branches.iter().any(|(_, e)| has_side_effects(e)),
+        Expression::While {
+            condition, body, ..
+        } => has_side_effects(condition) || has_side_effects(body),
+        Expression::Loop { body, .. } => has_side_effects(body),
+        Expression::Struct(items, _) => items.iter().any(|(_, e)| has_side_effects(e)),
+        Expression::PropertyAccess { object, .. } => has_side_effects(object),
+        Expression::Operation { left, right, .. } => {
+            has_side_effects(left) || has_side_effects(right)
+        }
+        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _) => {
+            has_side_effects(left) || has_side_effects(right)
+        }
+        Expression::Diverge { value, .. } => value.as_ref().map_or(false, |v| has_side_effects(v)),
+        Expression::EnumValue { payload, .. } => {
+            payload.as_ref().map_or(false, |p| has_side_effects(p))
+        }
+        Expression::EnumAccess { enum_expr, .. } => has_side_effects(enum_expr),
+        Expression::EnumConstructor {
+            enum_type,
+            payload_type,
+            ..
+        } => has_side_effects(enum_type) || has_side_effects(payload_type),
+        Expression::EnumType(variants, _) => variants.iter().any(|(_, ty)| has_side_effects(ty)),
+        Expression::FunctionType {
+            parameter,
+            return_type,
+            ..
+        } => has_side_effects(parameter) || has_side_effects(return_type),
+        Expression::AttachImplementation {
+            type_expr,
+            implementation,
+            ..
+        } => has_side_effects(type_expr) || has_side_effects(implementation),
+        // Base cases - no side effects
+        Expression::Identifier(..)
+        | Expression::Literal(..)
+        | Expression::IntrinsicType(..)
+        | Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, _) => false,
+    }
+}
 
 pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
     match normalize_enum_application(expr) {
@@ -250,10 +466,56 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             Ok(Expression::Binding(Box::new(binding), source_span))
         }
         Expression::Block(expressions, source_span) => {
-            let simplified_exprs = expressions
+            // First, simplify all expressions
+            let mut simplified_exprs: Vec<Expression> = expressions
                 .into_iter()
                 .map(simplify_expression)
                 .collect::<Result<_, Diagnostic>>()?;
+
+            // Build a map of bindings in this block
+            let mut binding_names: HashSet<String> = HashSet::new();
+            for expr in &simplified_exprs {
+                if let Expression::Binding(binding, _) = expr {
+                    if let BindingPattern::Identifier(id, _) = &binding.pattern {
+                        binding_names.insert(id.0.clone());
+                    }
+                }
+            }
+
+            // Collect which bindings are actually referenced
+            let mut referenced_bindings: HashSet<String> = HashSet::new();
+            for expr in &simplified_exprs {
+                collect_identifiers_in_expression(expr, &mut referenced_bindings);
+            }
+
+            // Filter: only keep binding expressions that are referenced OR have side effects
+            // Also track which bindings we're keeping
+            let mut kept_bindings: HashSet<String> = HashSet::new();
+            simplified_exprs.retain(|expr| {
+                if let Expression::Binding(binding, _) = expr {
+                    if let BindingPattern::Identifier(id, _) = &binding.pattern {
+                        let is_referenced = referenced_bindings.contains(&id.0);
+                        let has_effects = has_side_effects(&binding.expr);
+                        // TODO: Only keep expressions of unused bindings with side effects
+
+                        if is_referenced || has_effects {
+                            kept_bindings.insert(id.0.clone());
+                            true
+                        } else {
+                            false // Remove this binding
+                        }
+                    } else {
+                        // Keep non-identifier bindings (pattern bindings)
+                        // TODO: Consider more advanced analysis for pattern bindings
+                        true
+                    }
+                } else {
+                    // Keep all non-binding expressions
+                    // TODO: These should probably be dropped if they have no side effects
+                    true
+                }
+            });
+
             Ok(Expression::Block(simplified_exprs, source_span))
         }
         expr @ (Expression::Identifier(..)
