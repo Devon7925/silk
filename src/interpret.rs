@@ -621,9 +621,10 @@ pub fn interpret_expression(
             }) = effective_function
             {
                 let is_direct = matches!(function_value, Expression::Function { .. });
-                let returns_type = is_type_expression(&return_type.unwrap());
+                let returns_compile_time_type = type_expression_contains_compile_time_data(&return_type.unwrap());
+                let pattern_is_compile_time = pattern_contains_compile_time_data(&parameter);
 
-                if is_direct || returns_type {
+                if is_direct || returns_compile_time_type || pattern_is_compile_time {
                     let mut call_context = context.clone();
                     bind_pattern_from_value(
                         parameter,
@@ -1716,6 +1717,46 @@ fn expression_contains_mutation(expr: &Expression) -> bool {
         | Expression::EnumType(_, _)
         | Expression::FunctionType { .. }
         | Expression::Struct(_, _) => false,
+    }
+}
+
+fn pattern_contains_compile_time_data(pattern: &BindingPattern) -> bool {
+    match pattern {
+        BindingPattern::Identifier(_, _) => false,
+        BindingPattern::Literal(_, _) => true,
+        BindingPattern::Struct(items, _) => items
+            .iter()
+            .any(|(_, field_pattern)| pattern_contains_compile_time_data(field_pattern)),
+        BindingPattern::EnumVariant { payload, .. } => {
+            if let Some(payload) = payload {
+                pattern_contains_compile_time_data(payload)
+            } else {
+                false
+            }
+        }
+        BindingPattern::TypeHint(pattern, ty, _) => pattern_contains_compile_time_data(pattern) || type_expression_contains_compile_time_data(ty),
+        BindingPattern::Annotated { pattern, .. } => pattern_contains_compile_time_data(pattern),
+    }
+}
+
+fn type_expression_contains_compile_time_data(expr: &Expression) -> bool {
+    match expr {
+        Expression::Struct(items, _) => items
+            .iter()
+            .any(|(_, field_expr)| type_expression_contains_compile_time_data(field_expr)),
+        Expression::FunctionType { .. } => true,
+        Expression::AttachImplementation {
+            type_expr,
+            ..
+        } => {
+            type_expression_contains_compile_time_data(type_expr)
+        }
+        Expression::EnumType(cases, _) => cases
+            .iter()
+            .any(|(_, field_expr)| type_expression_contains_compile_time_data(field_expr)),
+        Expression::IntrinsicType(IntrinsicType::Target | IntrinsicType::Type, _) => true,
+        Expression::IntrinsicType(IntrinsicType::Boolean | IntrinsicType::I32, _) => false,
+        _ => panic!("Unsupported expression for resolved type"),
     }
 }
 
@@ -2920,14 +2961,13 @@ pub fn evaluate_text_to_expression(program: &str) -> Result<(Expression, Context
     );
 
     let mut context = intrinsic_context();
-    let (value, context) = interpret_program(expression, &mut context)?;
+    let (mut value, context) = interpret_program(expression, &mut context)?;
 
-    let final_value = match &value {
-        Expression::Block(exprs, _) => exprs.last().cloned().unwrap_or(value),
-        other => other.clone(),
-    };
+    while let Expression::Block(exprs, _) = value {
+        value = exprs.last().cloned().unwrap();
+    }
 
-    Ok((final_value, context))
+    Ok((value, context))
 }
 
 #[cfg(test)]

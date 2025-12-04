@@ -40,7 +40,6 @@ test("functions can be passed as arguments", async () => {
 
         apply { func = increment, value = x }
     );
-    {};
     `;
 
     const exports = await compileAndLoad(silkCode);
@@ -59,7 +58,6 @@ test("functions can be returned and invoked", async () => {
         add_three := make_adder 3;
         add_three offset
     );
-    {};
     `;
 
     const exports = await compileAndLoad(silkCode);

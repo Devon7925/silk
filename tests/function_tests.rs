@@ -4,15 +4,18 @@ use silk::test_support::evaluate_text_to_expression;
 #[test]
 fn functions_can_be_passed_as_arguments() {
     let program = "
+    (export wasm) apply_increment := (x: i32) => (
         apply := { func = func: (i32 -> i32), value = value: i32 } => (
             func value
         );
 
-        increment := (x: i32) => (
-            x + 1
+        increment := (y: i32) => (
+            y + 1
         );
 
-        apply { func = increment, value = 41 }
+        apply { func = increment, value = x }
+    );
+    apply_increment 41
     ";
 
     let (expr, _) = evaluate_text_to_expression(program)
