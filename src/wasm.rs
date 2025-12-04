@@ -13,6 +13,457 @@ use crate::{
     },
 };
 
+fn inline_function_calls(
+    expr: Expression,
+    context: &interpret::Context,
+) -> Result<Expression, Diagnostic> {
+    use std::collections::{HashMap, HashSet};
+
+    fn bind_pattern_to_env(
+        pattern: &BindingPattern,
+        value: &Expression,
+        env: &mut HashMap<String, Expression>,
+    ) {
+        match pattern {
+            BindingPattern::Identifier(id, _) => {
+                env.insert(id.0.clone(), value.clone());
+            }
+            BindingPattern::Annotated { pattern, .. } | BindingPattern::TypeHint(pattern, _, _) => {
+                bind_pattern_to_env(pattern, value, env)
+            }
+            BindingPattern::Struct(fields, _) => {
+                if let Expression::Struct(values, _) = value {
+                    for (field_id, sub_pattern) in fields {
+                        if let Some((_, field_value)) =
+                            values.iter().find(|(id, _)| id.0 == field_id.0)
+                        {
+                            bind_pattern_to_env(sub_pattern, field_value, env);
+                        }
+                    }
+                }
+            }
+            BindingPattern::EnumVariant { payload, .. } => {
+                if let Some(inner) = payload {
+                    bind_pattern_to_env(inner, value, env);
+                }
+            }
+            BindingPattern::Literal(_, _) => {}
+        }
+    }
+
+    fn pattern_identifier_name(pattern: &BindingPattern) -> Option<String> {
+        match pattern {
+            BindingPattern::Identifier(id, _) => Some(id.0.clone()),
+            BindingPattern::Annotated { pattern, .. }
+            | BindingPattern::TypeHint(pattern, _, _) => pattern_identifier_name(pattern),
+            _ => None,
+        }
+    }
+
+    fn inline_with_env(
+        expr: Expression,
+        context: &interpret::Context,
+        env: &mut HashMap<String, Expression>,
+    ) -> Result<Expression, Diagnostic> {
+        match expr {
+            Expression::Identifier(id, span) => {
+                if let Some(value) = env.get(&id.0) {
+                    return Ok(value.clone());
+                }
+                Ok(Expression::Identifier(id, span))
+            }
+            Expression::Binding(binding, span) => {
+                let lowered_expr = inline_with_env(binding.expr, context, env)?;
+                if let Some(name) = pattern_identifier_name(&binding.pattern) {
+                    env.insert(name, lowered_expr.clone());
+                }
+
+                Ok(Expression::Binding(
+                    Box::new(Binding {
+                        pattern: binding.pattern,
+                        expr: lowered_expr,
+                    }),
+                    span,
+                ))
+            }
+            Expression::Block(exprs, span) => {
+                let mut local_env = env.clone();
+                let mut lowered = Vec::with_capacity(exprs.len());
+                for expr in exprs {
+                    lowered.push(inline_with_env(expr, context, &mut local_env)?);
+                }
+                let mut used: HashSet<String> = HashSet::new();
+                let mut pruned = Vec::with_capacity(lowered.len());
+
+                for expr in lowered.into_iter().rev() {
+                    let free_ids = free_identifiers(&expr);
+                    match &expr {
+                        Expression::Binding(binding, _) => {
+                            if let Some(name) = pattern_identifier_name(&binding.pattern) {
+                                if !used.contains(&name) {
+                                    continue;
+                                }
+                                used.remove(&name);
+                            }
+                            used.extend(free_ids);
+                            pruned.push(expr);
+                        }
+                        _ => {
+                            used.extend(free_ids);
+                            pruned.push(expr);
+                        }
+                    }
+                }
+
+                pruned.reverse();
+                Ok(Expression::Block(pruned, span))
+            }
+            Expression::If {
+                condition,
+                then_branch,
+                else_branch,
+                span,
+            } => Ok(Expression::If {
+                condition: inline_with_env(*condition, context, env)?.into(),
+                then_branch: inline_with_env(*then_branch, context, env)?.into(),
+                else_branch: else_branch
+                    .map(|branch| inline_with_env(*branch, context, env))
+                    .transpose()?
+                    .map(Box::new),
+                span,
+            }),
+            Expression::Loop { body, span } => Ok(Expression::Loop {
+                body: inline_with_env(*body, context, env)?.into(),
+                span,
+            }),
+            Expression::While {
+                condition,
+                body,
+                span,
+            } => Ok(Expression::While {
+                condition: inline_with_env(*condition, context, env)?.into(),
+                body: inline_with_env(*body, context, env)?.into(),
+                span,
+            }),
+            Expression::FunctionCall {
+                function,
+                argument,
+                span,
+            } => {
+                let mut resolve_ctx = context.clone();
+                let resolved_function = interpret::interpret_expression(
+                    (*function).clone(),
+                    &mut resolve_ctx,
+                )
+                .ok()
+                .or_else(|| {
+                    if let Expression::Identifier(id, _) = function.as_ref() {
+                        env.get(&id.0).cloned()
+                    } else {
+                        None
+                    }
+                })
+                .or_else(|| {
+                    if let Expression::Identifier(id, _) = function.as_ref() {
+                        context.bindings.get(&id.0).and_then(|(binding, _)| match binding {
+                            interpret::BindingContext::Bound(value, _) => Some(value.clone()),
+                            _ => None,
+                        })
+                    } else {
+                        None
+                    }
+                });
+
+                if let Some(Expression::Function {
+                    parameter,
+                    body,
+                    ..
+                }) = resolved_function
+                {
+                    let lowered_arg = inline_with_env(*argument, context, env)?;
+                    let mut local_env = env.clone();
+                    bind_pattern_to_env(&parameter, &lowered_arg, &mut local_env);
+
+                    let inlined = Expression::Block(
+                        vec![
+                            Expression::Binding(
+                                Box::new(Binding {
+                                    pattern: parameter,
+                                    expr: lowered_arg,
+                                }),
+                                span,
+                            ),
+                            *body,
+                        ],
+                        span,
+                    );
+
+                    return inline_with_env(inlined, context, &mut local_env);
+                }
+
+                Ok(Expression::FunctionCall {
+                    function: inline_with_env(*function, context, env)?.into(),
+                    argument: inline_with_env(*argument, context, env)?.into(),
+                    span,
+                })
+            }
+            Expression::Match {
+                value,
+                branches,
+                span,
+            } => {
+                let lowered_value = inline_with_env(*value, context, env)?;
+                let mut lowered_branches = Vec::with_capacity(branches.len());
+                for (pattern, branch) in branches {
+                    lowered_branches.push((pattern, inline_with_env(branch, context, env)?));
+                }
+                Ok(Expression::Match {
+                    value: Box::new(lowered_value),
+                    branches: lowered_branches,
+                    span,
+                })
+            }
+            Expression::Assignment { target, expr, span } => Ok(Expression::Assignment {
+                target,
+                expr: inline_with_env(*expr, context, env)?.into(),
+                span,
+            }),
+            Expression::IntrinsicOperation(op, span) => match op {
+                IntrinsicOperation::Binary(left, right, operator) => {
+                    Ok(Expression::IntrinsicOperation(
+                        IntrinsicOperation::Binary(
+                            inline_with_env(*left, context, env)?.into(),
+                            inline_with_env(*right, context, env)?.into(),
+                            operator,
+                        ),
+                        span,
+                    ))
+                }
+                IntrinsicOperation::EnumFromStruct => Ok(Expression::IntrinsicOperation(
+                    IntrinsicOperation::EnumFromStruct,
+                    span,
+                )),
+            },
+            Expression::EnumValue {
+                enum_type,
+                variant,
+                variant_index,
+                payload,
+                span,
+            } => Ok(Expression::EnumValue {
+                enum_type: inline_with_env(*enum_type, context, env)?.into(),
+                variant,
+                variant_index,
+                payload: payload
+                    .map(|p| inline_with_env(*p, context, env))
+                    .transpose()?
+                    .map(Box::new),
+                span,
+            }),
+            Expression::EnumConstructor {
+                enum_type,
+                variant,
+                variant_index,
+                payload_type,
+                span,
+            } => Ok(Expression::EnumConstructor {
+                enum_type: inline_with_env(*enum_type, context, env)?.into(),
+                variant,
+                variant_index,
+                payload_type: inline_with_env(*payload_type, context, env)?.into(),
+                span,
+            }),
+            Expression::EnumAccess {
+                enum_expr,
+                variant,
+                span,
+            } => Ok(Expression::EnumAccess {
+                enum_expr: inline_with_env(*enum_expr, context, env)?.into(),
+                variant,
+                span,
+            }),
+            Expression::Struct(fields, span) => {
+                let mut lowered = Vec::with_capacity(fields.len());
+                for (id, value) in fields {
+                    lowered.push((id, inline_with_env(value, context, env)?));
+                }
+                Ok(Expression::Struct(lowered, span))
+            }
+            Expression::AttachImplementation {
+                type_expr,
+                implementation,
+                span,
+            } => Ok(Expression::AttachImplementation {
+                type_expr: inline_with_env(*type_expr, context, env)?.into(),
+                implementation: inline_with_env(*implementation, context, env)?.into(),
+                span,
+            }),
+            other => Ok(other),
+        }
+    }
+
+    inline_with_env(expr, context, &mut HashMap::new())
+}
+
+fn expression_contains_function_call(expr: &Expression) -> bool {
+    match expr {
+        Expression::FunctionCall { .. } => true,
+        Expression::Block(exprs, _) => exprs.iter().any(expression_contains_function_call),
+        Expression::Binding(binding, _) => expression_contains_function_call(&binding.expr),
+        Expression::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expression_contains_function_call(condition)
+                || expression_contains_function_call(then_branch)
+                || else_branch
+                    .as_ref()
+                    .map(|branch| expression_contains_function_call(branch))
+                    .unwrap_or(false)
+        }
+        Expression::Loop { body, .. } | Expression::While { body, .. } => {
+            expression_contains_function_call(body)
+        }
+        Expression::Match { value, branches, .. } => {
+            expression_contains_function_call(value)
+                || branches
+                    .iter()
+                    .any(|(_, branch)| expression_contains_function_call(branch))
+        }
+        Expression::IntrinsicOperation(op, _) => match op {
+            IntrinsicOperation::Binary(left, right, _) => {
+                expression_contains_function_call(left)
+                    || expression_contains_function_call(right)
+            }
+            IntrinsicOperation::EnumFromStruct => false,
+        },
+        Expression::Assignment { expr, .. } => expression_contains_function_call(expr),
+        Expression::EnumValue { enum_type, payload, .. } => {
+            expression_contains_function_call(enum_type)
+                || payload
+                    .as_ref()
+                    .map(|p| expression_contains_function_call(p))
+                    .unwrap_or(false)
+        }
+        Expression::EnumConstructor {
+            enum_type,
+            payload_type,
+            ..
+        } => {
+            expression_contains_function_call(enum_type)
+                || expression_contains_function_call(payload_type)
+        }
+        Expression::EnumAccess { enum_expr, .. } => expression_contains_function_call(enum_expr),
+        Expression::Function { body, .. } => expression_contains_function_call(body),
+        Expression::Struct(fields, _) => fields
+            .iter()
+            .any(|(_, value)| expression_contains_function_call(value)),
+        Expression::AttachImplementation {
+            type_expr,
+            implementation,
+            ..
+        } => {
+            expression_contains_function_call(type_expr)
+                || expression_contains_function_call(implementation)
+        }
+        _ => false,
+    }
+}
+
+fn free_identifiers(expr: &Expression) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+    let mut ids = HashSet::new();
+    match expr {
+        Expression::Identifier(id, _) => {
+            ids.insert(id.0.clone());
+        }
+        Expression::Binding(binding, _) => {
+            ids.extend(free_identifiers(&binding.expr));
+            if let Some(name) = pattern_identifier_name(&binding.pattern) {
+                ids.remove(&name);
+            }
+        }
+        Expression::Block(exprs, _) => {
+            for e in exprs {
+                ids.extend(free_identifiers(e));
+            }
+        }
+        Expression::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            ids.extend(free_identifiers(condition));
+            ids.extend(free_identifiers(then_branch));
+            if let Some(branch) = else_branch {
+                ids.extend(free_identifiers(branch));
+            }
+        }
+        Expression::Loop { body, .. } | Expression::While { body, .. } => {
+            ids.extend(free_identifiers(body));
+        }
+        Expression::Match { value, branches, .. } => {
+            ids.extend(free_identifiers(value));
+            for (_, branch) in branches {
+                ids.extend(free_identifiers(branch));
+            }
+        }
+        Expression::IntrinsicOperation(op, _) => match op {
+            IntrinsicOperation::Binary(left, right, _) => {
+                ids.extend(free_identifiers(left));
+                ids.extend(free_identifiers(right));
+            }
+            IntrinsicOperation::EnumFromStruct => {}
+        },
+        Expression::Assignment { target, expr, .. } => {
+            ids.extend(free_identifiers(expr));
+            ids.extend(free_identifiers(&lvalue_to_expression(target)));
+        }
+        Expression::EnumValue {
+            enum_type,
+            payload,
+            ..
+        } => {
+            ids.extend(free_identifiers(enum_type));
+            if let Some(payload) = payload {
+                ids.extend(free_identifiers(payload));
+            }
+        }
+        Expression::EnumConstructor {
+            enum_type,
+            payload_type,
+            ..
+        } => {
+            ids.extend(free_identifiers(enum_type));
+            ids.extend(free_identifiers(payload_type));
+        }
+        Expression::EnumAccess { enum_expr, .. } => {
+            ids.extend(free_identifiers(enum_expr));
+        }
+        Expression::Function { body, .. } => {
+            ids.extend(free_identifiers(body));
+        }
+        Expression::Struct(fields, _) => {
+            for (_, value) in fields {
+                ids.extend(free_identifiers(value));
+            }
+        }
+        Expression::AttachImplementation {
+            type_expr,
+            implementation,
+            ..
+        } => {
+            ids.extend(free_identifiers(type_expr));
+            ids.extend(free_identifiers(implementation));
+        }
+        _ => {}
+    }
+    ids
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum WasmType {
     I32,
@@ -142,6 +593,15 @@ fn lvalue_to_expression(target: &LValue) -> Expression {
             property: property.clone(),
             span: *span,
         },
+    }
+}
+
+fn pattern_identifier_name(pattern: &BindingPattern) -> Option<String> {
+    match pattern {
+        BindingPattern::Identifier(id, _) => Some(id.0.clone()),
+        BindingPattern::Annotated { pattern, .. }
+        | BindingPattern::TypeHint(pattern, _, _) => pattern_identifier_name(pattern),
+        _ => None,
     }
 }
 
@@ -858,11 +1318,23 @@ fn lower_function_export(
 
     let return_type = resolve_type(context, &return_type.unwrap())?;
     let params = extract_function_params(context, parameter)?;
+    let mut body = *body;
+
+    if expression_contains_function_call(&body) {
+        body = inline_function_calls(body, context)?;
+
+        if expression_contains_function_call(&body) {
+            return Err(
+                Diagnostic::new("Function calls should be inlined before wasm lowering")
+                    .with_span(annotation_span),
+            );
+        }
+    }
 
     Ok(WasmFunctionExport {
         name: binding_name.to_string(),
         params,
-        body: *body,
+        body,
         return_type,
     })
 }
@@ -897,6 +1369,158 @@ fn resolve_type(context: &interpret::Context, expr: &Expression) -> Result<WasmT
         Expression::AttachImplementation { type_expr, .. } => resolve_type(context, type_expr),
         Expression::EnumType(_, _) => enum_wasm_type(expr, context),
         _ => Err(Diagnostic::new("Unsupported type for WASM").with_span(expr.span())),
+    }
+}
+
+#[cfg(test)]
+mod inline_tests {
+    use super::*;
+    use crate::interpret::intrinsic_context;
+    use crate::parsing::{BinaryIntrinsicOperator, Binding, BindingPattern, Identifier};
+    use crate::simplify::simplify_context;
+
+    fn fn_type(param: Expression, ret: Expression) -> Expression {
+        Expression::FunctionType {
+            parameter: Box::new(param),
+            return_type: Box::new(ret),
+            span: SourceSpan::new(0, 0),
+        }
+    }
+
+    #[test]
+    fn inlines_local_function_calls_in_wasm_exports() {
+        let span = SourceSpan::new(0, 0);
+
+        let apply_fn = Expression::Function {
+            parameter: BindingPattern::Struct(
+                vec![
+                    (
+                        Identifier("func".into()),
+                        BindingPattern::TypeHint(
+                            Box::new(BindingPattern::Identifier(Identifier("func".into()), span)),
+                            Box::new(fn_type(
+                                Expression::IntrinsicType(IntrinsicType::I32, span),
+                                Expression::IntrinsicType(IntrinsicType::I32, span),
+                            )),
+                            span,
+                        ),
+                    ),
+                    (
+                        Identifier("value".into()),
+                        BindingPattern::TypeHint(
+                            Box::new(BindingPattern::Identifier(Identifier("value".into()), span)),
+                            Box::new(Expression::IntrinsicType(IntrinsicType::I32, span)),
+                            span,
+                        ),
+                    ),
+                ],
+                span,
+            ),
+            return_type: Some(Box::new(Expression::IntrinsicType(IntrinsicType::I32, span))),
+            body: Box::new(Expression::FunctionCall {
+                function: Box::new(Expression::Identifier(Identifier("func".into()), span)),
+                argument: Box::new(Expression::Identifier(Identifier("value".into()), span)),
+                span,
+            }),
+            span,
+        };
+
+        let increment_fn = Expression::Function {
+            parameter: BindingPattern::TypeHint(
+                Box::new(BindingPattern::Identifier(Identifier("y".into()), span)),
+                Box::new(Expression::IntrinsicType(IntrinsicType::I32, span)),
+                span,
+            ),
+            return_type: Some(Box::new(Expression::IntrinsicType(IntrinsicType::I32, span))),
+            body: Box::new(Expression::IntrinsicOperation(
+                IntrinsicOperation::Binary(
+                    Box::new(Expression::Identifier(Identifier("y".into()), span)),
+                    Box::new(Expression::Literal(ExpressionLiteral::Number(1), span)),
+                    BinaryIntrinsicOperator::I32Add,
+                ),
+                span,
+            )),
+            span,
+        };
+
+        let body = Expression::Block(
+            vec![
+                Expression::Binding(
+                    Box::new(Binding {
+                        pattern: BindingPattern::Identifier(Identifier("apply".into()), span),
+                        expr: apply_fn,
+                    }),
+                    span,
+                ),
+                Expression::Binding(
+                    Box::new(Binding {
+                        pattern: BindingPattern::Identifier(Identifier("increment".into()), span),
+                        expr: increment_fn,
+                    }),
+                    span,
+                ),
+                Expression::FunctionCall {
+                    function: Box::new(Expression::Identifier(Identifier("apply".into()), span)),
+                    argument: Box::new(Expression::Struct(
+                        vec![
+                            (Identifier("func".into()), Expression::Identifier(Identifier("increment".into()), span)),
+                            (Identifier("value".into()), Expression::Identifier(Identifier("x".into()), span)),
+                        ],
+                        span,
+                    )),
+                    span,
+                },
+            ],
+            span,
+        );
+
+        let inlined = inline_function_calls(body, &intrinsic_context()).expect("inline should succeed");
+
+        assert!(
+            !expression_contains_function_call(&inlined),
+            "expected function calls to be inlined, got {inlined:?}"
+        );
+    }
+
+    #[test]
+    fn inlines_higher_order_functions_in_export_pipeline() {
+        let program = r#"
+        (export wasm) apply_increment := (x: i32) => (
+            apply := { func = func: (i32 -> i32), value = value: i32 } => (
+                func value
+            );
+
+            increment := (y: i32) => (
+                y + 1
+            );
+
+            apply { func = increment, value = x }
+        );
+        "#;
+
+        let (ast, remaining) = crate::parsing::parse_block(program).expect("parse should succeed");
+        assert!(remaining.trim().is_empty());
+
+        let mut ctx = intrinsic_context();
+        let (_value, program_ctx) = interpret::interpret_program(ast, &mut ctx).expect("interpret");
+        let simplified_ctx = simplify_context(program_ctx).expect("simplify context");
+
+        let binding = simplified_ctx
+            .annotated_bindings()
+            .into_iter()
+            .find(|b| b.name == "apply_increment")
+            .expect("exported binding present");
+
+        let Expression::Function { body, .. } = binding.value else {
+            panic!("expected function export");
+        };
+
+        let inlined = inline_function_calls(*body, &simplified_ctx).expect("inline should succeed");
+
+        assert!(
+            !expression_contains_function_call(&inlined),
+            "expected function calls to be inlined, got {inlined:?}"
+        );
     }
 }
 

@@ -635,11 +635,11 @@ pub fn simplify_context(context: Context) -> Result<Context, Diagnostic> {
 
     simplified_bindings.retain(|name, (ctx, annotations)| {
         if let BindingContext::Bound(_, crate::interpret::PreserveBehavior::Inline) = ctx {
-            // Inline bindings should already have their values substituted at use sites.
-            // If they are still present in the binding map and are not exported, they are
-            // safe to drop even if referenced by other bindings. This avoids keeping
-            // helper closures like `apply` in the higher-order functions bun test.
-            return !annotations.is_empty();
+            // Inline bindings may still be required to resolve type-level constructs
+            // (e.g. enum aliases) even though their values are substituted at use sites.
+            // Keep them when they are part of the dependency graph, and only drop
+            // non-exported, truly unused inline bindings.
+            return !annotations.is_empty() || used_bindings.contains(name);
         }
 
         used_bindings.contains(name)
