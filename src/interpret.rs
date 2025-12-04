@@ -396,10 +396,9 @@ pub fn interpret_expression(
             let (interpreted_else, else_type, else_diverges) =
                 branch_type(&inferred_else_expr, &base_context)?;
 
-            if !types_equivalent(&then_type, &else_type)
-                && !then_diverges && !else_diverges {
-                    return Err(diagnostic("Type mismatch between if branches", span));
-                }
+            if !types_equivalent(&then_type, &else_type) && !then_diverges && !else_diverges {
+                return Err(diagnostic("Type mismatch between if branches", span));
+            }
 
             let resolved_condition = resolve_expression(interpreted_condition.clone(), context);
             if let Ok(Expression::Literal(ExpressionLiteral::Boolean(condition_value), _)) =
@@ -621,7 +620,8 @@ pub fn interpret_expression(
             }) = effective_function
             {
                 let is_direct = matches!(function_value, Expression::Function { .. });
-                let returns_compile_time_type = type_expression_contains_compile_time_data(&return_type.unwrap());
+                let returns_compile_time_type =
+                    type_expression_contains_compile_time_data(&return_type.unwrap());
                 let pattern_is_compile_time = pattern_contains_compile_time_data(&parameter);
 
                 if is_direct || returns_compile_time_type || pattern_is_compile_time {
@@ -1734,7 +1734,10 @@ fn pattern_contains_compile_time_data(pattern: &BindingPattern) -> bool {
                 false
             }
         }
-        BindingPattern::TypeHint(pattern, ty, _) => pattern_contains_compile_time_data(pattern) || type_expression_contains_compile_time_data(ty),
+        BindingPattern::TypeHint(pattern, ty, _) => {
+            pattern_contains_compile_time_data(pattern)
+                || type_expression_contains_compile_time_data(ty)
+        }
         BindingPattern::Annotated { pattern, .. } => pattern_contains_compile_time_data(pattern),
     }
 }
@@ -1745,10 +1748,7 @@ fn type_expression_contains_compile_time_data(expr: &Expression) -> bool {
             .iter()
             .any(|(_, field_expr)| type_expression_contains_compile_time_data(field_expr)),
         Expression::FunctionType { .. } => true,
-        Expression::AttachImplementation {
-            type_expr,
-            ..
-        } => {
+        Expression::AttachImplementation { type_expr, .. } => {
             type_expression_contains_compile_time_data(type_expr)
         }
         Expression::EnumType(cases, _) => cases

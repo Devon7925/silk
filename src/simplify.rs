@@ -5,6 +5,7 @@ use crate::{
     interpret::BindingContext,
     parsing::{BinaryIntrinsicOperator, Binding, BindingPattern, Expression, IntrinsicOperation},
 };
+use std::collections::{HashMap, HashSet, VecDeque};
 
 #[cfg(test)]
 use crate::parsing::{BindingAnnotation, ExpressionLiteral, TargetLiteral};
@@ -338,14 +339,302 @@ fn simplify_binding_context(binding_context: BindingContext) -> Result<BindingCo
     }
 }
 
+fn simplify_binding_annotation(
+    annotation: crate::parsing::BindingAnnotation,
+) -> Result<crate::parsing::BindingAnnotation, Diagnostic> {
+    match annotation {
+        crate::parsing::BindingAnnotation::Export(expr, span) => Ok(
+            crate::parsing::BindingAnnotation::Export(simplify_expression(expr)?, span),
+        ),
+        crate::parsing::BindingAnnotation::Mutable(span) => {
+            Ok(crate::parsing::BindingAnnotation::Mutable(span))
+        }
+    }
+}
+
+fn collect_pattern_bindings(pattern: &BindingPattern, bindings: &mut HashSet<String>) {
+    match pattern {
+        BindingPattern::Identifier(identifier, _) => {
+            bindings.insert(identifier.0.clone());
+        }
+        BindingPattern::Struct(items, _) => {
+            for (_id, pat) in items {
+                collect_pattern_bindings(pat, bindings);
+            }
+        }
+        BindingPattern::EnumVariant { payload, .. } => {
+            if let Some(payload) = payload {
+                collect_pattern_bindings(payload, bindings);
+            }
+        }
+        BindingPattern::TypeHint(inner, _, _) => collect_pattern_bindings(inner, bindings),
+        BindingPattern::Annotated { pattern, .. } => collect_pattern_bindings(pattern, bindings),
+        BindingPattern::Literal(..) => {}
+    }
+}
+
+fn collect_pattern_dependencies(
+    pattern: &BindingPattern,
+    bound: &HashSet<String>,
+    free: &mut HashSet<String>,
+) {
+    match pattern {
+        BindingPattern::TypeHint(inner, ty_expr, _) => {
+            collect_free_identifiers(ty_expr, bound, free);
+            collect_pattern_dependencies(inner, bound, free);
+        }
+        BindingPattern::Annotated {
+            annotations,
+            pattern,
+            ..
+        } => {
+            for annotation in annotations {
+                if let crate::parsing::BindingAnnotation::Export(expr, _) = annotation {
+                    collect_free_identifiers(expr, bound, free);
+                }
+            }
+            collect_pattern_dependencies(pattern, bound, free);
+        }
+        BindingPattern::Struct(items, _) => {
+            for (_id, pat) in items {
+                collect_pattern_dependencies(pat, bound, free);
+            }
+        }
+        BindingPattern::EnumVariant {
+            enum_type, payload, ..
+        } => {
+            collect_free_identifiers(enum_type, bound, free);
+            if let Some(payload) = payload {
+                collect_pattern_dependencies(payload, bound, free);
+            }
+        }
+        BindingPattern::Identifier(..) | BindingPattern::Literal(..) => {}
+    }
+}
+
+fn collect_lvalue_dependencies(
+    lvalue: &crate::parsing::LValue,
+    bound: &HashSet<String>,
+    free: &mut HashSet<String>,
+) {
+    match lvalue {
+        crate::parsing::LValue::Identifier(identifier, _) => {
+            if !bound.contains(&identifier.0) {
+                free.insert(identifier.0.clone());
+            }
+        }
+        crate::parsing::LValue::PropertyAccess { object, .. } => {
+            collect_lvalue_dependencies(object, bound, free);
+        }
+    }
+}
+
+fn collect_free_identifiers(
+    expr: &Expression,
+    bound: &HashSet<String>,
+    free: &mut HashSet<String>,
+) {
+    match expr {
+        Expression::Identifier(identifier, _) => {
+            if !bound.contains(&identifier.0) {
+                free.insert(identifier.0.clone());
+            }
+        }
+        Expression::Function {
+            parameter,
+            return_type,
+            body,
+            ..
+        } => {
+            collect_pattern_dependencies(parameter, bound, free);
+            let mut inner_bound = bound.clone();
+            collect_pattern_bindings(parameter, &mut inner_bound);
+            if let Some(return_type) = return_type {
+                collect_free_identifiers(return_type, &inner_bound, free);
+            }
+            collect_free_identifiers(body, &inner_bound, free);
+        }
+        Expression::FunctionType {
+            parameter,
+            return_type,
+            ..
+        } => {
+            collect_free_identifiers(parameter, bound, free);
+            collect_free_identifiers(return_type, bound, free);
+        }
+        Expression::Struct(fields, _) => {
+            for (_id, value) in fields {
+                collect_free_identifiers(value, bound, free);
+            }
+        }
+        Expression::IntrinsicOperation(intrinsic, _) => match intrinsic {
+            IntrinsicOperation::Binary(left, right, _) => {
+                collect_free_identifiers(left, bound, free);
+                collect_free_identifiers(right, bound, free);
+            }
+            IntrinsicOperation::EnumFromStruct => {}
+        },
+        Expression::EnumType(variants, _) => {
+            for (_id, ty) in variants {
+                collect_free_identifiers(ty, bound, free);
+            }
+        }
+        Expression::EnumAccess { enum_expr, .. } => {
+            collect_free_identifiers(enum_expr, bound, free)
+        }
+        Expression::EnumConstructor {
+            enum_type,
+            payload_type,
+            ..
+        } => {
+            collect_free_identifiers(enum_type, bound, free);
+            collect_free_identifiers(payload_type, bound, free);
+        }
+        Expression::EnumValue {
+            enum_type, payload, ..
+        } => {
+            collect_free_identifiers(enum_type, bound, free);
+            if let Some(payload) = payload {
+                collect_free_identifiers(payload, bound, free);
+            }
+        }
+        Expression::Match {
+            value, branches, ..
+        } => {
+            collect_free_identifiers(value, bound, free);
+            for (pattern, branch_expr) in branches {
+                collect_pattern_dependencies(pattern, bound, free);
+                let mut inner_bound = bound.clone();
+                collect_pattern_bindings(pattern, &mut inner_bound);
+                collect_free_identifiers(branch_expr, &inner_bound, free);
+            }
+        }
+        Expression::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_free_identifiers(condition, bound, free);
+            collect_free_identifiers(then_branch, bound, free);
+            if let Some(branch) = else_branch {
+                collect_free_identifiers(branch, bound, free);
+            }
+        }
+        Expression::Operation { left, right, .. } => {
+            collect_free_identifiers(left, bound, free);
+            collect_free_identifiers(right, bound, free);
+        }
+        Expression::FunctionCall {
+            function, argument, ..
+        } => {
+            collect_free_identifiers(function, bound, free);
+            collect_free_identifiers(argument, bound, free);
+        }
+        Expression::PropertyAccess { object, .. } => {
+            collect_free_identifiers(object, bound, free);
+        }
+        Expression::Binding(binding, _) => {
+            collect_pattern_dependencies(&binding.pattern, bound, free);
+            collect_free_identifiers(&binding.expr, bound, free);
+        }
+        Expression::Block(expressions, _) => {
+            for expr in expressions {
+                collect_free_identifiers(expr, bound, free);
+            }
+        }
+        Expression::Diverge { value, .. } => {
+            if let Some(value) = value {
+                collect_free_identifiers(value, bound, free);
+            }
+        }
+        Expression::Loop { body, .. } => collect_free_identifiers(body, bound, free),
+        Expression::While {
+            condition, body, ..
+        } => {
+            collect_free_identifiers(condition, bound, free);
+            collect_free_identifiers(body, bound, free);
+        }
+        Expression::Assignment { target, expr, .. } => {
+            collect_lvalue_dependencies(target, bound, free);
+            collect_free_identifiers(expr, bound, free);
+        }
+        Expression::AttachImplementation {
+            type_expr,
+            implementation,
+            ..
+        } => {
+            collect_free_identifiers(type_expr, bound, free);
+            collect_free_identifiers(implementation, bound, free);
+        }
+        Expression::IntrinsicType(..) | Expression::Literal(..) => {}
+    }
+}
+
+fn binding_dependencies(binding: &BindingContext) -> HashSet<String> {
+    let mut free = HashSet::new();
+    match binding {
+        BindingContext::Bound(expr, _) => {
+            collect_free_identifiers(expr, &HashSet::new(), &mut free)
+        }
+        BindingContext::UnboundWithType(expr) => {
+            collect_free_identifiers(expr, &HashSet::new(), &mut free)
+        }
+        BindingContext::UnboundWithoutType => {}
+    }
+    free
+}
+
 pub fn simplify_context(context: Context) -> Result<Context, Diagnostic> {
-    let simplified_bindings = context
+    let mut simplified_bindings: HashMap<
+        String,
+        (BindingContext, Vec<crate::parsing::BindingAnnotation>),
+    > = context
         .bindings
         .into_iter()
         .map(|(bind_name, (binding, annotations))| {
-            Ok((bind_name, (simplify_binding_context(binding)?, annotations)))
+            Ok((
+                bind_name,
+                (
+                    simplify_binding_context(binding)?,
+                    annotations
+                        .into_iter()
+                        .map(simplify_binding_annotation)
+                        .collect::<Result<_, Diagnostic>>()?,
+                ),
+            ))
         })
         .collect::<Result<_, Diagnostic>>()?;
+
+    let dependencies: HashMap<String, HashSet<String>> = simplified_bindings
+        .iter()
+        .map(|(name, (binding_ctx, _))| (name.clone(), binding_dependencies(binding_ctx)))
+        .collect();
+
+    let mut used_bindings: HashSet<String> = simplified_bindings
+        .iter()
+        .filter_map(|(name, (_, annotations))| {
+            annotations
+                .iter()
+                .any(|ann| matches!(ann, crate::parsing::BindingAnnotation::Export(..)))
+                .then(|| name.clone())
+        })
+        .collect();
+
+    let mut queue: VecDeque<String> = used_bindings.iter().cloned().collect();
+
+    while let Some(current) = queue.pop_front() {
+        if let Some(deps) = dependencies.get(&current) {
+            for dep in deps {
+                if used_bindings.insert(dep.clone()) {
+                    queue.push_back(dep.clone());
+                }
+            }
+        }
+    }
+
+    simplified_bindings.retain(|name, _| used_bindings.contains(name));
+
     Ok(Context {
         bindings: simplified_bindings,
     })
