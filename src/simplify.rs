@@ -4,7 +4,7 @@ use crate::{
     enum_normalization::normalize_enum_application,
     interpret::BindingContext,
     parsing::{
-        BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, Expression,
+        BinaryIntrinsicOperator, Binding, BindingPattern, Expression,
         IntrinsicOperation,
     },
 };
@@ -179,7 +179,7 @@ fn has_side_effects(expr: &Expression) -> bool {
         } => {
             has_side_effects(condition)
                 || has_side_effects(then_branch)
-                || else_branch.as_ref().map_or(false, |e| has_side_effects(e))
+                || else_branch.as_ref().is_some_and(|e| has_side_effects(e))
         }
         Expression::Match {
             value, branches, ..
@@ -196,9 +196,9 @@ fn has_side_effects(expr: &Expression) -> bool {
         Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _) => {
             has_side_effects(left) || has_side_effects(right)
         }
-        Expression::Diverge { value, .. } => value.as_ref().map_or(false, |v| has_side_effects(v)),
+        Expression::Diverge { value, .. } => value.as_ref().is_some_and(|v| has_side_effects(v)),
         Expression::EnumValue { payload, .. } => {
-            payload.as_ref().map_or(false, |p| has_side_effects(p))
+            payload.as_ref().is_some_and(|p| has_side_effects(p))
         }
         Expression::EnumAccess { enum_expr, .. } => has_side_effects(enum_expr),
         Expression::EnumConstructor {
@@ -475,11 +475,10 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             // Build a map of bindings in this block
             let mut binding_names: HashSet<String> = HashSet::new();
             for expr in &simplified_exprs {
-                if let Expression::Binding(binding, _) = expr {
-                    if let BindingPattern::Identifier(id, _) = &binding.pattern {
+                if let Expression::Binding(binding, _) = expr
+                    && let BindingPattern::Identifier(id, _) = &binding.pattern {
                         binding_names.insert(id.0.clone());
                     }
-                }
             }
 
             // Collect which bindings are actually referenced
