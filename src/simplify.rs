@@ -11,7 +11,7 @@ use crate::{
 use std::collections::HashSet;
 
 #[cfg(test)]
-use crate::parsing::{ExpressionLiteral, TargetLiteral};
+use crate::parsing::{ExpressionLiteral, TargetLiteral, BindingAnnotation};
 
 /// Recursively collect all identifier names referenced in an expression
 fn collect_identifiers_in_expression(expr: &Expression, identifiers: &mut HashSet<String>) {
