@@ -2357,7 +2357,7 @@ fn bind_pattern_blanks(
                         .collect::<Result<Vec<_>, _>>()?,
                 )
                 .collect(),
-            None,
+            type_hint,
         ),
     }
 }
