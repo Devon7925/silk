@@ -9,7 +9,7 @@ pub mod test_support {
     pub use crate::interpret::{
         Context, evaluate_text_to_expression, interpret_program, intrinsic_context,
     };
-    pub use crate::simplify::{simplify_context, simplify_expression};
+    pub use crate::simplify::{simplify_context, simplify_expression, evaluate_text_to_simplified_expression};
 }
 
 pub use diagnostics::{Diagnostic, SourceSpan};

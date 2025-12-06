@@ -612,8 +612,7 @@ pub fn simplify_context(context: Context) -> Result<Context, Diagnostic> {
     })
 }
 
-#[cfg(test)]
-fn evaluate_text_to_simplified_expression(
+pub fn evaluate_text_to_simplified_expression(
     program: &str,
 ) -> Result<(Expression, Context), Diagnostic> {
     use crate::interpret::{interpret_program, intrinsic_context};
