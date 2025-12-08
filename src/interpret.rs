@@ -396,10 +396,9 @@ pub fn interpret_expression(
             let (interpreted_else, else_type, else_diverges) =
                 branch_type(&inferred_else_expr, &base_context)?;
 
-            if !types_equivalent(&then_type, &else_type)
-                && !then_diverges && !else_diverges {
-                    return Err(diagnostic("Type mismatch between if branches", span));
-                }
+            if !types_equivalent(&then_type, &else_type) && !then_diverges && !else_diverges {
+                return Err(diagnostic("Type mismatch between if branches", span));
+            }
 
             let resolved_condition = resolve_expression(interpreted_condition.clone(), context);
             if let Ok(Expression::Literal(ExpressionLiteral::Boolean(condition_value), _)) =
@@ -621,7 +620,8 @@ pub fn interpret_expression(
             }) = effective_function
             {
                 let is_direct = matches!(function_value, Expression::Function { .. });
-                let returns_compile_time_type = type_expression_contains_compile_time_data(&return_type.unwrap());
+                let returns_compile_time_type =
+                    type_expression_contains_compile_time_data(&return_type.unwrap());
                 let pattern_is_compile_time = pattern_contains_compile_time_data(&parameter);
 
                 if is_direct || returns_compile_time_type || pattern_is_compile_time {
@@ -1112,7 +1112,7 @@ fn get_type_of_expression(
             variant,
             span,
         } => {
-            let enum_type = get_type_of_expression(enum_expr, context)?;
+            let enum_type = interpret_expression(*enum_expr.clone(), context)?;
             if let Some((_, payload_type)) = enum_variant_info(&enum_type, variant) {
                 if let Expression::Struct(fields, _) = &payload_type
                     && fields.is_empty()
@@ -1734,7 +1734,10 @@ fn pattern_contains_compile_time_data(pattern: &BindingPattern) -> bool {
                 false
             }
         }
-        BindingPattern::TypeHint(pattern, ty, _) => pattern_contains_compile_time_data(pattern) || type_expression_contains_compile_time_data(ty),
+        BindingPattern::TypeHint(pattern, ty, _) => {
+            pattern_contains_compile_time_data(pattern)
+                || type_expression_contains_compile_time_data(ty)
+        }
         BindingPattern::Annotated { pattern, .. } => pattern_contains_compile_time_data(pattern),
     }
 }
@@ -1745,10 +1748,7 @@ fn type_expression_contains_compile_time_data(expr: &Expression) -> bool {
             .iter()
             .any(|(_, field_expr)| type_expression_contains_compile_time_data(field_expr)),
         Expression::FunctionType { .. } => true,
-        Expression::AttachImplementation {
-            type_expr,
-            ..
-        } => {
+        Expression::AttachImplementation { type_expr, .. } => {
             type_expression_contains_compile_time_data(type_expr)
         }
         Expression::EnumType(cases, _) => cases
@@ -2036,7 +2036,10 @@ fn get_lvalue_type(
     }
 }
 
-fn get_lvalue_value(target: &LValue, context: &mut Context) -> Result<Expression, Diagnostic> {
+fn get_lvalue_value(
+    target: &LValue,
+    context: &mut Context,
+) -> Result<Option<Expression>, Diagnostic> {
     match target {
         LValue::Identifier(identifier, target_span) => {
             let (binding_ctx, _) = context.bindings.get(&identifier.0).ok_or_else(|| {
@@ -2047,8 +2050,15 @@ fn get_lvalue_value(target: &LValue, context: &mut Context) -> Result<Expression
             })?;
 
             match binding_ctx {
-                BindingContext::Bound(value, _) => Ok(value.clone()),
-                _ => Err(diagnostic(
+                BindingContext::Bound(value, _) => {
+                    if is_resolved_constant(value) {
+                        Ok(Some(value.clone()))
+                    } else {
+                        Ok(None)
+                    }
+                }
+                BindingContext::UnboundWithType(_) => Ok(None),
+                BindingContext::UnboundWithoutType => Err(diagnostic(
                     format!(
                         "Cannot assign to uninitialized identifier: {}",
                         identifier.0
@@ -2062,7 +2072,9 @@ fn get_lvalue_value(target: &LValue, context: &mut Context) -> Result<Expression
             property,
             span: prop_span,
         } => {
-            let object_value = get_lvalue_value(object, context)?;
+            let Some(object_value) = get_lvalue_value(object, context)? else {
+                return Ok(None);
+            };
             let Expression::Struct(fields, struct_span) = object_value else {
                 return Err(diagnostic(
                     "Property access on non-struct value",
@@ -2073,7 +2085,7 @@ fn get_lvalue_value(target: &LValue, context: &mut Context) -> Result<Expression
             fields
                 .into_iter()
                 .find(|(id, _)| id.0 == *property)
-                .map(|(_, expr)| expr)
+                .map(|(_, expr)| Some(expr))
                 .ok_or_else(|| {
                     diagnostic(format!("Missing field {} in struct", property), struct_span)
                 })
@@ -2133,7 +2145,9 @@ fn apply_lvalue_update(
             property,
             span: prop_span,
         } => {
-            let current_object = get_lvalue_value(&object, context)?;
+            let Some(current_object) = get_lvalue_value(&object, context)? else {
+                return Ok(());
+            };
             let Expression::Struct(mut fields, struct_span) = current_object else {
                 return Err(diagnostic("Property access on non-struct value", prop_span));
             };
