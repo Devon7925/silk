@@ -20,6 +20,15 @@ impl LValue {
             LValue::PropertyAccess { span, .. } => *span,
         }
     }
+
+    pub fn pretty_print(&self) -> String {
+        match self {
+            LValue::Identifier(id, _) => id.0.clone(),
+            LValue::PropertyAccess {
+                object, property, ..
+            } => format!("{}.{}", object.pretty_print(), property),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,6 +59,63 @@ impl BindingPattern {
             | BindingPattern::EnumVariant { span, .. }
             | BindingPattern::TypeHint(_, _, span)
             | BindingPattern::Annotated { span, .. } => *span,
+        }
+    }
+
+    pub fn pretty_print(&self) -> String {
+        match self {
+            BindingPattern::Identifier(id, _) => id.0.clone(),
+            BindingPattern::Literal(lit, _) => match lit {
+                ExpressionLiteral::Number(n) => n.to_string(),
+                ExpressionLiteral::Boolean(b) => b.to_string(),
+                ExpressionLiteral::Target(t) => match t {
+                    TargetLiteral::JSTarget => "js".to_string(),
+                    TargetLiteral::WasmTarget => "wasm".to_string(),
+                },
+            },
+            BindingPattern::Struct(fields, _) => {
+                let field_strs: Vec<String> = fields
+                    .iter()
+                    .map(|(name, pat)| format!("{} = {}", name.0, pat.pretty_print()))
+                    .collect();
+                format!("{{ {} }}", field_strs.join(", "))
+            }
+            BindingPattern::EnumVariant {
+                enum_type,
+                variant,
+                payload,
+                ..
+            } => {
+                let payload_str = payload
+                    .as_ref()
+                    .map(|p| format!("({})", p.pretty_print()))
+                    .unwrap_or_default();
+                format!("{}::{}{}", enum_type.pretty_print(), variant.0, payload_str)
+            }
+            BindingPattern::TypeHint(inner, type_expr, _) => {
+                format!("{}: {}", inner.pretty_print(), type_expr.pretty_print())
+            }
+            BindingPattern::Annotated {
+                annotations,
+                pattern,
+                ..
+            } => {
+                let mut result = String::new();
+                for annotation in annotations {
+                    result.push('(');
+                    match annotation {
+                        BindingAnnotation::Export(expr, _) => {
+                            result.push_str(&format!("export {}", expr.pretty_print()));
+                        }
+                        BindingAnnotation::Mutable(_) => {
+                            result.push_str("mut");
+                        }
+                    }
+                    result.push_str(") ");
+                }
+                result.push_str(&pattern.pretty_print());
+                result
+            }
         }
     }
 }
@@ -223,6 +289,231 @@ impl Expression {
             | Expression::Operation { span, .. }
             | Expression::FunctionCall { span, .. }
             | Expression::PropertyAccess { span, .. } => *span,
+        }
+    }
+
+    // approximately decompiles the expression to a pretty-printed string
+    pub fn pretty_print(&self) -> String {
+        match self {
+            Expression::IntrinsicType(ty, _) => match ty {
+                IntrinsicType::I32 => "i32".to_string(),
+                IntrinsicType::Boolean => "boolean".to_string(),
+                IntrinsicType::Type => "type".to_string(),
+                IntrinsicType::Target => "target".to_string(),
+            },
+            Expression::IntrinsicOperation(op, _) => match op {
+                IntrinsicOperation::Binary(left, right, op) => {
+                    let op_str = match op {
+                        BinaryIntrinsicOperator::I32Add => "+",
+                        BinaryIntrinsicOperator::I32Subtract => "-",
+                        BinaryIntrinsicOperator::I32Multiply => "*",
+                        BinaryIntrinsicOperator::I32Divide => "/",
+                        BinaryIntrinsicOperator::I32Equal => "==",
+                        BinaryIntrinsicOperator::I32NotEqual => "!=",
+                        BinaryIntrinsicOperator::I32LessThan => "<",
+                        BinaryIntrinsicOperator::I32GreaterThan => ">",
+                        BinaryIntrinsicOperator::I32LessThanOrEqual => "<=",
+                        BinaryIntrinsicOperator::I32GreaterThanOrEqual => ">=",
+                        BinaryIntrinsicOperator::BooleanAnd => "&&",
+                        BinaryIntrinsicOperator::BooleanOr => "||",
+                        BinaryIntrinsicOperator::BooleanXor => "^",
+                    };
+                    format!(
+                        "{} {} {}",
+                        left.pretty_print(),
+                        op_str,
+                        right.pretty_print()
+                    )
+                }
+                IntrinsicOperation::EnumFromStruct => "EnumFromStruct".to_string(),
+            },
+            Expression::EnumType(variants, _) => {
+                let variant_strs: Vec<String> = variants
+                    .iter()
+                    .map(|(name, ty)| format!("{}({})", name.0, ty.pretty_print()))
+                    .collect();
+                format!("enum {{ {} }}", variant_strs.join(", "))
+            }
+            Expression::Match {
+                value, branches, ..
+            } => {
+                let branch_strs: Vec<String> = branches
+                    .iter()
+                    .map(|(pattern, body)| {
+                        format!("{} => {}", pattern.pretty_print(), body.pretty_print())
+                    })
+                    .collect();
+                format!(
+                    "match {} with ({})",
+                    value.pretty_print(),
+                    branch_strs.join(", ")
+                )
+            }
+            Expression::EnumValue {
+                enum_type,
+                variant,
+                payload,
+                ..
+            } => {
+                let payload_str = payload
+                    .as_ref()
+                    .map(|p| format!("({})", p.pretty_print()))
+                    .unwrap_or_default();
+                format!("{}::{}{}", enum_type.pretty_print(), variant.0, payload_str)
+            }
+            Expression::EnumConstructor {
+                enum_type,
+                variant,
+                payload_type,
+                ..
+            } => {
+                format!(
+                    "{}::{}({})",
+                    enum_type.pretty_print(),
+                    variant.0,
+                    payload_type.pretty_print()
+                )
+            }
+            Expression::EnumAccess {
+                enum_expr, variant, ..
+            } => format!("{}::{}", enum_expr.pretty_print(), variant.0),
+            Expression::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let else_str = else_branch
+                    .as_ref()
+                    .map(|b| format!(" else {}", b.pretty_print()))
+                    .unwrap_or_default();
+                format!(
+                    "if {} then {}{}",
+                    condition.pretty_print(),
+                    then_branch.pretty_print(),
+                    else_str
+                )
+            }
+            Expression::AttachImplementation {
+                type_expr,
+                implementation,
+                ..
+            } => {
+                let implementation_str = implementation.pretty_print();
+                let elipses = "...";
+                let max_len = 30;
+                let implementation_str = if implementation_str.len() > max_len {
+                    format!(
+                        "{}{}",
+                        &implementation_str[..max_len - elipses.len()],
+                        elipses
+                    )
+                } else {
+                    implementation_str
+                };
+                format!(
+                    "{} @ {}",
+                    type_expr.pretty_print(),
+                    implementation_str
+                )
+            }
+            Expression::Function {
+                parameter,
+                return_type,
+                body,
+                ..
+            } => {
+                let return_str = return_type
+                    .as_ref()
+                    .map(|r| format!(" => {}", r.pretty_print()))
+                    .unwrap_or_default();
+                format!(
+                    "({}{}) => {}",
+                    parameter.pretty_print(),
+                    return_str,
+                    body.pretty_print()
+                )
+            }
+            Expression::FunctionType {
+                parameter,
+                return_type,
+                ..
+            } => format!(
+                "({}) => {}",
+                parameter.pretty_print(),
+                return_type.pretty_print()
+            ),
+            Expression::Struct(fields, _) => {
+                let field_strs: Vec<String> = fields
+                    .iter()
+                    .map(|(name, value)| format!("{} = {}", name.0, value.pretty_print()))
+                    .collect();
+                format!("{{ {} }}", field_strs.join(", "))
+            }
+            Expression::Literal(lit, _) => match lit {
+                ExpressionLiteral::Number(n) => n.to_string(),
+                ExpressionLiteral::Boolean(b) => b.to_string(),
+                ExpressionLiteral::Target(t) => match t {
+                    TargetLiteral::JSTarget => "js".to_string(),
+                    TargetLiteral::WasmTarget => "wasm".to_string(),
+                },
+            },
+            Expression::Identifier(id, _) => id.0.clone(),
+            Expression::Operation {
+                operator,
+                left,
+                right,
+                ..
+            } => format!(
+                "{} {} {}",
+                left.pretty_print(),
+                operator,
+                right.pretty_print()
+            ),
+            Expression::Assignment { target, expr, .. } => {
+                format!("{} = {}", target.pretty_print(), expr.pretty_print())
+            }
+            Expression::FunctionCall {
+                function, argument, ..
+            } => format!("{}({})", function.pretty_print(), argument.pretty_print()),
+            Expression::PropertyAccess {
+                object, property, ..
+            } => format!("{}.{}", object.pretty_print(), property),
+            Expression::Binding(binding, _) => {
+                format!(
+                    "{} := {}",
+                    binding.pattern.pretty_print(),
+                    binding.expr.pretty_print()
+                )
+            }
+            Expression::Block(exprs, _) => {
+                let expr_strs: Vec<String> = exprs.iter().map(|e| e.pretty_print()).collect();
+                format!("{{ {} }}", expr_strs.join("; "))
+            }
+            Expression::Diverge {
+                value,
+                divergance_type,
+                ..
+            } => {
+                let keyword = match divergance_type {
+                    DivergeExpressionType::Return => "return",
+                    DivergeExpressionType::Break => "break",
+                };
+                match value {
+                    Some(v) => format!("{} {}", keyword, v.pretty_print()),
+                    None => keyword.to_string(),
+                }
+            }
+            Expression::Loop { body, .. } => format!("loop ({})", body.pretty_print()),
+            Expression::While {
+                condition, body, ..
+            } => {
+                format!(
+                    "while {} do ({})",
+                    condition.pretty_print(),
+                    body.pretty_print()
+                )
+            }
         }
     }
 }
