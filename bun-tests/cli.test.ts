@@ -89,7 +89,7 @@ test("runs add_one module and returns incremented value", async () => {
   expect(addOne(-1)).toBe(0);
 }, TEST_TIMEOUT_MS);
 
-test("runs range_sum module and returns incremented value", async () => {
+test("runs range_sum module and returns correct value", async () => {
   const moduleBytes = compileFixtureToBytes("range_sum.silk");
   const { instance } = await WebAssembly.instantiate(moduleBytes);
   const constructRange = instance.exports.construct_range as (min: any, max: any) => any;
