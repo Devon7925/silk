@@ -2053,7 +2053,7 @@ fn get_lvalue_value(
 
             match binding_ctx {
                 BindingContext::Bound(value, _) => {
-                    if is_resolved_constant(value) {
+                    if is_resolved_const_function_expression(value, context) { //TODO: verify context here
                         Ok(Some(value.clone()))
                     } else {
                         Ok(None)
@@ -2148,7 +2148,7 @@ fn apply_lvalue_update(
             span: prop_span,
         } => {
             let Some(current_object) = get_lvalue_value(&object, context)? else {
-                return Ok(());
+                return Ok(()); // TODO: if unable to get lvalue, we need to mark as unbound to avoid incorrect context value?
             };
             let Expression::Struct(mut fields, struct_span) = current_object else {
                 return Err(diagnostic("Property access on non-struct value", prop_span));
