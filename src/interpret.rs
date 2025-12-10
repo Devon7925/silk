@@ -10,6 +10,7 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreserveBehavior {
     PreserveUsage,
+    PreserveUsageInLoops,
     PreserveBinding,
     Inline,
 }
@@ -17,15 +18,16 @@ pub enum PreserveBehavior {
 impl Ord for PreserveBehavior {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         use PreserveBehavior::*;
-        match (self, other) {
-            (PreserveUsage, PreserveUsage) => std::cmp::Ordering::Equal,
-            (PreserveUsage, _) => std::cmp::Ordering::Greater,
-            (_, PreserveUsage) => std::cmp::Ordering::Less,
-            (PreserveBinding, PreserveBinding) => std::cmp::Ordering::Equal,
-            (PreserveBinding, Inline) => std::cmp::Ordering::Greater,
-            (Inline, PreserveBinding) => std::cmp::Ordering::Less,
-            (Inline, Inline) => std::cmp::Ordering::Equal,
+        fn get_rank(behavior: &PreserveBehavior) -> u8 {
+            match behavior {
+                PreserveUsage => 3,
+                PreserveUsageInLoops => 2,
+                PreserveBinding => 1,
+                Inline => 0,
+            }
         }
+        
+        get_rank(self).cmp(&get_rank(other))
     }
 }
 
@@ -45,6 +47,7 @@ pub enum BindingContext {
 #[derive(Clone, Debug)]
 pub struct Context {
     pub bindings: std::collections::HashMap<String, (BindingContext, Vec<BindingAnnotation>)>,
+    pub in_loop: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +76,7 @@ impl Context {
     fn empty() -> Context {
         Context {
             bindings: std::collections::HashMap::new(),
+            in_loop: false,
         }
     }
 }
@@ -420,27 +424,24 @@ pub fn interpret_expression(
         }
         Expression::Identifier(identifier, span) => {
             if let Some(binding) = context.bindings.get(&identifier.0) {
-                let is_mutable = binding
-                    .1
-                    .iter()
-                    .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)));
-                match &binding.0 {
-                    BindingContext::Bound(_, PreserveBehavior::PreserveUsage) => {
-                        return Ok(Expression::Identifier(identifier, span));
-                    }
-                    BindingContext::Bound(expr, PreserveBehavior::PreserveBinding) => {
-                        if is_mutable {
-                            return Ok(Expression::Identifier(identifier, span));
+                Ok(match &binding.0 {
+                    BindingContext::Bound(value, PreserveBehavior::PreserveUsageInLoops) => {
+                        if context.in_loop {
+                            Expression::Identifier(identifier, span)
+                        } else {
+                            value.clone()
                         }
-                        return Ok(expr.clone());
                     }
-                    BindingContext::Bound(expr, PreserveBehavior::Inline) => {
-                        return Ok(expr.clone());
+                    BindingContext::Bound(
+                        expr,
+                        PreserveBehavior::Inline | PreserveBehavior::PreserveBinding,
+                    ) => expr.clone(),
+                    BindingContext::UnboundWithType(_)
+                    | BindingContext::UnboundWithoutType
+                    | BindingContext::Bound(_, PreserveBehavior::PreserveUsage) => {
+                        Expression::Identifier(identifier, span)
                     }
-                    BindingContext::UnboundWithType(_) => {}
-                    _ => {}
-                }
-                Ok(Expression::Identifier(identifier, span))
+                })
             } else {
                 Err(diagnostic(
                     format!("Unbound identifier: {}", identifier.0),
@@ -519,6 +520,7 @@ pub fn interpret_expression(
                     return Ok(empty_struct_expr(span));
                 }
 
+                context.in_loop = true;
                 let iteration_value = match *body.clone() {
                     Expression::Block(exprs, block_span) => {
                         interpret_loop_block(exprs, block_span, context)?
@@ -552,6 +554,7 @@ pub fn interpret_expression(
 
                 iteration_count += 1;
                 let prev_context = context.clone();
+                context.in_loop = true;
                 let iteration_value = match *body.clone() {
                     Expression::Block(exprs, block_span) => {
                         interpret_loop_block(exprs, block_span, context)?
@@ -709,7 +712,7 @@ pub fn interpret_expression(
             bind_pattern_blanks(parameter.clone(), &mut type_context, Vec::new(), None)?;
 
             let preserve_body =
-                expression_contains_loop(&body) || expression_contains_mutation(&body);
+                expression_contains_loop(&body); // Todo: Don't preserve function bodies with loops. Currently causes issues.
 
             let interpreted_body = if preserve_body {
                 *body
@@ -2518,6 +2521,14 @@ fn bind_pattern_from_value(
             } else {
                 preserve_behavior
             };
+            let new_preserve_behavior = if new_annotations
+                .iter()
+                .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)))
+            {
+                new_preserve_behavior.max(PreserveBehavior::PreserveUsageInLoops)
+            } else {
+                new_preserve_behavior
+            };
             bind_pattern_from_value(
                 *pattern,
                 value,
@@ -2734,6 +2745,7 @@ fn is_resolved_const_function_expression(expr: &Expression, function_context: &C
 pub fn intrinsic_context() -> Context {
     let mut context = Context {
         bindings: std::collections::HashMap::new(),
+        in_loop: false,
     };
 
     context.bindings.insert(

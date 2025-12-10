@@ -3,15 +3,12 @@ use crate::{
     Diagnostic,
     enum_normalization::normalize_enum_application,
     interpret::BindingContext,
-    parsing::{
-        BinaryIntrinsicOperator, Binding, BindingPattern, Expression,
-        IntrinsicOperation,
-    },
+    parsing::{BinaryIntrinsicOperator, Binding, BindingPattern, Expression, IntrinsicOperation},
 };
 use std::collections::HashSet;
 
 #[cfg(test)]
-use crate::parsing::{ExpressionLiteral, TargetLiteral, BindingAnnotation};
+use crate::parsing::{BindingAnnotation, ExpressionLiteral, TargetLiteral};
 
 /// Recursively collect all identifier names referenced in an expression
 fn collect_identifiers_in_expression(expr: &Expression, identifiers: &mut HashSet<String>) {
@@ -141,23 +138,24 @@ fn collect_identifiers_in_pattern(pattern: &BindingPattern, identifiers: &mut Ha
             for (_, pat) in items {
                 collect_identifiers_in_pattern(pat, identifiers);
             }
-        },
-        BindingPattern::EnumVariant { enum_type, payload, .. } => {
+        }
+        BindingPattern::EnumVariant {
+            enum_type, payload, ..
+        } => {
             collect_identifiers_in_expression(enum_type, identifiers);
             if let Some(payload_pattern) = payload {
                 collect_identifiers_in_pattern(payload_pattern, identifiers);
             }
-        },
+        }
         BindingPattern::TypeHint(binding_pattern, expression, ..) => {
             collect_identifiers_in_pattern(binding_pattern, identifiers);
             collect_identifiers_in_expression(expression, identifiers);
-        },
+        }
         BindingPattern::Annotated { pattern, .. } => {
             // TODO: Consider collecting identifiers from annotations if they can contain expressions
             collect_identifiers_in_pattern(pattern, identifiers);
         }
-        BindingPattern::Identifier(..)
-        | BindingPattern::Literal(..) => {},
+        BindingPattern::Identifier(..) | BindingPattern::Literal(..) => {}
     }
 }
 
@@ -476,9 +474,10 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             let mut binding_names: HashSet<String> = HashSet::new();
             for expr in &simplified_exprs {
                 if let Expression::Binding(binding, _) = expr
-                    && let BindingPattern::Identifier(id, _) = &binding.pattern {
-                        binding_names.insert(id.0.clone());
-                    }
+                    && let BindingPattern::Identifier(id, _) = &binding.pattern
+                {
+                    binding_names.insert(id.0.clone());
+                }
             }
 
             // Collect which bindings are actually referenced
@@ -609,6 +608,7 @@ pub fn simplify_context(context: Context) -> Result<Context, Diagnostic> {
         .collect::<Result<_, Diagnostic>>()?;
     Ok(Context {
         bindings: simplified_bindings,
+        in_loop: false,
     })
 }
 
