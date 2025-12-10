@@ -26,7 +26,7 @@ impl Ord for PreserveBehavior {
                 Inline => 0,
             }
         }
-        
+
         get_rank(self).cmp(&get_rank(other))
     }
 }
@@ -382,7 +382,6 @@ pub fn interpret_expression(
             else_branch,
             span,
         } => {
-            let base_context = context.clone();
             let condition_expr = *condition;
             let condition_for_pattern = condition_expr.clone();
             let interpreted_condition = interpret_expression(condition_expr, context)?;
@@ -391,14 +390,15 @@ pub fn interpret_expression(
                 .clone()
                 .unwrap_or_else(|| Box::new(empty_struct_expr(SourceSpan::new(span.end(), 0))));
 
-            let mut then_context = base_context.clone();
+            let mut then_context = context.clone();
             let resolved_condition = resolve_operations(condition_for_pattern, context)?;
             collect_bindings(&resolved_condition, &mut then_context)?;
 
             let (interpreted_then, then_type, then_diverges) =
                 branch_type(&then_branch, &then_context)?;
+            let else_context = context.clone();
             let (interpreted_else, else_type, else_diverges) =
-                branch_type(&inferred_else_expr, &base_context)?;
+                branch_type(&inferred_else_expr, &else_context)?;
 
             if !types_equivalent(&then_type, &else_type) && !then_diverges && !else_diverges {
                 return Err(diagnostic("Type mismatch between if branches", span));
@@ -711,8 +711,7 @@ pub fn interpret_expression(
 
             bind_pattern_blanks(parameter.clone(), &mut type_context, Vec::new(), None)?;
 
-            let preserve_body =
-                expression_contains_loop(&body); // Todo: Don't preserve function bodies with loops. Currently causes issues.
+            let preserve_body = expression_contains_loop(&body); // Todo: Don't preserve function bodies with loops. Currently causes issues.
 
             let interpreted_body = if preserve_body {
                 *body
@@ -2379,6 +2378,14 @@ fn bind_pattern_blanks(
     }
 }
 
+
+fn value_preserve_behavior(value: &Expression, preserve_behavior: PreserveBehavior) -> PreserveBehavior {
+    if let Expression::Function { parameter, .. } = value && pattern_has_mutable_annotation(parameter) {
+        return PreserveBehavior::PreserveUsage;
+    }
+    preserve_behavior
+}
+
 fn bind_pattern_from_value(
     pattern: BindingPattern,
     value: &Expression,
@@ -2388,14 +2395,15 @@ fn bind_pattern_from_value(
 ) -> Result<(bool, PreserveBehavior), Diagnostic> {
     match pattern {
         BindingPattern::Identifier(identifier, _) => {
+            let new_preserve_behavior = value_preserve_behavior(value, preserve_behavior);
             context.bindings.insert(
                 identifier.0,
                 (
-                    BindingContext::Bound(value.clone(), preserve_behavior),
+                    BindingContext::Bound(value.clone(), new_preserve_behavior),
                     passed_annotations.clone(),
                 ),
             );
-            Ok((true, preserve_behavior))
+            Ok((true, new_preserve_behavior))
         }
         BindingPattern::Literal(literal, _) => match (literal, value) {
             (
