@@ -12,6 +12,7 @@ pub mod test_support {
     pub use crate::simplify::{
         evaluate_text_to_simplified_expression, simplify_context, simplify_expression,
     };
+    pub use crate::wasm::compile_exports;
 }
 
 pub use diagnostics::{Diagnostic, SourceSpan};
