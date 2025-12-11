@@ -1,0 +1,12 @@
+Option := (T: type) => (
+    enum { Some = T, None = {} }
+);
+
+(export wasm) loop_once := {} => (
+    mut opt := Option(i32)::Some(0);
+    while Option(i32)::Some(value) := opt do (
+        opt = Option(i32)::None;
+        value
+    );
+    0
+);
