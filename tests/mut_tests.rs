@@ -19,7 +19,6 @@ fn nested_mutation() {
         );
     });
 
-    
     let Expression::Block(statements, _) = expr else {
         panic!("Expected block expression, got {:?}", expr);
     };

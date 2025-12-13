@@ -1,4 +1,4 @@
-use silk::test_support::{evaluate_text_to_simplified_expression, compile_exports};
+use silk::test_support::{compile_exports, evaluate_text_to_simplified_expression};
 
 #[test]
 fn interpret_range_sum() {

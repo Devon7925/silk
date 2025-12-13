@@ -1855,7 +1855,7 @@ fn emit_expression(
                 let local_index = locals
                     .get(&name)
                     .copied()
-                    .expect("Local should have been collected");
+                    .expect(format!("Local '{}' should have been collected", name).as_str());
                 func.instruction(&Instruction::LocalSet(local_index));
                 // Binding to an identifier always succeeds
                 func.instruction(&Instruction::I32Const(1));

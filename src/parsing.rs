@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::diagnostics::{Diagnostic, SourceSpan};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,6 +29,13 @@ impl LValue {
             LValue::PropertyAccess {
                 object, property, ..
             } => format!("{}.{}", object.pretty_print(), property),
+        }
+    }
+
+    pub fn get_used_identifiers(&self) -> HashSet<String> {
+        match self {
+            LValue::Identifier(identifier, ..) => HashSet::from([identifier.clone().0]),
+            LValue::PropertyAccess { object, .. } => object.get_used_identifiers(),
         }
     }
 }
@@ -411,11 +420,7 @@ impl Expression {
                 } else {
                     implementation_str
                 };
-                format!(
-                    "{} @ {}",
-                    type_expr.pretty_print(),
-                    implementation_str
-                )
+                format!("{} @ {}", type_expr.pretty_print(), implementation_str)
             }
             Expression::Function {
                 parameter,
