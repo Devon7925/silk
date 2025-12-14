@@ -634,7 +634,7 @@ fn interpret_exported_function() {
     let annotated_bindings = context.annotated_bindings();
     assert_eq!(annotated_bindings.len(), 1);
     let exported_binding = &annotated_bindings[0];
-    assert_eq!(exported_binding.name.name, "add_one");
+    assert_eq!(exported_binding.identifier.name, "add_one");
     assert!(exported_binding.annotations.len() == 1);
     let target_expr = exported_binding
         .annotations
@@ -660,7 +660,7 @@ fn interpret_exported_function_w_binding() {
     let annotated_bindings = context.annotated_bindings();
     assert_eq!(annotated_bindings.len(), 1);
     let exported_binding = &annotated_bindings[0];
-    assert_eq!(exported_binding.name.name, "add_one_squared");
+    assert_eq!(exported_binding.identifier.name, "add_one_squared");
     assert!(exported_binding.annotations.len() == 1);
     let target_expr = exported_binding
         .annotations

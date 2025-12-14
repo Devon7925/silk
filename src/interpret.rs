@@ -67,7 +67,7 @@ pub struct Context {
 
 #[derive(Clone, Debug)]
 pub struct AnnotatedBinding {
-    pub name: Identifier,
+    pub identifier: Identifier,
     pub annotations: Vec<BindingAnnotation>,
     pub value: Expression,
 }
@@ -82,7 +82,7 @@ impl Context {
             .filter(|(_, (_, annotations))| !annotations.is_empty())
             .filter_map(|(name, (binding, annotations))| match binding {
                 BindingContext::Bound(value, _) => Some(AnnotatedBinding {
-                    name: name.clone(),
+                    identifier: name.clone(),
                     annotations: annotations.clone(),
                     value: value.clone(),
                 }),
@@ -3369,7 +3369,7 @@ fn interpret_preserves_bindings_in_function() {
     let bindings = context.annotated_bindings();
     let double_add = bindings
         .iter()
-        .find(|b| b.name.name == "double_add")
+        .find(|b| b.identifier.name == "double_add")
         .expect("double_add not found");
 
     if let Expression::Function { body, .. } = &double_add.value {
@@ -3431,7 +3431,7 @@ fn enum_intrinsic_exposes_function_type() {
         .expect("enum intrinsic should be present")
         .clone();
 
-    match &enum_binding.name {
+    match &enum_binding.0 {
         BindingContext::Bound(expr, _) => match get_type_of_expression(expr, &mut context) {
             Ok(Expression::FunctionType {
                 parameter,

@@ -666,7 +666,7 @@ fn collect_wasm_exports(
     let mut exports = Vec::new();
     for binding in context.annotated_bindings() {
         let AnnotatedBinding {
-            name,
+            identifier: name,
             annotations,
             value,
         } = binding;
