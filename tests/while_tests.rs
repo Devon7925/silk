@@ -67,7 +67,7 @@ fn while_condition_must_be_boolean() {
     match interpret_program(expression, &mut context) {
         Err(diag) => assert_eq!(
             diag.message,
-            "While condition did not resolve to a boolean value"
+            "Cannot perform boolean not on non boolean type" //TODO: improve diagnostic
         ),
         Ok(_) => panic!("non-boolean while condition should fail"),
     }

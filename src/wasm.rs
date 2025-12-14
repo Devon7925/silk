@@ -9,7 +9,7 @@ use crate::{
     parsing::{
         BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, DivergeExpressionType,
         Expression, ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, LValue,
-        TargetLiteral,
+        TargetLiteral, UnaryIntrinsicOperator,
     },
 };
 
@@ -446,11 +446,8 @@ fn collect_types(
             collect_types(left, ctx, locals_types, context)?;
             collect_types(right, ctx, locals_types, context)?;
         }
-        Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, span) => {
-            return Err(
-                Diagnostic::new("enum intrinsic should be resolved before wasm lowering")
-                    .with_span(*span),
-            );
+        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, _), _) => {
+            collect_types(operand, ctx, locals_types, context)?;
         }
         Expression::Loop { body, .. } => {
             collect_types(body, ctx, locals_types, context)?;
@@ -680,7 +677,7 @@ fn collect_wasm_exports(
 
 fn lower_function_export(
     context: &interpret::Context,
-    binding_name: &str,
+    binding_name: &Identifier,
     value: Expression,
     annotation_span: SourceSpan,
 ) -> Result<WasmFunctionExport, Diagnostic> {
@@ -692,7 +689,8 @@ fn lower_function_export(
     } = value
     else {
         return Err(Diagnostic::new(format!(
-            "Only functions can be exported to wasm (binding `{binding_name}`)"
+            "Only functions can be exported to wasm (binding `{}`)",
+            binding_name.0
         ))
         .with_span(annotation_span));
     };
@@ -701,7 +699,7 @@ fn lower_function_export(
     let params = extract_function_params(context, parameter)?;
 
     Ok(WasmFunctionExport {
-        name: binding_name.to_string(),
+        name: binding_name.0.clone(),
         params,
         body: *body,
         return_type,
@@ -722,7 +720,7 @@ fn resolve_type(context: &interpret::Context, expr: &Expression) -> Result<WasmT
             Ok(WasmType::Struct(field_types))
         }
         Expression::Identifier(identifier, span) => {
-            if let Some((binding, _)) = context.bindings.get(&identifier.0) {
+            if let Some((binding, _)) = context.get_identifier(&identifier) {
                 match binding {
                     interpret::BindingContext::Bound(value, _) => resolve_type(context, value),
                     _ => Err(Diagnostic::new(format!(
@@ -1246,10 +1244,24 @@ fn emit_expression(
             }
             Ok(())
         }
-        Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, span) => Err(
+        Expression::IntrinsicOperation(IntrinsicOperation::Unary(_, UnaryIntrinsicOperator::EnumFromStruct), span) => Err(
             Diagnostic::new("enum intrinsic should be resolved before wasm lowering")
                 .with_span(*span),
         ),
+        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, UnaryIntrinsicOperator::BooleanNot), _) => {
+            emit_expression(
+                operand,
+                locals,
+                locals_types,
+                func,
+                type_ctx,
+                context,
+                control_stack,
+                loop_stack,
+            )?;
+            func.instruction(&Instruction::I32Eqz);
+            Ok(())
+        },
         Expression::Diverge {
             value,
             divergance_type: DivergeExpressionType::Break,

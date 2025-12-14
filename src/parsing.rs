@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::diagnostics::{Diagnostic, SourceSpan};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Identifier(pub String);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,9 +32,9 @@ impl LValue {
         }
     }
 
-    pub fn get_used_identifiers(&self) -> HashSet<String> {
+    pub fn get_used_identifiers(&self) -> HashSet<Identifier> {
         match self {
-            LValue::Identifier(identifier, ..) => HashSet::from([identifier.clone().0]),
+            LValue::Identifier(identifier, ..) => HashSet::from([identifier.clone()]),
             LValue::PropertyAccess { object, .. } => object.get_used_identifiers(),
         }
     }
@@ -151,6 +151,12 @@ pub enum IntrinsicType {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UnaryIntrinsicOperator {
+    BooleanNot,
+    EnumFromStruct
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BinaryIntrinsicOperator {
     I32Add,
     I32Subtract,
@@ -170,7 +176,7 @@ pub enum BinaryIntrinsicOperator {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntrinsicOperation {
     Binary(Box<Expression>, Box<Expression>, BinaryIntrinsicOperator),
-    EnumFromStruct,
+    Unary(Box<Expression>, UnaryIntrinsicOperator),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -265,11 +271,6 @@ pub enum Expression {
         body: Box<Expression>,
         span: SourceSpan,
     },
-    While {
-        condition: Box<Expression>,
-        body: Box<Expression>,
-        span: SourceSpan,
-    },
 }
 
 impl Expression {
@@ -288,7 +289,6 @@ impl Expression {
             | Expression::Block(_, span)
             | Expression::Diverge { span, .. }
             | Expression::Loop { span, .. }
-            | Expression::While { span, .. }
             | Expression::Assignment { span, .. }
             | Expression::EnumValue { span, .. }
             | Expression::EnumConstructor { span, .. }
@@ -334,7 +334,17 @@ impl Expression {
                         right.pretty_print()
                     )
                 }
-                IntrinsicOperation::EnumFromStruct => "EnumFromStruct".to_string(),
+                IntrinsicOperation::Unary(operand, op) => {
+                    let op_str = match op {
+                        UnaryIntrinsicOperator::BooleanNot => "!",
+                        UnaryIntrinsicOperator::EnumFromStruct => "enum",
+                    };
+                    format!(
+                        "{}({})",
+                        op_str,
+                        operand.pretty_print()
+                    )
+                }
             },
             Expression::EnumType(variants, _) => {
                 let variant_strs: Vec<String> = variants
@@ -493,7 +503,7 @@ impl Expression {
             }
             Expression::Block(exprs, _) => {
                 let expr_strs: Vec<String> = exprs.iter().map(|e| e.pretty_print()).collect();
-                format!("{{ {} }}", expr_strs.join("; "))
+                format!("( {} )", expr_strs.join("; "))
             }
             Expression::Diverge {
                 value,
@@ -509,16 +519,7 @@ impl Expression {
                     None => keyword.to_string(),
                 }
             }
-            Expression::Loop { body, .. } => format!("loop ({})", body.pretty_print()),
-            Expression::While {
-                condition, body, ..
-            } => {
-                format!(
-                    "while {} do ({})",
-                    condition.pretty_print(),
-                    body.pretty_print()
-                )
-            }
+            Expression::Loop { body, .. } => format!("loop {}", body.pretty_print()),
         }
     }
 }
@@ -865,8 +866,7 @@ fn expression_to_lvalue(expression: Expression) -> Result<LValue, Diagnostic> {
         | Expression::Binding(..)
         | Expression::Block(..)
         | Expression::Diverge { .. }
-        | Expression::Loop { .. }
-        | Expression::While { .. } => {
+        | Expression::Loop { .. } => {
             Err(Diagnostic::new("Invalid binding pattern expression").with_span(expression.span()))
         }
     }
@@ -949,8 +949,7 @@ fn pattern_expression_to_binding_pattern(
         | Expression::Binding(..)
         | Expression::Block(..)
         | Expression::Diverge { .. }
-        | Expression::Loop { .. }
-        | Expression::While { .. } => Err(Diagnostic::new("Invalid binding pattern expression")
+        | Expression::Loop { .. } => Err(Diagnostic::new("Invalid binding pattern expression")
             .with_span(pattern_expression.span())),
     }
 }
@@ -1296,10 +1295,25 @@ fn parse_while_expression_with_source<'a>(
     match group_parsed {
         Ok((body, rest)) => {
             let span = consumed_span(source, start_slice, rest);
+            let condition_span = condition.span();
             Some(Ok((
-                Expression::While {
-                    condition: Box::new(condition),
-                    body: Box::new(body),
+                Expression::Loop {
+                    body: Box::new(Expression::Block(
+                        vec![
+                            Expression::If {
+                                condition: Box::new(Expression::IntrinsicOperation(IntrinsicOperation::Unary(Box::new(condition), UnaryIntrinsicOperator::BooleanNot), condition_span)),
+                                then_branch: Box::new(Expression::Diverge {
+                                    value: None,
+                                    divergance_type: DivergeExpressionType::Break,
+                                    span: condition_span,
+                                }),
+                                else_branch: None,
+                                span: condition_span,
+                            },
+                            body,
+                        ],
+                        span,
+                    )),
                     span,
                 },
                 rest,

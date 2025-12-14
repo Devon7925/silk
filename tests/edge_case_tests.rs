@@ -52,7 +52,7 @@ fn test_shadowing_in_block() {
     let bindings = context.annotated_bindings();
     let _binding = bindings
         .iter()
-        .find(|b| b.name == "test_shadow")
+        .find(|b| b.name.0 == "test_shadow")
         .expect("binding found");
 }
 
@@ -114,7 +114,7 @@ fn test_negative_number_literal() {
     let binding = context
         .annotated_bindings()
         .into_iter()
-        .find(|b| b.name == "negative_literal")
+        .find(|b| b.name.0 == "negative_literal")
         .expect("exported binding found");
 
     assert!(matches!(

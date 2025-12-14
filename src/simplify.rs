@@ -1,11 +1,12 @@
 use crate::interpret::Context;
+use crate::parsing::Identifier;
 use crate::{
     Diagnostic,
     enum_normalization::normalize_enum_application,
     interpret::BindingContext,
     parsing::{BinaryIntrinsicOperator, Binding, BindingPattern, Expression, IntrinsicOperation},
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[cfg(test)]
 use crate::parsing::{BindingAnnotation, ExpressionLiteral, TargetLiteral};
@@ -55,12 +56,6 @@ fn collect_identifiers_in_expression(expr: &Expression, identifiers: &mut HashSe
                 collect_identifiers_in_expression(branch_expr, identifiers);
             }
         }
-        Expression::While {
-            condition, body, ..
-        } => {
-            collect_identifiers_in_expression(condition, identifiers);
-            collect_identifiers_in_expression(body, identifiers);
-        }
         Expression::Loop { body, .. } => {
             collect_identifiers_in_expression(body, identifiers);
         }
@@ -79,6 +74,9 @@ fn collect_identifiers_in_expression(expr: &Expression, identifiers: &mut HashSe
         Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _) => {
             collect_identifiers_in_expression(left, identifiers);
             collect_identifiers_in_expression(right, identifiers);
+        }
+        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, _), _) => {
+            collect_identifiers_in_expression(operand, identifiers);
         }
         Expression::Assignment { expr, .. } => {
             collect_identifiers_in_expression(expr, identifiers);
@@ -126,9 +124,7 @@ fn collect_identifiers_in_expression(expr: &Expression, identifiers: &mut HashSe
             collect_identifiers_in_expression(implementation, identifiers);
         }
         // Base cases - no identifiers to collect
-        Expression::Literal(..)
-        | Expression::IntrinsicType(..)
-        | Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, _) => {}
+        Expression::Literal(..) | Expression::IntrinsicType(..) => {}
     }
 }
 
@@ -182,9 +178,6 @@ fn has_side_effects(expr: &Expression) -> bool {
         Expression::Match {
             value, branches, ..
         } => has_side_effects(value) || branches.iter().any(|(_, e)| has_side_effects(e)),
-        Expression::While {
-            condition, body, ..
-        } => has_side_effects(condition) || has_side_effects(body),
         Expression::Loop { body, .. } => has_side_effects(body),
         Expression::Struct(items, _) => items.iter().any(|(_, e)| has_side_effects(e)),
         Expression::PropertyAccess { object, .. } => has_side_effects(object),
@@ -193,6 +186,9 @@ fn has_side_effects(expr: &Expression) -> bool {
         }
         Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _) => {
             has_side_effects(left) || has_side_effects(right)
+        }
+        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, _), _) => {
+            has_side_effects(operand)
         }
         Expression::Diverge { value, .. } => value.as_ref().is_some_and(|v| has_side_effects(v)),
         Expression::EnumValue { payload, .. } => {
@@ -216,10 +212,9 @@ fn has_side_effects(expr: &Expression) -> bool {
             ..
         } => has_side_effects(type_expr) || has_side_effects(implementation),
         // Base cases - no side effects
-        Expression::Identifier(..)
-        | Expression::Literal(..)
-        | Expression::IntrinsicType(..)
-        | Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, _) => false,
+        Expression::Identifier(..) | Expression::Literal(..) | Expression::IntrinsicType(..) => {
+            false
+        }
     }
 }
 
@@ -236,9 +231,12 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             ),
             source_span,
         )),
-        Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, source_span) => Ok(
-            Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, source_span),
-        ),
+        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, op), source_span) => {
+            Ok(Expression::IntrinsicOperation(
+                IntrinsicOperation::Unary(Box::new(simplify_expression(*operand)?), op),
+                source_span,
+            ))
+        }
         Expression::AttachImplementation { type_expr, .. } => simplify_expression(*type_expr),
         Expression::If {
             condition,
@@ -289,23 +287,6 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
         } => Ok(Expression::FunctionType {
             parameter: Box::new(simplify_expression(*parameter)?),
             return_type: Box::new(simplify_expression(*return_type)?),
-            span,
-        }),
-        Expression::While {
-            condition,
-            body,
-            span,
-        } => Ok(Expression::Loop {
-            body: Box::new(Expression::If {
-                condition: Box::new(simplify_expression(*condition)?),
-                then_branch: Box::new(simplify_expression(*body)?),
-                else_branch: Some(Box::new(Expression::Diverge {
-                    value: None,
-                    divergance_type: crate::parsing::DivergeExpressionType::Break,
-                    span,
-                })),
-                span,
-            }),
             span,
         }),
         Expression::Loop { body, span } => Ok(Expression::Loop {
@@ -599,11 +580,17 @@ fn simplify_binding_context(binding_context: BindingContext) -> Result<BindingCo
 }
 
 pub fn simplify_context(context: Context) -> Result<Context, Diagnostic> {
+    use crate::parsing::BindingAnnotation;
     let simplified_bindings = context
         .bindings
         .into_iter()
-        .map(|(bind_name, (binding, annotations))| {
-            Ok((bind_name, (simplify_binding_context(binding)?, annotations)))
+        .map(|binding_context| {
+            binding_context
+                .into_iter()
+                .map(|(bind_name, (binding, annotations))| {
+                    Ok((bind_name, (simplify_binding_context(binding)?, annotations)))
+                })
+                .collect::<Result<HashMap<Identifier, (BindingContext, Vec<BindingAnnotation>)>, Diagnostic>>()
         })
         .collect::<Result<_, Diagnostic>>()?;
     Ok(Context {
@@ -644,7 +631,7 @@ fn interpret_exported_function() {
     let annotated_bindings = context.annotated_bindings();
     assert_eq!(annotated_bindings.len(), 1);
     let exported_binding = &annotated_bindings[0];
-    assert_eq!(exported_binding.name, "add_one");
+    assert_eq!(exported_binding.name.0, "add_one");
     assert!(exported_binding.annotations.len() == 1);
     let target_expr = exported_binding
         .annotations
@@ -670,7 +657,7 @@ fn interpret_exported_function_w_binding() {
     let annotated_bindings = context.annotated_bindings();
     assert_eq!(annotated_bindings.len(), 1);
     let exported_binding = &annotated_bindings[0];
-    assert_eq!(exported_binding.name, "add_one_squared");
+    assert_eq!(exported_binding.name.0, "add_one_squared");
     assert!(exported_binding.annotations.len() == 1);
     let target_expr = exported_binding
         .annotations

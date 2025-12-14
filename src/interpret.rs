@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     diagnostics::{Diagnostic, SourceSpan},
@@ -6,7 +6,7 @@ use crate::{
     parsing::{
         BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, DivergeExpressionType,
         Expression, ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, LValue,
-        TargetLiteral,
+        TargetLiteral, UnaryIntrinsicOperator,
     },
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,13 +60,13 @@ impl BindingContext {
 
 #[derive(Clone, Debug)]
 pub struct Context {
-    pub bindings: std::collections::HashMap<String, (BindingContext, Vec<BindingAnnotation>)>,
+    pub bindings: Vec<HashMap<Identifier, (BindingContext, Vec<BindingAnnotation>)>>,
     pub in_loop: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct AnnotatedBinding {
-    pub name: String,
+    pub name: Identifier,
     pub annotations: Vec<BindingAnnotation>,
     pub value: Expression,
 }
@@ -74,6 +74,9 @@ pub struct AnnotatedBinding {
 impl Context {
     pub fn annotated_bindings(&self) -> Vec<AnnotatedBinding> {
         self.bindings
+            .iter()
+            .last()
+            .unwrap()
             .iter()
             .filter(|(_, (_, annotations))| !annotations.is_empty())
             .filter_map(|(name, (binding, annotations))| match binding {
@@ -89,9 +92,36 @@ impl Context {
 
     fn empty() -> Context {
         Context {
-            bindings: std::collections::HashMap::new(),
+            bindings: vec![],
             in_loop: false,
         }
+    }
+
+    pub fn get_identifier(
+        &self,
+        identifier: &Identifier,
+    ) -> Option<&(BindingContext, Vec<BindingAnnotation>)> {
+        self.bindings
+            .iter()
+            .rev()
+            .find_map(|binding_context| binding_context.get(identifier))
+    }
+
+    pub fn get_mut_identifier(
+        &mut self,
+        identifier: &Identifier,
+    ) -> Option<&mut (BindingContext, Vec<BindingAnnotation>)> {
+        self.bindings
+            .iter_mut()
+            .rev()
+            .find_map(|binding_context| binding_context.get_mut(identifier))
+    }
+
+    fn contains_identifier(&self, identifier: &Identifier) -> bool {
+        self.bindings
+            .iter()
+            .rev()
+            .any(|binding_context| binding_context.contains_key(identifier))
     }
 }
 
@@ -442,8 +472,8 @@ pub fn interpret_expression(
             }
         }
         Expression::Identifier(identifier, span) => {
-            if let Some(binding) = context.bindings.get(&identifier.0) {
-                Ok(match &binding.0 {
+            if let Some((binding, _)) = context.get_identifier(&identifier) {
+                Ok(match &binding {
                     BindingContext::Bound(value, PreserveBehavior::PreserveUsageInLoops) => {
                         if context.in_loop {
                             Expression::Identifier(identifier, span)
@@ -504,85 +534,6 @@ pub fn interpret_expression(
                 span,
             })
         }
-        Expression::While {
-            condition,
-            body,
-            span,
-        } => {
-            let mut iteration_count = 0usize;
-            loop {
-                if iteration_count > 10_000 {
-                    return Err(diagnostic("Loop did not produce a return value", span));
-                }
-
-                iteration_count += 1;
-                let condition_value = interpret_expression((*condition).clone(), context)?;
-                let resolved_condition = resolve_expression(condition_value.clone(), context)?;
-                let Expression::Literal(ExpressionLiteral::Boolean(condition_bool), _) =
-                    resolved_condition
-                else {
-                    if is_resolved_constant(&resolved_condition) {
-                        return Err(diagnostic(
-                            "While condition did not resolve to a boolean value",
-                            span,
-                        ));
-                    } else {
-                        // TODO: In this case values possibly mutated from context need to be reset to unknown
-                        let was_in_loop_before = context.in_loop;
-                        context.in_loop = true;
-                        let interpreted_condition =
-                            interpret_expression((*condition).clone(), context)?;
-                        let interpreted_body = interpret_expression(*body, context)?;
-                        context.in_loop = was_in_loop_before;
-                        let possibly_mutated_values: HashSet<String> =
-                            get_possibly_mutated_values(&interpreted_condition)
-                                .into_iter()
-                                .chain(get_possibly_mutated_values(&interpreted_body).into_iter())
-                                .collect();
-                        for possibly_mutated_value in possibly_mutated_values {
-                            let binding = context.bindings.get(&possibly_mutated_value).unwrap();
-                            if let Some(binding_ty) = binding.0.get_bound_type(context)? {
-                                let binding =
-                                    context.bindings.get_mut(&possibly_mutated_value).unwrap();
-                                binding.0 = BindingContext::UnboundWithType(binding_ty)
-                            }
-                        }
-                        return Ok(Expression::While {
-                            condition: Box::new(interpreted_condition),
-                            body: Box::new(interpreted_body),
-                            span,
-                        });
-                    }
-                };
-
-                if !condition_bool {
-                    return Ok(empty_struct_expr(span));
-                }
-
-                let iteration_value = match *body.clone() {
-                    Expression::Block(exprs, block_span) => {
-                        interpret_loop_block(exprs, block_span, context)?
-                    }
-                    other => interpret_expression(other, context)?,
-                };
-
-                if let Expression::Diverge {
-                    value,
-                    divergance_type,
-                    span,
-                } = &iteration_value
-                {
-                    match divergance_type {
-                        DivergeExpressionType::Return => return Ok(iteration_value),
-                        DivergeExpressionType::Break => {
-                            return Ok(*value
-                                .clone()
-                                .unwrap_or_else(|| Box::new(empty_struct_expr(*span))));
-                        }
-                    }
-                }
-            }
-        }
         Expression::Loop { body, span } => {
             let mut iteration_count = 0usize;
             loop {
@@ -592,12 +543,7 @@ pub fn interpret_expression(
 
                 iteration_count += 1;
                 let prev_context = context.clone();
-                let iteration_value = match *body.clone() {
-                    Expression::Block(exprs, block_span) => {
-                        interpret_loop_block(exprs, block_span, context)?
-                    }
-                    other => interpret_expression(other, context)?,
-                };
+                let iteration_value = interpret_expression(*body.clone(), context)?;
 
                 if let Expression::Diverge {
                     value,
@@ -622,13 +568,13 @@ pub fn interpret_expression(
                     context.in_loop = true;
                     let interpreted_body = interpret_expression(*body, context)?;
                     context.in_loop = was_in_loop_before;
-                    let possibly_mutated_values: HashSet<String> =
+                    let possibly_mutated_values: HashSet<Identifier> =
                         get_possibly_mutated_values(&interpreted_body);
                     for possibly_mutated_value in possibly_mutated_values {
-                        let binding = context.bindings.get(&possibly_mutated_value).unwrap();
+                        let binding = context.get_identifier(&possibly_mutated_value).unwrap();
                         if let Some(binding_ty) = binding.0.get_bound_type(context)? {
                             let binding =
-                                context.bindings.get_mut(&possibly_mutated_value).unwrap();
+                                context.get_mut_identifier(&possibly_mutated_value).unwrap();
                             binding.0 = BindingContext::UnboundWithType(binding_ty)
                         }
                     }
@@ -656,19 +602,13 @@ pub fn interpret_expression(
             let argument_value = interpret_expression(*argument, context)?;
 
             let effective_function = if let Expression::Identifier(ident, _) = &function_value {
-                context.bindings.get(&ident.0).and_then(|b| match &b.0 {
+                context.get_identifier(&ident).and_then(|b| match &b.0 {
                     BindingContext::Bound(v, _) => Some(v.clone()),
                     _ => None,
                 })
             } else {
                 Some(function_value.clone())
             };
-
-            if let Some(Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, _)) =
-                &effective_function
-            {
-                return interpret_enum_from_struct(argument_value, span, context);
-            }
 
             if let Some(Expression::Function {
                 parameter,
@@ -930,10 +870,31 @@ pub fn interpret_expression(
                     ),
                 }
             }
-            IntrinsicOperation::EnumFromStruct => Ok(Expression::IntrinsicOperation(
-                IntrinsicOperation::EnumFromStruct,
-                span,
-            )),
+            IntrinsicOperation::Unary(operand, op) => {
+                let evaluated_operand = interpret_expression(*operand, context)?;
+                if !is_resolved_constant(&evaluated_operand) {
+                    return Ok(Expression::IntrinsicOperation(
+                        IntrinsicOperation::Unary(Box::new(evaluated_operand), op),
+                        span,
+                    ));
+                }
+                match op {
+                    UnaryIntrinsicOperator::BooleanNot => match evaluated_operand {
+                        Expression::Literal(ExpressionLiteral::Boolean(b), span) => {
+                            return Ok(Expression::Literal(ExpressionLiteral::Boolean(!b), span));
+                        }
+                        _ => {
+                            return Err(Diagnostic::new(
+                                "Cannot perform boolean not on non boolean type",
+                            )
+                            .with_span(span));
+                        }
+                    },
+                    UnaryIntrinsicOperator::EnumFromStruct => {
+                        return interpret_enum_from_struct(evaluated_operand, span, context);
+                    }
+                }
+            }
         },
         Expression::PropertyAccess {
             object,
@@ -972,7 +933,7 @@ pub fn interpret_expression(
     }
 }
 
-fn get_possibly_mutated_values(body: &Expression) -> HashSet<String> {
+fn get_possibly_mutated_values(body: &Expression) -> HashSet<Identifier> {
     match body {
         Expression::IntrinsicType(intrinsic_type, source_span) => todo!(),
         Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), ..) => {
@@ -981,7 +942,9 @@ fn get_possibly_mutated_values(body: &Expression) -> HashSet<String> {
                 .chain(get_possibly_mutated_values(right).into_iter())
                 .collect()
         }
-        Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, ..) => HashSet::new(),
+        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, _), ..) => {
+            get_possibly_mutated_values(operand)
+        }
         Expression::EnumType(items, source_span) => todo!(),
         Expression::Match {
             value,
@@ -1075,11 +1038,6 @@ fn get_possibly_mutated_values(body: &Expression) -> HashSet<String> {
             .map(|value| get_possibly_mutated_values(value.as_ref()))
             .unwrap_or(HashSet::new()),
         Expression::Loop { body, span } => todo!(),
-        Expression::While {
-            condition,
-            body,
-            span,
-        } => todo!(),
     }
 }
 
@@ -1155,8 +1113,7 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
         },
         Expression::Identifier(identifier, span) => {
             let bound_value = context
-                .bindings
-                .get(&identifier.0)
+                .get_identifier(&identifier)
                 .ok_or_else(|| diagnostic(format!("Unbound identifier: {}", identifier.0), *span))?
                 .clone();
 
@@ -1321,7 +1278,8 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
             context,
         ),
         Expression::Block(exprs, span) => {
-            let (value, mut block_context) = interpret_block(exprs.clone(), *span, context)?;
+            let (value, mut block_context) =
+                interpret_block(exprs.clone(), *span, &mut context.clone())?;
             if let Expression::Block(expressions, span) = &value {
                 let Some(last_expr) = expressions.last() else {
                     return Err(Diagnostic::new(
@@ -1332,30 +1290,6 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
                 return get_type_of_expression(last_expr, &mut block_context);
             }
             get_type_of_expression(&value, &mut block_context)
-        }
-        Expression::While {
-            condition,
-            body,
-            span,
-        } => {
-            ensure_boolean_condition(condition, *span, context, "While")?;
-
-            get_type_of_expression(
-                &Expression::Loop {
-                    body: Box::new(Expression::If {
-                        condition: condition.clone(),
-                        then_branch: body.clone(),
-                        else_branch: Some(Box::new(Expression::Diverge {
-                            value: None,
-                            divergance_type: DivergeExpressionType::Break,
-                            span: *span,
-                        })),
-                        span: *span,
-                    }),
-                    span: *span,
-                },
-                context,
-            )
         }
         Expression::Loop { body, .. } => {
             let mut loop_context = context.clone();
@@ -1501,13 +1435,14 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
             ),
             _,
         ) => interpret_expression(identifier_expr("bool"), &mut context.clone()),
-        Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, span) => {
-            Ok(Expression::FunctionType {
-                parameter: Box::new(intrinsic_type_expr(IntrinsicType::Type)),
-                return_type: Box::new(intrinsic_type_expr(IntrinsicType::Type)),
-                span: *span,
-            })
-        }
+        Expression::IntrinsicOperation(
+            IntrinsicOperation::Unary(_, UnaryIntrinsicOperator::BooleanNot),
+            _,
+        ) => interpret_expression(identifier_expr("bool"), &mut context.clone()),
+        Expression::IntrinsicOperation(
+            IntrinsicOperation::Unary(_, UnaryIntrinsicOperator::EnumFromStruct),
+            _,
+        ) => interpret_expression(identifier_expr("type"), &mut context.clone()),
     }
 }
 
@@ -1583,6 +1518,9 @@ pub fn collect_break_values(expr: &Expression) -> Vec<Expression> {
                 collect_break_values_impl(left, values);
                 collect_break_values_impl(right, values);
             }
+            Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, _), _) => {
+                collect_break_values_impl(operand, values);
+            }
             Expression::AttachImplementation {
                 type_expr,
                 implementation,
@@ -1599,11 +1537,7 @@ pub fn collect_break_values(expr: &Expression) -> Vec<Expression> {
                     collect_break_values_impl(branch, values);
                 }
             }
-            Expression::While { condition, .. } => {
-                collect_break_values_impl(condition, values);
-            }
-            Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, _)
-            | Expression::Literal(_, _)
+            Expression::Literal(_, _)
             | Expression::Identifier(_, _)
             | Expression::IntrinsicType(_, _)
             | Expression::EnumType(_, _)
@@ -1685,13 +1619,6 @@ pub fn expression_does_diverge(expr: &Expression, possibility: bool, in_inner_lo
             expression_does_diverge(function, possibility, in_inner_loop)
                 || expression_does_diverge(argument, possibility, in_inner_loop)
         }
-        Expression::While {
-            condition, body, ..
-        } => {
-            //todo verify condition handling is correct here
-            expression_does_diverge(condition, possibility, in_inner_loop)
-                || expression_does_diverge(body, possibility, true)
-        }
         Expression::Loop { body, .. } => expression_does_diverge(body, possibility, true),
         Expression::PropertyAccess { object, .. } => {
             expression_does_diverge(object, possibility, in_inner_loop)
@@ -1740,8 +1667,10 @@ pub fn expression_does_diverge(expr: &Expression, possibility: bool, in_inner_lo
             expression_does_diverge(left, possibility, in_inner_loop)
                 || expression_does_diverge(right, possibility, in_inner_loop)
         }
-        Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, _)
-        | Expression::Literal(_, _)
+        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, _), _span) => {
+            expression_does_diverge(operand, possibility, in_inner_loop)
+        }
+        Expression::Literal(_, _)
         | Expression::Identifier(_, _)
         | Expression::IntrinsicType(_, _)
         | Expression::EnumType(_, _)
@@ -1751,81 +1680,10 @@ pub fn expression_does_diverge(expr: &Expression, possibility: bool, in_inner_lo
     }
 }
 
-fn expression_contains_loop(expr: &Expression) -> bool {
-    match expr {
-        Expression::While { .. } | Expression::Loop { .. } => true,
-        Expression::Block(exprs, _) => exprs.iter().any(expression_contains_loop),
-        Expression::If {
-            condition,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            expression_contains_loop(condition)
-                || expression_contains_loop(then_branch)
-                || else_branch
-                    .as_ref()
-                    .map(|branch| expression_contains_loop(branch))
-                    .unwrap_or(false)
-        }
-        Expression::Binding(binding, _) => expression_contains_loop(&binding.expr),
-        Expression::Assignment { expr, .. } => expression_contains_loop(expr),
-        Expression::FunctionCall {
-            function, argument, ..
-        } => expression_contains_loop(function) || expression_contains_loop(argument),
-        Expression::Function { body, .. } => expression_contains_loop(body),
-        Expression::PropertyAccess { object, .. } => expression_contains_loop(object),
-        Expression::Operation { left, right, .. } => {
-            expression_contains_loop(left) || expression_contains_loop(right)
-        }
-        Expression::Diverge { value, .. } => value
-            .as_ref()
-            .map(|val| expression_contains_loop(val))
-            .unwrap_or(false),
-        Expression::EnumAccess { enum_expr, .. } => expression_contains_loop(enum_expr),
-        Expression::EnumValue {
-            enum_type, payload, ..
-        } => {
-            expression_contains_loop(enum_type)
-                || payload
-                    .as_ref()
-                    .map(|payload| expression_contains_loop(payload))
-                    .unwrap_or(false)
-        }
-        Expression::EnumConstructor {
-            enum_type,
-            payload_type,
-            ..
-        } => expression_contains_loop(enum_type) || expression_contains_loop(payload_type),
-        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _span) => {
-            expression_contains_loop(left) || expression_contains_loop(right)
-        }
-        Expression::AttachImplementation {
-            type_expr,
-            implementation,
-            ..
-        } => expression_contains_loop(type_expr) || expression_contains_loop(implementation),
-        Expression::Match {
-            value, branches, ..
-        } => {
-            expression_contains_loop(value)
-                || branches
-                    .iter()
-                    .any(|(_, branch)| expression_contains_loop(branch))
-        }
-        Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, _)
-        | Expression::Literal(_, _)
-        | Expression::Identifier(_, _)
-        | Expression::IntrinsicType(_, _)
-        | Expression::EnumType(_, _)
-        | Expression::FunctionType { .. }
-        | Expression::Struct(_, _) => false,
-    }
-}
-
 fn expression_contains_mutation(expr: &Expression) -> bool {
     match expr {
-        Expression::Assignment { .. } | Expression::Loop { .. } | Expression::While { .. } => true,
+        Expression::Assignment { .. } => true,
+        Expression::Loop { body, .. } => expression_contains_mutation(body),
         Expression::Binding(binding, _) => {
             pattern_has_mutable_annotation(&binding.pattern)
                 || expression_contains_mutation(&binding.expr)
@@ -1870,6 +1728,9 @@ fn expression_contains_mutation(expr: &Expression) -> bool {
         Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _span) => {
             expression_contains_mutation(left) || expression_contains_mutation(right)
         }
+        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, _), _span) => {
+            expression_contains_mutation(operand)
+        }
         Expression::AttachImplementation {
             type_expr,
             implementation,
@@ -1889,8 +1750,7 @@ fn expression_contains_mutation(expr: &Expression) -> bool {
             .as_ref()
             .map(|val| expression_contains_mutation(val))
             .unwrap_or(false),
-        Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, _)
-        | Expression::Literal(_, _)
+        Expression::Literal(_, _)
         | Expression::Identifier(_, _)
         | Expression::IntrinsicType(_, _)
         | Expression::EnumType(_, _)
@@ -1935,7 +1795,7 @@ fn type_expression_contains_compile_time_data(expr: &Expression) -> bool {
             .any(|(_, field_expr)| type_expression_contains_compile_time_data(field_expr)),
         Expression::IntrinsicType(IntrinsicType::Target | IntrinsicType::Type, _) => true,
         Expression::IntrinsicType(IntrinsicType::Boolean | IntrinsicType::I32, _) => false,
-        _ => panic!("Unsupported expression for resolved type"),
+        other => panic!("Unsupported expression {:?} for resolved type", other),
     }
 }
 
@@ -1997,9 +1857,9 @@ fn get_trait_prop_of_type(
 fn interpret_block(
     expressions: Vec<Expression>,
     span: SourceSpan,
-    context: &Context,
+    context: &mut Context,
 ) -> Result<(Expression, Context), Diagnostic> {
-    let mut block_context = context.clone();
+    context.bindings.push(HashMap::new());
     let mut last_value: Option<Expression> = None;
     let mut last_preserved = false;
     let mut preserved_expressions = Vec::new();
@@ -2009,7 +1869,7 @@ fn interpret_block(
         let value = match expression {
             Expression::Binding(binding, span) => {
                 let (binding_expr, preserve_behavior) =
-                    interpret_binding(*binding, &mut block_context)?;
+                    interpret_binding(*binding, context)?;
                 let should_preserve_binding = preserve_behavior != PreserveBehavior::Inline;
                 if should_preserve_binding
                     && let Expression::Binding(binding, _) = binding_expr.clone()
@@ -2020,19 +1880,19 @@ fn interpret_block(
                 Expression::Literal(ExpressionLiteral::Boolean(true), dummy_span())
             }
             Expression::Assignment { target, expr, span } => {
-                let interpreted_expr = interpret_expression((*expr).clone(), &mut block_context)?;
+                let interpreted_expr = interpret_expression((*expr).clone(), context)?;
                 let assignment_expr = Expression::Assignment {
                     target: target.clone(),
                     expr: Box::new(interpreted_expr.clone()),
                     span,
                 };
-                let val = apply_assignment(target, interpreted_expr, span, &mut block_context)?;
+                let val = apply_assignment(target, interpreted_expr, span, context)?;
                 last_preserved = true;
                 preserved_expressions.push(assignment_expr);
                 val
             }
             other => {
-                let val = interpret_expression(other, &mut block_context)?;
+                let val = interpret_expression(other, context)?;
                 if expression_contains_mutation(&val) || expression_does_diverge(&val, true, false)
                 {
                     // TODO: should only check for mutation of external bindings
@@ -2049,6 +1909,8 @@ fn interpret_block(
                 ..
             }
         ) {
+            let block_context = context.clone();
+            context.bindings.pop();
             return Ok((value, block_context));
         }
 
@@ -2057,6 +1919,8 @@ fn interpret_block(
 
     let final_value = last_value.ok_or_else(|| diagnostic("Cannot evaluate empty block", span))?;
 
+    let block_context = context.clone();
+    context.bindings.pop();
     if preserved_expressions.is_empty() {
         Ok((final_value, block_context))
     } else {
@@ -2070,44 +1934,6 @@ fn interpret_block(
             block_context,
         ))
     }
-}
-
-fn interpret_loop_block(
-    expressions: Vec<Expression>,
-    span: SourceSpan,
-    context: &mut Context,
-) -> Result<Expression, Diagnostic> {
-    let mut last_value: Option<Expression> = None;
-
-    for expression in expressions {
-        let value = match expression {
-            Expression::Binding(binding, _) => {
-                interpret_binding(*binding, context)?;
-                Expression::Literal(ExpressionLiteral::Boolean(true), dummy_span())
-            }
-            Expression::Assignment { target, expr, span } => {
-                let interpreted_expr = interpret_expression(*expr, context)?;
-                let resolved_expr = resolve_expression(interpreted_expr, context)?;
-                apply_assignment(target, resolved_expr.clone(), span, context)?;
-                resolved_expr
-            }
-            other => interpret_expression(other, context)?,
-        };
-
-        if matches!(
-            value,
-            Expression::Diverge {
-                divergance_type: DivergeExpressionType::Break | DivergeExpressionType::Return,
-                ..
-            }
-        ) {
-            return Ok(value);
-        }
-
-        last_value = Some(value);
-    }
-
-    last_value.ok_or_else(|| diagnostic("Cannot evaluate empty block", span))
 }
 
 pub fn interpret_program(
@@ -2127,7 +1953,7 @@ fn ensure_lvalue_mutable(
 ) -> Result<(), Diagnostic> {
     match target {
         LValue::Identifier(identifier, target_span) => {
-            let (_, annotations) = context.bindings.get(&identifier.0).ok_or_else(|| {
+            let (_, annotations) = context.get_identifier(&identifier).ok_or_else(|| {
                 diagnostic(
                     format!("Cannot assign to unbound identifier: {}", identifier.0),
                     *target_span,
@@ -2169,7 +1995,7 @@ fn get_lvalue_type(
 
     match target {
         LValue::Identifier(identifier, target_span) => {
-            let (binding_ctx, _) = context.bindings.get(&identifier.0).ok_or_else(|| {
+            let (binding_ctx, _) = context.get_identifier(&identifier).ok_or_else(|| {
                 diagnostic(
                     format!("Cannot assign to unbound identifier: {}", identifier.0),
                     *target_span,
@@ -2218,7 +2044,7 @@ fn get_lvalue_value(
 ) -> Result<Option<Expression>, Diagnostic> {
     match target {
         LValue::Identifier(identifier, target_span) => {
-            let (binding_ctx, _) = context.bindings.get(&identifier.0).ok_or_else(|| {
+            let (binding_ctx, _) = context.get_identifier(&identifier).ok_or_else(|| {
                 diagnostic(
                     format!("Cannot assign to unbound identifier: {}", identifier.0),
                     *target_span,
@@ -2281,7 +2107,7 @@ fn apply_lvalue_update(
             let mut type_context = context.clone();
             let value_type = get_type_of_expression(&value, &mut type_context).ok();
 
-            let Some((binding_ctx, _annotations)) = context.bindings.get_mut(&identifier.0) else {
+            let Some((binding_ctx, _annotations)) = context.get_mut_identifier(&identifier) else {
                 return Err(diagnostic(
                     format!("Cannot assign to unbound identifier: {}", identifier.0),
                     span,
@@ -2471,16 +2297,16 @@ fn bind_pattern_blanks(
     match pattern {
         BindingPattern::Identifier(identifier, _) => {
             if let Some(type_expr) = type_hint {
-                context.bindings.insert(
-                    identifier.0,
+                context.bindings.last_mut().unwrap().insert(
+                    identifier,
                     (
                         BindingContext::UnboundWithType(type_expr),
                         passed_annotations.clone(),
                     ),
                 );
             } else {
-                context.bindings.insert(
-                    identifier.0,
+                context.bindings.last_mut().unwrap().insert(
+                    identifier,
                     (
                         BindingContext::UnboundWithoutType,
                         passed_annotations.clone(),
@@ -2576,8 +2402,8 @@ fn bind_pattern_from_value(
     match pattern {
         BindingPattern::Identifier(identifier, _) => {
             let new_preserve_behavior = value_preserve_behavior(value, preserve_behavior);
-            context.bindings.insert(
-                identifier.0,
+            context.bindings.last_mut().unwrap().insert(
+                identifier,
                 (
                     BindingContext::Bound(value.clone(), new_preserve_behavior),
                     passed_annotations.clone(),
@@ -2864,6 +2690,7 @@ fn is_resolved_constant(expr: &Expression) -> bool {
         } => {
             let new_function_context = {
                 let mut ctx = Context::empty();
+                ctx.bindings.push(HashMap::new());
                 bind_pattern_blanks(parameter.clone(), &mut ctx, Vec::new(), None).unwrap();
                 ctx
             };
@@ -2918,13 +2745,15 @@ fn is_resolved_const_function_expression(expr: &Expression, function_context: &C
             is_resolved_const_function_expression(parameter, function_context)
                 && is_resolved_const_function_expression(return_type, function_context)
         }
-        Expression::Identifier(ident, _) => function_context.bindings.contains_key(&ident.0),
+        Expression::Identifier(ident, _) => function_context.contains_identifier(&ident),
         Expression::IntrinsicOperation(intrinsic_operation, _) => match intrinsic_operation {
             IntrinsicOperation::Binary(left, right, _) => {
                 is_resolved_const_function_expression(left, function_context)
                     && is_resolved_const_function_expression(right, function_context)
             }
-            IntrinsicOperation::EnumFromStruct => true,
+            IntrinsicOperation::Unary(operand, _) => {
+                is_resolved_const_function_expression(operand, function_context)
+            }
         },
         Expression::EnumType(cases, _) => cases.iter().all(|(_, case_expr)| {
             is_resolved_const_function_expression(case_expr, function_context)
@@ -2958,12 +2787,12 @@ fn is_resolved_const_function_expression(expr: &Expression, function_context: &C
 
 pub fn intrinsic_context() -> Context {
     let mut context = Context {
-        bindings: std::collections::HashMap::new(),
+        bindings: vec![HashMap::new()],
         in_loop: false,
     };
 
-    context.bindings.insert(
-        "type".to_string(),
+    context.bindings.last_mut().unwrap().insert(
+        Identifier("type".to_string()),
         (
             BindingContext::Bound(
                 Expression::AttachImplementation {
@@ -3019,8 +2848,8 @@ pub fn intrinsic_context() -> Context {
         )
     }
 
-    context.bindings.insert(
-        "i32".to_string(),
+    context.bindings.last_mut().unwrap().insert(
+        Identifier("i32".to_string()),
         (
             BindingContext::Bound(
                 Expression::AttachImplementation {
@@ -3093,8 +2922,8 @@ pub fn intrinsic_context() -> Context {
         )
     }
 
-    context.bindings.insert(
-        "bool".to_string(),
+    context.bindings.last_mut().unwrap().insert(
+        Identifier("bool".to_string()),
         (
             BindingContext::Bound(
                 Expression::AttachImplementation {
@@ -3117,8 +2946,8 @@ pub fn intrinsic_context() -> Context {
         ),
     );
 
-    context.bindings.insert(
-        "true".to_string(),
+    context.bindings.last_mut().unwrap().insert(
+        Identifier("true".to_string()),
         (
             BindingContext::Bound(
                 Expression::Literal(ExpressionLiteral::Boolean(true), dummy_span()),
@@ -3128,8 +2957,8 @@ pub fn intrinsic_context() -> Context {
         ),
     );
 
-    context.bindings.insert(
-        "false".to_string(),
+    context.bindings.last_mut().unwrap().insert(
+        Identifier("false".to_string()),
         (
             BindingContext::Bound(
                 Expression::Literal(ExpressionLiteral::Boolean(false), dummy_span()),
@@ -3139,8 +2968,8 @@ pub fn intrinsic_context() -> Context {
         ),
     );
 
-    context.bindings.insert(
-        "js".to_string(),
+    context.bindings.last_mut().unwrap().insert(
+        Identifier("js".to_string()),
         (
             BindingContext::Bound(
                 Expression::Literal(
@@ -3153,8 +2982,8 @@ pub fn intrinsic_context() -> Context {
         ),
     );
 
-    context.bindings.insert(
-        "wasm".to_string(),
+    context.bindings.last_mut().unwrap().insert(
+        Identifier("wasm".to_string()),
         (
             BindingContext::Bound(
                 Expression::Literal(
@@ -3167,11 +2996,32 @@ pub fn intrinsic_context() -> Context {
         ),
     );
 
-    context.bindings.insert(
-        "enum".to_string(),
+    context.bindings.last_mut().unwrap().insert(
+        Identifier("enum".to_string()),
         (
             BindingContext::Bound(
-                Expression::IntrinsicOperation(IntrinsicOperation::EnumFromStruct, dummy_span()),
+                Expression::Function {
+                    parameter: BindingPattern::TypeHint(
+                        Box::new(BindingPattern::Identifier(
+                            Identifier("struct_arg".to_string()),
+                            dummy_span(),
+                        )),
+                        Box::new(intrinsic_type_expr(IntrinsicType::Type)),
+                        dummy_span(),
+                    ),
+                    return_type: Some(Box::new(intrinsic_type_expr(IntrinsicType::Type))),
+                    body: Box::new(Expression::IntrinsicOperation(
+                        IntrinsicOperation::Unary(
+                            Box::new(Expression::Identifier(
+                                Identifier("struct_arg".to_string()),
+                                dummy_span(),
+                            )),
+                            UnaryIntrinsicOperator::EnumFromStruct,
+                        ),
+                        dummy_span(),
+                    )),
+                    span: dummy_span(),
+                },
                 PreserveBehavior::Inline,
             ),
             Vec::new(),
@@ -3203,6 +3053,8 @@ pub fn evaluate_text_to_expression(program: &str) -> Result<(Expression, Context
     let mut context = intrinsic_context();
     let (mut value, context) = interpret_program(expression, &mut context)?;
 
+    println!("{}", value.pretty_print());
+
     while let Expression::Block(exprs, _) = value {
         value = exprs.last().cloned().unwrap();
     }
@@ -3229,7 +3081,7 @@ fn evaluate_text_to_number(program: &str) -> i32 {
 fn resolve_value(expr: Expression, context: &mut Context) -> Result<Expression, Diagnostic> {
     match expr {
         Expression::Identifier(ident, span) => {
-            if let Some(binding) = context.bindings.get(&ident.0) {
+            if let Some(binding) = context.get_identifier(&ident) {
                 match &binding.0 {
                     BindingContext::Bound(val, preserve_behavior) => {
                         if preserve_behavior == &PreserveBehavior::PreserveUsageInLoops
@@ -3363,7 +3215,9 @@ fn test_basic_addition_interpretation() {
 #[test]
 fn i32_is_constant() {
     let binding = intrinsic_context();
-    let Some((BindingContext::Bound(expr, _), _)) = binding.bindings.get("i32") else {
+    let Some((BindingContext::Bound(expr, _), _)) =
+        binding.get_identifier(&Identifier("i32".to_string()))
+    else {
         panic!("i32 binding not found");
     };
     assert!(is_resolved_constant(expr));
@@ -3486,7 +3340,7 @@ fn interpret_preserves_bindings_in_function() {
     let bindings = context.annotated_bindings();
     let double_add = bindings
         .iter()
-        .find(|b| b.name == "double_add")
+        .find(|b| b.name.0 == "double_add")
         .expect("double_add not found");
 
     if let Expression::Function { body, .. } = &double_add.value {
@@ -3544,8 +3398,7 @@ fn interpret_basic_enum_flow() {
 fn enum_intrinsic_exposes_function_type() {
     let mut context = intrinsic_context();
     let enum_binding = context
-        .bindings
-        .get("enum")
+        .get_identifier(&Identifier("enum".to_string()))
         .expect("enum intrinsic should be present")
         .clone();
 
@@ -3556,14 +3409,7 @@ fn enum_intrinsic_exposes_function_type() {
                 return_type,
                 ..
             }) => {
-                assert!(matches!(
-                    parameter.as_ref(),
-                    Expression::IntrinsicType(IntrinsicType::Type, _)
-                ));
-                assert!(matches!(
-                    return_type.as_ref(),
-                    Expression::IntrinsicType(IntrinsicType::Type, _)
-                ));
+                assert!(parameter == return_type)
             }
             other => panic!("unexpected enum intrinsic type {other:?}"),
         },
@@ -3650,7 +3496,13 @@ fn interpret_enum_from_struct(
     context: &mut Context,
 ) -> Result<Expression, Diagnostic> {
     let Expression::Struct(variants, _) = &argument_value else {
-        return Err(diagnostic("enum expects a struct of variants", span));
+        return Err(diagnostic(
+            format!(
+                "enum expects a struct of variants, got {:?}",
+                argument_value
+            ),
+            span,
+        ));
     };
 
     let mut evaluated_variants = Vec::with_capacity(variants.len());
