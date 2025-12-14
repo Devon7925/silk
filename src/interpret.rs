@@ -400,10 +400,6 @@ pub fn interpret_expression(
             let condition_for_pattern = condition_expr.clone();
             let interpreted_condition = interpret_expression(condition_expr, context)?;
 
-            let inferred_else_expr = else_branch
-                .clone()
-                .unwrap_or_else(|| Box::new(empty_struct_expr(SourceSpan::new(span.end(), 0))));
-
             let mut then_context = context.clone();
             let resolved_condition = resolve_operations(condition_for_pattern, context)?;
             collect_bindings(&resolved_condition, &mut then_context)?;
@@ -411,12 +407,19 @@ pub fn interpret_expression(
             let (interpreted_then, then_type, then_diverges) =
                 branch_type(&then_branch, &then_context)?;
             let else_context = context.clone();
-            let (interpreted_else, else_type, else_diverges) =
-                branch_type(&inferred_else_expr, &else_context)?;
 
-            if !types_equivalent(&then_type, &else_type) && !then_diverges && !else_diverges {
-                return Err(diagnostic("Type mismatch between if branches", span));
-            }
+            let interpreted_else = if let Some(else_branch) = else_branch {
+                let (interpreted_else, else_type, else_diverges) =
+                    branch_type(&else_branch, &else_context)?;
+
+                if !types_equivalent(&then_type, &else_type) && !then_diverges && !else_diverges {
+                    return Err(diagnostic("Type mismatch between if branches", span));
+                }
+
+                Some(Box::new(interpreted_else))
+            } else {
+                None
+            };
 
             let resolved_condition = resolve_expression(interpreted_condition.clone(), context);
             if let Ok(Expression::Literal(ExpressionLiteral::Boolean(condition_value), _)) =
@@ -424,14 +427,16 @@ pub fn interpret_expression(
             {
                 if condition_value {
                     interpret_expression(*then_branch, context)
+                } else if let Some(interpreted_else) = interpreted_else {
+                    interpret_expression(*interpreted_else, context)
                 } else {
-                    interpret_expression(*inferred_else_expr, context)
+                    Ok(empty_struct_expr(dummy_span()))
                 }
             } else {
                 Ok(Expression::If {
                     condition: Box::new(interpreted_condition),
                     then_branch: Box::new(interpreted_then),
-                    else_branch: Some(Box::new(interpreted_else)),
+                    else_branch: interpreted_else,
                     span,
                 })
             }

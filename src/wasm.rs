@@ -533,11 +533,13 @@ fn expression_produces_value(
             ..
         } => {
             if let Some(else_branch) = else_branch {
-                let then_produces =
+                let then_produces_value =
                     expression_produces_value(then_branch, locals_types, context, type_ctx)?;
-                let else_produces =
+                let else_produces_value =
                     expression_produces_value(else_branch, locals_types, context, type_ctx)?;
-                Ok(then_produces && else_produces)
+                let then_diverges = expression_does_diverge(&then_branch, false, false);
+                let else_diverges = expression_does_diverge(&else_branch, false, false);
+                Ok(then_produces_value && else_produces_value || ((then_diverges || else_diverges) && (then_produces_value || else_produces_value)))
             } else {
                 Ok(false)
             }
@@ -1412,8 +1414,15 @@ fn emit_expression(
                 false
             };
 
+            let then_diverges = expression_does_diverge(&then_branch, false, false);
+            let else_diverges = if let Some(else_branch) = else_branch {
+                expression_does_diverge(&else_branch, false, false)
+            } else {
+                false
+            };
+
             control_stack.push(ControlFrame::If);
-            let block_type = if then_produces_value && else_produces_value {
+            let block_type = if (then_produces_value && else_produces_value) || ((then_diverges || else_diverges) && (then_produces_value || else_produces_value)) {
                 wasm_encoder::BlockType::Result(wasm_result_type)
             } else {
                 wasm_encoder::BlockType::Empty
