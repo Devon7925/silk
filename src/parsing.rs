@@ -153,7 +153,7 @@ pub enum IntrinsicType {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UnaryIntrinsicOperator {
     BooleanNot,
-    EnumFromStruct
+    EnumFromStruct,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -339,11 +339,7 @@ impl Expression {
                         UnaryIntrinsicOperator::BooleanNot => "!",
                         UnaryIntrinsicOperator::EnumFromStruct => "enum",
                     };
-                    format!(
-                        "{}({})",
-                        op_str,
-                        operand.pretty_print()
-                    )
+                    format!("{}({})", op_str, operand.pretty_print())
                 }
             },
             Expression::EnumType(variants, _) => {
@@ -1301,7 +1297,13 @@ fn parse_while_expression_with_source<'a>(
                     body: Box::new(Expression::Block(
                         vec![
                             Expression::If {
-                                condition: Box::new(Expression::IntrinsicOperation(IntrinsicOperation::Unary(Box::new(condition), UnaryIntrinsicOperator::BooleanNot), condition_span)),
+                                condition: Box::new(Expression::IntrinsicOperation(
+                                    IntrinsicOperation::Unary(
+                                        Box::new(condition),
+                                        UnaryIntrinsicOperator::BooleanNot,
+                                    ),
+                                    condition_span,
+                                )),
                                 then_branch: Box::new(Expression::Diverge {
                                     value: None,
                                     divergance_type: DivergeExpressionType::Break,

@@ -536,7 +536,9 @@ fn expression_produces_value(
                     expression_produces_value(else_branch, locals_types, context, type_ctx)?;
                 let then_diverges = expression_does_diverge(&then_branch, false, false);
                 let else_diverges = expression_does_diverge(&else_branch, false, false);
-                Ok(then_produces_value && else_produces_value || ((then_diverges || else_diverges) && (then_produces_value || else_produces_value)))
+                Ok(then_produces_value && else_produces_value
+                    || ((then_diverges || else_diverges)
+                        && (then_produces_value || else_produces_value)))
             } else {
                 Ok(false)
             }
@@ -545,7 +547,9 @@ fn expression_produces_value(
             let Some(last) = exprs.last() else {
                 panic!("Empty block shouldn't exist")
             };
-            let diverges = exprs.iter().any(|e| expression_does_diverge(e, false, false));
+            let diverges = exprs
+                .iter()
+                .any(|e| expression_does_diverge(e, false, false));
             Ok(!diverges && expression_produces_value(last, locals_types, context, type_ctx)?)
         }
         Expression::Loop { body, .. } => {
@@ -1244,11 +1248,17 @@ fn emit_expression(
             }
             Ok(())
         }
-        Expression::IntrinsicOperation(IntrinsicOperation::Unary(_, UnaryIntrinsicOperator::EnumFromStruct), span) => Err(
+        Expression::IntrinsicOperation(
+            IntrinsicOperation::Unary(_, UnaryIntrinsicOperator::EnumFromStruct),
+            span,
+        ) => Err(
             Diagnostic::new("enum intrinsic should be resolved before wasm lowering")
                 .with_span(*span),
         ),
-        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, UnaryIntrinsicOperator::BooleanNot), _) => {
+        Expression::IntrinsicOperation(
+            IntrinsicOperation::Unary(operand, UnaryIntrinsicOperator::BooleanNot),
+            _,
+        ) => {
             emit_expression(
                 operand,
                 locals,
@@ -1261,7 +1271,7 @@ fn emit_expression(
             )?;
             func.instruction(&Instruction::I32Eqz);
             Ok(())
-        },
+        }
         Expression::Diverge {
             value,
             divergance_type: DivergeExpressionType::Break,
@@ -1419,7 +1429,8 @@ fn emit_expression(
             )?;
             let result_type = infer_type(then_branch, locals_types, context)?;
             let wasm_result_type = result_type.to_val_type(type_ctx);
-            let then_produces_value = expression_produces_value(then_branch, locals_types, context, type_ctx)?;
+            let then_produces_value =
+                expression_produces_value(then_branch, locals_types, context, type_ctx)?;
             let else_produces_value = if let Some(else_branch) = else_branch {
                 expression_produces_value(else_branch, locals_types, context, type_ctx)?
             } else {
@@ -1434,7 +1445,10 @@ fn emit_expression(
             };
 
             control_stack.push(ControlFrame::If);
-            let block_type = if (then_produces_value && else_produces_value) || ((then_diverges || else_diverges) && (then_produces_value || else_produces_value)) {
+            let block_type = if (then_produces_value && else_produces_value)
+                || ((then_diverges || else_diverges)
+                    && (then_produces_value || else_produces_value))
+            {
                 wasm_encoder::BlockType::Result(wasm_result_type)
             } else {
                 wasm_encoder::BlockType::Empty

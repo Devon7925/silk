@@ -581,18 +581,22 @@ fn simplify_binding_context(binding_context: BindingContext) -> Result<BindingCo
 
 pub fn simplify_context(context: Context) -> Result<Context, Diagnostic> {
     use crate::parsing::BindingAnnotation;
-    let simplified_bindings = context
-        .bindings
-        .into_iter()
-        .map(|binding_context| {
-            binding_context
-                .into_iter()
-                .map(|(bind_name, (binding, annotations))| {
-                    Ok((bind_name, (simplify_binding_context(binding)?, annotations)))
-                })
-                .collect::<Result<HashMap<Identifier, (BindingContext, Vec<BindingAnnotation>)>, Diagnostic>>()
-        })
-        .collect::<Result<_, Diagnostic>>()?;
+    let simplified_bindings =
+        context
+            .bindings
+            .into_iter()
+            .map(|binding_context| {
+                binding_context
+                    .into_iter()
+                    .map(|(bind_name, (binding, annotations))| {
+                        Ok((bind_name, (simplify_binding_context(binding)?, annotations)))
+                    })
+                    .collect::<Result<
+                        HashMap<Identifier, (BindingContext, Vec<BindingAnnotation>)>,
+                        Diagnostic,
+                    >>()
+            })
+            .collect::<Result<_, Diagnostic>>()?;
     Ok(Context {
         bindings: simplified_bindings,
         in_loop: false,
