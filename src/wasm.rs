@@ -114,15 +114,15 @@ fn materialize_enum_value(enum_value: &Expression) -> Option<Expression> {
             } else {
                 default_value_for_type(ty)?
             };
-            payload_fields.push((Identifier(name.0.clone()), value));
+            payload_fields.push((Identifier::new(name.name.clone()), value));
         }
 
         let payload_struct = Expression::Struct(payload_fields, *span);
         let tag_expr = Expression::Literal(ExpressionLiteral::Number(*variant_index as i32), *span);
         return Some(Expression::Struct(
             vec![
-                (Identifier("payload".to_string()), payload_struct),
-                (Identifier("tag".to_string()), tag_expr),
+                (Identifier::new("payload".to_string()), payload_struct),
+                (Identifier::new("tag".to_string()), tag_expr),
             ],
             *span,
         ));
@@ -152,12 +152,12 @@ fn ensure_lvalue_local(
 ) -> Result<(), Diagnostic> {
     match target {
         LValue::Identifier(identifier, _) => {
-            if locals_types.contains_key(&identifier.0) {
+            if locals_types.contains_key(&identifier.name) {
                 Ok(())
             } else {
                 Err(Diagnostic::new(format!(
                     "Identifier `{}` is not a local variable or parameter",
-                    identifier.0
+                    identifier.name
                 ))
                 .with_span(span))
             }
@@ -174,7 +174,7 @@ fn enum_wasm_type(
         let mut payload_fields = Vec::new();
         for (id, ty) in variants {
             let wasm_ty = resolve_type(ctx, ty)?;
-            payload_fields.push((id.0.clone(), wasm_ty));
+            payload_fields.push((id.name.clone(), wasm_ty));
         }
         payload_fields.sort_by(|a, b| a.0.cmp(&b.0));
         let mut outer_fields = vec![
@@ -203,7 +203,7 @@ fn enum_variant_index_from_context(
         && let Some((index, _)) = variants
             .iter()
             .enumerate()
-            .find(|(_, (id, _))| id.0 == variant.0)
+            .find(|(_, (id, _))| id.name == variant.name)
     {
         return Ok(index);
     }
@@ -400,7 +400,7 @@ fn collect_types(
             for (name, value) in fields {
                 collect_types(value, ctx, locals_types, context)?;
                 let ty = infer_type(value, locals_types, context)?;
-                field_types.push((name.0.clone(), ty));
+                field_types.push((name.name.clone(), ty));
             }
             field_types.sort_by(|a, b| a.0.cmp(&b.0));
             ctx.get_or_register_type(field_types);
@@ -536,7 +536,9 @@ fn expression_produces_value(
                     expression_produces_value(else_branch, locals_types, context, type_ctx)?;
                 let then_diverges = expression_does_diverge(&then_branch, false, false);
                 let else_diverges = expression_does_diverge(&else_branch, false, false);
-                Ok(then_produces_value && else_produces_value || ((then_diverges || else_diverges) && (then_produces_value || else_produces_value)))
+                Ok(then_produces_value && else_produces_value
+                    || ((then_diverges || else_diverges)
+                        && (then_produces_value || else_produces_value)))
             } else {
                 Ok(false)
             }
@@ -545,7 +547,9 @@ fn expression_produces_value(
             let Some(last) = exprs.last() else {
                 panic!("Empty block shouldn't exist")
             };
-            let diverges = exprs.iter().any(|e| expression_does_diverge(e, false, false));
+            let diverges = exprs
+                .iter()
+                .any(|e| expression_does_diverge(e, false, false));
             Ok(!diverges && expression_produces_value(last, locals_types, context, type_ctx)?)
         }
         Expression::Loop { body, .. } => {
@@ -570,14 +574,15 @@ fn infer_type(
             let mut field_types = Vec::new();
             for (name, value) in fields {
                 let ty = infer_type(value, locals_types, context)?;
-                field_types.push((name.0.clone(), ty));
+                field_types.push((name.name.clone(), ty));
             }
             field_types.sort_by(|a, b| a.0.cmp(&b.0));
             Ok(WasmType::Struct(field_types))
         }
         Expression::Identifier(identifier, span) => {
-            locals_types.get(&identifier.0).cloned().ok_or_else(|| {
-                Diagnostic::new(format!("Unknown identifier `{}`", identifier.0)).with_span(*span)
+            locals_types.get(&identifier.name).cloned().ok_or_else(|| {
+                Diagnostic::new(format!("Unknown identifier `{}`", identifier.name))
+                    .with_span(*span)
             })
         }
         Expression::Assignment { target, expr, span } => {
@@ -690,7 +695,7 @@ fn lower_function_export(
     else {
         return Err(Diagnostic::new(format!(
             "Only functions can be exported to wasm (binding `{}`)",
-            binding_name.0
+            binding_name.name
         ))
         .with_span(annotation_span));
     };
@@ -699,7 +704,7 @@ fn lower_function_export(
     let params = extract_function_params(context, parameter)?;
 
     Ok(WasmFunctionExport {
-        name: binding_name.0.clone(),
+        name: binding_name.name.clone(),
         params,
         body: *body,
         return_type,
@@ -714,7 +719,7 @@ fn resolve_type(context: &interpret::Context, expr: &Expression) -> Result<WasmT
             let mut field_types = Vec::new();
             for (name, value) in fields {
                 let ty = resolve_type(context, value)?;
-                field_types.push((name.0.clone(), ty));
+                field_types.push((name.name.clone(), ty));
             }
             field_types.sort_by(|a, b| a.0.cmp(&b.0));
             Ok(WasmType::Struct(field_types))
@@ -725,12 +730,12 @@ fn resolve_type(context: &interpret::Context, expr: &Expression) -> Result<WasmT
                     interpret::BindingContext::Bound(value, _) => resolve_type(context, value),
                     _ => Err(Diagnostic::new(format!(
                         "Type alias `{}` is not bound to a value",
-                        identifier.0
+                        identifier.name
                     ))
                     .with_span(*span)),
                 }
             } else {
-                Err(Diagnostic::new(format!("Unknown type `{}`", identifier.0)).with_span(*span))
+                Err(Diagnostic::new(format!("Unknown type `{}`", identifier.name)).with_span(*span))
             }
         }
         Expression::AttachImplementation { type_expr, .. } => resolve_type(context, type_expr),
@@ -797,7 +802,7 @@ fn extract_function_params(
 
 fn extract_identifier_from_pattern(pattern: BindingPattern) -> Result<String, Diagnostic> {
     match pattern {
-        BindingPattern::Identifier(identifier, _) => Ok(identifier.0),
+        BindingPattern::Identifier(identifier, _) => Ok(identifier.name),
         BindingPattern::Annotated { pattern, .. } => extract_identifier_from_pattern(*pattern),
         BindingPattern::TypeHint(pattern, _, _) => extract_identifier_from_pattern(*pattern),
         BindingPattern::Struct(ref items, _) => {
@@ -913,8 +918,8 @@ fn collect_locals_for_pattern(
 ) -> Result<(), Diagnostic> {
     match pattern {
         BindingPattern::Identifier(identifier, _) => {
-            locals.push((identifier.0.clone(), expr_type.clone()));
-            locals_types.insert(identifier.0, expr_type);
+            locals.push((identifier.name.clone(), expr_type.clone()));
+            locals_types.insert(identifier.name, expr_type);
             Ok(())
         }
         BindingPattern::Struct(items, span) => {
@@ -927,12 +932,12 @@ fn collect_locals_for_pattern(
             for (field_identifier, field_pattern) in items {
                 let field_type = field_types
                     .iter()
-                    .find(|(name, _)| name == &field_identifier.0)
+                    .find(|(name, _)| name == &field_identifier.name)
                     .map(|(_, ty)| ty.clone())
                     .ok_or_else(|| {
                         Diagnostic::new(format!(
                             "Missing field {} in struct type",
-                            field_identifier.0
+                            field_identifier.name
                         ))
                         .with_span(field_pattern.span())
                     })?;
@@ -970,7 +975,7 @@ fn collect_locals_for_pattern(
                     };
                     payload_fields
                         .iter()
-                        .find(|(name, _)| name == &variant.0)
+                        .find(|(name, _)| name == &variant.name)
                         .map(|(_, ty)| ty.clone())
                         .ok_or_else(|| {
                             Diagnostic::new("Enum variant missing in payload struct")
@@ -1026,10 +1031,10 @@ fn emit_expression(
             Ok(())
         }
         Expression::Identifier(identifier, span) => {
-            let local_index = locals.get(&identifier.0).copied().ok_or_else(|| {
+            let local_index = locals.get(&identifier.name).copied().ok_or_else(|| {
                 Diagnostic::new(format!(
                     "Identifier `{}` is not a local variable or parameter",
-                    identifier.0
+                    identifier.name
                 ))
                 .with_span(*span)
             })?;
@@ -1038,10 +1043,10 @@ fn emit_expression(
         }
         Expression::Assignment { target, expr, span } => match target {
             LValue::Identifier(identifier, _) => {
-                let local_index = locals.get(&identifier.0).copied().ok_or_else(|| {
+                let local_index = locals.get(&identifier.name).copied().ok_or_else(|| {
                     Diagnostic::new(format!(
                         "Identifier `{}` is not a local variable or parameter",
-                        identifier.0
+                        identifier.name
                     ))
                     .with_span(*span)
                 })?;
@@ -1244,11 +1249,17 @@ fn emit_expression(
             }
             Ok(())
         }
-        Expression::IntrinsicOperation(IntrinsicOperation::Unary(_, UnaryIntrinsicOperator::EnumFromStruct), span) => Err(
+        Expression::IntrinsicOperation(
+            IntrinsicOperation::Unary(_, UnaryIntrinsicOperator::EnumFromStruct),
+            span,
+        ) => Err(
             Diagnostic::new("enum intrinsic should be resolved before wasm lowering")
                 .with_span(*span),
         ),
-        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, UnaryIntrinsicOperator::BooleanNot), _) => {
+        Expression::IntrinsicOperation(
+            IntrinsicOperation::Unary(operand, UnaryIntrinsicOperator::BooleanNot),
+            _,
+        ) => {
             emit_expression(
                 operand,
                 locals,
@@ -1261,7 +1272,7 @@ fn emit_expression(
             )?;
             func.instruction(&Instruction::I32Eqz);
             Ok(())
-        },
+        }
         Expression::Diverge {
             value,
             divergance_type: DivergeExpressionType::Break,
@@ -1419,7 +1430,8 @@ fn emit_expression(
             )?;
             let result_type = infer_type(then_branch, locals_types, context)?;
             let wasm_result_type = result_type.to_val_type(type_ctx);
-            let then_produces_value = expression_produces_value(then_branch, locals_types, context, type_ctx)?;
+            let then_produces_value =
+                expression_produces_value(then_branch, locals_types, context, type_ctx)?;
             let else_produces_value = if let Some(else_branch) = else_branch {
                 expression_produces_value(else_branch, locals_types, context, type_ctx)?
             } else {
@@ -1434,7 +1446,10 @@ fn emit_expression(
             };
 
             control_stack.push(ControlFrame::If);
-            let block_type = if (then_produces_value && else_produces_value) || ((then_diverges || else_diverges) && (then_produces_value || else_produces_value)) {
+            let block_type = if (then_produces_value && else_produces_value)
+                || ((then_diverges || else_diverges)
+                    && (then_produces_value || else_produces_value))
+            {
                 wasm_encoder::BlockType::Result(wasm_result_type)
             } else {
                 wasm_encoder::BlockType::Empty
@@ -1552,7 +1567,7 @@ fn emit_expression(
                             property: "payload".to_string(),
                             span: *pattern_span,
                         }),
-                        property: variant.0.clone(),
+                        property: variant.name.clone(),
                         span: *pattern_span,
                     };
 
@@ -1600,12 +1615,12 @@ fn emit_expression(
                 for (field_identifier, field_pattern) in pattern_fields {
                     let value_expr = value_fields
                         .iter()
-                        .find(|(id, _)| id.0 == field_identifier.0)
+                        .find(|(id, _)| id.name == field_identifier.name)
                         .map(|(_, expr)| expr)
                         .ok_or_else(|| {
                             Diagnostic::new(format!(
                                 "Missing field {} in struct binding",
-                                field_identifier.0
+                                field_identifier.name
                             ))
                             .with_span(field_pattern.span())
                         })?;
@@ -1641,7 +1656,7 @@ fn emit_expression(
                                 loop_stack,
                             )?;
                             let local_index = locals
-                                .get(&identifier.0)
+                                .get(&identifier.name)
                                 .copied()
                                 .expect("Local should have been collected");
                             func.instruction(&Instruction::LocalSet(local_index));
@@ -1718,7 +1733,7 @@ fn emit_expression(
                 && let Some((variant_index, (_, payload_type))) = variants
                     .iter()
                     .enumerate()
-                    .find(|(_, (id, _))| id.0 == variant.0)
+                    .find(|(_, (id, _))| id.name == variant.name)
             {
                 if let Expression::Struct(fields, _) = payload_type
                     && fields.is_empty()
@@ -1817,12 +1832,12 @@ fn emit_expression(
         }
         Expression::Struct(items, _span) => {
             let mut sorted_items = items.clone();
-            sorted_items.sort_by(|a, b| a.0.0.cmp(&b.0.0));
+            sorted_items.sort_by(|(a_name, _), (b_name, _)| a_name.name.cmp(&b_name.name));
 
             let mut field_types = Vec::new();
             for (name, value) in &sorted_items {
                 let ty = infer_type(value, locals_types, context)?;
-                field_types.push((name.0.clone(), ty));
+                field_types.push((name.name.clone(), ty));
             }
 
             let type_index = type_ctx.get_type_index(&field_types).ok_or_else(|| {
@@ -1925,7 +1940,10 @@ fn emit_expression(
                 let check_expr = Expression::Binding(
                     Box::new(Binding {
                         pattern: pattern.clone(),
-                        expr: Expression::Identifier(Identifier(temp_local_name.clone()), *span),
+                        expr: Expression::Identifier(
+                            Identifier::new(temp_local_name.clone()),
+                            *span,
+                        ),
                     }),
                     *span,
                 );

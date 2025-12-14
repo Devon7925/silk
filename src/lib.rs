@@ -3,6 +3,7 @@ mod enum_normalization;
 mod interpret;
 pub mod parsing;
 mod simplify;
+mod uniquify;
 mod wasm;
 
 pub mod test_support {
@@ -31,8 +32,9 @@ pub fn compile(file: String) -> Result<Vec<u8>, Diagnostic> {
         let span = SourceSpan::new(start, token_len);
         return Err(Diagnostic::new("Unexpected trailing input").with_span(span));
     }
+    let uniquified = uniquify::uniquify_program(ast);
     let mut context = interpret::intrinsic_context();
-    let (value, program_context) = interpret::interpret_program(ast, &mut context)?;
+    let (value, program_context) = interpret::interpret_program(uniquified, &mut context)?;
     let _simplified_value = simplify::simplify_expression(value)?;
     let simplified_context = simplify::simplify_context(program_context)?;
     wasm::compile_exports(&simplified_context)
