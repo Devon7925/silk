@@ -1639,7 +1639,7 @@ fn get_type_of_binding_pattern(
     }
 }
 
-fn expression_does_diverge(expr: &Expression, possibility: bool, in_inner_loop: bool) -> bool {
+pub fn expression_does_diverge(expr: &Expression, possibility: bool, in_inner_loop: bool) -> bool {
     match expr {
         Expression::Diverge {
             divergance_type: DivergeExpressionType::Break,

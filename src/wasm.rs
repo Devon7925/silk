@@ -5,7 +5,7 @@ use wasm_encoder::{
 
 use crate::{
     diagnostics::{Diagnostic, SourceSpan},
-    interpret::{self, AnnotatedBinding},
+    interpret::{self, AnnotatedBinding, expression_does_diverge},
     parsing::{
         BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, DivergeExpressionType,
         Expression, ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, LValue,
@@ -363,8 +363,9 @@ pub fn compile_exports(context: &interpret::Context) -> Result<Vec<u8>, Diagnost
             &mut loop_stack,
         )?;
 
-        let body_produces_value = expression_produces_value(&export.body);
-        let body_transfers_control = expression_contains_return(&export.body);
+        let body_produces_value =
+            expression_produces_value(&export.body, &locals_types, context, &type_ctx)?;
+        let body_transfers_control = expression_does_diverge(&export.body, false, false);
         if body_produces_value {
             func.instruction(&Instruction::Return);
         } else if body_transfers_control {
@@ -481,100 +482,6 @@ fn collect_types(
     Ok(())
 }
 
-fn expression_contains_return(expr: &Expression) -> bool {
-    match expr {
-        Expression::Diverge { .. } => true,
-        Expression::Block(exprs, _) => exprs.iter().any(expression_contains_return),
-        Expression::If {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            expression_contains_return(then_branch)
-                || else_branch
-                    .as_ref()
-                    .map(|branch| expression_contains_return(branch))
-                    .unwrap_or(false)
-        }
-        Expression::Binding(binding, _) => expression_contains_return(&binding.expr),
-        Expression::Assignment { expr, .. } => expression_contains_return(expr),
-        Expression::FunctionCall {
-            function, argument, ..
-        } => expression_contains_return(function) || expression_contains_return(argument),
-        Expression::Loop { body, .. } => {
-            loop_contains_break(body) || expression_contains_return(body)
-        }
-        Expression::PropertyAccess { object, .. } => expression_contains_return(object),
-        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _span) => {
-            expression_contains_return(left) || expression_contains_return(right)
-        }
-        Expression::EnumAccess { enum_expr, .. } => expression_contains_return(enum_expr),
-        Expression::EnumConstructor {
-            enum_type,
-            payload_type,
-            ..
-        } => expression_contains_return(enum_type) || expression_contains_return(payload_type),
-        Expression::AttachImplementation {
-            type_expr,
-            implementation,
-            ..
-        } => expression_contains_return(type_expr) || expression_contains_return(implementation),
-        _ => false,
-    }
-}
-
-fn loop_contains_break(expr: &Expression) -> bool {
-    match expr {
-        Expression::Diverge {
-            divergance_type: DivergeExpressionType::Break,
-            ..
-        } => true,
-        Expression::Block(exprs, _) => exprs.iter().any(loop_contains_break),
-        Expression::If {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            loop_contains_break(then_branch)
-                || else_branch
-                    .as_ref()
-                    .map(|branch| loop_contains_break(branch))
-                    .unwrap_or(false)
-        }
-        Expression::Binding(binding, _) => loop_contains_break(&binding.expr),
-        Expression::Assignment { expr, .. } => loop_contains_break(expr),
-        Expression::FunctionCall {
-            function, argument, ..
-        } => loop_contains_break(function) || loop_contains_break(argument),
-        Expression::Loop { .. } => false,
-        Expression::PropertyAccess { object, .. } => loop_contains_break(object),
-        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _span) => {
-            loop_contains_break(left) || loop_contains_break(right)
-        }
-        Expression::EnumAccess { enum_expr, .. } => loop_contains_break(enum_expr),
-        Expression::EnumConstructor {
-            enum_type,
-            payload_type,
-            ..
-        } => loop_contains_break(enum_type) || loop_contains_break(payload_type),
-        Expression::AttachImplementation {
-            type_expr,
-            implementation,
-            ..
-        } => loop_contains_break(type_expr) || loop_contains_break(implementation),
-        Expression::EnumValue {
-            enum_type, payload, ..
-        } => {
-            loop_contains_break(enum_type)
-                || payload
-                    .as_ref()
-                    .map(|payload| loop_contains_break(payload))
-                    .unwrap_or(false)
-        }
-        _ => false,
-    }
-}
-
 fn determine_loop_result_type(
     body: &Expression,
     locals_types: &std::collections::HashMap<String, WasmType>,
@@ -612,60 +519,7 @@ fn determine_loop_result_type(
     }
 }
 
-fn expression_produces_value(expr: &Expression) -> bool {
-    match expr {
-        Expression::Diverge { .. } => false,
-        Expression::Loop { body, .. } => loop_contains_break(body),
-        Expression::Block(exprs, _) => exprs.last().map(expression_produces_value).unwrap_or(true),
-        Expression::If {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            let then_returns = expression_contains_return(then_branch);
-            let else_returns = else_branch
-                .as_ref()
-                .map(|branch| expression_contains_return(branch))
-                .unwrap_or(false);
-
-            let then_produces = expression_produces_value(then_branch);
-            let else_produces = else_branch
-                .as_ref()
-                .map(|branch| expression_produces_value(branch))
-                .unwrap_or(true);
-
-            (then_produces || then_returns) && (else_produces || else_returns)
-        }
-        Expression::Binding(binding, _) => expression_produces_value(&binding.expr),
-        _ => true,
-    }
-}
-
-fn expression_always_transfers_control(expr: &Expression) -> bool {
-    match expr {
-        Expression::Diverge { .. } => true,
-        Expression::Block(exprs, _) => exprs
-            .last()
-            .map(expression_always_transfers_control)
-            .unwrap_or(false),
-        Expression::If {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            let then_exits = expression_always_transfers_control(then_branch);
-            let else_exits = else_branch
-                .as_ref()
-                .map(|branch| expression_always_transfers_control(branch))
-                .unwrap_or(false);
-            then_exits && else_exits
-        }
-        Expression::Binding(binding, _) => expression_always_transfers_control(&binding.expr),
-        _ => false,
-    }
-}
-
-fn expression_emits_value(
+fn expression_produces_value(
     expr: &Expression,
     locals_types: &std::collections::HashMap<String, WasmType>,
     context: &interpret::Context,
@@ -678,37 +532,22 @@ fn expression_emits_value(
             else_branch,
             ..
         } => {
-            let result_type = infer_type(then_branch, locals_types, context)?;
-            let wasm_result_type = result_type.to_val_type(type_ctx);
-            let then_returns = expression_contains_return(then_branch);
-            let else_returns = else_branch
-                .as_ref()
-                .map(|branch| expression_contains_return(branch))
-                .unwrap_or(false);
-
-            if else_branch.is_none() && (then_returns || !matches!(wasm_result_type, ValType::I32))
-            {
-                return Ok(false);
-            }
-
             if let Some(else_branch) = else_branch {
-                if then_returns && else_returns {
-                    return Ok(false);
-                }
-
-                let then_produces = expression_produces_value(then_branch);
-                let else_produces = expression_produces_value(else_branch);
-                return Ok(then_produces || else_produces);
-            }
-
-            Ok(true)
-        }
-        Expression::Block(exprs, _) => {
-            if let Some(last) = exprs.last() {
-                expression_emits_value(last, locals_types, context, type_ctx)
+                let then_produces =
+                    expression_produces_value(then_branch, locals_types, context, type_ctx)?;
+                let else_produces =
+                    expression_produces_value(else_branch, locals_types, context, type_ctx)?;
+                Ok(then_produces && else_produces)
             } else {
                 Ok(false)
             }
+        }
+        Expression::Block(exprs, _) => {
+            let Some(last) = exprs.last() else {
+                panic!("Empty block shouldn't exist")
+            };
+            let diverges = exprs.iter().any(|e| expression_does_diverge(e, false, false));
+            Ok(!diverges && expression_produces_value(last, locals_types, context, type_ctx)?)
         }
         Expression::Loop { body, .. } => {
             Ok(determine_loop_result_type(body, locals_types, context)?.is_some())
@@ -1478,7 +1317,7 @@ fn emit_expression(
                     control_stack,
                     loop_stack,
                 )?;
-                if expression_emits_value(body, locals_types, context, type_ctx)? {
+                if expression_produces_value(body, locals_types, context, type_ctx)? {
                     func.instruction(&Instruction::Drop);
                 }
                 func.instruction(&Instruction::Br(0));
@@ -1503,7 +1342,7 @@ fn emit_expression(
                     control_stack,
                     loop_stack,
                 )?;
-                if expression_emits_value(body, locals_types, context, type_ctx)? {
+                if expression_produces_value(body, locals_types, context, type_ctx)? {
                     func.instruction(&Instruction::Drop);
                 }
                 func.instruction(&Instruction::Br(0));
@@ -1566,38 +1405,37 @@ fn emit_expression(
             )?;
             let result_type = infer_type(then_branch, locals_types, context)?;
             let wasm_result_type = result_type.to_val_type(type_ctx);
-            let then_returns = expression_contains_return(then_branch);
-            let else_returns = else_branch
-                .as_ref()
-                .map(|branch| expression_contains_return(branch))
-                .unwrap_or(false);
-
-            if else_branch.is_none() && (then_returns || !matches!(wasm_result_type, ValType::I32))
-            {
-                control_stack.push(ControlFrame::If);
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
-                emit_expression(
-                    then_branch,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    context,
-                    control_stack,
-                    loop_stack,
-                )?;
-                func.instruction(&Instruction::End);
-                control_stack.pop();
+            let then_produces_value = expression_produces_value(then_branch, locals_types, context, type_ctx)?;
+            let else_produces_value = if let Some(else_branch) = else_branch {
+                expression_produces_value(else_branch, locals_types, context, type_ctx)?
             } else {
-                let block_type = if then_returns && else_returns {
-                    wasm_encoder::BlockType::Empty
-                } else {
-                    wasm_encoder::BlockType::Result(wasm_result_type)
-                };
-                control_stack.push(ControlFrame::If);
-                func.instruction(&Instruction::If(block_type));
+                false
+            };
+
+            control_stack.push(ControlFrame::If);
+            let block_type = if then_produces_value && else_produces_value {
+                wasm_encoder::BlockType::Result(wasm_result_type)
+            } else {
+                wasm_encoder::BlockType::Empty
+            };
+            func.instruction(&Instruction::If(block_type));
+            emit_expression(
+                then_branch,
+                locals,
+                locals_types,
+                func,
+                type_ctx,
+                context,
+                control_stack,
+                loop_stack,
+            )?;
+            if then_produces_value && matches!(block_type, wasm_encoder::BlockType::Empty) {
+                func.instruction(&Instruction::Drop);
+            }
+            if let Some(else_expr) = else_branch {
+                func.instruction(&Instruction::Else);
                 emit_expression(
-                    then_branch,
+                    else_expr,
                     locals,
                     locals_types,
                     func,
@@ -1606,24 +1444,12 @@ fn emit_expression(
                     control_stack,
                     loop_stack,
                 )?;
-                func.instruction(&Instruction::Else);
-                if let Some(else_expr) = else_branch {
-                    emit_expression(
-                        else_expr,
-                        locals,
-                        locals_types,
-                        func,
-                        type_ctx,
-                        context,
-                        control_stack,
-                        loop_stack,
-                    )?;
-                } else {
-                    func.instruction(&Instruction::I32Const(0));
-                }
-                func.instruction(&Instruction::End);
-                control_stack.pop();
             }
+            if else_produces_value && matches!(block_type, wasm_encoder::BlockType::Empty) {
+                func.instruction(&Instruction::Drop);
+            }
+            func.instruction(&Instruction::End);
+            control_stack.pop();
             Ok(())
         }
         Expression::Binding(binding, _) => {
@@ -1932,11 +1758,11 @@ fn emit_expression(
                     loop_stack,
                 )?;
                 if i < exprs.len() - 1 {
-                    if expression_always_transfers_control(e) {
+                    if expression_does_diverge(e, false, false) {
                         break;
                     }
 
-                    if expression_emits_value(e, locals_types, context, type_ctx)? {
+                    if expression_produces_value(e, locals_types, context, type_ctx)? {
                         func.instruction(&Instruction::Drop);
                     }
                 }
