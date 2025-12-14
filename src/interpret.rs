@@ -965,8 +965,15 @@ fn get_possibly_mutated_values(body: &Expression) -> HashSet<Identifier> {
         Expression::Match {
             value,
             branches,
-            span,
-        } => todo!(),
+            ..
+        } => get_possibly_mutated_values(&value)
+            .into_iter()
+            .chain(
+                branches
+                    .iter()
+                    .flat_map(|(_, branch)| get_possibly_mutated_values(&branch)),
+            )
+            .collect(),
         Expression::EnumValue {
             enum_type, payload, ..
         } => get_possibly_mutated_values(&enum_type)
@@ -979,16 +986,16 @@ fn get_possibly_mutated_values(body: &Expression) -> HashSet<Identifier> {
             .collect(),
         Expression::EnumConstructor {
             enum_type,
-            variant,
-            variant_index,
             payload_type,
-            span,
-        } => todo!(),
+            ..
+        } => get_possibly_mutated_values(&enum_type)
+            .into_iter()
+            .chain(get_possibly_mutated_values(&payload_type).into_iter())
+            .collect(),
         Expression::EnumAccess {
             enum_expr,
-            variant,
-            span,
-        } => todo!(),
+            ..
+        } => get_possibly_mutated_values(&enum_expr),
         Expression::If {
             condition,
             then_branch,
@@ -1030,11 +1037,13 @@ fn get_possibly_mutated_values(body: &Expression) -> HashSet<Identifier> {
         Expression::Literal(..) => HashSet::new(),
         Expression::Identifier(..) => HashSet::new(),
         Expression::Operation {
-            operator,
             left,
             right,
-            span,
-        } => todo!(),
+            ..
+        } => get_possibly_mutated_values(&left)
+            .into_iter()
+            .chain(get_possibly_mutated_values(&right).into_iter())
+            .collect(),
         Expression::Assignment { target, expr, .. } => target
             .get_used_identifiers()
             .into_iter()
@@ -1056,7 +1065,7 @@ fn get_possibly_mutated_values(body: &Expression) -> HashSet<Identifier> {
             .as_ref()
             .map(|value| get_possibly_mutated_values(value.as_ref()))
             .unwrap_or(HashSet::new()),
-        Expression::Loop { body, span } => todo!(),
+        Expression::Loop { body, .. } => get_possibly_mutated_values(body),
     }
 }
 
