@@ -534,8 +534,8 @@ fn expression_produces_value(
                     expression_produces_value(then_branch, locals_types, context, type_ctx)?;
                 let else_produces_value =
                     expression_produces_value(else_branch, locals_types, context, type_ctx)?;
-                let then_diverges = expression_does_diverge(&then_branch, false, false);
-                let else_diverges = expression_does_diverge(&else_branch, false, false);
+                let then_diverges = expression_does_diverge(then_branch, false, false);
+                let else_diverges = expression_does_diverge(else_branch, false, false);
                 Ok(then_produces_value && else_produces_value
                     || ((then_diverges || else_diverges)
                         && (then_produces_value || else_produces_value)))
@@ -725,7 +725,7 @@ fn resolve_type(context: &interpret::Context, expr: &Expression) -> Result<WasmT
             Ok(WasmType::Struct(field_types))
         }
         Expression::Identifier(identifier, span) => {
-            if let Some((binding, _)) = context.get_identifier(&identifier) {
+            if let Some((binding, _)) = context.get_identifier(identifier) {
                 match binding {
                     interpret::BindingContext::Bound(value, _) => resolve_type(context, value),
                     _ => Err(Diagnostic::new(format!(
@@ -1438,9 +1438,9 @@ fn emit_expression(
                 false
             };
 
-            let then_diverges = expression_does_diverge(&then_branch, false, false);
+            let then_diverges = expression_does_diverge(then_branch, false, false);
             let else_diverges = if let Some(else_branch) = else_branch {
-                expression_does_diverge(&else_branch, false, false)
+                expression_does_diverge(else_branch, false, false)
             } else {
                 false
             };
@@ -1717,7 +1717,7 @@ fn emit_expression(
                 let local_index = locals
                     .get(&name)
                     .copied()
-                    .expect(format!("Local '{}' should have been collected", name).as_str());
+                    .unwrap_or_else(|| panic!("Local '{}' should have been collected", name));
                 func.instruction(&Instruction::LocalSet(local_index));
                 // Binding to an identifier always succeeds
                 func.instruction(&Instruction::I32Const(1));

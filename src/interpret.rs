@@ -152,8 +152,7 @@ fn ensure_boolean_condition(
     context: &Context,
     construct_name: &str,
 ) -> Result<(), Diagnostic> {
-    let mut condition_context = context.clone();
-    let condition_type = get_type_of_expression(condition, &mut condition_context)?;
+    let condition_type = get_type_of_expression(condition, &context.clone())?;
     let expected_bool = intrinsic_type_expr(IntrinsicType::Boolean);
 
     if !types_equivalent(&condition_type, &expected_bool) {
@@ -270,9 +269,8 @@ fn resolve_operations(expr: Expression, context: &mut Context) -> Result<Express
             right,
             span,
         } => {
-            let mut type_context = context.clone();
-            let possible_binary_op = get_type_of_expression(&left, &mut type_context)
-                .and_then(|left_type| resolve_expression(left_type, &mut type_context))
+            let possible_binary_op = get_type_of_expression(&left, context)
+                .and_then(|left_type| resolve_expression(left_type, &mut context.clone()))
                 .and_then(|resolved_left_type| {
                     get_trait_prop_of_type(&resolved_left_type, &operator, span)
                 })
@@ -345,10 +343,10 @@ fn collect_bindings(expr: &Expression, context: &mut Context) -> Result<(), Diag
     match expr {
         Expression::Binding(binding, _) => {
             let mut type_context = context.clone();
-            let value_type = get_type_of_expression(&binding.expr, &mut type_context)
+            let value_type = get_type_of_expression(&binding.expr, context)
                 .or_else(|_| {
                     interpret_expression(binding.expr.clone(), &mut type_context)
-                        .and_then(|evaluated| get_type_of_expression(&evaluated, &mut type_context))
+                        .and_then(|evaluated| get_type_of_expression(&evaluated, &type_context))
                 })
                 .ok();
 
@@ -616,7 +614,7 @@ pub fn interpret_expression(
             let argument_value = interpret_expression(*argument, context)?;
 
             let effective_function = if let Expression::Identifier(ident, _) = &function_value {
-                context.get_identifier(&ident).and_then(|b| match &b.0 {
+                context.get_identifier(ident).and_then(|b| match &b.0 {
                     BindingContext::Bound(v, _) => Some(v.clone()),
                     _ => None,
                 })
@@ -722,7 +720,7 @@ pub fn interpret_expression(
 
             let interpreted_body = interpret_expression(*body, &mut type_context)?;
 
-            let return_type = get_type_of_expression(&interpreted_body, &mut type_context)?;
+            let return_type = get_type_of_expression(&interpreted_body, &type_context)?;
 
             Ok(Expression::Function {
                 parameter,
@@ -895,17 +893,15 @@ pub fn interpret_expression(
                 match op {
                     UnaryIntrinsicOperator::BooleanNot => match evaluated_operand {
                         Expression::Literal(ExpressionLiteral::Boolean(b), span) => {
-                            return Ok(Expression::Literal(ExpressionLiteral::Boolean(!b), span));
+                            Ok(Expression::Literal(ExpressionLiteral::Boolean(!b), span))
                         }
-                        _ => {
-                            return Err(Diagnostic::new(
-                                "Cannot perform boolean not on non boolean type",
-                            )
-                            .with_span(span));
-                        }
+                        _ => Err(
+                            Diagnostic::new("Cannot perform boolean not on non boolean type")
+                                .with_span(span),
+                        ),
                     },
                     UnaryIntrinsicOperator::EnumFromStruct => {
-                        return interpret_enum_from_struct(evaluated_operand, span, context);
+                        interpret_enum_from_struct(evaluated_operand, span, context)
                     }
                 }
             }
@@ -953,7 +949,7 @@ fn get_possibly_mutated_values(body: &Expression) -> HashSet<Identifier> {
         Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), ..) => {
             get_possibly_mutated_values(left)
                 .into_iter()
-                .chain(get_possibly_mutated_values(right).into_iter())
+                .chain(get_possibly_mutated_values(right))
                 .collect()
         }
         Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, _), ..) => {
@@ -965,66 +961,66 @@ fn get_possibly_mutated_values(body: &Expression) -> HashSet<Identifier> {
             .collect(),
         Expression::Match {
             value, branches, ..
-        } => get_possibly_mutated_values(&value)
+        } => get_possibly_mutated_values(value)
             .into_iter()
             .chain(
                 branches
                     .iter()
-                    .flat_map(|(_, branch)| get_possibly_mutated_values(&branch)),
+                    .flat_map(|(_, branch)| get_possibly_mutated_values(branch)),
             )
             .collect(),
         Expression::EnumValue {
             enum_type, payload, ..
-        } => get_possibly_mutated_values(&enum_type)
+        } => get_possibly_mutated_values(enum_type)
             .into_iter()
             .chain(
                 payload
                     .iter()
-                    .flat_map(|else_branch| get_possibly_mutated_values(&else_branch)),
+                    .flat_map(|else_branch| get_possibly_mutated_values(else_branch)),
             )
             .collect(),
         Expression::EnumConstructor {
             enum_type,
             payload_type,
             ..
-        } => get_possibly_mutated_values(&enum_type)
+        } => get_possibly_mutated_values(enum_type)
             .into_iter()
-            .chain(get_possibly_mutated_values(&payload_type).into_iter())
+            .chain(get_possibly_mutated_values(payload_type))
             .collect(),
-        Expression::EnumAccess { enum_expr, .. } => get_possibly_mutated_values(&enum_expr),
+        Expression::EnumAccess { enum_expr, .. } => get_possibly_mutated_values(enum_expr),
         Expression::If {
             condition,
             then_branch,
             else_branch,
             ..
-        } => get_possibly_mutated_values(&condition)
+        } => get_possibly_mutated_values(condition)
             .into_iter()
-            .chain(get_possibly_mutated_values(&then_branch).into_iter())
+            .chain(get_possibly_mutated_values(then_branch))
             .chain(
                 else_branch
                     .iter()
-                    .flat_map(|else_branch| get_possibly_mutated_values(&else_branch)),
+                    .flat_map(|else_branch| get_possibly_mutated_values(else_branch)),
             )
             .collect(),
         Expression::AttachImplementation {
             type_expr,
             implementation,
             ..
-        } => get_possibly_mutated_values(&type_expr)
+        } => get_possibly_mutated_values(type_expr)
             .into_iter()
-            .chain(get_possibly_mutated_values(&implementation).into_iter())
+            .chain(get_possibly_mutated_values(implementation))
             .collect(),
         Expression::Function { return_type, .. } => return_type
             .iter()
-            .flat_map(|else_branch| get_possibly_mutated_values(&else_branch))
+            .flat_map(|else_branch| get_possibly_mutated_values(else_branch))
             .collect(),
         Expression::FunctionType {
             parameter,
             return_type,
             ..
-        } => get_possibly_mutated_values(&parameter)
+        } => get_possibly_mutated_values(parameter)
             .into_iter()
-            .chain(get_possibly_mutated_values(&return_type).into_iter())
+            .chain(get_possibly_mutated_values(return_type))
             .collect(),
         Expression::Struct(items, ..) => items
             .iter()
@@ -1032,26 +1028,26 @@ fn get_possibly_mutated_values(body: &Expression) -> HashSet<Identifier> {
             .collect(),
         Expression::Literal(..) => HashSet::new(),
         Expression::Identifier(..) => HashSet::new(),
-        Expression::Operation { left, right, .. } => get_possibly_mutated_values(&left)
+        Expression::Operation { left, right, .. } => get_possibly_mutated_values(left)
             .into_iter()
-            .chain(get_possibly_mutated_values(&right).into_iter())
+            .chain(get_possibly_mutated_values(right))
             .collect(),
         Expression::Assignment { target, expr, .. } => target
             .get_used_identifiers()
             .into_iter()
-            .chain(get_possibly_mutated_values(expr).into_iter())
+            .chain(get_possibly_mutated_values(expr))
             .collect(),
         Expression::FunctionCall {
             function, argument, ..
-        } => get_possibly_mutated_values(&function)
+        } => get_possibly_mutated_values(function)
             .into_iter()
-            .chain(get_possibly_mutated_values(&argument))
+            .chain(get_possibly_mutated_values(argument))
             .collect(),
-        Expression::PropertyAccess { object, .. } => get_possibly_mutated_values(&object),
+        Expression::PropertyAccess { object, .. } => get_possibly_mutated_values(object),
         Expression::Binding(binding, ..) => get_possibly_mutated_values(&binding.expr),
         Expression::Block(expressions, ..) => expressions
             .iter()
-            .flat_map(|e| get_possibly_mutated_values(e))
+            .flat_map(get_possibly_mutated_values)
             .collect(),
         Expression::Diverge { value, .. } => value
             .as_ref()
@@ -1133,7 +1129,7 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
         },
         Expression::Identifier(identifier, span) => {
             let bound_value = context
-                .get_identifier(&identifier)
+                .get_identifier(identifier)
                 .ok_or_else(|| {
                     diagnostic(format!("Unbound identifier: {}", identifier.name), *span)
                 })?
@@ -1154,8 +1150,7 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
             }
         }
         Expression::Assignment { target, expr, span } => {
-            let mut type_context = context.clone();
-            let value_type = get_type_of_expression(expr, &mut type_context)?;
+            let value_type = get_type_of_expression(expr, context)?;
             let target_type = get_lvalue_type(target, context, *span)?;
 
             if !types_equivalent(&target_type, &value_type) {
@@ -1191,9 +1186,8 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
                 .unwrap_or_else(|| empty_struct_expr(SourceSpan::new(span.end(), 0)));
             let mut then_context = context.clone();
             collect_bindings(condition, &mut then_context)?;
-            let then_type = get_type_of_expression(then_branch, &mut then_context)?;
-            let mut else_context = context.clone();
-            let else_type = get_type_of_expression(&inferred_else, &mut else_context)?;
+            let then_type = get_type_of_expression(then_branch, &then_context)?;
+            let else_type = get_type_of_expression(&inferred_else, context)?;
             if !types_equivalent(&then_type, &else_type) {
                 let then_returns = expression_does_diverge(then_branch, false, false);
                 let else_returns = expression_does_diverge(&inferred_else, false, false);
@@ -1213,7 +1207,7 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
             branches,
             span,
         } => {
-            let value_type = get_type_of_expression(value, &mut context.clone())?;
+            let value_type = get_type_of_expression(value, context)?;
             let mut branch_type: Option<Expression> = None;
 
             for (pattern, branch) in branches {
@@ -1224,7 +1218,7 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
                     Vec::new(),
                     Some(value_type.clone()),
                 )?;
-                let branch_ty = get_type_of_expression(branch, &mut branch_context)?;
+                let branch_ty = get_type_of_expression(branch, &branch_context)?;
                 if let Some(existing) = &branch_type {
                     if !types_equivalent(existing, &branch_ty)
                         && !expression_does_diverge(branch, false, false)
@@ -1238,15 +1232,7 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
 
             branch_type.ok_or(diagnostic("Match has no branches", *span))
         }
-        Expression::Binding(binding, _) => {
-            let mut binding_context = context.clone();
-            let value_type = get_type_of_expression(&binding.expr, &mut binding_context)?;
-            bind_pattern_blanks(
-                binding.pattern.clone(),
-                &mut binding_context,
-                Vec::new(),
-                Some(value_type),
-            )?;
+        Expression::Binding(..) => {
             interpret_expression(identifier_expr("bool"), &mut context.clone())
         }
         Expression::EnumAccess {
@@ -1300,7 +1286,7 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
             context,
         ),
         Expression::Block(exprs, span) => {
-            let (value, mut block_context) =
+            let (value, block_context) =
                 interpret_block(exprs.clone(), *span, &mut context.clone())?;
             if let Expression::Block(expressions, span) = &value {
                 let Some(last_expr) = expressions.last() else {
@@ -1309,19 +1295,18 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
                     )
                     .with_span(*span));
                 };
-                return get_type_of_expression(last_expr, &mut block_context);
+                return get_type_of_expression(last_expr, &block_context);
             }
-            get_type_of_expression(&value, &mut block_context)
+            get_type_of_expression(&value, &block_context)
         }
         Expression::Loop { body, .. } => {
-            let mut loop_context = context.clone();
             let break_values = collect_break_values(body);
             if break_values.is_empty() {
-                get_type_of_expression(body, &mut loop_context)
+                get_type_of_expression(body, context)
             } else {
                 let mut first_type: Option<Expression> = None;
                 for val in break_values {
-                    let ty = get_type_of_expression(&val, &mut loop_context)?;
+                    let ty = get_type_of_expression(&val, context)?;
                     if let Some(ref first) = first_type {
                         if !types_equivalent(first, &ty) {
                             return Err(diagnostic("Inconsistent break types in loop", val.span()));
@@ -1359,14 +1344,14 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
             let mut call_context = context.clone();
             let evaluated_function = interpret_expression(*function.clone(), &mut call_context)?;
             let evaluated_function_type =
-                get_type_of_expression(&evaluated_function, &mut call_context)?;
+                get_type_of_expression(&evaluated_function, &call_context)?;
             if let Expression::FunctionType {
                 parameter,
                 return_type,
                 ..
             } = &evaluated_function_type
             {
-                let argument_type = get_type_of_expression(argument, &mut call_context)?;
+                let argument_type = get_type_of_expression(argument, &call_context)?;
                 if !types_equivalent(parameter, &argument_type) {
                     return Err(diagnostic(
                         format!(
@@ -1827,7 +1812,7 @@ fn branch_type(
 ) -> Result<(Expression, Expression, bool), Diagnostic> {
     let mut branch_context = context.clone();
     let evaluated_branch = interpret_expression(branch.clone(), &mut branch_context)?;
-    let branch_type = get_type_of_expression(&evaluated_branch, &mut branch_context)?;
+    let branch_type = get_type_of_expression(&evaluated_branch, &branch_context)?;
     Ok((
         evaluated_branch.clone(),
         branch_type,
@@ -1974,7 +1959,7 @@ fn ensure_lvalue_mutable(
 ) -> Result<(), Diagnostic> {
     match target {
         LValue::Identifier(identifier, target_span) => {
-            let (_, annotations) = context.get_identifier(&identifier).ok_or_else(|| {
+            let (_, annotations) = context.get_identifier(identifier).ok_or_else(|| {
                 diagnostic(
                     format!("Cannot assign to unbound identifier: {}", identifier.name),
                     *target_span,
@@ -2016,7 +2001,7 @@ fn get_lvalue_type(
 
     match target {
         LValue::Identifier(identifier, target_span) => {
-            let (binding_ctx, _) = context.get_identifier(&identifier).ok_or_else(|| {
+            let (binding_ctx, _) = context.get_identifier(identifier).ok_or_else(|| {
                 diagnostic(
                     format!("Cannot assign to unbound identifier: {}", identifier.name),
                     *target_span,
@@ -2025,7 +2010,7 @@ fn get_lvalue_type(
 
             match binding_ctx {
                 BindingContext::Bound(value, _) => {
-                    get_type_of_expression(value, &mut context.clone())
+                    get_type_of_expression(value, &context)
                 }
                 BindingContext::UnboundWithType(type_expr) => Ok(type_expr.clone()),
                 BindingContext::UnboundWithoutType => Err(diagnostic(
@@ -2065,7 +2050,7 @@ fn get_lvalue_value(
 ) -> Result<Option<Expression>, Diagnostic> {
     match target {
         LValue::Identifier(identifier, target_span) => {
-            let (binding_ctx, _) = context.get_identifier(&identifier).ok_or_else(|| {
+            let (binding_ctx, _) = context.get_identifier(identifier).ok_or_else(|| {
                 diagnostic(
                     format!("Cannot assign to unbound identifier: {}", identifier.name),
                     *target_span,
@@ -2125,19 +2110,19 @@ fn apply_lvalue_update(
 ) -> Result<(), Diagnostic> {
     match target {
         LValue::Identifier(identifier, _) => {
-            let mut type_context = context.clone();
-            let value_type = get_type_of_expression(&value, &mut type_context).ok();
-
+            let value_type = get_type_of_expression(&value, context).ok();
+            let type_context = context.clone();
+            
             let Some((binding_ctx, _annotations)) = context.get_mut_identifier(&identifier) else {
                 return Err(diagnostic(
                     format!("Cannot assign to unbound identifier: {}", identifier.name),
                     span,
                 ));
             };
-
+            
             let expected_type = match binding_ctx {
                 BindingContext::Bound(existing, _) => {
-                    get_type_of_expression(existing, &mut type_context).ok()
+                    get_type_of_expression(existing, &type_context).ok()
                 }
                 BindingContext::UnboundWithType(expected_ty) => Some(expected_ty.clone()),
                 BindingContext::UnboundWithoutType => None,
@@ -2209,9 +2194,8 @@ fn apply_assignment(
 ) -> Result<Expression, Diagnostic> {
     ensure_lvalue_mutable(&target, context, span)?;
 
-    let mut type_context = context.clone();
-    let value_type = get_type_of_expression(&value, &mut type_context).ok();
-    let target_type = get_lvalue_type(&target, &mut type_context, span)?;
+    let value_type = get_type_of_expression(&value, context).ok();
+    let target_type = get_lvalue_type(&target, context, span)?;
 
     if let Some(actual_type) = value_type
         && !types_equivalent(&target_type, &actual_type)
@@ -2260,7 +2244,7 @@ fn interpret_binding(
 ) -> Result<(Expression, PreserveBehavior), Diagnostic> {
     let interpreted_pattern = interpret_binding_pattern(binding.pattern, context)?;
     let value = interpret_expression(binding.expr.clone(), context)?;
-    if let Ok(value_type) = get_type_of_expression(&value, &mut context.clone()) {
+    if let Ok(value_type) = get_type_of_expression(&value, context) {
         bind_pattern_blanks(
             interpreted_pattern.clone(),
             context,
@@ -2772,7 +2756,7 @@ fn is_resolved_const_function_expression(expr: &Expression, function_context: &C
             is_resolved_const_function_expression(parameter, function_context)
                 && is_resolved_const_function_expression(return_type, function_context)
         }
-        Expression::Identifier(ident, _) => function_context.contains_identifier(&ident),
+        Expression::Identifier(ident, _) => function_context.contains_identifier(ident),
         Expression::IntrinsicOperation(intrinsic_operation, _) => match intrinsic_operation {
             IntrinsicOperation::Binary(left, right, _) => {
                 is_resolved_const_function_expression(left, function_context)
@@ -2791,7 +2775,7 @@ fn is_resolved_const_function_expression(expr: &Expression, function_context: &C
             is_resolved_const_function_expression(enum_type, function_context)
                 && payload
                     .as_ref()
-                    .map(|p| is_resolved_const_function_expression(&*p, function_context))
+                    .map(|p| is_resolved_const_function_expression(p, function_context))
                     .unwrap_or(true)
         }
         Expression::EnumConstructor {
@@ -2800,13 +2784,13 @@ fn is_resolved_const_function_expression(expr: &Expression, function_context: &C
             ..
         } => {
             is_resolved_const_function_expression(enum_type, function_context)
-                && is_resolved_const_function_expression(&payload_type, function_context)
+                && is_resolved_const_function_expression(payload_type, function_context)
         }
         Expression::FunctionCall {
             function, argument, ..
         } => {
             is_resolved_const_function_expression(function, function_context)
-                && is_resolved_const_function_expression(&argument, function_context)
+                && is_resolved_const_function_expression(argument, function_context)
         }
         _ => false,
     }
@@ -3113,11 +3097,9 @@ fn resolve_value(expr: Expression, context: &mut Context) -> Result<Expression, 
             if let Some(binding) = context.get_identifier(&ident) {
                 match &binding.0 {
                     BindingContext::Bound(val, preserve_behavior) => {
-                        if *preserve_behavior == PreserveBehavior::PreserveUsageInLoops
-                            && context.in_loop
-                        {
-                            Ok(Expression::Identifier(ident, span))
-                        } else if matches!(val, Expression::Identifier(id, _) if id.name == ident.name)
+                        if (*preserve_behavior == PreserveBehavior::PreserveUsageInLoops
+                            && context.in_loop)
+                            || matches!(val, Expression::Identifier(id, _) if id.name == ident.name)
                         {
                             Ok(Expression::Identifier(ident, span))
                         } else {
