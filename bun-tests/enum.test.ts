@@ -112,7 +112,7 @@ test("enum patterns require defined enum types", async () => {
 
     const { exitCode, stderr } = await compileExpectError(silkCode);
     expect(exitCode).not.toBe(0);
-    expect(stderr).toContain("Enum pattern references unknown type: Missing");
+    expect(stderr).toContain("Unbound identifier: Missing");
 }, TEST_TIMEOUT_MS);
 
 test("enum patterns respect variant enum types", async () => {
