@@ -463,12 +463,22 @@ pub fn interpret_expression(
                     Ok(empty_struct_expr(dummy_span()))
                 }
             } else {
-                Ok(Expression::If {
+                let interpreted = Expression::If {
                     condition: Box::new(interpreted_condition),
                     then_branch: Box::new(interpreted_then),
                     else_branch: interpreted_else,
                     span,
-                })
+                };
+                let possibly_mutated_values = get_possibly_mutated_values(&interpreted);
+                for possibly_mutated_value in possibly_mutated_values {
+                    let binding = context.get_identifier(&possibly_mutated_value).unwrap();
+                    if let Some(binding_ty) = binding.0.get_bound_type(context)? {
+                        let binding =
+                            context.get_mut_identifier(&possibly_mutated_value).unwrap();
+                        binding.0 = BindingContext::UnboundWithType(binding_ty)
+                    }
+                }
+                Ok(interpreted)
             }
         }
         Expression::Identifier(identifier, span) => {
@@ -935,7 +945,7 @@ pub fn interpret_expression(
 
 fn get_possibly_mutated_values(body: &Expression) -> HashSet<Identifier> {
     match body {
-        Expression::IntrinsicType(intrinsic_type, source_span) => todo!(),
+        Expression::IntrinsicType(..) => HashSet::new(),
         Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), ..) => {
             get_possibly_mutated_values(left)
                 .into_iter()
@@ -945,19 +955,25 @@ fn get_possibly_mutated_values(body: &Expression) -> HashSet<Identifier> {
         Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, _), ..) => {
             get_possibly_mutated_values(operand)
         }
-        Expression::EnumType(items, source_span) => todo!(),
+        Expression::EnumType(items, ..) => items
+            .iter()
+            .flat_map(|e| get_possibly_mutated_values(&e.1))
+            .collect(),
         Expression::Match {
             value,
             branches,
             span,
         } => todo!(),
         Expression::EnumValue {
-            enum_type,
-            variant,
-            variant_index,
-            payload,
-            span,
-        } => todo!(),
+            enum_type, payload, ..
+        } => get_possibly_mutated_values(&enum_type)
+            .into_iter()
+            .chain(
+                payload
+                    .iter()
+                    .flat_map(|else_branch| get_possibly_mutated_values(&else_branch)),
+            )
+            .collect(),
         Expression::EnumConstructor {
             enum_type,
             variant,
@@ -987,25 +1003,29 @@ fn get_possibly_mutated_values(body: &Expression) -> HashSet<Identifier> {
         Expression::AttachImplementation {
             type_expr,
             implementation,
-            span,
-        } => todo!(),
-        Expression::Function {
-            parameter,
-            return_type,
-            body,
-            span,
-        } => todo!(),
+            ..
+        } => get_possibly_mutated_values(&type_expr)
+            .into_iter()
+            .chain(get_possibly_mutated_values(&implementation).into_iter())
+            .collect(),
+        Expression::Function { return_type, .. } => return_type
+            .iter()
+            .flat_map(|else_branch| get_possibly_mutated_values(&else_branch))
+            .collect(),
         Expression::FunctionType {
             parameter,
             return_type,
-            span,
-        } => todo!(),
+            ..
+        } => get_possibly_mutated_values(&parameter)
+            .into_iter()
+            .chain(get_possibly_mutated_values(&return_type).into_iter())
+            .collect(),
         Expression::Struct(items, ..) => items
             .iter()
             .flat_map(|e| get_possibly_mutated_values(&e.1))
             .collect(),
-        Expression::Literal(expression_literal, source_span) => HashSet::new(),
-        Expression::Identifier(identifier, source_span) => HashSet::new(),
+        Expression::Literal(..) => HashSet::new(),
+        Expression::Identifier(..) => HashSet::new(),
         Expression::Operation {
             operator,
             left,
@@ -1025,10 +1045,9 @@ fn get_possibly_mutated_values(body: &Expression) -> HashSet<Identifier> {
             .collect(),
         Expression::PropertyAccess {
             object,
-            property,
-            span,
-        } => todo!(),
-        Expression::Binding(binding, source_span) => get_possibly_mutated_values(&binding.expr),
+            ..
+        } => get_possibly_mutated_values(&object),
+        Expression::Binding(binding, ..) => get_possibly_mutated_values(&binding.expr),
         Expression::Block(expressions, ..) => expressions
             .iter()
             .flat_map(|e| get_possibly_mutated_values(e))
@@ -1868,8 +1887,7 @@ fn interpret_block(
         last_preserved = false;
         let value = match expression {
             Expression::Binding(binding, span) => {
-                let (binding_expr, preserve_behavior) =
-                    interpret_binding(*binding, context)?;
+                let (binding_expr, preserve_behavior) = interpret_binding(*binding, context)?;
                 let should_preserve_binding = preserve_behavior != PreserveBehavior::Inline;
                 if should_preserve_binding
                     && let Expression::Binding(binding, _) = binding_expr.clone()
