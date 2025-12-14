@@ -15,7 +15,7 @@ use crate::parsing::{BindingAnnotation, ExpressionLiteral, TargetLiteral};
 fn collect_identifiers_in_expression(expr: &Expression, identifiers: &mut HashSet<String>) {
     match expr {
         Expression::Identifier(id, _) => {
-            identifiers.insert(id.0.clone());
+            identifiers.insert(id.name.clone());
         }
         Expression::Function { body, .. } => {
             collect_identifiers_in_expression(body, identifiers);
@@ -374,7 +374,7 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
                 && let Some((variant_index, (_id, payload_type))) = variants
                     .iter()
                     .enumerate()
-                    .find(|(_, (id, _))| id.0 == variant.0)
+                    .find(|(_, (id, _))| id.name == variant.name)
             {
                 if let Expression::Struct(fields, _) = payload_type
                     && fields.is_empty()
@@ -457,7 +457,7 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
                 if let Expression::Binding(binding, _) = expr
                     && let BindingPattern::Identifier(id, _) = &binding.pattern
                 {
-                    binding_names.insert(id.0.clone());
+                    binding_names.insert(id.name.clone());
                 }
             }
 
@@ -473,12 +473,12 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             simplified_exprs.retain(|expr| {
                 if let Expression::Binding(binding, _) = expr {
                     if let BindingPattern::Identifier(id, _) = &binding.pattern {
-                        let is_referenced = referenced_bindings.contains(&id.0);
+                        let is_referenced = referenced_bindings.contains(&id.name);
                         let has_effects = has_side_effects(&binding.expr);
                         // TODO: Only keep expressions of unused bindings with side effects
 
                         if is_referenced || has_effects {
-                            kept_bindings.insert(id.0.clone());
+                            kept_bindings.insert(id.name.clone());
                             true
                         } else {
                             false // Remove this binding
@@ -581,12 +581,11 @@ fn simplify_binding_context(binding_context: BindingContext) -> Result<BindingCo
 
 pub fn simplify_context(context: Context) -> Result<Context, Diagnostic> {
     use crate::parsing::BindingAnnotation;
-    let simplified_bindings =
-        context
-            .bindings
-            .into_iter()
-            .map(|binding_context| {
-                binding_context
+    let simplified_bindings = context
+        .bindings
+        .into_iter()
+        .map(|binding_context| {
+            binding_context
                     .into_iter()
                     .map(|(bind_name, (binding, annotations))| {
                         Ok((bind_name, (simplify_binding_context(binding)?, annotations)))
@@ -595,8 +594,8 @@ pub fn simplify_context(context: Context) -> Result<Context, Diagnostic> {
                         HashMap<Identifier, (BindingContext, Vec<BindingAnnotation>)>,
                         Diagnostic,
                     >>()
-            })
-            .collect::<Result<_, Diagnostic>>()?;
+        })
+        .collect::<Result<_, Diagnostic>>()?;
     Ok(Context {
         bindings: simplified_bindings,
         in_loop: false,
@@ -635,7 +634,7 @@ fn interpret_exported_function() {
     let annotated_bindings = context.annotated_bindings();
     assert_eq!(annotated_bindings.len(), 1);
     let exported_binding = &annotated_bindings[0];
-    assert_eq!(exported_binding.name.0, "add_one");
+    assert_eq!(exported_binding.name.name, "add_one");
     assert!(exported_binding.annotations.len() == 1);
     let target_expr = exported_binding
         .annotations
@@ -661,7 +660,7 @@ fn interpret_exported_function_w_binding() {
     let annotated_bindings = context.annotated_bindings();
     assert_eq!(annotated_bindings.len(), 1);
     let exported_binding = &annotated_bindings[0];
-    assert_eq!(exported_binding.name.0, "add_one_squared");
+    assert_eq!(exported_binding.name.name, "add_one_squared");
     assert!(exported_binding.annotations.len() == 1);
     let target_expr = exported_binding
         .annotations

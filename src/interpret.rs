@@ -8,6 +8,7 @@ use crate::{
         Expression, ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, LValue,
         TargetLiteral, UnaryIntrinsicOperator,
     },
+    uniquify,
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreserveBehavior {
@@ -138,7 +139,7 @@ fn empty_struct_expr(span: SourceSpan) -> Expression {
 }
 
 fn identifier_expr(name: &str) -> Expression {
-    Expression::Identifier(Identifier(name.to_string()), dummy_span())
+    Expression::Identifier(Identifier::new(name.to_string()), dummy_span())
 }
 
 fn intrinsic_type_expr(ty: IntrinsicType) -> Expression {
@@ -171,7 +172,7 @@ fn ensure_boolean_condition(
 fn types_equivalent(left: &Expression, right: &Expression) -> bool {
     match (left, right) {
         (Expression::IntrinsicType(a, _), Expression::IntrinsicType(b, _)) => a == b,
-        (Expression::Identifier(a, _), Expression::Identifier(b, _)) => a.0 == b.0,
+        (Expression::Identifier(a, _), Expression::Identifier(b, _)) => a.name == b.name,
         (Expression::Struct(a_items, _), Expression::Struct(b_items, _)) => {
             if a_items.len() != b_items.len() {
                 return false;
@@ -180,7 +181,7 @@ fn types_equivalent(left: &Expression, right: &Expression) -> bool {
                 .iter()
                 .zip(b_items.iter())
                 .all(|((aid, aexpr), (bid, bexpr))| {
-                    aid.0 == bid.0 && types_equivalent(aexpr, bexpr)
+                    aid.name == bid.name && types_equivalent(aexpr, bexpr)
                 })
         }
         (
@@ -217,7 +218,7 @@ fn types_equivalent(left: &Expression, right: &Expression) -> bool {
                 .iter()
                 .zip(b_variants.iter())
                 .all(|((a_id, a_ty), (b_id, b_ty))| {
-                    a_id.0 == b_id.0 && types_equivalent(a_ty, b_ty)
+                    a_id.name == b_id.name && types_equivalent(a_ty, b_ty)
                 })
         }
         _ => false,
@@ -246,7 +247,7 @@ fn enum_variant_info(enum_type: &Expression, variant: &Identifier) -> Option<(us
         variants
             .iter()
             .enumerate()
-            .find(|(_, (id, _))| id.0 == variant.0)
+            .find(|(_, (id, _))| id.name == variant.name)
             .map(|(idx, (_, ty))| (idx, ty.clone()))
     } else {
         None
@@ -502,7 +503,7 @@ pub fn interpret_expression(
                 })
             } else {
                 Err(diagnostic(
-                    format!("Unbound identifier: {}", identifier.0),
+                    format!("Unbound identifier: {}", identifier.name),
                     span,
                 ))
             }
@@ -918,7 +919,7 @@ pub fn interpret_expression(
             let resolved_object = resolve_value(evaluated_object, context)?;
             if let Expression::Struct(items, _) = &resolved_object {
                 for (item_id, item_expr) in items {
-                    if item_id.0 == property {
+                    if item_id.name == property {
                         return Ok(item_expr.clone());
                     }
                 }
@@ -1133,7 +1134,9 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
         Expression::Identifier(identifier, span) => {
             let bound_value = context
                 .get_identifier(&identifier)
-                .ok_or_else(|| diagnostic(format!("Unbound identifier: {}", identifier.0), *span))?
+                .ok_or_else(|| {
+                    diagnostic(format!("Unbound identifier: {}", identifier.name), *span)
+                })?
                 .clone();
 
             match bound_value.0 {
@@ -1144,7 +1147,7 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
                 BindingContext::UnboundWithoutType => Err(diagnostic(
                     format!(
                         "Cannot determine type of unbound identifier: {}",
-                        identifier.0
+                        identifier.name
                     ),
                     *span,
                 )),
@@ -1843,7 +1846,7 @@ fn get_trait_prop_of_type(
     ) -> Option<Expression> {
         items
             .iter()
-            .find(|(field_id, _)| field_id.0 == trait_prop)
+            .find(|(field_id, _)| field_id.name == trait_prop)
             .map(|(_, expr)| expr.clone())
     }
 
@@ -1973,7 +1976,7 @@ fn ensure_lvalue_mutable(
         LValue::Identifier(identifier, target_span) => {
             let (_, annotations) = context.get_identifier(&identifier).ok_or_else(|| {
                 diagnostic(
-                    format!("Cannot assign to unbound identifier: {}", identifier.0),
+                    format!("Cannot assign to unbound identifier: {}", identifier.name),
                     *target_span,
                 )
             })?;
@@ -1983,7 +1986,7 @@ fn ensure_lvalue_mutable(
                 .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)))
             {
                 return Err(diagnostic(
-                    format!("Cannot assign to immutable identifier: {}", identifier.0),
+                    format!("Cannot assign to immutable identifier: {}", identifier.name),
                     span,
                 ));
             }
@@ -1995,7 +1998,7 @@ fn ensure_lvalue_mutable(
 
 fn lvalue_display_name(lvalue: &LValue) -> String {
     match lvalue {
-        LValue::Identifier(Identifier(name), _) => name.clone(),
+        LValue::Identifier(Identifier { name, .. }, _) => name.clone(),
         LValue::PropertyAccess {
             object, property, ..
         } => {
@@ -2015,7 +2018,7 @@ fn get_lvalue_type(
         LValue::Identifier(identifier, target_span) => {
             let (binding_ctx, _) = context.get_identifier(&identifier).ok_or_else(|| {
                 diagnostic(
-                    format!("Cannot assign to unbound identifier: {}", identifier.0),
+                    format!("Cannot assign to unbound identifier: {}", identifier.name),
                     *target_span,
                 )
             })?;
@@ -2026,7 +2029,7 @@ fn get_lvalue_type(
                 }
                 BindingContext::UnboundWithType(type_expr) => Ok(type_expr.clone()),
                 BindingContext::UnboundWithoutType => Err(diagnostic(
-                    format!("Cannot determine type of {}", identifier.0),
+                    format!("Cannot determine type of {}", identifier.name),
                     *target_span,
                 )),
             }
@@ -2043,7 +2046,7 @@ fn get_lvalue_type(
 
             let field_type = fields
                 .iter()
-                .find(|(id, _)| id.0 == *property)
+                .find(|(id, _)| id.name == *property)
                 .map(|(_, ty)| ty.clone())
                 .ok_or_else(|| {
                     diagnostic(
@@ -2064,7 +2067,7 @@ fn get_lvalue_value(
         LValue::Identifier(identifier, target_span) => {
             let (binding_ctx, _) = context.get_identifier(&identifier).ok_or_else(|| {
                 diagnostic(
-                    format!("Cannot assign to unbound identifier: {}", identifier.0),
+                    format!("Cannot assign to unbound identifier: {}", identifier.name),
                     *target_span,
                 )
             })?;
@@ -2082,7 +2085,7 @@ fn get_lvalue_value(
                 BindingContext::UnboundWithoutType => Err(diagnostic(
                     format!(
                         "Cannot assign to uninitialized identifier: {}",
-                        identifier.0
+                        identifier.name
                     ),
                     *target_span,
                 )),
@@ -2105,7 +2108,7 @@ fn get_lvalue_value(
 
             fields
                 .into_iter()
-                .find(|(id, _)| id.0 == *property)
+                .find(|(id, _)| id.name == *property)
                 .map(|(_, expr)| Some(expr))
                 .ok_or_else(|| {
                     diagnostic(format!("Missing field {} in struct", property), struct_span)
@@ -2127,7 +2130,7 @@ fn apply_lvalue_update(
 
             let Some((binding_ctx, _annotations)) = context.get_mut_identifier(&identifier) else {
                 return Err(diagnostic(
-                    format!("Cannot assign to unbound identifier: {}", identifier.0),
+                    format!("Cannot assign to unbound identifier: {}", identifier.name),
                     span,
                 ));
             };
@@ -2144,7 +2147,10 @@ fn apply_lvalue_update(
                 && !types_equivalent(expected_ty, actual_ty)
             {
                 return Err(diagnostic(
-                    format!("Cannot assign value of mismatched type to {}", identifier.0),
+                    format!(
+                        "Cannot assign value of mismatched type to {}",
+                        identifier.name
+                    ),
                     span,
                 ));
             }
@@ -2175,7 +2181,7 @@ fn apply_lvalue_update(
 
             let mut found = false;
             for (field_id, field_expr) in fields.iter_mut() {
-                if field_id.0 == property {
+                if field_id.name == property {
                     *field_expr = value.clone();
                     found = true;
                     break;
@@ -2344,7 +2350,7 @@ fn bind_pattern_blanks(
                 let field_type_hint = type_lookup.as_ref().and_then(|fields| {
                     fields
                         .iter()
-                        .find(|(name, _)| name.0 == field_identifier.0)
+                        .find(|(name, _)| name.name == field_identifier.name)
                         .map(|(_, ty)| ty.clone())
                 });
                 bind_pattern_blanks(
@@ -2453,10 +2459,13 @@ fn bind_pattern_from_value(
                 let field_span = field_pattern.span();
                 let field_value = struct_items
                     .iter()
-                    .find(|(value_identifier, _)| value_identifier.0 == field_identifier.0)
+                    .find(|(value_identifier, _)| value_identifier.name == field_identifier.name)
                     .map(|(_, expr)| expr)
                     .ok_or_else(|| {
-                        diagnostic(format!("Missing field {}", field_identifier.0), field_span)
+                        diagnostic(
+                            format!("Missing field {}", field_identifier.name),
+                            field_span,
+                        )
                     })?;
 
                 let (matched, new_preserve_behavior) = bind_pattern_from_value(
@@ -2492,7 +2501,7 @@ fn bind_pattern_from_value(
             };
 
             let enum_type_name = match enum_type.as_ref() {
-                Expression::Identifier(id, _) => id.0.clone(),
+                Expression::Identifier(id, _) => id.name.clone(),
                 _ => "<unknown>".to_string(),
             };
 
@@ -2509,7 +2518,7 @@ fn bind_pattern_from_value(
                 return Ok((false, preserve_behavior));
             }
 
-            if value_variant.0 != variant.0 {
+            if value_variant.name != variant.name {
                 return Ok((false, preserve_behavior));
             }
 
@@ -2810,7 +2819,7 @@ pub fn intrinsic_context() -> Context {
     };
 
     context.bindings.last_mut().unwrap().insert(
-        Identifier("type".to_string()),
+        Identifier::new("type"),
         (
             BindingContext::Bound(
                 Expression::AttachImplementation {
@@ -2831,7 +2840,7 @@ pub fn intrinsic_context() -> Context {
         let typed_pattern = |name: &str| {
             BindingPattern::TypeHint(
                 Box::new(BindingPattern::Identifier(
-                    Identifier(name.to_string()),
+                    Identifier::new(name.to_string()),
                     dummy_span(),
                 )),
                 Box::new(intrinsic_type_expr(IntrinsicType::I32)),
@@ -2840,7 +2849,7 @@ pub fn intrinsic_context() -> Context {
         };
 
         (
-            Identifier(symbol.to_string()),
+            Identifier::new(symbol.to_string()),
             Expression::Function {
                 parameter: typed_pattern("self"),
                 return_type: Some(Box::new(Expression::FunctionType {
@@ -2867,7 +2876,7 @@ pub fn intrinsic_context() -> Context {
     }
 
     context.bindings.last_mut().unwrap().insert(
-        Identifier("i32".to_string()),
+        Identifier::new("i32"),
         (
             BindingContext::Bound(
                 Expression::AttachImplementation {
@@ -2905,7 +2914,7 @@ pub fn intrinsic_context() -> Context {
         let typed_pattern = |name: &str| {
             BindingPattern::TypeHint(
                 Box::new(BindingPattern::Identifier(
-                    Identifier(name.to_string()),
+                    Identifier::new(name.to_string()),
                     dummy_span(),
                 )),
                 Box::new(intrinsic_type_expr(IntrinsicType::Boolean)),
@@ -2914,7 +2923,7 @@ pub fn intrinsic_context() -> Context {
         };
 
         (
-            Identifier(symbol.to_string()),
+            Identifier::new(symbol.to_string()),
             Expression::Function {
                 parameter: typed_pattern("self"),
                 return_type: Some(Box::new(Expression::FunctionType {
@@ -2941,7 +2950,7 @@ pub fn intrinsic_context() -> Context {
     }
 
     context.bindings.last_mut().unwrap().insert(
-        Identifier("bool".to_string()),
+        Identifier::new("bool"),
         (
             BindingContext::Bound(
                 Expression::AttachImplementation {
@@ -2965,7 +2974,7 @@ pub fn intrinsic_context() -> Context {
     );
 
     context.bindings.last_mut().unwrap().insert(
-        Identifier("true".to_string()),
+        Identifier::new("true"),
         (
             BindingContext::Bound(
                 Expression::Literal(ExpressionLiteral::Boolean(true), dummy_span()),
@@ -2976,7 +2985,7 @@ pub fn intrinsic_context() -> Context {
     );
 
     context.bindings.last_mut().unwrap().insert(
-        Identifier("false".to_string()),
+        Identifier::new("false"),
         (
             BindingContext::Bound(
                 Expression::Literal(ExpressionLiteral::Boolean(false), dummy_span()),
@@ -2987,7 +2996,7 @@ pub fn intrinsic_context() -> Context {
     );
 
     context.bindings.last_mut().unwrap().insert(
-        Identifier("js".to_string()),
+        Identifier::new("js"),
         (
             BindingContext::Bound(
                 Expression::Literal(
@@ -3001,7 +3010,7 @@ pub fn intrinsic_context() -> Context {
     );
 
     context.bindings.last_mut().unwrap().insert(
-        Identifier("wasm".to_string()),
+        Identifier::new("wasm"),
         (
             BindingContext::Bound(
                 Expression::Literal(
@@ -3015,13 +3024,13 @@ pub fn intrinsic_context() -> Context {
     );
 
     context.bindings.last_mut().unwrap().insert(
-        Identifier("enum".to_string()),
+        Identifier::new("enum"),
         (
             BindingContext::Bound(
                 Expression::Function {
                     parameter: BindingPattern::TypeHint(
                         Box::new(BindingPattern::Identifier(
-                            Identifier("struct_arg".to_string()),
+                            Identifier::new("struct_arg"),
                             dummy_span(),
                         )),
                         Box::new(intrinsic_type_expr(IntrinsicType::Type)),
@@ -3031,7 +3040,7 @@ pub fn intrinsic_context() -> Context {
                     body: Box::new(Expression::IntrinsicOperation(
                         IntrinsicOperation::Unary(
                             Box::new(Expression::Identifier(
-                                Identifier("struct_arg".to_string()),
+                                Identifier::new("struct_arg"),
                                 dummy_span(),
                             )),
                             UnaryIntrinsicOperator::EnumFromStruct,
@@ -3057,6 +3066,7 @@ pub fn evaluate_text_to_raw_expression(program: &str) -> Result<(Expression, Con
         "Parser did not consume entire input, remaining: {remaining:?}"
     );
 
+    let expression = uniquify::uniquify_program(expression);
     let mut context = intrinsic_context();
     interpret_program(expression, &mut context)
 }
@@ -3068,6 +3078,7 @@ pub fn evaluate_text_to_expression(program: &str) -> Result<(Expression, Context
         "Parser did not consume entire input, remaining: {remaining:?}"
     );
 
+    let expression = uniquify::uniquify_program(expression);
     let mut context = intrinsic_context();
     let (mut value, context) = interpret_program(expression, &mut context)?;
 
@@ -3102,11 +3113,12 @@ fn resolve_value(expr: Expression, context: &mut Context) -> Result<Expression, 
             if let Some(binding) = context.get_identifier(&ident) {
                 match &binding.0 {
                     BindingContext::Bound(val, preserve_behavior) => {
-                        if preserve_behavior == &PreserveBehavior::PreserveUsageInLoops
-                            && context.in_loop == true
+                        if *preserve_behavior == PreserveBehavior::PreserveUsageInLoops
+                            && context.in_loop
                         {
                             Ok(Expression::Identifier(ident, span))
-                        } else if matches!(val, Expression::Identifier(id, _) if id.0 == ident.0) {
+                        } else if matches!(val, Expression::Identifier(id, _) if id.name == ident.name)
+                        {
                             Ok(Expression::Identifier(ident, span))
                         } else {
                             resolve_value(val.clone(), context)
@@ -3167,7 +3179,7 @@ fn test_basic_binding_interpretation() {
                 Box::new(Binding {
                     pattern: BindingPattern::TypeHint(
                         Box::new(BindingPattern::Identifier(
-                            Identifier("x".to_string()),
+                            Identifier::new("x"),
                             dummy_span(),
                         )),
                         Box::new(intrinsic_type_expr(IntrinsicType::I32)),
@@ -3233,8 +3245,7 @@ fn test_basic_addition_interpretation() {
 #[test]
 fn i32_is_constant() {
     let binding = intrinsic_context();
-    let Some((BindingContext::Bound(expr, _), _)) =
-        binding.get_identifier(&Identifier("i32".to_string()))
+    let Some((BindingContext::Bound(expr, _), _)) = binding.get_identifier(&Identifier::new("i32"))
     else {
         panic!("i32 binding not found");
     };
@@ -3358,7 +3369,7 @@ fn interpret_preserves_bindings_in_function() {
     let bindings = context.annotated_bindings();
     let double_add = bindings
         .iter()
-        .find(|b| b.name.0 == "double_add")
+        .find(|b| b.name.name == "double_add")
         .expect("double_add not found");
 
     if let Expression::Function { body, .. } = &double_add.value {
@@ -3368,7 +3379,7 @@ fn interpret_preserves_bindings_in_function() {
             match &exprs[0] {
                 Expression::Binding(binding, _) => {
                     if let BindingPattern::Identifier(ident, _) = &binding.pattern {
-                        assert_eq!(ident.0, "y");
+                        assert_eq!(ident.name, "y");
                     } else {
                         panic!("Expected identifier pattern for y");
                     }
@@ -3416,11 +3427,11 @@ fn interpret_basic_enum_flow() {
 fn enum_intrinsic_exposes_function_type() {
     let mut context = intrinsic_context();
     let enum_binding = context
-        .get_identifier(&Identifier("enum".to_string()))
+        .get_identifier(&Identifier::new("enum"))
         .expect("enum intrinsic should be present")
         .clone();
 
-    match &enum_binding.0 {
+    match &enum_binding.name {
         BindingContext::Bound(expr, _) => match get_type_of_expression(expr, &mut context) {
             Ok(Expression::FunctionType {
                 parameter,
@@ -3445,7 +3456,7 @@ fn enum_intrinsic_can_be_aliased() {
 
     let (value, _context) = evaluate_text_to_expression(program).unwrap();
     match value {
-        Expression::EnumValue { variant, .. } => assert_eq!(variant.0, "None"),
+        Expression::EnumValue { variant, .. } => assert_eq!(variant.name, "None"),
         other => panic!("unexpected alias result {other:?}"),
     }
 }

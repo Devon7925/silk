@@ -2,8 +2,42 @@ use std::collections::HashSet;
 
 use crate::diagnostics::{Diagnostic, SourceSpan};
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Identifier(pub String);
+#[derive(Clone, Debug)]
+pub struct Identifier {
+    pub name: String,
+    pub unique: String,
+}
+
+impl Identifier {
+    pub fn new(name: impl Into<String>) -> Self {
+        let name = name.into();
+        Identifier {
+            unique: name.clone(),
+            name,
+        }
+    }
+
+    pub fn with_unique(name: impl Into<String>, unique: impl Into<String>) -> Self {
+        Identifier {
+            name: name.into(),
+            unique: unique.into(),
+        }
+    }
+}
+
+impl PartialEq for Identifier {
+    fn eq(&self, other: &Self) -> bool {
+        self.unique == other.unique
+    }
+}
+
+impl Eq for Identifier {}
+
+impl std::hash::Hash for Identifier {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.unique.hash(state);
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LValue {
@@ -25,7 +59,7 @@ impl LValue {
 
     pub fn pretty_print(&self) -> String {
         match self {
-            LValue::Identifier(id, _) => id.0.clone(),
+            LValue::Identifier(id, _) => id.name.clone(),
             LValue::PropertyAccess {
                 object, property, ..
             } => format!("{}.{}", object.pretty_print(), property),
@@ -73,7 +107,7 @@ impl BindingPattern {
 
     pub fn pretty_print(&self) -> String {
         match self {
-            BindingPattern::Identifier(id, _) => id.0.clone(),
+            BindingPattern::Identifier(id, _) => id.name.clone(),
             BindingPattern::Literal(lit, _) => match lit {
                 ExpressionLiteral::Number(n) => n.to_string(),
                 ExpressionLiteral::Boolean(b) => b.to_string(),
@@ -85,7 +119,7 @@ impl BindingPattern {
             BindingPattern::Struct(fields, _) => {
                 let field_strs: Vec<String> = fields
                     .iter()
-                    .map(|(name, pat)| format!("{} = {}", name.0, pat.pretty_print()))
+                    .map(|(name, pat)| format!("{} = {}", name.name, pat.pretty_print()))
                     .collect();
                 format!("{{ {} }}", field_strs.join(", "))
             }
@@ -99,7 +133,12 @@ impl BindingPattern {
                     .as_ref()
                     .map(|p| format!("({})", p.pretty_print()))
                     .unwrap_or_default();
-                format!("{}::{}{}", enum_type.pretty_print(), variant.0, payload_str)
+                format!(
+                    "{}::{}{}",
+                    enum_type.pretty_print(),
+                    variant.name,
+                    payload_str
+                )
             }
             BindingPattern::TypeHint(inner, type_expr, _) => {
                 format!("{}: {}", inner.pretty_print(), type_expr.pretty_print())
@@ -345,7 +384,7 @@ impl Expression {
             Expression::EnumType(variants, _) => {
                 let variant_strs: Vec<String> = variants
                     .iter()
-                    .map(|(name, ty)| format!("{}({})", name.0, ty.pretty_print()))
+                    .map(|(name, ty)| format!("{}({})", name.name, ty.pretty_print()))
                     .collect();
                 format!("enum {{ {} }}", variant_strs.join(", "))
             }
@@ -374,7 +413,12 @@ impl Expression {
                     .as_ref()
                     .map(|p| format!("({})", p.pretty_print()))
                     .unwrap_or_default();
-                format!("{}::{}{}", enum_type.pretty_print(), variant.0, payload_str)
+                format!(
+                    "{}::{}{}",
+                    enum_type.pretty_print(),
+                    variant.name,
+                    payload_str
+                )
             }
             Expression::EnumConstructor {
                 enum_type,
@@ -385,13 +429,13 @@ impl Expression {
                 format!(
                     "{}::{}({})",
                     enum_type.pretty_print(),
-                    variant.0,
+                    variant.name,
                     payload_type.pretty_print()
                 )
             }
             Expression::EnumAccess {
                 enum_expr, variant, ..
-            } => format!("{}::{}", enum_expr.pretty_print(), variant.0),
+            } => format!("{}::{}", enum_expr.pretty_print(), variant.name),
             Expression::If {
                 condition,
                 then_branch,
@@ -457,7 +501,7 @@ impl Expression {
             Expression::Struct(fields, _) => {
                 let field_strs: Vec<String> = fields
                     .iter()
-                    .map(|(name, value)| format!("{} = {}", name.0, value.pretty_print()))
+                    .map(|(name, value)| format!("{} = {}", name.name, value.pretty_print()))
                     .collect();
                 format!("{{ {} }}", field_strs.join(", "))
             }
@@ -469,7 +513,7 @@ impl Expression {
                     TargetLiteral::WasmTarget => "wasm".to_string(),
                 },
             },
-            Expression::Identifier(id, _) => id.0.clone(),
+            Expression::Identifier(id, _) => id.name.clone(),
             Expression::Operation {
                 operator,
                 left,
@@ -765,7 +809,7 @@ pub fn parse_identifier(file: &str) -> Option<(Identifier, &str)> {
     }
 
     let remaining = &file[identifier.len()..];
-    Some((Identifier(identifier), remaining))
+    Some((Identifier::new(identifier), remaining))
 }
 
 pub fn parse_literal(file: &str) -> Option<(ExpressionLiteral, &str)> {
@@ -810,13 +854,13 @@ fn test_enum_pattern_parse2() {
             ..
         } => {
             match *enum_type {
-                Expression::Identifier(Identifier(ref name), _) if name == "Option" => {}
+                Expression::Identifier(Identifier { name, .. }, _) if name == "Option" => {}
                 _ => panic!("Expected enum type identifier 'Option'"),
             }
-            assert_eq!(variant.0, "Some");
+            assert_eq!(variant.name, "Some");
             match payload {
                 Some(boxed_pattern) => match *boxed_pattern {
-                    BindingPattern::Identifier(Identifier(ref name), _) if name == "value" => {}
+                    BindingPattern::Identifier(Identifier { name, .. }, _) if name == "value" => {}
                     _ => panic!("Expected payload identifier 'value'"),
                 },
                 None => panic!("Expected payload in enum variant pattern"),
@@ -954,13 +998,13 @@ fn extract_binding_annotations_from_expression(
     expression: Expression,
 ) -> Result<Vec<BindingAnnotation>, Diagnostic> {
     match expression {
-        Expression::Identifier(Identifier(id), span) if id == "mut" => {
+        Expression::Identifier(Identifier { name: id, .. }, span) if id == "mut" => {
             Ok(vec![BindingAnnotation::Mutable(span)])
         }
         Expression::FunctionCall {
             function, argument, ..
         } => match *function {
-            Expression::Identifier(Identifier(id), ann_span) if id == "export" => {
+            Expression::Identifier(Identifier { name: id, .. }, ann_span) if id == "export" => {
                 Ok(vec![BindingAnnotation::Export(*argument, ann_span)])
             }
             other => {
@@ -1091,7 +1135,7 @@ fn parse_struct_expression<'a>(
             }
 
             let (value_expr, rest) = parse_operation_expression_with_source(source, remaining)?;
-            items.push((Identifier(tuple_index.to_string()), value_expr));
+            items.push((Identifier::new(tuple_index.to_string()), value_expr));
             tuple_index += 1;
             remaining = rest;
             remaining = parse_optional_whitespace(remaining);
@@ -1471,13 +1515,13 @@ fn parse_lvalue<'a>(
                 }
 
                 let rest = &after_dot[tuple_index.len()..];
-                (Identifier(tuple_index), rest)
+                (Identifier::new(tuple_index), rest)
             };
 
         current_span = consumed_span(source, start_slice, rest);
         lvalue = LValue::PropertyAccess {
             object: Box::new(lvalue),
-            property: property_identifier.0,
+            property: property_identifier.name,
             span: current_span,
         };
         remaining = rest;
@@ -1584,7 +1628,7 @@ fn parse_operation_expression_with_min_precedence<'a>(
             "." => match right {
                 Expression::Identifier(property, _) => Expression::PropertyAccess {
                     object: Box::new(left),
-                    property: property.0,
+                    property: property.name,
                     span,
                 },
                 Expression::Literal(ExpressionLiteral::Number(num), _) => {
@@ -1741,7 +1785,7 @@ y: i32 := x
         panic!()
     };
     assert_eq!(
-        matches!(binding1.pattern, BindingPattern::Identifier(ref id, _) if id.0 == "x"),
+        matches!(binding1.pattern, BindingPattern::Identifier(ref id, _) if id.name == "x"),
         true
     );
     assert_eq!(
@@ -1753,15 +1797,15 @@ y: i32 := x
         panic!()
     };
     assert_eq!(
-        matches!(binding2.expr, Expression::Identifier(ref lit, _) if lit.0 == "x"),
+        matches!(binding2.expr, Expression::Identifier(ref lit, _) if lit.name == "x"),
         true
     );
     let BindingPattern::TypeHint(binding2, binding2_type, _) = &binding2.pattern else {
         panic!()
     };
-    assert!(matches!(**binding2, BindingPattern::Identifier(ref hint, _) if hint.0 == "y"));
+    assert!(matches!(**binding2, BindingPattern::Identifier(ref hint, _) if hint.name == "y"));
     assert_eq!(
-        matches!(**binding2_type, Expression::Identifier(ref hint, _) if hint.0 == "i32"),
+        matches!(**binding2_type, Expression::Identifier(ref hint, _) if hint.name == "i32"),
         true
     );
 }
@@ -1796,7 +1840,7 @@ bar
     assert_eq!(annotations.len(), 1);
     match &annotations[0] {
         BindingAnnotation::Export(target_expr, _) => match target_expr {
-            Expression::Identifier(identifier, _) => assert_eq!(identifier.0, "js"),
+            Expression::Identifier(identifier, _) => assert_eq!(identifier.name, "js"),
             other => panic!("expected target identifier, got {:?}", other),
         },
         other => panic!("unexpected annotation: {:?}", other),
@@ -1834,7 +1878,7 @@ foo_binding
     };
     let (_, foo_pattern) = fields
         .iter()
-        .find(|(identifier, _)| identifier.0 == "foo")
+        .find(|(identifier, _)| identifier.name == "foo")
         .expect("missing foo field");
     let BindingPattern::Annotated { annotations, .. } = foo_pattern else {
         panic!("expected annotated foo field")
@@ -1869,7 +1913,7 @@ foo_binding
     };
     let (_, foo_pattern) = fields
         .iter()
-        .find(|(identifier, _)| identifier.0 == "foo")
+        .find(|(identifier, _)| identifier.name == "foo")
         .expect("missing foo field");
     let BindingPattern::Annotated { annotations, .. } = foo_pattern else {
         panic!("expected annotated foo field")
@@ -1906,7 +1950,10 @@ foo = 2
     let Expression::Assignment { target, .. } = &parsed[1] else {
         panic!("expected assignment expression")
     };
-    assert!(matches!(target, LValue::Identifier(Identifier(name), _) if name == "foo"));
+    assert!(matches!(
+        target,
+        LValue::Identifier(Identifier { name, .. }, _) if name == "foo"
+    ));
 }
 
 #[test]
@@ -2000,7 +2047,7 @@ foo(123)
     };
     assert!(matches!(
         &binding.pattern,
-        BindingPattern::Identifier(Identifier(name), _) if name == "foo"
+        BindingPattern::Identifier(Identifier { name, .. }, _) if name == "foo"
     ));
 
     let Expression::Function {
@@ -2021,11 +2068,11 @@ foo(123)
     };
     assert!(matches!(
         inner.as_ref(),
-        BindingPattern::Identifier(Identifier(name), _) if name == "bar"
+        BindingPattern::Identifier(Identifier { name, .. }, _) if name == "bar"
     ));
     assert!(matches!(
         type_hint.as_ref(),
-        Expression::Identifier(Identifier(name), _) if name == "i32"
+        Expression::Identifier(Identifier { name, .. }, _) if name == "i32"
     ));
     assert!(matches!(return_type.as_ref(), None));
     assert!(matches!(
@@ -2046,7 +2093,7 @@ foo(123)
     };
     assert!(matches!(
         function.as_ref(),
-        Expression::Identifier(Identifier(name), _) if name == "foo"
+        Expression::Identifier(Identifier { name, .. }, _) if name == "foo"
     ));
     assert!(matches!(
         **argument,
@@ -2073,31 +2120,31 @@ fn parse_function_struct_parameter_pattern() {
     assert_eq!(fields.len(), 2);
 
     let (first_name, first_pattern) = &fields[0];
-    assert_eq!(first_name.0, "0");
+    assert_eq!(first_name.name, "0");
     let BindingPattern::TypeHint(first_inner, first_type, _) = first_pattern else {
         panic!("expected type hint for first parameter");
     };
     assert!(matches!(
         first_inner.as_ref(),
-        BindingPattern::Identifier(Identifier(name), _) if name == "bar1"
+        BindingPattern::Identifier(Identifier { name, .. }, _) if name == "bar1"
     ));
     assert!(matches!(
         first_type.as_ref(),
-        Expression::Identifier(Identifier(name), _) if name == "i32"
+        Expression::Identifier(Identifier { name, .. }, _) if name == "i32"
     ));
 
     let (second_name, second_pattern) = &fields[1];
-    assert_eq!(second_name.0, "1");
+    assert_eq!(second_name.name, "1");
     let BindingPattern::TypeHint(second_inner, second_type, _) = second_pattern else {
         panic!("expected type hint for second parameter");
     };
     assert!(matches!(
         second_inner.as_ref(),
-        BindingPattern::Identifier(Identifier(name), _) if name == "bar2"
+        BindingPattern::Identifier(Identifier { name, .. }, _) if name == "bar2"
     ));
     assert!(matches!(
         second_type.as_ref(),
-        Expression::Identifier(Identifier(name), _) if name == "i32"
+        Expression::Identifier(Identifier { name, .. }, _) if name == "i32"
     ));
 }
 
@@ -2109,9 +2156,9 @@ fn parse_struct_literal_named_and_tuple_fields() {
         panic!("expected struct literal");
     };
     assert_eq!(items.len(), 3);
-    assert_eq!(items[0].0.0, "foo");
-    assert_eq!(items[1].0.0, "0");
-    assert_eq!(items[2].0.0, "bar");
+    assert_eq!(items[0].0.name, "foo");
+    assert_eq!(items[1].0.name, "0");
+    assert_eq!(items[2].0.name, "bar");
 }
 
 #[test]
@@ -2125,8 +2172,8 @@ fn parse_struct_binding_pattern_named_fields() {
         panic!("expected struct pattern");
     };
     assert_eq!(fields.len(), 2);
-    assert_eq!(fields[0].0.0, "foo");
-    assert_eq!(fields[1].0.0, "0");
+    assert_eq!(fields[0].0.name, "foo");
+    assert_eq!(fields[1].0.name, "0");
 }
 
 #[test]
@@ -2155,7 +2202,7 @@ fn parse_struct_property_access_chain() {
     assert_eq!(inner_property, "bar");
     assert!(matches!(
         *inner_object,
-        Expression::Identifier(Identifier(name), _) if name == "foo"
+        Expression::Identifier(Identifier { name, .. }, _) if name == "foo"
     ));
 }
 
@@ -2174,7 +2221,7 @@ fn parse_struct_property_access_then_call() {
     };
     assert!(matches!(
         *argument,
-        Expression::Identifier(Identifier(name), _) if name == "baz"
+        Expression::Identifier(Identifier { name, .. }, _) if name == "baz"
     ));
     let Expression::PropertyAccess {
         object,
@@ -2187,7 +2234,7 @@ fn parse_struct_property_access_then_call() {
     assert_eq!(property, "bar");
     assert!(matches!(
         *object,
-        Expression::Identifier(Identifier(name), _) if name == "foo"
+        Expression::Identifier(Identifier { name, .. }, _) if name == "foo"
     ));
 }
 
