@@ -473,8 +473,7 @@ pub fn interpret_expression(
                 for possibly_mutated_value in possibly_mutated_values {
                     let binding = context.get_identifier(&possibly_mutated_value).unwrap();
                     if let Some(binding_ty) = binding.0.get_bound_type(context)? {
-                        let binding =
-                            context.get_mut_identifier(&possibly_mutated_value).unwrap();
+                        let binding = context.get_mut_identifier(&possibly_mutated_value).unwrap();
                         binding.0 = BindingContext::UnboundWithType(binding_ty)
                     }
                 }
@@ -545,6 +544,7 @@ pub fn interpret_expression(
             })
         }
         Expression::Loop { body, span } => {
+            let initial_context = context.clone();
             let mut iteration_count = 0usize;
             loop {
                 if iteration_count > 10_000 {
@@ -570,10 +570,13 @@ pub fn interpret_expression(
                         }
                     }
                 }
+                let possible_divergence = expression_does_diverge(&iteration_value, true, false);
 
-                if prev_context.bindings == context.bindings {
-                    // No mutations occurred; infinite loop detected, possibly due to inability to evaluate condition that would've led to a divergence.
-                    // TODO: There is probably more efficient logic that could be used here
+                // TODO: There is probably more efficient logic that could be used here instead of comparing large objects
+                // Either no mutations occurred; meaning an infinite loop would occur
+                // Or a divergence that could've occured did not, meaning the results may be incorrect
+                if possible_divergence || prev_context.bindings == context.bindings {
+                    *context = initial_context;
                     let was_in_loop_before = context.in_loop;
                     context.in_loop = true;
                     let interpreted_body = interpret_expression(*body, context)?;
@@ -1043,10 +1046,7 @@ fn get_possibly_mutated_values(body: &Expression) -> HashSet<Identifier> {
             .into_iter()
             .chain(get_possibly_mutated_values(&argument))
             .collect(),
-        Expression::PropertyAccess {
-            object,
-            ..
-        } => get_possibly_mutated_values(&object),
+        Expression::PropertyAccess { object, .. } => get_possibly_mutated_values(&object),
         Expression::Binding(binding, ..) => get_possibly_mutated_values(&binding.expr),
         Expression::Block(expressions, ..) => expressions
             .iter()
