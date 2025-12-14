@@ -1,0 +1,13 @@
+construct_range := (max: i32) => (
+    mut x := 0;
+    mut res := 0;
+    while x <= max do (
+        res = res + x;
+    );
+    res
+);
+
+(export wasm) sum_range := (new_max: i32) => ( 
+    range := construct_range(new_max);
+    range
+);

@@ -89,6 +89,17 @@ test("runs add_one module and returns incremented value", async () => {
   expect(addOne(-1)).toBe(0);
 }, TEST_TIMEOUT_MS);
 
+test("runs pass_pair module and returns correct value", async () => {
+  const moduleBytes = compileFixtureToBytes("pass_pair.silk");
+  const { instance } = await WebAssembly.instantiate(moduleBytes);
+  const constructRange = instance.exports.construct_range as (min: any, max: any) => any;
+  const rangeSum = instance.exports.sum_range as (range: any) => number;
+
+  expect(typeof rangeSum).toBe("function");
+  expect(rangeSum(1)).toBe(5);
+  expect(rangeSum(3)).toBe(9);
+}, TEST_TIMEOUT_MS);
+
 test("runs range_sum module and returns correct value", async () => {
   const moduleBytes = compileFixtureToBytes("range_sum.silk");
   const { instance } = await WebAssembly.instantiate(moduleBytes);
