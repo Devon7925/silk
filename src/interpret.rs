@@ -944,117 +944,15 @@ pub fn interpret_expression(
 }
 
 fn get_possibly_mutated_values(body: &Expression) -> HashSet<Identifier> {
-    match body {
-        Expression::IntrinsicType(..) => HashSet::new(),
-        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), ..) => {
-            get_possibly_mutated_values(left)
-                .into_iter()
-                .chain(get_possibly_mutated_values(right))
-                .collect()
+    fold_expression(body, HashSet::new(), &|expr, mut mutated| {
+        match expr {
+            Expression::Assignment { target, .. } => {
+                mutated.extend(target.get_used_identifiers());
+            }
+            _ => {}
         }
-        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, _), ..) => {
-            get_possibly_mutated_values(operand)
-        }
-        Expression::EnumType(items, ..) => items
-            .iter()
-            .flat_map(|e| get_possibly_mutated_values(&e.1))
-            .collect(),
-        Expression::Match {
-            value, branches, ..
-        } => get_possibly_mutated_values(value)
-            .into_iter()
-            .chain(
-                branches
-                    .iter()
-                    .flat_map(|(_, branch)| get_possibly_mutated_values(branch)),
-            )
-            .collect(),
-        Expression::EnumValue {
-            enum_type, payload, ..
-        } => get_possibly_mutated_values(enum_type)
-            .into_iter()
-            .chain(
-                payload
-                    .iter()
-                    .flat_map(|else_branch| get_possibly_mutated_values(else_branch)),
-            )
-            .collect(),
-        Expression::EnumConstructor {
-            enum_type,
-            payload_type,
-            ..
-        } => get_possibly_mutated_values(enum_type)
-            .into_iter()
-            .chain(get_possibly_mutated_values(payload_type))
-            .collect(),
-        Expression::EnumAccess { enum_expr, .. } => get_possibly_mutated_values(enum_expr),
-        Expression::If {
-            condition,
-            then_branch,
-            else_branch,
-            ..
-        } => get_possibly_mutated_values(condition)
-            .into_iter()
-            .chain(get_possibly_mutated_values(then_branch))
-            .chain(
-                else_branch
-                    .iter()
-                    .flat_map(|else_branch| get_possibly_mutated_values(else_branch)),
-            )
-            .collect(),
-        Expression::AttachImplementation {
-            type_expr,
-            implementation,
-            ..
-        } => get_possibly_mutated_values(type_expr)
-            .into_iter()
-            .chain(get_possibly_mutated_values(implementation))
-            .collect(),
-        Expression::Function { return_type, .. } => return_type
-            .iter()
-            .flat_map(|else_branch| get_possibly_mutated_values(else_branch))
-            .collect(),
-        Expression::FunctionType {
-            parameter,
-            return_type,
-            ..
-        } => get_possibly_mutated_values(parameter)
-            .into_iter()
-            .chain(get_possibly_mutated_values(return_type))
-            .collect(),
-        Expression::Struct(items, ..) => items
-            .iter()
-            .flat_map(|e| get_possibly_mutated_values(&e.1))
-            .collect(),
-        Expression::Literal(..) => HashSet::new(),
-        Expression::Identifier(..) => HashSet::new(),
-        Expression::Operation { left, right, .. } => get_possibly_mutated_values(left)
-            .into_iter()
-            .chain(get_possibly_mutated_values(right))
-            .collect(),
-        Expression::Assignment { target, expr, .. } => target
-            .get_used_identifiers()
-            .into_iter()
-            .chain(get_possibly_mutated_values(expr))
-            .collect(),
-        Expression::FunctionCall {
-            function, argument, ..
-        } => get_possibly_mutated_values(function)
-            .into_iter()
-            .chain(get_possibly_mutated_values(argument))
-            .collect(),
-        Expression::PropertyAccess { object, .. } => get_possibly_mutated_values(object),
-        Expression::Binding(binding, ..) => get_possibly_mutated_values(&binding.expr),
-        Expression::Block(expressions, ..) => expressions
-            .iter()
-            .flat_map(get_possibly_mutated_values)
-            .collect(),
-        Expression::Diverge { value, .. } => value
-            .as_ref()
-            .map(|value| get_possibly_mutated_values(value.as_ref()))
-            .unwrap_or(HashSet::new()),
-        Expression::Loop { body, .. } => get_possibly_mutated_values(body),
-    }
+        mutated
+    })
 }
 
 fn interpret_binding_pattern(
