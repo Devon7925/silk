@@ -1454,8 +1454,8 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
 }
 
 pub fn collect_break_values(expr: &Expression) -> Vec<Expression> {
-    fn collect_break_values_impl(expr: &Expression, values: &mut Vec<Expression>) {
-        match expr {
+    fold_expression(expr, Vec::new(), &|current_expr, mut values| {
+        match current_expr {
             Expression::Diverge {
                 value,
                 divergance_type: DivergeExpressionType::Break,
@@ -1467,94 +1467,10 @@ pub fn collect_break_values(expr: &Expression) -> Vec<Expression> {
                     .unwrap_or_else(|| empty_struct_expr(*span));
                 values.push(val);
             }
-            Expression::Loop { .. } => {}
-            Expression::Block(exprs, _) => {
-                for e in exprs {
-                    collect_break_values_impl(e, values);
-                }
-            }
-            Expression::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                collect_break_values_impl(then_branch, values);
-                if let Some(else_branch) = else_branch {
-                    collect_break_values_impl(else_branch, values);
-                }
-            }
-            Expression::Binding(binding, _) => collect_break_values_impl(&binding.expr, values),
-            Expression::Assignment { expr, .. } => collect_break_values_impl(expr, values),
-            Expression::FunctionCall {
-                function, argument, ..
-            } => {
-                collect_break_values_impl(function, values);
-                collect_break_values_impl(argument, values);
-            }
-            Expression::Function { .. } => {}
-            Expression::PropertyAccess { object, .. } => collect_break_values_impl(object, values),
-            Expression::Operation { left, right, .. } => {
-                collect_break_values_impl(left, values);
-                collect_break_values_impl(right, values);
-            }
-            Expression::Diverge { value, .. } => {
-                if let Some(val) = value {
-                    collect_break_values_impl(val, values);
-                }
-            }
-            Expression::EnumAccess { enum_expr, .. } => {
-                collect_break_values_impl(enum_expr, values)
-            }
-            Expression::EnumValue {
-                enum_type, payload, ..
-            } => {
-                collect_break_values_impl(enum_type, values);
-                if let Some(payload) = payload {
-                    collect_break_values_impl(payload, values);
-                }
-            }
-            Expression::EnumConstructor {
-                enum_type,
-                payload_type,
-                ..
-            } => {
-                collect_break_values_impl(enum_type, values);
-                collect_break_values_impl(payload_type, values);
-            }
-            Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _) => {
-                collect_break_values_impl(left, values);
-                collect_break_values_impl(right, values);
-            }
-            Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, _), _) => {
-                collect_break_values_impl(operand, values);
-            }
-            Expression::AttachImplementation {
-                type_expr,
-                implementation,
-                ..
-            } => {
-                collect_break_values_impl(type_expr, values);
-                collect_break_values_impl(implementation, values);
-            }
-            Expression::Match {
-                value, branches, ..
-            } => {
-                collect_break_values_impl(value, values);
-                for (_, branch) in branches {
-                    collect_break_values_impl(branch, values);
-                }
-            }
-            Expression::Literal(_, _)
-            | Expression::Identifier(_, _)
-            | Expression::IntrinsicType(_, _)
-            | Expression::EnumType(_, _)
-            | Expression::FunctionType { .. }
-            | Expression::Struct(_, _) => {}
+            _ => {}
         }
-    }
-    let mut values = Vec::new();
-    collect_break_values_impl(expr, &mut values);
-    values
+        values
+    })
 }
 
 fn get_type_of_binding_pattern(
