@@ -633,8 +633,9 @@ pub fn interpret_expression(
                 let returns_compile_time_type =
                     type_expression_contains_compile_time_data(&return_type.unwrap());
                 let pattern_is_compile_time = pattern_contains_compile_time_data(&parameter);
+                let argument_is_const = is_resolved_constant(&argument_value);
 
-                if is_direct || returns_compile_time_type || pattern_is_compile_time {
+                if is_direct || returns_compile_time_type || pattern_is_compile_time || argument_is_const {
                     let mut call_context = context.clone();
                     bind_pattern_from_value(
                         parameter,
@@ -1607,19 +1608,6 @@ fn pattern_exports(pattern: &BindingPattern) -> bool {
     }
 }
 
-fn expression_contains_mutation(expr: &Expression) -> bool {
-    fold_expression(expr, false, &|current_expr, has_mutation| {
-        if has_mutation {
-            return true;
-        }
-        match current_expr {
-            Expression::Assignment { .. } => true,
-            Expression::Binding(binding, _) => pattern_has_mutable_annotation(&binding.pattern),
-            _ => false,
-        }
-    })
-}
-
 fn get_assigned_identifiers(expr: &Expression) -> HashSet<Identifier> {
     fold_expression(expr, HashSet::new(), &|current_expr, mut identifiers| {
         match current_expr {
@@ -2341,7 +2329,7 @@ fn interpret_binding(
         if value_is_constant {
             PreserveBehavior::Inline
         } else {
-            PreserveBehavior::PreserveBinding
+            PreserveBehavior::PreserveUsage
         },
     )?;
     let binding_expr = Expression::Binding(
@@ -3431,6 +3419,7 @@ fn interpret_basic_enum_flow() {
     ";
 
     let (ast, remaining) = crate::parsing::parse_block(program).unwrap();
+    println!("{}", ast.pretty_print());
     assert!(remaining.trim().is_empty());
     let mut context = intrinsic_context();
     if let Expression::Block(exprs, _) = ast {
