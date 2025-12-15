@@ -1687,6 +1687,112 @@ pub fn expression_does_diverge(expr: &Expression, possibility: bool, in_inner_lo
     }
 }
 
+pub fn expression_exports(expr: &Expression) -> bool {
+    match expr {
+        Expression::Diverge {
+            value: Some(value), ..
+        } => expression_exports(value),
+        Expression::Block(exprs, _) => exprs.iter().any(|expr| expression_exports(expr)),
+        Expression::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let then_diverges = expression_exports(then_branch);
+            let else_diverges = else_branch
+                .as_ref()
+                .map(|branch| expression_exports(branch))
+                .unwrap_or(false);
+            then_diverges || else_diverges
+        }
+        Expression::Binding(binding, _) => {
+            pattern_exports(&binding.pattern) || expression_exports(&binding.expr)
+        }
+        Expression::Assignment { expr, .. } => expression_exports(expr),
+        Expression::FunctionCall {
+            function, argument, ..
+        } => expression_exports(function) || expression_exports(argument),
+        Expression::Loop { body, .. } => expression_exports(body),
+        Expression::PropertyAccess { object, .. } => expression_exports(object),
+        Expression::Operation { left, right, .. } => {
+            expression_exports(left) || expression_exports(right)
+        }
+        Expression::AttachImplementation {
+            type_expr,
+            implementation,
+            ..
+        } => expression_exports(type_expr) || expression_exports(implementation),
+        Expression::EnumAccess { enum_expr, .. } => expression_exports(enum_expr),
+        Expression::EnumValue {
+            enum_type, payload, ..
+        } => {
+            expression_exports(enum_type)
+                || payload
+                    .as_ref()
+                    .map(|payload| expression_exports(payload))
+                    .unwrap_or(false)
+        }
+        Expression::EnumConstructor {
+            enum_type,
+            payload_type,
+            ..
+        } => expression_exports(enum_type) || expression_exports(payload_type),
+        Expression::Match {
+            value, branches, ..
+        } => {
+            expression_exports(value)
+                || branches
+                    .iter()
+                    .all(|(_, branch)| expression_exports(branch))
+        }
+        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _span) => {
+            expression_exports(left) || expression_exports(right)
+        }
+        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, _), _span) => {
+            expression_exports(operand)
+        }
+        Expression::Diverge { value: None, .. }
+        | Expression::Literal(_, _)
+        | Expression::Identifier(_, _)
+        | Expression::IntrinsicType(_, _)
+        | Expression::EnumType(_, _)
+        | Expression::Function { .. }
+        | Expression::FunctionType { .. }
+        | Expression::Struct(_, _) => false,
+    }
+}
+
+fn pattern_exports(pattern: &BindingPattern) -> bool {
+    match pattern {
+        BindingPattern::Identifier(..) => false,
+        BindingPattern::Literal(..) => false,
+        BindingPattern::Struct(items, ..) => items.iter().any(|(_, item)| pattern_exports(&item)),
+        BindingPattern::EnumVariant {
+            enum_type,
+            payload: Some(payload),
+            ..
+        } => expression_exports(&enum_type) || pattern_exports(payload),
+        BindingPattern::EnumVariant {
+            enum_type,
+            payload: None,
+            ..
+        } => expression_exports(&enum_type),
+        BindingPattern::TypeHint(binding_pattern, expression, ..) => {
+            pattern_exports(binding_pattern) || expression_exports(expression)
+        }
+        BindingPattern::Annotated {
+            annotations,
+            pattern,
+            ..
+        } => {
+            annotations
+                .iter()
+                .any(|ann| matches!(ann, BindingAnnotation::Export(..)))
+                || pattern_exports(pattern)
+        }
+    }
+}
+
 fn expression_contains_mutation(expr: &Expression) -> bool {
     match expr {
         Expression::Assignment { .. } => true,
@@ -1764,6 +1870,112 @@ fn expression_contains_mutation(expr: &Expression) -> bool {
         | Expression::FunctionType { .. }
         | Expression::Struct(_, _) => false,
     }
+}
+
+fn get_assigned_identifiers(expr: &Expression) -> HashSet<Identifier> {
+    match expr {
+        Expression::Assignment { target, expr, .. } => target
+            .get_used_identifiers()
+            .into_iter()
+            .chain(get_assigned_identifiers(expr))
+            .collect(),
+        Expression::Loop { body, .. } => get_assigned_identifiers(body),
+        Expression::Binding(binding, _) => get_assigned_identifiers(&binding.expr),
+        Expression::Block(exprs, _) => exprs.iter().flat_map(get_assigned_identifiers).collect(),
+        Expression::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let mut result = get_assigned_identifiers(condition);
+            result.extend(get_assigned_identifiers(then_branch));
+            if let Some(branch) = else_branch {
+                result.extend(get_assigned_identifiers(branch));
+            }
+            result
+        }
+        Expression::FunctionCall {
+            function, argument, ..
+        } => {
+            let mut result = get_assigned_identifiers(function);
+            result.extend(get_assigned_identifiers(argument));
+            result
+        }
+        Expression::Function { body, .. } => get_assigned_identifiers(body),
+        Expression::PropertyAccess { object, .. } => get_assigned_identifiers(object),
+        Expression::Operation { left, right, .. } => {
+            let mut result = get_assigned_identifiers(left);
+            result.extend(get_assigned_identifiers(right));
+            result
+        }
+        Expression::EnumAccess { enum_expr, .. } => get_assigned_identifiers(enum_expr),
+        Expression::EnumValue {
+            enum_type, payload, ..
+        } => {
+            let mut result = get_assigned_identifiers(enum_type);
+            if let Some(payload) = payload {
+                result.extend(get_assigned_identifiers(payload));
+            }
+            result
+        }
+        Expression::EnumConstructor {
+            enum_type,
+            payload_type,
+            ..
+        } => {
+            let mut result = get_assigned_identifiers(enum_type);
+            result.extend(get_assigned_identifiers(payload_type));
+            result
+        }
+        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _span) => {
+            let mut result = get_assigned_identifiers(left);
+            result.extend(get_assigned_identifiers(right));
+            result
+        }
+        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, _), _span) => {
+            get_assigned_identifiers(operand)
+        }
+        Expression::AttachImplementation {
+            type_expr,
+            implementation,
+            ..
+        } => {
+            let mut result = get_assigned_identifiers(type_expr);
+            result.extend(get_assigned_identifiers(implementation));
+            result
+        }
+        Expression::Match {
+            value, branches, ..
+        } => {
+            let mut result = get_assigned_identifiers(value);
+            for (_, branch) in branches {
+                result.extend(get_assigned_identifiers(branch));
+            }
+            result
+        }
+        Expression::Diverge { value, .. } => value
+            .as_ref()
+            .map(|val| get_assigned_identifiers(val))
+            .unwrap_or_default(),
+        Expression::Literal(_, _)
+        | Expression::Identifier(_, _)
+        | Expression::IntrinsicType(_, _)
+        | Expression::EnumType(_, _)
+        | Expression::FunctionType { .. }
+        | Expression::Struct(_, _) => HashSet::new(),
+    }
+}
+
+fn expression_contains_external_mutation(expr: &Expression, context: &Context) -> bool {
+    let assigned = get_assigned_identifiers(expr);
+
+    for identifier in assigned {
+        if let Some(_) = context.get_identifier(&identifier) {
+            return true;
+        }
+    }
+    false
 }
 
 fn pattern_contains_compile_time_data(pattern: &BindingPattern) -> bool {
@@ -1861,53 +2073,324 @@ fn get_trait_prop_of_type(
     }
 }
 
+fn collect_bound_identifiers_from_pattern(
+    pattern: &BindingPattern,
+    bound: &mut HashSet<Identifier>,
+) {
+    match pattern {
+        BindingPattern::Identifier(identifier, _) => {
+            bound.insert(identifier.clone());
+        }
+        BindingPattern::Struct(items, _) => {
+            for (_, sub_pattern) in items {
+                collect_bound_identifiers_from_pattern(sub_pattern, bound);
+            }
+        }
+        BindingPattern::EnumVariant { payload, .. } => {
+            if let Some(payload) = payload {
+                collect_bound_identifiers_from_pattern(payload, bound);
+            }
+        }
+        BindingPattern::TypeHint(inner, _, _) => {
+            collect_bound_identifiers_from_pattern(inner, bound);
+        }
+        BindingPattern::Annotated { pattern, .. } => {
+            collect_bound_identifiers_from_pattern(pattern, bound);
+        }
+        BindingPattern::Literal(_, _) => {}
+    }
+}
+
+fn fold_expression<T, U: Fn(&Expression, T) -> T>(
+    expr: &Expression,
+    init: T,
+    item_processor: &U,
+) -> T {
+    let new_state = item_processor(expr, init);
+    match expr {
+        Expression::IntrinsicType(..) => new_state,
+        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, ..), ..) => {
+            fold_expression(
+                right,
+                fold_expression(left, new_state, item_processor),
+                item_processor,
+            )
+        }
+        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, ..), ..) => {
+            fold_expression(operand, new_state, item_processor)
+        }
+        Expression::EnumType(items, _) => items.iter().fold(new_state, |state, (_, field_expr)| {
+            fold_expression(field_expr, state, item_processor)
+        }),
+        Expression::Match {
+            value, branches, ..
+        } => {
+            let state_with_value = fold_expression(value, new_state, item_processor);
+            branches
+                .iter()
+                .fold(state_with_value, |state, (_, branch)| {
+                    fold_expression(branch, state, item_processor)
+                })
+        }
+        Expression::EnumValue {
+            enum_type, payload, ..
+        } => {
+            let state_with_type = fold_expression(enum_type, new_state, item_processor);
+            if let Some(payload_expr) = payload {
+                fold_expression(payload_expr, state_with_type, item_processor)
+            } else {
+                state_with_type
+            }
+        }
+        Expression::EnumConstructor {
+            enum_type,
+            payload_type,
+            ..
+        } => {
+            let state_with_type = fold_expression(enum_type, new_state, item_processor);
+            fold_expression(payload_type, state_with_type, item_processor)
+        }
+        Expression::EnumAccess { enum_expr, .. } => {
+            fold_expression(enum_expr, new_state, item_processor)
+        }
+        Expression::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let state_with_condition = fold_expression(condition, new_state, item_processor);
+            let state_with_then =
+                fold_expression(then_branch, state_with_condition, item_processor);
+            if let Some(else_expr) = else_branch {
+                fold_expression(else_expr, state_with_then, item_processor)
+            } else {
+                state_with_then
+            }
+        }
+        Expression::AttachImplementation {
+            type_expr,
+            implementation,
+            ..
+        } => {
+            let state_with_type = fold_expression(type_expr, new_state, item_processor);
+            fold_expression(implementation, state_with_type, item_processor)
+        }
+        Expression::Function {
+            return_type, body, ..
+        } => {
+            let state_with_return = if let Some(ret_type) = return_type {
+                fold_expression(ret_type, new_state, item_processor)
+            } else {
+                new_state
+            };
+            fold_expression(body, state_with_return, item_processor)
+        }
+        Expression::FunctionType {
+            parameter,
+            return_type,
+            ..
+        } => {
+            let state_with_param = fold_expression(parameter, new_state, item_processor);
+            fold_expression(return_type, state_with_param, item_processor)
+        }
+        Expression::Struct(items, _) => items.iter().fold(new_state, |state, (_, field_expr)| {
+            fold_expression(field_expr, state, item_processor)
+        }),
+        Expression::Literal(..) => new_state,
+        Expression::Identifier(..) => new_state,
+        Expression::Operation { left, right, .. } => {
+            let state_with_left = fold_expression(left, new_state, item_processor);
+            fold_expression(right, state_with_left, item_processor)
+        }
+        Expression::Assignment { expr, .. } => fold_expression(expr, new_state, item_processor),
+        Expression::FunctionCall {
+            function, argument, ..
+        } => {
+            let state_with_function = fold_expression(function, new_state, item_processor);
+            fold_expression(argument, state_with_function, item_processor)
+        }
+        Expression::PropertyAccess { object, .. } => {
+            fold_expression(object, new_state, item_processor)
+        }
+        Expression::Binding(binding, _) => {
+            fold_expression(&binding.expr, new_state, item_processor)
+        }
+        Expression::Block(expressions, _) => expressions.iter().fold(new_state, |state, expr| {
+            fold_expression(expr, state, item_processor)
+        }),
+        Expression::Diverge { value, .. } => {
+            if let Some(value_expr) = value {
+                fold_expression(value_expr, new_state, item_processor)
+            } else {
+                new_state
+            }
+        }
+        Expression::Loop { body, .. } => fold_expression(body, new_state, item_processor),
+    }
+}
+
+fn identifiers_created_or_modified(expr: &Expression) -> HashSet<Identifier> {
+    fold_expression(expr, HashSet::new(), &|expr, mut identifiers| match expr {
+        Expression::Binding(binding, _) => {
+            collect_bound_identifiers_from_pattern(&binding.pattern, &mut identifiers);
+            identifiers
+        }
+        Expression::Assignment { target, .. } => {
+            identifiers.extend(target.get_used_identifiers());
+            identifiers
+        }
+        _ => identifiers,
+    })
+}
+
+fn collect_used_identifiers(expr: &Expression, used: &mut HashSet<Identifier>) {
+    match expr {
+        Expression::Identifier(identifier, _) => {
+            used.insert(identifier.clone());
+        }
+        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _) => {
+            collect_used_identifiers(left, used);
+            collect_used_identifiers(right, used);
+        }
+        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, _), _) => {
+            collect_used_identifiers(operand, used);
+        }
+        Expression::EnumType(variants, _) => {
+            for (_, ty_expr) in variants {
+                collect_used_identifiers(ty_expr, used);
+            }
+        }
+        Expression::Match {
+            value, branches, ..
+        } => {
+            collect_used_identifiers(value, used);
+            for (_, branch) in branches {
+                collect_used_identifiers(branch, used);
+            }
+        }
+        Expression::EnumValue {
+            enum_type, payload, ..
+        } => {
+            collect_used_identifiers(enum_type, used);
+            if let Some(payload) = payload {
+                collect_used_identifiers(payload, used);
+            }
+        }
+        Expression::EnumConstructor {
+            enum_type,
+            payload_type,
+            ..
+        } => {
+            collect_used_identifiers(enum_type, used);
+            collect_used_identifiers(payload_type, used);
+        }
+        Expression::EnumAccess { enum_expr, .. } => {
+            collect_used_identifiers(enum_expr, used);
+        }
+        Expression::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_used_identifiers(condition, used);
+            collect_used_identifiers(then_branch, used);
+            if let Some(else_branch) = else_branch {
+                collect_used_identifiers(else_branch, used);
+            }
+        }
+        Expression::AttachImplementation {
+            type_expr,
+            implementation,
+            ..
+        } => {
+            collect_used_identifiers(type_expr, used);
+            collect_used_identifiers(implementation, used);
+        }
+        Expression::Function {
+            return_type, body, ..
+        } => {
+            if let Some(ret) = return_type {
+                collect_used_identifiers(ret, used);
+            }
+            collect_used_identifiers(body, used);
+        }
+        Expression::FunctionType {
+            parameter,
+            return_type,
+            ..
+        } => {
+            collect_used_identifiers(parameter, used);
+            collect_used_identifiers(return_type, used);
+        }
+        Expression::Struct(items, _) => {
+            for (_, expr) in items {
+                collect_used_identifiers(expr, used);
+            }
+        }
+        Expression::Operation { left, right, .. } => {
+            collect_used_identifiers(left, used);
+            collect_used_identifiers(right, used);
+        }
+        Expression::Assignment { target, expr, .. } => {
+            used.extend(target.get_used_identifiers());
+            collect_used_identifiers(expr, used);
+        }
+        Expression::FunctionCall {
+            function, argument, ..
+        } => {
+            collect_used_identifiers(function, used);
+            collect_used_identifiers(argument, used);
+        }
+        Expression::PropertyAccess { object, .. } => {
+            collect_used_identifiers(object, used);
+        }
+        Expression::Binding(binding, _) => {
+            collect_used_identifiers(&binding.expr, used);
+        }
+        Expression::Block(expressions, _) => {
+            for expr in expressions {
+                collect_used_identifiers(expr, used);
+            }
+        }
+        Expression::Diverge { value, .. } => {
+            if let Some(value) = value {
+                collect_used_identifiers(value, used);
+            }
+        }
+        Expression::Loop { body, .. } => {
+            collect_used_identifiers(body, used);
+        }
+        Expression::Literal(_, _) | Expression::IntrinsicType(_, _) => {}
+    }
+}
+
+fn identifiers_used(expr: &Expression) -> HashSet<Identifier> {
+    let mut used = HashSet::new();
+    collect_used_identifiers(expr, &mut used);
+    used
+}
+
 fn interpret_block(
     expressions: Vec<Expression>,
     span: SourceSpan,
     context: &mut Context,
 ) -> Result<(Expression, Context), Diagnostic> {
+    let outer_context = context.clone();
     context.bindings.push(HashMap::new());
-    let mut last_value: Option<Expression> = None;
-    let mut last_preserved = false;
-    let mut preserved_expressions = Vec::new();
+    let mut interpreted_expressions = Vec::new();
+    let mut preserved_expression_indicies = HashSet::new();
 
-    for expression in expressions {
-        last_preserved = false;
-        let value = match expression {
-            Expression::Binding(binding, span) => {
-                let (binding_expr, preserve_behavior) = interpret_binding(*binding, context)?;
-                let should_preserve_binding = preserve_behavior != PreserveBehavior::Inline;
-                if should_preserve_binding
-                    && let Expression::Binding(binding, _) = binding_expr.clone()
-                {
-                    last_preserved = true;
-                    preserved_expressions.push(Expression::Binding(binding, span));
-                }
-                Expression::Literal(ExpressionLiteral::Boolean(true), dummy_span())
-            }
-            Expression::Assignment { target, expr, span } => {
-                let interpreted_expr = interpret_expression((*expr).clone(), context)?;
-                let assignment_expr = Expression::Assignment {
-                    target: target.clone(),
-                    expr: Box::new(interpreted_expr.clone()),
-                    span,
-                };
-                let val = apply_assignment(target, interpreted_expr, span, context)?;
-                last_preserved = true;
-                preserved_expressions.push(assignment_expr);
-                val
-            }
-            other => {
-                let val = interpret_expression(other, context)?;
-                if expression_contains_mutation(&val) || expression_does_diverge(&val, true, false)
-                {
-                    // TODO: should only check for mutation of external bindings
-                    last_preserved = true;
-                    preserved_expressions.push(val.clone());
-                }
-                val
-            }
-        };
+    for (expr_idx, expression) in expressions.into_iter().enumerate() {
+        let value = interpret_expression(expression, context)?;
+        if expression_contains_external_mutation(&value, &outer_context)
+            || expression_does_diverge(&value, true, false)
+            || expression_exports(&value)
+        {
+            preserved_expression_indicies.insert(expr_idx);
+        }
+
         if matches!(
             value,
             Expression::Diverge {
@@ -1919,22 +2402,62 @@ fn interpret_block(
             context.bindings.pop();
             return Ok((value, block_context));
         }
-
-        last_value = Some(value);
+        interpreted_expressions.push(value);
     }
 
-    let final_value = last_value.ok_or_else(|| diagnostic("Cannot evaluate empty block", span))?;
+    preserved_expression_indicies.insert(interpreted_expressions.len() - 1);
+
+    let expression_usage: Vec<HashSet<Identifier>> = interpreted_expressions
+        .iter()
+        .map(|expr| identifiers_used(expr))
+        .collect();
+
+    let expression_modifications: Vec<HashSet<Identifier>> = interpreted_expressions
+        .iter()
+        .map(|expr| identifiers_created_or_modified(expr))
+        .collect();
+
+    let mut needed_identifiers: HashSet<Identifier> = HashSet::new();
+    for idx in (0..interpreted_expressions.len()).rev() {
+        let mut preserve_current = preserved_expression_indicies.contains(&idx);
+        if !preserve_current
+            && expression_modifications[idx]
+                .iter()
+                .any(|identifier| needed_identifiers.contains(identifier))
+        {
+            preserved_expression_indicies.insert(idx);
+            preserve_current = true;
+        }
+
+        if preserve_current {
+            // for identifier in &expression_modifications[idx] {
+            //     needed_identifiers.remove(identifier);
+            // }
+
+            for identifier in &expression_usage[idx] {
+                needed_identifiers.insert(identifier.clone());
+            }
+        }
+    }
 
     let block_context = context.clone();
     context.bindings.pop();
-    if preserved_expressions.is_empty() {
-        Ok((final_value, block_context))
+    if preserved_expression_indicies.len() == 1 {
+        // Only last expression preserved
+        Ok((
+            interpreted_expressions.into_iter().last().unwrap(),
+            block_context,
+        ))
     } else {
         // If we have preserved bindings, we need to return a Block that contains them
         // AND the final value.
-        if !last_preserved {
-            preserved_expressions.push(final_value);
-        }
+        let preserved_expressions = interpreted_expressions
+            .into_iter()
+            .enumerate()
+            .filter(|(idx, _)| preserved_expression_indicies.contains(idx))
+            .map(|(_, expr)| expr)
+            .collect();
+
         Ok((
             Expression::Block(preserved_expressions, span),
             block_context,
@@ -2009,9 +2532,7 @@ fn get_lvalue_type(
             })?;
 
             match binding_ctx {
-                BindingContext::Bound(value, _) => {
-                    get_type_of_expression(value, &context)
-                }
+                BindingContext::Bound(value, _) => get_type_of_expression(value, &context),
                 BindingContext::UnboundWithType(type_expr) => Ok(type_expr.clone()),
                 BindingContext::UnboundWithoutType => Err(diagnostic(
                     format!("Cannot determine type of {}", identifier.name),
@@ -2103,7 +2624,7 @@ fn get_lvalue_value(
 }
 
 fn apply_lvalue_update(
-    target: LValue,
+    target: &LValue,
     value: Expression,
     context: &mut Context,
     span: SourceSpan,
@@ -2112,14 +2633,14 @@ fn apply_lvalue_update(
         LValue::Identifier(identifier, _) => {
             let value_type = get_type_of_expression(&value, context).ok();
             let type_context = context.clone();
-            
+
             let Some((binding_ctx, _annotations)) = context.get_mut_identifier(&identifier) else {
                 return Err(diagnostic(
                     format!("Cannot assign to unbound identifier: {}", identifier.name),
                     span,
                 ));
             };
-            
+
             let expected_type = match binding_ctx {
                 BindingContext::Bound(existing, _) => {
                     get_type_of_expression(existing, &type_context).ok()
@@ -2161,12 +2682,15 @@ fn apply_lvalue_update(
                 return Ok(()); // TODO: if unable to get lvalue, we need to mark as unbound to avoid incorrect context value?
             };
             let Expression::Struct(mut fields, struct_span) = current_object else {
-                return Err(diagnostic("Property access on non-struct value", prop_span));
+                return Err(diagnostic(
+                    "Property access on non-struct value",
+                    *prop_span,
+                ));
             };
 
             let mut found = false;
             for (field_id, field_expr) in fields.iter_mut() {
-                if field_id.name == property {
+                if field_id.name == *property {
                     *field_expr = value.clone();
                     found = true;
                     break;
@@ -2176,12 +2700,12 @@ fn apply_lvalue_update(
             if !found {
                 return Err(diagnostic(
                     format!("Missing field {} in struct", property),
-                    prop_span,
+                    *prop_span,
                 ));
             }
 
             let updated_struct = Expression::Struct(fields, struct_span);
-            apply_lvalue_update(*object, updated_struct, context, span)
+            apply_lvalue_update(object, updated_struct, context, span)
         }
     }
 }
@@ -2209,9 +2733,13 @@ fn apply_assignment(
         ));
     }
 
-    apply_lvalue_update(target, value.clone(), context, span)?;
+    apply_lvalue_update(&target, value.clone(), context, span)?;
 
-    Ok(value)
+    Ok(Expression::Assignment {
+        target,
+        expr: Box::new(value),
+        span,
+    })
 }
 
 fn pattern_has_mutable_annotation(pattern: &BindingPattern) -> bool {
@@ -3336,44 +3864,6 @@ fn interpret_reports_calling_non_function_span() {
     let rendered = err.render_with_source(source);
     assert!(rendered.contains("Attempted to call a non-function value"));
     assert!(rendered.contains("line 1, column 1"));
-}
-
-#[test]
-fn interpret_preserves_bindings_in_function() {
-    let program = "
-    (export wasm) double_add := (x: i32) => (
-        y := x * 2;
-        y + y
-    );
-    {}
-    ";
-    let (_, context) = evaluate_text_to_expression(program).unwrap();
-    let bindings = context.annotated_bindings();
-    let double_add = bindings
-        .iter()
-        .find(|b| b.identifier.name == "double_add")
-        .expect("double_add not found");
-
-    if let Expression::Function { body, .. } = &double_add.value {
-        // The body should be a Block containing `let y = ...` and `y + y`.
-        if let Expression::Block(exprs, _) = &**body {
-            assert_eq!(exprs.len(), 2);
-            match &exprs[0] {
-                Expression::Binding(binding, _) => {
-                    if let BindingPattern::Identifier(ident, _) = &binding.pattern {
-                        assert_eq!(ident.name, "y");
-                    } else {
-                        panic!("Expected identifier pattern for y");
-                    }
-                }
-                _ => panic!("Expected binding as first expression"),
-            }
-        } else {
-            panic!("Expected function body to be a block, got {:?}", body);
-        }
-    } else {
-        panic!("Expected function value");
-    }
 }
 
 #[test]

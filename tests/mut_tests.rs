@@ -22,10 +22,6 @@ fn nested_mutation() {
     let Expression::Block(statements, _) = expr else {
         panic!("Expected block expression, got {:?}", expr);
     };
-    let expr = statements.iter().last().unwrap();
-    let Expression::Block(statements, _) = expr else {
-        panic!("Expected block expression, got {:?}", expr);
-    };
 
     match statements.iter().last().unwrap() {
         Expression::Literal(ExpressionLiteral::Number(value), _) => assert_eq!(value, &9),
