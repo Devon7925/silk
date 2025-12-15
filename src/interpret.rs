@@ -1794,177 +1794,28 @@ fn pattern_exports(pattern: &BindingPattern) -> bool {
 }
 
 fn expression_contains_mutation(expr: &Expression) -> bool {
-    match expr {
-        Expression::Assignment { .. } => true,
-        Expression::Loop { body, .. } => expression_contains_mutation(body),
-        Expression::Binding(binding, _) => {
-            pattern_has_mutable_annotation(&binding.pattern)
-                || expression_contains_mutation(&binding.expr)
+    fold_expression(expr, false, &|current_expr, has_mutation| {
+        if has_mutation {
+            return true;
         }
-        Expression::Block(exprs, _) => exprs.iter().any(expression_contains_mutation),
-        Expression::If {
-            condition,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            expression_contains_mutation(condition)
-                || expression_contains_mutation(then_branch)
-                || else_branch
-                    .as_ref()
-                    .map(|branch| expression_contains_mutation(branch))
-                    .unwrap_or(false)
+        match current_expr {
+            Expression::Assignment { .. } => true,
+            Expression::Binding(binding, _) => pattern_has_mutable_annotation(&binding.pattern),
+            _ => false,
         }
-        Expression::FunctionCall {
-            function, argument, ..
-        } => expression_contains_mutation(function) || expression_contains_mutation(argument),
-        Expression::Function { body, .. } => expression_contains_mutation(body),
-        Expression::PropertyAccess { object, .. } => expression_contains_mutation(object),
-        Expression::Operation { left, right, .. } => {
-            expression_contains_mutation(left) || expression_contains_mutation(right)
-        }
-        Expression::EnumAccess { enum_expr, .. } => expression_contains_mutation(enum_expr),
-        Expression::EnumValue {
-            enum_type, payload, ..
-        } => {
-            expression_contains_mutation(enum_type)
-                || payload
-                    .as_ref()
-                    .map(|payload| expression_contains_mutation(payload))
-                    .unwrap_or(false)
-        }
-        Expression::EnumConstructor {
-            enum_type,
-            payload_type,
-            ..
-        } => expression_contains_mutation(enum_type) || expression_contains_mutation(payload_type),
-        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _span) => {
-            expression_contains_mutation(left) || expression_contains_mutation(right)
-        }
-        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, _), _span) => {
-            expression_contains_mutation(operand)
-        }
-        Expression::AttachImplementation {
-            type_expr,
-            implementation,
-            ..
-        } => {
-            expression_contains_mutation(type_expr) || expression_contains_mutation(implementation)
-        }
-        Expression::Match {
-            value, branches, ..
-        } => {
-            expression_contains_mutation(value)
-                || branches
-                    .iter()
-                    .any(|(_, branch)| expression_contains_mutation(branch))
-        }
-        Expression::Diverge { value, .. } => value
-            .as_ref()
-            .map(|val| expression_contains_mutation(val))
-            .unwrap_or(false),
-        Expression::Literal(_, _)
-        | Expression::Identifier(_, _)
-        | Expression::IntrinsicType(_, _)
-        | Expression::EnumType(_, _)
-        | Expression::FunctionType { .. }
-        | Expression::Struct(_, _) => false,
-    }
+    })
 }
 
 fn get_assigned_identifiers(expr: &Expression) -> HashSet<Identifier> {
-    match expr {
-        Expression::Assignment { target, expr, .. } => target
-            .get_used_identifiers()
-            .into_iter()
-            .chain(get_assigned_identifiers(expr))
-            .collect(),
-        Expression::Loop { body, .. } => get_assigned_identifiers(body),
-        Expression::Binding(binding, _) => get_assigned_identifiers(&binding.expr),
-        Expression::Block(exprs, _) => exprs.iter().flat_map(get_assigned_identifiers).collect(),
-        Expression::If {
-            condition,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            let mut result = get_assigned_identifiers(condition);
-            result.extend(get_assigned_identifiers(then_branch));
-            if let Some(branch) = else_branch {
-                result.extend(get_assigned_identifiers(branch));
+    fold_expression(expr, HashSet::new(), &|current_expr, mut identifiers| {
+        match current_expr {
+            Expression::Assignment { target, .. } => {
+                identifiers.extend(target.get_used_identifiers());
             }
-            result
+            _ => {}
         }
-        Expression::FunctionCall {
-            function, argument, ..
-        } => {
-            let mut result = get_assigned_identifiers(function);
-            result.extend(get_assigned_identifiers(argument));
-            result
-        }
-        Expression::Function { body, .. } => get_assigned_identifiers(body),
-        Expression::PropertyAccess { object, .. } => get_assigned_identifiers(object),
-        Expression::Operation { left, right, .. } => {
-            let mut result = get_assigned_identifiers(left);
-            result.extend(get_assigned_identifiers(right));
-            result
-        }
-        Expression::EnumAccess { enum_expr, .. } => get_assigned_identifiers(enum_expr),
-        Expression::EnumValue {
-            enum_type, payload, ..
-        } => {
-            let mut result = get_assigned_identifiers(enum_type);
-            if let Some(payload) = payload {
-                result.extend(get_assigned_identifiers(payload));
-            }
-            result
-        }
-        Expression::EnumConstructor {
-            enum_type,
-            payload_type,
-            ..
-        } => {
-            let mut result = get_assigned_identifiers(enum_type);
-            result.extend(get_assigned_identifiers(payload_type));
-            result
-        }
-        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _span) => {
-            let mut result = get_assigned_identifiers(left);
-            result.extend(get_assigned_identifiers(right));
-            result
-        }
-        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, _), _span) => {
-            get_assigned_identifiers(operand)
-        }
-        Expression::AttachImplementation {
-            type_expr,
-            implementation,
-            ..
-        } => {
-            let mut result = get_assigned_identifiers(type_expr);
-            result.extend(get_assigned_identifiers(implementation));
-            result
-        }
-        Expression::Match {
-            value, branches, ..
-        } => {
-            let mut result = get_assigned_identifiers(value);
-            for (_, branch) in branches {
-                result.extend(get_assigned_identifiers(branch));
-            }
-            result
-        }
-        Expression::Diverge { value, .. } => value
-            .as_ref()
-            .map(|val| get_assigned_identifiers(val))
-            .unwrap_or_default(),
-        Expression::Literal(_, _)
-        | Expression::Identifier(_, _)
-        | Expression::IntrinsicType(_, _)
-        | Expression::EnumType(_, _)
-        | Expression::FunctionType { .. }
-        | Expression::Struct(_, _) => HashSet::new(),
-    }
+        identifiers
+    })
 }
 
 fn expression_contains_external_mutation(expr: &Expression, context: &Context) -> bool {
@@ -2244,132 +2095,19 @@ fn identifiers_created_or_modified(expr: &Expression) -> HashSet<Identifier> {
     })
 }
 
-fn collect_used_identifiers(expr: &Expression, used: &mut HashSet<Identifier>) {
-    match expr {
-        Expression::Identifier(identifier, _) => {
-            used.insert(identifier.clone());
-        }
-        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _) => {
-            collect_used_identifiers(left, used);
-            collect_used_identifiers(right, used);
-        }
-        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, _), _) => {
-            collect_used_identifiers(operand, used);
-        }
-        Expression::EnumType(variants, _) => {
-            for (_, ty_expr) in variants {
-                collect_used_identifiers(ty_expr, used);
-            }
-        }
-        Expression::Match {
-            value, branches, ..
-        } => {
-            collect_used_identifiers(value, used);
-            for (_, branch) in branches {
-                collect_used_identifiers(branch, used);
-            }
-        }
-        Expression::EnumValue {
-            enum_type, payload, ..
-        } => {
-            collect_used_identifiers(enum_type, used);
-            if let Some(payload) = payload {
-                collect_used_identifiers(payload, used);
-            }
-        }
-        Expression::EnumConstructor {
-            enum_type,
-            payload_type,
-            ..
-        } => {
-            collect_used_identifiers(enum_type, used);
-            collect_used_identifiers(payload_type, used);
-        }
-        Expression::EnumAccess { enum_expr, .. } => {
-            collect_used_identifiers(enum_expr, used);
-        }
-        Expression::If {
-            condition,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            collect_used_identifiers(condition, used);
-            collect_used_identifiers(then_branch, used);
-            if let Some(else_branch) = else_branch {
-                collect_used_identifiers(else_branch, used);
-            }
-        }
-        Expression::AttachImplementation {
-            type_expr,
-            implementation,
-            ..
-        } => {
-            collect_used_identifiers(type_expr, used);
-            collect_used_identifiers(implementation, used);
-        }
-        Expression::Function {
-            return_type, body, ..
-        } => {
-            if let Some(ret) = return_type {
-                collect_used_identifiers(ret, used);
-            }
-            collect_used_identifiers(body, used);
-        }
-        Expression::FunctionType {
-            parameter,
-            return_type,
-            ..
-        } => {
-            collect_used_identifiers(parameter, used);
-            collect_used_identifiers(return_type, used);
-        }
-        Expression::Struct(items, _) => {
-            for (_, expr) in items {
-                collect_used_identifiers(expr, used);
-            }
-        }
-        Expression::Operation { left, right, .. } => {
-            collect_used_identifiers(left, used);
-            collect_used_identifiers(right, used);
-        }
-        Expression::Assignment { target, expr, .. } => {
-            used.extend(target.get_used_identifiers());
-            collect_used_identifiers(expr, used);
-        }
-        Expression::FunctionCall {
-            function, argument, ..
-        } => {
-            collect_used_identifiers(function, used);
-            collect_used_identifiers(argument, used);
-        }
-        Expression::PropertyAccess { object, .. } => {
-            collect_used_identifiers(object, used);
-        }
-        Expression::Binding(binding, _) => {
-            collect_used_identifiers(&binding.expr, used);
-        }
-        Expression::Block(expressions, _) => {
-            for expr in expressions {
-                collect_used_identifiers(expr, used);
-            }
-        }
-        Expression::Diverge { value, .. } => {
-            if let Some(value) = value {
-                collect_used_identifiers(value, used);
-            }
-        }
-        Expression::Loop { body, .. } => {
-            collect_used_identifiers(body, used);
-        }
-        Expression::Literal(_, _) | Expression::IntrinsicType(_, _) => {}
-    }
-}
-
 fn identifiers_used(expr: &Expression) -> HashSet<Identifier> {
-    let mut used = HashSet::new();
-    collect_used_identifiers(expr, &mut used);
-    used
+    fold_expression(expr, HashSet::new(), &|current_expr, mut used| {
+        match current_expr {
+            Expression::Identifier(identifier, _) => {
+                used.insert(identifier.clone());
+            }
+            Expression::Assignment { target, .. } => {
+                used.extend(target.get_used_identifiers());
+            }
+            _ => {}
+        }
+        used
+    })
 }
 
 fn interpret_block(
