@@ -946,11 +946,8 @@ pub fn interpret_expression(
 
 fn get_possibly_mutated_values(body: &Expression) -> HashSet<Identifier> {
     fold_expression(body, HashSet::new(), &|expr, mut mutated| {
-        match expr {
-            Expression::Assignment { target, .. } => {
-                mutated.extend(target.get_used_identifiers());
-            }
-            _ => {}
+        if let Expression::Assignment { target, .. } = expr {
+            mutated.extend(target.get_used_identifiers());
         }
         mutated
     })
@@ -1354,19 +1351,16 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
 
 pub fn collect_break_values(expr: &Expression) -> Vec<Expression> {
     fold_expression(expr, Vec::new(), &|current_expr, mut values| {
-        match current_expr {
-            Expression::Diverge {
+        if let Expression::Diverge {
                 value,
                 divergance_type: DivergeExpressionType::Break,
                 span,
-            } => {
-                let val = value
-                    .as_ref()
-                    .map(|v| *v.clone())
-                    .unwrap_or_else(|| empty_struct_expr(*span));
-                values.push(val);
-            }
-            _ => {}
+            } = current_expr {
+            let val = value
+                .as_ref()
+                .map(|v| *v.clone())
+                .unwrap_or_else(|| empty_struct_expr(*span));
+            values.push(val);
         }
         values
     })
@@ -1507,7 +1501,7 @@ pub fn expression_exports(expr: &Expression) -> bool {
         Expression::Diverge {
             value: Some(value), ..
         } => expression_exports(value),
-        Expression::Block(exprs, _) => exprs.iter().any(|expr| expression_exports(expr)),
+        Expression::Block(exprs, _) => exprs.iter().any(expression_exports),
         Expression::If {
             then_branch,
             else_branch,
@@ -1581,17 +1575,17 @@ fn pattern_exports(pattern: &BindingPattern) -> bool {
     match pattern {
         BindingPattern::Identifier(..) => false,
         BindingPattern::Literal(..) => false,
-        BindingPattern::Struct(items, ..) => items.iter().any(|(_, item)| pattern_exports(&item)),
+        BindingPattern::Struct(items, ..) => items.iter().any(|(_, item)| pattern_exports(item)),
         BindingPattern::EnumVariant {
             enum_type,
             payload: Some(payload),
             ..
-        } => expression_exports(&enum_type) || pattern_exports(payload),
+        } => expression_exports(enum_type) || pattern_exports(payload),
         BindingPattern::EnumVariant {
             enum_type,
             payload: None,
             ..
-        } => expression_exports(&enum_type),
+        } => expression_exports(enum_type),
         BindingPattern::TypeHint(binding_pattern, expression, ..) => {
             pattern_exports(binding_pattern) || expression_exports(expression)
         }
@@ -1610,11 +1604,8 @@ fn pattern_exports(pattern: &BindingPattern) -> bool {
 
 fn get_assigned_identifiers(expr: &Expression) -> HashSet<Identifier> {
     fold_expression(expr, HashSet::new(), &|current_expr, mut identifiers| {
-        match current_expr {
-            Expression::Assignment { target, .. } => {
-                identifiers.extend(target.get_used_identifiers());
-            }
-            _ => {}
+        if let Expression::Assignment { target, .. } = current_expr {
+            identifiers.extend(target.get_used_identifiers());
         }
         identifiers
     })
@@ -1624,7 +1615,7 @@ fn expression_contains_external_mutation(expr: &Expression, context: &Context) -
     let assigned = get_assigned_identifiers(expr);
 
     for identifier in assigned {
-        if let Some(_) = context.get_identifier(&identifier) {
+        if context.get_identifier(&identifier).is_some() {
             return true;
         }
     }
@@ -1949,12 +1940,12 @@ fn interpret_block(
 
     let expression_usage: Vec<HashSet<Identifier>> = interpreted_expressions
         .iter()
-        .map(|expr| identifiers_used(expr))
+        .map(identifiers_used)
         .collect();
 
     let expression_modifications: Vec<HashSet<Identifier>> = interpreted_expressions
         .iter()
-        .map(|expr| identifiers_created_or_modified(expr))
+        .map(identifiers_created_or_modified)
         .collect();
 
     let mut needed_identifiers: HashSet<Identifier> = HashSet::new();
@@ -2072,7 +2063,7 @@ fn get_lvalue_type(
             })?;
 
             match binding_ctx {
-                BindingContext::Bound(value, _) => get_type_of_expression(value, &context),
+                BindingContext::Bound(value, _) => get_type_of_expression(value, context),
                 BindingContext::UnboundWithType(type_expr) => Ok(type_expr.clone()),
                 BindingContext::UnboundWithoutType => Err(diagnostic(
                     format!("Cannot determine type of {}", identifier.name),
@@ -2174,7 +2165,7 @@ fn apply_lvalue_update(
             let value_type = get_type_of_expression(&value, context).ok();
             let type_context = context.clone();
 
-            let Some((binding_ctx, _annotations)) = context.get_mut_identifier(&identifier) else {
+            let Some((binding_ctx, _annotations)) = context.get_mut_identifier(identifier) else {
                 return Err(diagnostic(
                     format!("Cannot assign to unbound identifier: {}", identifier.name),
                     span,
@@ -2218,7 +2209,7 @@ fn apply_lvalue_update(
             property,
             span: prop_span,
         } => {
-            let Some(current_object) = get_lvalue_value(&object, context)? else {
+            let Some(current_object) = get_lvalue_value(object, context)? else {
                 return Ok(()); // TODO: if unable to get lvalue, we need to mark as unbound to avoid incorrect context value?
             };
             let Expression::Struct(mut fields, struct_span) = current_object else {

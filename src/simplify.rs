@@ -6,7 +6,7 @@ use crate::{
     interpret::BindingContext,
     parsing::{BinaryIntrinsicOperator, Binding, BindingPattern, Expression, IntrinsicOperation},
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 #[cfg(test)]
 use crate::parsing::{BindingAnnotation, ExpressionLiteral, TargetLiteral};
