@@ -2471,7 +2471,7 @@ fn bind_pattern_from_value(
                     )
                 })?;
 
-            if !types_equivalent(&expected_enum_type, &value_enum) {
+            if !types_equivalent(&expected_enum_type, value_enum) {
                 return Ok((false, preserve_behavior));
             }
 
