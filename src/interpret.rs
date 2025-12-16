@@ -257,8 +257,7 @@ pub fn resolve_enum_type_expression(
     enum_expr: &Expression,
     context: &mut Context,
 ) -> Option<Expression> {
-    let interpreted = interpret_expression(enum_expr.clone(), context).ok()?;
-    resolve_expression(interpreted, context).ok()
+    interpret_expression(enum_expr.clone(), context).ok()
 }
 
 fn collect_bindings(expr: &Expression, context: &mut Context) -> Result<(), Diagnostic> {
@@ -272,12 +271,7 @@ fn collect_bindings(expr: &Expression, context: &mut Context) -> Result<(), Diag
                 })
                 .ok();
 
-            let resolved_type = value_type
-                .as_ref()
-                .and_then(|ty| resolve_expression(ty.clone(), context).ok())
-                .or(value_type);
-
-            bind_pattern_blanks(binding.pattern.clone(), context, Vec::new(), resolved_type)?;
+            bind_pattern_blanks(binding.pattern.clone(), context, Vec::new(), value_type)?;
         }
         Expression::IntrinsicOperation(
             IntrinsicOperation::Binary(left, right, BinaryIntrinsicOperator::BooleanAnd),
@@ -371,9 +365,8 @@ pub fn interpret_expression(
                 None
             };
 
-            let resolved_condition = resolve_expression(interpreted_condition.clone(), context);
-            if let Ok(Expression::Literal(ExpressionLiteral::Boolean(condition_value), _)) =
-                resolved_condition
+            if let Expression::Literal(ExpressionLiteral::Boolean(condition_value), _) =
+                interpreted_condition
             {
                 if condition_value {
                     interpret_expression(*then_branch, context)
@@ -590,9 +583,8 @@ pub fn interpret_expression(
                 span: constructor_span,
             } = function_value.clone()
             {
-                let payload_type_resolved = resolve_expression(*payload_type, context)?;
                 let argument_type = get_type_of_expression(&argument_value, context)?;
-                if !types_equivalent(&payload_type_resolved, &argument_type) {
+                if !types_equivalent(&payload_type, &argument_type) {
                     return Err(diagnostic("Enum variant payload type mismatch", span));
                 }
                 return Ok(Expression::EnumValue {
@@ -674,14 +666,13 @@ pub fn interpret_expression(
             span,
         } => {
             let interpreted_enum = interpret_expression(*enum_expr, context)?;
-            let resolved_enum = resolve_expression(interpreted_enum.clone(), context)?;
-            if let Some((variant_index, payload_type)) = enum_variant_info(&resolved_enum, &variant)
+            if let Some((variant_index, payload_type)) = enum_variant_info(&interpreted_enum, &variant)
             {
                 if let Expression::Struct(fields, _payload_span) = &payload_type
                     && fields.is_empty()
                 {
                     return Ok(Expression::EnumValue {
-                        enum_type: Box::new(resolved_enum),
+                        enum_type: Box::new(interpreted_enum),
                         variant,
                         variant_index,
                         payload: None,
@@ -690,7 +681,7 @@ pub fn interpret_expression(
                 }
 
                 Ok(Expression::EnumConstructor {
-                    enum_type: Box::new(resolved_enum),
+                    enum_type: Box::new(interpreted_enum),
                     variant,
                     variant_index,
                     payload_type: Box::new(payload_type),
@@ -754,7 +745,6 @@ pub fn interpret_expression(
                     | BinaryIntrinsicOperator::I32Multiply => interpret_numeric_intrinsic(
                         evaluated_left,
                         evaluated_right,
-                        context,
                         span,
                         match operator {
                             BinaryIntrinsicOperator::I32Add => |l, r| l + r,
@@ -764,7 +754,7 @@ pub fn interpret_expression(
                         },
                     ),
                     BinaryIntrinsicOperator::I32Divide => {
-                        interpret_divide_intrinsic(evaluated_left, evaluated_right, context, span)
+                        interpret_divide_intrinsic(evaluated_left, evaluated_right, span)
                     }
                     BinaryIntrinsicOperator::I32Equal
                     | BinaryIntrinsicOperator::I32NotEqual
@@ -775,7 +765,6 @@ pub fn interpret_expression(
                         interpret_comparison_intrinsic(
                             evaluated_left,
                             evaluated_right,
-                            context,
                             span,
                             match operator {
                                 BinaryIntrinsicOperator::I32Equal => |l, r| l == r,
@@ -793,7 +782,6 @@ pub fn interpret_expression(
                     | BinaryIntrinsicOperator::BooleanXor => interpret_boolean_intrinsic(
                         evaluated_left,
                         evaluated_right,
-                        context,
                         span,
                         match operator {
                             BinaryIntrinsicOperator::BooleanAnd => |l, r| l && r,
@@ -1187,8 +1175,7 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
             span,
         } => {
             let object_type = get_type_of_expression(object, context)?;
-            let resolved_object_type = resolve_expression(object_type, &mut context.clone())?;
-            get_trait_prop_of_type(&resolved_object_type, property, *span)
+            get_trait_prop_of_type(&object_type, property, *span)
         }
         Expression::IntrinsicType(intrinsic_type, span) => match intrinsic_type {
             IntrinsicType::I32
@@ -2483,9 +2470,8 @@ fn bind_pattern_from_value(
                         span,
                     )
                 })?;
-            let actual_enum_type = resolve_expression(value_enum.as_ref().clone(), context)?;
 
-            if !types_equivalent(&expected_enum_type, &actual_enum_type) {
+            if !types_equivalent(&expected_enum_type, &value_enum) {
                 return Ok((false, preserve_behavior));
             }
 
@@ -2558,15 +2544,14 @@ fn bind_pattern_from_value(
 fn interpret_numeric_intrinsic<F>(
     left: Expression,
     right: Expression,
-    context: &mut Context,
     span: SourceSpan,
     op: F,
 ) -> Result<Expression, Diagnostic>
 where
     F: Fn(i32, i32) -> i32,
 {
-    let left_value = evaluate_numeric_operand(left, context)?;
-    let right_value = evaluate_numeric_operand(right, context)?;
+    let left_value = evaluate_numeric_operand(left)?;
+    let right_value = evaluate_numeric_operand(right)?;
     Ok(Expression::Literal(
         ExpressionLiteral::Number(op(left_value, right_value)),
         span,
@@ -2576,11 +2561,10 @@ where
 fn interpret_divide_intrinsic(
     left: Expression,
     right: Expression,
-    context: &mut Context,
     span: SourceSpan,
 ) -> Result<Expression, Diagnostic> {
-    let left_value = evaluate_numeric_operand(left, context)?;
-    let right_value = evaluate_numeric_operand(right, context)?;
+    let left_value = evaluate_numeric_operand(left)?;
+    let right_value = evaluate_numeric_operand(right)?;
 
     if right_value == 0 {
         return Err(diagnostic("Division by zero", span));
@@ -2595,29 +2579,26 @@ fn interpret_divide_intrinsic(
 fn interpret_comparison_intrinsic<F>(
     left: Expression,
     right: Expression,
-    context: &mut Context,
     span: SourceSpan,
     op: F,
 ) -> Result<Expression, Diagnostic>
 where
     F: Fn(i32, i32) -> bool,
 {
-    let left_value = evaluate_numeric_operand(left, context)?;
-    let right_value = evaluate_numeric_operand(right, context)?;
+    let left_value = evaluate_numeric_operand(left)?;
+    let right_value = evaluate_numeric_operand(right)?;
     Ok(Expression::Literal(
         ExpressionLiteral::Boolean(op(left_value, right_value)),
         span,
     ))
 }
 
-fn evaluate_numeric_operand(expr: Expression, context: &mut Context) -> Result<i32, Diagnostic> {
-    let operand_span = expr.span();
-    let evaluated = resolve_expression(expr, context)?;
-    match evaluated {
+fn evaluate_numeric_operand(expr: Expression) -> Result<i32, Diagnostic> {
+    match expr {
         Expression::Literal(ExpressionLiteral::Number(value), _) => Ok(value),
         _ => Err(diagnostic(
             "Expected numeric literal during intrinsic operation",
-            operand_span,
+            expr.span(),
         )),
     }
 }
@@ -2625,29 +2606,26 @@ fn evaluate_numeric_operand(expr: Expression, context: &mut Context) -> Result<i
 fn interpret_boolean_intrinsic<F>(
     left: Expression,
     right: Expression,
-    context: &mut Context,
     span: SourceSpan,
     op: F,
 ) -> Result<Expression, Diagnostic>
 where
     F: Fn(bool, bool) -> bool,
 {
-    let left_value = evaluate_boolean_operand(left, context)?;
-    let right_value = evaluate_boolean_operand(right, context)?;
+    let left_value = evaluate_boolean_operand(left)?;
+    let right_value = evaluate_boolean_operand(right)?;
     Ok(Expression::Literal(
         ExpressionLiteral::Boolean(op(left_value, right_value)),
         span,
     ))
 }
 
-fn evaluate_boolean_operand(expr: Expression, context: &mut Context) -> Result<bool, Diagnostic> {
-    let operand_span = expr.span();
-    let evaluated = resolve_expression(expr, context)?;
-    match evaluated {
+fn evaluate_boolean_operand(expr: Expression) -> Result<bool, Diagnostic> {
+    match expr {
         Expression::Literal(ExpressionLiteral::Boolean(value), _) => Ok(value),
         _ => Err(diagnostic(
             "Expected boolean literal during intrinsic operation",
-            operand_span,
+            expr.span(),
         )),
     }
 }
@@ -3076,10 +3054,6 @@ fn evaluate_text_to_number(program: &str) -> i32 {
         Expression::Literal(ExpressionLiteral::Number(value), _) => value,
         _ => panic!("Expected numeric result"),
     }
-}
-
-fn resolve_expression(expr: Expression, context: &mut Context) -> Result<Expression, Diagnostic> {
-    interpret_expression(expr, context)
 }
 
 #[test]
