@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     diagnostics::{Diagnostic, SourceSpan},
-    enum_normalization::normalize_enum_application,
     parsing::{
         BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, DivergeExpressionType,
         Expression, ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, LValue,
@@ -289,8 +288,6 @@ pub fn interpret_expression(
     expr: Expression,
     context: &mut Context,
 ) -> Result<Expression, Diagnostic> {
-    let expr = normalize_enum_application(expr);
-
     match expr {
         Expression::EnumType(variants, span) => {
             let mut evaluated_variants = Vec::with_capacity(variants.len());

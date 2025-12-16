@@ -2,7 +2,6 @@ use crate::interpret::Context;
 use crate::parsing::Identifier;
 use crate::{
     Diagnostic,
-    enum_normalization::normalize_enum_application,
     interpret::BindingContext,
     parsing::{BinaryIntrinsicOperator, Binding, BindingPattern, Expression, IntrinsicOperation},
 };
@@ -12,7 +11,7 @@ use std::collections::HashMap;
 use crate::parsing::{BindingAnnotation, ExpressionLiteral, TargetLiteral};
 
 pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
-    match normalize_enum_application(expr) {
+    match expr {
         Expression::IntrinsicOperation(
             IntrinsicOperation::Binary(left, right, op),
             source_span,
