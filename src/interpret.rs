@@ -261,84 +261,6 @@ pub fn resolve_enum_type_expression(
     resolve_expression(interpreted, context).ok()
 }
 
-fn resolve_operations(expr: Expression, context: &mut Context) -> Result<Expression, Diagnostic> {
-    match expr {
-        Expression::Operation {
-            operator,
-            left,
-            right,
-            span,
-        } => {
-            let possible_binary_op = get_type_of_expression(&left, context)
-                .and_then(|left_type| resolve_expression(left_type, &mut context.clone()))
-                .and_then(|resolved_left_type| {
-                    get_trait_prop_of_type(&resolved_left_type, &operator, span)
-                })
-                .map(|op_impl| {
-                    let Expression::Function {
-                        body: outer_body, ..
-                    } = op_impl
-                    else {
-                        return None;
-                    };
-                    let Expression::Function {
-                        body: inner_body, ..
-                    } = *outer_body
-                    else {
-                        return None;
-                    };
-
-                    if let Expression::IntrinsicOperation(
-                        IntrinsicOperation::Binary(_, _, binary_op),
-                        _,
-                    ) = *inner_body
-                    {
-                        Some(binary_op)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(None);
-
-            if let Some(binary_op) = possible_binary_op {
-                let resolved_left = resolve_operations(*left, context)?;
-                let resolved_right = resolve_operations(*right, context)?;
-                Ok(Expression::IntrinsicOperation(
-                    IntrinsicOperation::Binary(
-                        Box::new(resolved_left),
-                        Box::new(resolved_right),
-                        binary_op,
-                    ),
-                    span,
-                ))
-            } else {
-                Ok(Expression::Operation {
-                    operator,
-                    left,
-                    right,
-                    span,
-                })
-            }
-        }
-        Expression::IntrinsicOperation(
-            IntrinsicOperation::Binary(left, right, BinaryIntrinsicOperator::BooleanAnd),
-            span,
-        ) => {
-            let resolved_left = resolve_operations(*left, context)?;
-            let resolved_right = resolve_operations(*right, context)?;
-            Ok(Expression::IntrinsicOperation(
-                IntrinsicOperation::Binary(
-                    Box::new(resolved_left),
-                    Box::new(resolved_right),
-                    BinaryIntrinsicOperator::BooleanAnd,
-                ),
-                span,
-            ))
-        }
-        _ => Ok(expr),
-    }
-}
-
 fn collect_bindings(expr: &Expression, context: &mut Context) -> Result<(), Diagnostic> {
     match expr {
         Expression::Binding(binding, _) => {
@@ -430,8 +352,7 @@ pub fn interpret_expression(
             let interpreted_condition = interpret_expression(condition_expr, context)?;
 
             let mut then_context = context.clone();
-            let resolved_condition = resolve_operations(condition_for_pattern, context)?;
-            collect_bindings(&resolved_condition, &mut then_context)?;
+            collect_bindings(&condition_for_pattern, &mut then_context)?;
 
             let (interpreted_then, then_type, then_diverges) =
                 branch_type(&then_branch, &then_context)?;
@@ -635,7 +556,11 @@ pub fn interpret_expression(
                 let pattern_is_compile_time = pattern_contains_compile_time_data(&parameter);
                 let argument_is_const = is_resolved_constant(&argument_value);
 
-                if is_direct || returns_compile_time_type || pattern_is_compile_time || argument_is_const {
+                if is_direct
+                    || returns_compile_time_type
+                    || pattern_is_compile_time
+                    || argument_is_const
+                {
                     let mut call_context = context.clone();
                     bind_pattern_from_value(
                         parameter,
@@ -651,13 +576,9 @@ pub fn interpret_expression(
                         ..
                     } = body_value
                     {
-                        let resolved_return = resolve_value_deep(
-                            *value.expect("Return value should be populated"),
-                            &mut call_context,
-                        )?;
-                        return Ok(resolved_return);
+                        return Ok(*value.expect("Return value should be populated"));
                     }
-                    return resolve_value_deep(body_value, &mut call_context);
+                    return Ok(body_value);
                 }
             }
 
@@ -913,8 +834,7 @@ pub fn interpret_expression(
             span,
         } => {
             let evaluated_object = interpret_expression(*object, context)?;
-            let resolved_object = resolve_value(evaluated_object, context)?;
-            if let Expression::Struct(items, _) = &resolved_object {
+            if let Expression::Struct(items, _) = &evaluated_object {
                 for (item_id, item_expr) in items {
                     if item_id.name == property {
                         return Ok(item_expr.clone());
@@ -922,20 +842,19 @@ pub fn interpret_expression(
                 }
             }
 
-            let object_type = get_type_of_expression(&resolved_object, context)?;
-            let resolved_object_type = resolve_value(object_type, context)?;
-            let trait_prop = get_trait_prop_of_type(&resolved_object_type, &property, span)?;
+            let object_type = get_type_of_expression(&evaluated_object, context)?;
+            let trait_prop = get_trait_prop_of_type(&object_type, &property, span)?;
             match trait_prop {
                 Expression::Function { .. } => interpret_expression(
                     Expression::FunctionCall {
                         function: Box::new(trait_prop),
-                        argument: Box::new(resolved_object),
+                        argument: Box::new(evaluated_object),
                         span,
                     },
                     context,
                 ),
                 _other => Ok(Expression::PropertyAccess {
-                    object: Box::new(resolved_object),
+                    object: Box::new(evaluated_object),
                     property,
                     span,
                 }),
@@ -1352,10 +1271,11 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
 pub fn collect_break_values(expr: &Expression) -> Vec<Expression> {
     fold_expression(expr, Vec::new(), &|current_expr, mut values| {
         if let Expression::Diverge {
-                value,
-                divergance_type: DivergeExpressionType::Break,
-                span,
-            } = current_expr {
+            value,
+            divergance_type: DivergeExpressionType::Break,
+            span,
+        } = current_expr
+        {
             let val = value
                 .as_ref()
                 .map(|v| *v.clone())
@@ -2111,8 +2031,7 @@ fn get_lvalue_value(
 
             match binding_ctx {
                 BindingContext::Bound(value, _) => {
-                    if is_resolved_const_function_expression(value, context) {
-                        //TODO: verify context here
+                    if is_resolved_constant(value) {
                         Ok(Some(value.clone()))
                     } else {
                         Ok(None)
@@ -2210,7 +2129,16 @@ fn apply_lvalue_update(
             span: prop_span,
         } => {
             let Some(current_object) = get_lvalue_value(object, context)? else {
-                return Ok(()); // TODO: if unable to get lvalue, we need to mark as unbound to avoid incorrect context value?
+                for invalidated_identifier in object.get_used_identifiers() {
+                    let binding_to_invalidate =
+                        context.get_identifier(&invalidated_identifier).unwrap();
+                    if let Some(binding_ty) = binding_to_invalidate.0.get_bound_type(context)? {
+                        let binding_to_invalidate =
+                            context.get_mut_identifier(&invalidated_identifier).unwrap();
+                        binding_to_invalidate.0 = BindingContext::UnboundWithType(binding_ty)
+                    }
+                }
+                return Ok(());
             };
             let Expression::Struct(mut fields, struct_span) = current_object else {
                 return Err(diagnostic(
@@ -3150,64 +3078,8 @@ fn evaluate_text_to_number(program: &str) -> i32 {
     }
 }
 
-fn resolve_value(expr: Expression, context: &mut Context) -> Result<Expression, Diagnostic> {
-    match expr {
-        Expression::Identifier(ident, span) => {
-            if let Some(binding) = context.get_identifier(&ident) {
-                match &binding.0 {
-                    BindingContext::Bound(val, preserve_behavior) => {
-                        if (*preserve_behavior == PreserveBehavior::PreserveUsageInLoops
-                            && context.in_loop)
-                            || matches!(val, Expression::Identifier(id, _) if id.name == ident.name)
-                        {
-                            Ok(Expression::Identifier(ident, span))
-                        } else {
-                            resolve_value(val.clone(), context)
-                        }
-                    }
-                    _ => Ok(Expression::Identifier(ident, span)),
-                }
-            } else {
-                Ok(Expression::Identifier(ident, span))
-            }
-        }
-        other => Ok(other),
-    }
-}
-
-fn resolve_value_deep(expr: Expression, context: &mut Context) -> Result<Expression, Diagnostic> {
-    match expr {
-        Expression::Function {
-            parameter,
-            return_type,
-            body,
-            span,
-        } => Ok(Expression::Function {
-            parameter,
-            return_type: Some(Box::new(resolve_value_deep(
-                *return_type.unwrap(),
-                context,
-            )?)),
-            body: Box::new(resolve_value_deep(*body, context)?),
-            span,
-        }),
-        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, op), span) => {
-            Ok(Expression::IntrinsicOperation(
-                IntrinsicOperation::Binary(
-                    Box::new(resolve_value_deep(*left, context)?),
-                    Box::new(resolve_value_deep(*right, context)?),
-                    op,
-                ),
-                span,
-            ))
-        }
-        other => resolve_value(other, context),
-    }
-}
-
 fn resolve_expression(expr: Expression, context: &mut Context) -> Result<Expression, Diagnostic> {
-    let evaluated = interpret_expression(expr, context)?;
-    resolve_value(evaluated, context)
+    interpret_expression(expr, context)
 }
 
 #[test]
