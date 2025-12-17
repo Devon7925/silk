@@ -1,3 +1,4 @@
+use silk::parsing::{ExpressionKind, ExpressionLiteral};
 use silk::test_support::evaluate_text_to_expression;
 
 #[test]
@@ -22,10 +23,8 @@ fn loop_can_compute_factorial_using_return() {
     let (expr, _) =
         evaluate_text_to_expression(program).unwrap_or_else(|err| panic!("{}", err.message));
 
-    match expr {
-        silk::parsing::Expression::Literal(silk::parsing::ExpressionLiteral::Number(value), _) => {
-            assert_eq!(value, 120)
-        }
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 120),
         other => panic!("Expected numeric literal, got {:?}", other),
     }
 }
@@ -51,10 +50,8 @@ fn loop_can_compute_factorial_using_early_break() {
     let (expr, _) =
         evaluate_text_to_expression(program).unwrap_or_else(|err| panic!("{}", err.message));
 
-    match expr {
-        silk::parsing::Expression::Literal(silk::parsing::ExpressionLiteral::Number(value), _) => {
-            assert_eq!(value, 120)
-        }
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 120),
         other => panic!("Expected numeric literal, got {:?}", other),
     }
 }
@@ -80,10 +77,8 @@ fn loop_can_compute_factorial_using_late_break() {
     let (expr, _) =
         evaluate_text_to_expression(program).unwrap_or_else(|err| panic!("{}", err.message));
 
-    match expr {
-        silk::parsing::Expression::Literal(silk::parsing::ExpressionLiteral::Number(value), _) => {
-            assert_eq!(value, 120)
-        }
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 120),
         other => panic!("Expected numeric literal, got {:?}", other),
     }
 }
@@ -107,10 +102,8 @@ fn while_can_compute_factorial() {
     let (expr, _) =
         evaluate_text_to_expression(program).unwrap_or_else(|err| panic!("{}", err.message));
 
-    match expr {
-        silk::parsing::Expression::Literal(silk::parsing::ExpressionLiteral::Number(value), _) => {
-            assert_eq!(value, 120)
-        }
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 120),
         other => panic!("Expected numeric literal, got {:?}", other),
     }
 }

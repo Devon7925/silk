@@ -1,4 +1,4 @@
-use silk::parsing::{Expression, ExpressionLiteral};
+use silk::parsing::{ExpressionKind, ExpressionLiteral};
 use silk::test_support::evaluate_text_to_expression;
 
 #[test]
@@ -23,8 +23,8 @@ unwrap_or_zero(5) + unwrap_or_zero(-3)
         );
     });
 
-    match expr {
-        Expression::Literal(ExpressionLiteral::Number(value), _) => assert_eq!(value, 5),
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 5),
         other => panic!("Expected numeric literal, got {:?}", other),
     }
 }
@@ -56,8 +56,8 @@ check(10) + check(-5)
         );
     });
 
-    match expr {
-        Expression::Literal(ExpressionLiteral::Number(value), _) => assert_eq!(value, 5),
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 5),
         other => panic!("Expected numeric literal, got {:?}", other),
     }
 }

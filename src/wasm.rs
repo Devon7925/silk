@@ -8,8 +8,8 @@ use crate::{
     interpret::{self, AnnotatedBinding, expression_does_diverge},
     parsing::{
         BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, DivergeExpressionType,
-        Expression, ExpressionLiteral, Identifier, IntrinsicOperation, IntrinsicType, LValue,
-        TargetLiteral, UnaryIntrinsicOperator,
+        Expression, ExpressionKind, ExpressionLiteral, Identifier, IntrinsicOperation,
+        IntrinsicType, LValue, TargetLiteral, UnaryIntrinsicOperator,
     },
 };
 
@@ -64,45 +64,47 @@ fn format_wasm_type(ty: &WasmType) -> String {
 }
 
 fn default_value_for_type(ty: &Expression) -> Option<Expression> {
-    match ty {
-        Expression::IntrinsicType(IntrinsicType::I32, span)
-        | Expression::IntrinsicType(IntrinsicType::Boolean, span) => {
-            Some(Expression::Literal(ExpressionLiteral::Number(0), *span))
+    match &ty.kind {
+        ExpressionKind::IntrinsicType(IntrinsicType::I32 | IntrinsicType::Boolean) => {
+            Some(ExpressionKind::Literal(ExpressionLiteral::Number(0)).with_span(ty.span))
         }
-        Expression::Struct(fields, span) => {
+        ExpressionKind::Struct(fields) => {
             let mut values = Vec::new();
             for (id, field_ty) in fields {
                 values.push((id.clone(), default_value_for_type(field_ty)?));
             }
-            Some(Expression::Struct(values, *span))
+            Some(Expression::new(ExpressionKind::Struct(values), ty.span))
         }
-        Expression::AttachImplementation { type_expr, .. } => default_value_for_type(type_expr),
-        Expression::EnumType(variants, span) => {
+        ExpressionKind::AttachImplementation { type_expr, .. } => default_value_for_type(type_expr),
+        ExpressionKind::EnumType(variants) => {
             if variants.is_empty() {
                 return None;
             }
             let (first_variant, first_ty) = &variants[0];
-            Some(Expression::EnumValue {
-                enum_type: Box::new(Expression::EnumType(variants.clone(), *span)),
-                variant: first_variant.clone(),
-                variant_index: 0,
-                payload: Some(Box::new(default_value_for_type(first_ty)?)),
-                span: *span,
-            })
+            Some(
+                ExpressionKind::EnumValue {
+                    enum_type: Box::new(
+                        ExpressionKind::EnumType(variants.clone()).with_span(ty.span),
+                    ),
+                    variant: first_variant.clone(),
+                    variant_index: 0,
+                    payload: Some(Box::new(default_value_for_type(first_ty)?)),
+                }
+                .with_span(ty.span),
+            )
         }
         _ => None,
     }
 }
 
 fn materialize_enum_value(enum_value: &Expression) -> Option<Expression> {
-    if let Expression::EnumValue {
+    if let ExpressionKind::EnumValue {
         enum_type,
         variant: _variant,
         variant_index,
         payload,
-        span,
-    } = enum_value
-        && let Expression::EnumType(variants, _) = enum_type.as_ref()
+    } = &enum_value.kind
+        && let ExpressionKind::EnumType(variants) = &enum_type.kind
     {
         let mut payload_fields = Vec::new();
         for (idx, (name, ty)) in variants.iter().enumerate() {
@@ -117,14 +119,16 @@ fn materialize_enum_value(enum_value: &Expression) -> Option<Expression> {
             payload_fields.push((Identifier::new(name.name.clone()), value));
         }
 
-        let payload_struct = Expression::Struct(payload_fields, *span);
-        let tag_expr = Expression::Literal(ExpressionLiteral::Number(*variant_index as i32), *span);
-        return Some(Expression::Struct(
-            vec![
+        let payload_struct =
+            Expression::new(ExpressionKind::Struct(payload_fields), enum_value.span);
+        let tag_expr = ExpressionKind::Literal(ExpressionLiteral::Number(*variant_index as i32))
+            .with_span(enum_value.span);
+        return Some(Expression::new(
+            ExpressionKind::Struct(vec![
                 (Identifier::new("payload".to_string()), payload_struct),
                 (Identifier::new("tag".to_string()), tag_expr),
-            ],
-            *span,
+            ]),
+            enum_value.span,
         ));
     }
     None
@@ -132,16 +136,18 @@ fn materialize_enum_value(enum_value: &Expression) -> Option<Expression> {
 
 fn lvalue_to_expression(target: &LValue) -> Expression {
     match target {
-        LValue::Identifier(identifier, span) => Expression::Identifier(identifier.clone(), *span),
+        LValue::Identifier(identifier, span) => {
+            Expression::new(ExpressionKind::Identifier(identifier.clone()), *span)
+        }
         LValue::PropertyAccess {
             object,
             property,
             span,
-        } => Expression::PropertyAccess {
+        } => ExpressionKind::PropertyAccess {
             object: Box::new(lvalue_to_expression(object)),
             property: property.clone(),
-            span: *span,
-        },
+        }
+        .with_span(*span),
     }
 }
 
@@ -170,7 +176,7 @@ fn enum_wasm_type(
     enum_type: &Expression,
     ctx: &interpret::Context,
 ) -> Result<WasmType, Diagnostic> {
-    if let Expression::EnumType(variants, _span) = enum_type {
+    if let ExpressionKind::EnumType(variants) = &enum_type.kind {
         let mut payload_fields = Vec::new();
         for (id, ty) in variants {
             let wasm_ty = resolve_type(ctx, ty)?;
@@ -198,8 +204,10 @@ fn enum_variant_index_from_context(
     span: SourceSpan,
 ) -> Result<usize, Diagnostic> {
     let mut ctx = context.clone();
-    if let Some(Expression::EnumType(variants, _)) =
-        interpret::resolve_enum_type_expression(enum_expr, &mut ctx)
+    if let Some(Expression {
+        kind: ExpressionKind::EnumType(variants),
+        ..
+    }) = interpret::resolve_enum_type_expression(enum_expr, &mut ctx)
         && let Some((index, _)) = variants
             .iter()
             .enumerate()
@@ -394,8 +402,8 @@ fn collect_types(
     if let Some(struct_expr) = materialize_enum_value(expr) {
         return collect_types(&struct_expr, ctx, locals_types, context);
     }
-    match expr {
-        Expression::Struct(fields, _) => {
+    match &expr.kind {
+        ExpressionKind::Struct(fields) => {
             let mut field_types = Vec::new();
             for (name, value) in fields {
                 collect_types(value, ctx, locals_types, context)?;
@@ -405,24 +413,24 @@ fn collect_types(
             field_types.sort_by(|a, b| a.0.cmp(&b.0));
             ctx.get_or_register_type(field_types);
         }
-        Expression::Block(exprs, _) => {
+        ExpressionKind::Block(exprs) => {
             for e in exprs {
                 collect_types(e, ctx, locals_types, context)?;
             }
         }
-        Expression::Binding(binding, _) => {
+        ExpressionKind::Binding(binding) => {
             collect_types(&binding.expr, ctx, locals_types, context)?;
             let ty = infer_type(&binding.expr, locals_types, context)?;
             let mut locals = Vec::new();
             collect_locals_for_pattern(binding.pattern.clone(), ty, locals_types, &mut locals)?;
         }
-        Expression::FunctionCall {
+        ExpressionKind::FunctionCall {
             function, argument, ..
         } => {
             collect_types(function, ctx, locals_types, context)?;
             collect_types(argument, ctx, locals_types, context)?;
         }
-        Expression::If {
+        ExpressionKind::If {
             condition,
             then_branch,
             else_branch,
@@ -434,7 +442,7 @@ fn collect_types(
                 collect_types(else_branch, ctx, locals_types, context)?;
             }
         }
-        Expression::Match {
+        ExpressionKind::Match {
             value, branches, ..
         } => {
             collect_types(value, ctx, locals_types, context)?;
@@ -442,20 +450,20 @@ fn collect_types(
                 collect_types(branch, ctx, locals_types, context)?;
             }
         }
-        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _) => {
+        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _)) => {
             collect_types(left, ctx, locals_types, context)?;
             collect_types(right, ctx, locals_types, context)?;
         }
-        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, _), _) => {
+        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(operand, _)) => {
             collect_types(operand, ctx, locals_types, context)?;
         }
-        Expression::Loop { body, .. } => {
+        ExpressionKind::Loop { body } => {
             collect_types(body, ctx, locals_types, context)?;
         }
-        Expression::PropertyAccess { object, .. } => {
+        ExpressionKind::PropertyAccess { object, .. } => {
             collect_types(object, ctx, locals_types, context)?;
         }
-        Expression::EnumType(variants, _) => {
+        ExpressionKind::EnumType(variants) => {
             for (_, ty) in variants {
                 collect_types(ty, ctx, locals_types, context)?;
             }
@@ -463,7 +471,7 @@ fn collect_types(
                 ctx.get_or_register_type(fields);
             }
         }
-        Expression::EnumConstructor {
+        ExpressionKind::EnumConstructor {
             enum_type,
             payload_type,
             ..
@@ -471,7 +479,7 @@ fn collect_types(
             collect_types(enum_type, ctx, locals_types, context)?;
             collect_types(payload_type, ctx, locals_types, context)?;
         }
-        Expression::EnumAccess { enum_expr, .. } => {
+        ExpressionKind::EnumAccess { enum_expr, .. } => {
             collect_types(enum_expr, ctx, locals_types, context)?;
         }
         _ => {}
@@ -522,9 +530,9 @@ fn expression_produces_value(
     context: &interpret::Context,
     type_ctx: &TypeContext,
 ) -> Result<bool, Diagnostic> {
-    match expr {
-        Expression::Diverge { .. } => Ok(false),
-        Expression::If {
+    match &expr.kind {
+        ExpressionKind::Diverge { .. } => Ok(false),
+        ExpressionKind::If {
             then_branch,
             else_branch,
             ..
@@ -543,7 +551,7 @@ fn expression_produces_value(
                 Ok(false)
             }
         }
-        Expression::Block(exprs, _) => {
+        ExpressionKind::Block(exprs) => {
             let Some(last) = exprs.last() else {
                 panic!("Empty block shouldn't exist")
             };
@@ -552,7 +560,7 @@ fn expression_produces_value(
                 .any(|e| expression_does_diverge(e, false, false));
             Ok(!diverges && expression_produces_value(last, locals_types, context, type_ctx)?)
         }
-        Expression::Loop { body, .. } => {
+        ExpressionKind::Loop { body } => {
             Ok(determine_loop_result_type(body, locals_types, context)?.is_some())
         }
         _ => Ok(true),
@@ -567,10 +575,10 @@ fn infer_type(
     if let Some(struct_expr) = materialize_enum_value(expr) {
         return infer_type(&struct_expr, locals_types, context);
     }
-    match expr {
-        Expression::Literal(ExpressionLiteral::Number(_), _) => Ok(WasmType::I32),
-        Expression::Literal(ExpressionLiteral::Boolean(_), _) => Ok(WasmType::I32),
-        Expression::Struct(fields, _) => {
+    match &expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(_)) => Ok(WasmType::I32),
+        ExpressionKind::Literal(ExpressionLiteral::Boolean(_)) => Ok(WasmType::I32),
+        ExpressionKind::Struct(fields) => {
             let mut field_types = Vec::new();
             for (name, value) in fields {
                 let ty = infer_type(value, locals_types, context)?;
@@ -579,14 +587,14 @@ fn infer_type(
             field_types.sort_by(|a, b| a.0.cmp(&b.0));
             Ok(WasmType::Struct(field_types))
         }
-        Expression::Identifier(identifier, span) => {
+        ExpressionKind::Identifier(identifier) => {
             locals_types.get(&identifier.name).cloned().ok_or_else(|| {
                 Diagnostic::new(format!("Unknown identifier `{}`", identifier.name))
-                    .with_span(*span)
+                    .with_span(expr.span)
             })
         }
-        Expression::Assignment { target, expr, span } => {
-            let value_type = infer_type(expr, locals_types, context)?;
+        ExpressionKind::Assignment { target, expr: rhs } => {
+            let value_type = infer_type(rhs, locals_types, context)?;
             let target_expr = lvalue_to_expression(target);
             let existing_type = infer_type(&target_expr, locals_types, context)?;
 
@@ -594,31 +602,27 @@ fn infer_type(
                 return Err(Diagnostic::new(
                     "Cannot assign value of different type to target".to_string(),
                 )
-                .with_span(*span));
+                .with_span(expr.span));
             }
 
             Ok(value_type)
         }
-        Expression::Diverge { value, span, .. } => {
+        ExpressionKind::Diverge { value, .. } => {
             let inner_expr = value
                 .as_ref()
                 .map(|expr| expr.as_ref().clone())
-                .unwrap_or_else(|| Expression::Struct(vec![], *span));
+                .unwrap_or_else(|| Expression::new(ExpressionKind::Struct(vec![]), expr.span));
             infer_type(&inner_expr, locals_types, context)
         }
-        Expression::Loop { body, .. } => {
+        ExpressionKind::Loop { body } => {
             if let Some(result_type) = determine_loop_result_type(body, locals_types, context)? {
                 return Ok(result_type);
             }
 
             infer_type(body, locals_types, context)
         }
-        Expression::FunctionCall { .. } => Ok(WasmType::I32),
-        Expression::PropertyAccess {
-            object,
-            property,
-            span,
-        } => {
+        ExpressionKind::FunctionCall { .. } => Ok(WasmType::I32),
+        ExpressionKind::PropertyAccess { object, property } => {
             let object_type = infer_type(object, locals_types, context)?;
             if let WasmType::Struct(fields) = object_type {
                 if let Some((_, field_type)) = fields.iter().find(|(n, _)| n == property) {
@@ -626,33 +630,33 @@ fn infer_type(
                 } else {
                     Err(
                         Diagnostic::new(format!("Field `{}` not found in struct", property))
-                            .with_span(*span),
+                            .with_span(expr.span),
                     )
                 }
             } else {
-                Err(Diagnostic::new("Property access on non-struct type").with_span(*span))
+                Err(Diagnostic::new("Property access on non-struct type").with_span(expr.span))
             }
         }
-        Expression::IntrinsicOperation(..) => Ok(WasmType::I32),
-        Expression::If { then_branch, .. } => infer_type(then_branch, locals_types, context),
-        Expression::Block(exprs, _) => {
+        ExpressionKind::IntrinsicOperation(..) => Ok(WasmType::I32),
+        ExpressionKind::If { then_branch, .. } => infer_type(then_branch, locals_types, context),
+        ExpressionKind::Block(exprs) => {
             if let Some(last) = exprs.last() {
                 infer_type(last, locals_types, context)
             } else {
                 Ok(WasmType::I32)
             }
         }
-        Expression::Binding(..) => Ok(WasmType::I32),
-        Expression::Match { branches, .. } => {
+        ExpressionKind::Binding(..) => Ok(WasmType::I32),
+        ExpressionKind::Match { branches, .. } => {
             if let Some((_, branch)) = branches.first() {
                 infer_type(branch, locals_types, context)
             } else {
                 Ok(WasmType::I32) // todo: should be never type
             }
         }
-        Expression::EnumType(_, _) => enum_wasm_type(expr, context),
-        Expression::EnumConstructor { enum_type, .. }
-        | Expression::EnumAccess {
+        ExpressionKind::EnumType(_) => enum_wasm_type(expr, context),
+        ExpressionKind::EnumConstructor { enum_type, .. }
+        | ExpressionKind::EnumAccess {
             enum_expr: enum_type,
             ..
         } => enum_wasm_type(enum_type, context),
@@ -686,10 +690,13 @@ fn lower_function_export(
     value: Expression,
     annotation_span: SourceSpan,
 ) -> Result<WasmFunctionExport, Diagnostic> {
-    let Expression::Function {
-        parameter,
-        return_type,
-        body,
+    let Expression {
+        kind:
+            ExpressionKind::Function {
+                parameter,
+                return_type,
+                body,
+            },
         ..
     } = value
     else {
@@ -712,10 +719,10 @@ fn lower_function_export(
 }
 
 fn resolve_type(context: &interpret::Context, expr: &Expression) -> Result<WasmType, Diagnostic> {
-    match expr {
-        Expression::IntrinsicType(IntrinsicType::I32, _) => Ok(WasmType::I32),
-        Expression::IntrinsicType(IntrinsicType::Boolean, _) => Ok(WasmType::I32),
-        Expression::Struct(fields, _) => {
+    match &expr.kind {
+        ExpressionKind::IntrinsicType(IntrinsicType::I32) => Ok(WasmType::I32),
+        ExpressionKind::IntrinsicType(IntrinsicType::Boolean) => Ok(WasmType::I32),
+        ExpressionKind::Struct(fields) => {
             let mut field_types = Vec::new();
             for (name, value) in fields {
                 let ty = resolve_type(context, value)?;
@@ -724,7 +731,7 @@ fn resolve_type(context: &interpret::Context, expr: &Expression) -> Result<WasmT
             field_types.sort_by(|a, b| a.0.cmp(&b.0));
             Ok(WasmType::Struct(field_types))
         }
-        Expression::Identifier(identifier, span) => {
+        ExpressionKind::Identifier(identifier) => {
             if let Some((binding, _)) = context.get_identifier(identifier) {
                 match binding {
                     interpret::BindingContext::Bound(value, _) => resolve_type(context, value),
@@ -732,14 +739,17 @@ fn resolve_type(context: &interpret::Context, expr: &Expression) -> Result<WasmT
                         "Type alias `{}` is not bound to a value",
                         identifier.name
                     ))
-                    .with_span(*span)),
+                    .with_span(expr.span)),
                 }
             } else {
-                Err(Diagnostic::new(format!("Unknown type `{}`", identifier.name)).with_span(*span))
+                Err(
+                    Diagnostic::new(format!("Unknown type `{}`", identifier.name))
+                        .with_span(expr.span),
+                )
             }
         }
-        Expression::AttachImplementation { type_expr, .. } => resolve_type(context, type_expr),
-        Expression::EnumType(_, _) => enum_wasm_type(expr, context),
+        ExpressionKind::AttachImplementation { type_expr, .. } => resolve_type(context, type_expr),
+        ExpressionKind::EnumType(_) => enum_wasm_type(expr, context),
         _ => Err(Diagnostic::new("Unsupported type for WASM").with_span(expr.span())),
     }
 }
@@ -747,7 +757,10 @@ fn resolve_type(context: &interpret::Context, expr: &Expression) -> Result<WasmT
 fn wasm_annotation_span(annotations: &[BindingAnnotation]) -> Option<SourceSpan> {
     annotations.iter().find_map(|annotation| match annotation {
         BindingAnnotation::Export(
-            Expression::Literal(ExpressionLiteral::Target(TargetLiteral::WasmTarget), _),
+            Expression {
+                kind: ExpressionKind::Literal(ExpressionLiteral::Target(TargetLiteral::WasmTarget)),
+                ..
+            },
             span,
         ) => Some(*span),
         _ => None,
@@ -847,8 +860,8 @@ fn collect_locals(
     context: &interpret::Context,
 ) -> Result<Vec<(String, WasmType)>, Diagnostic> {
     let mut locals = Vec::new();
-    match expr {
-        Expression::Binding(binding, _) => {
+    match &expr.kind {
+        ExpressionKind::Binding(binding) => {
             let expr_type = infer_type(&binding.expr, locals_types, context)?;
             collect_locals_for_pattern(
                 binding.pattern.clone(),
@@ -859,27 +872,27 @@ fn collect_locals(
 
             locals.extend(collect_locals(&binding.expr, locals_types, context)?);
         }
-        Expression::Assignment { target, expr, span } => {
-            ensure_lvalue_local(target, locals_types, *span)?;
+        ExpressionKind::Assignment { target, expr } => {
+            ensure_lvalue_local(target, locals_types, expr.span)?;
             locals.extend(collect_locals(expr, locals_types, context)?);
         }
-        Expression::Block(exprs, _) => {
+        ExpressionKind::Block(exprs) => {
             for e in exprs {
                 locals.extend(collect_locals(e, locals_types, context)?);
             }
         }
-        Expression::Function { body: _body, .. } => {}
-        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _), _) => {
+        ExpressionKind::Function { body: _body, .. } => {}
+        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _)) => {
             locals.extend(collect_locals(left, locals_types, context)?);
             locals.extend(collect_locals(right, locals_types, context)?);
         }
-        Expression::FunctionCall {
+        ExpressionKind::FunctionCall {
             function, argument, ..
         } => {
             locals.extend(collect_locals(function, locals_types, context)?);
             locals.extend(collect_locals(argument, locals_types, context)?);
         }
-        Expression::If {
+        ExpressionKind::If {
             condition,
             then_branch,
             else_branch,
@@ -891,13 +904,9 @@ fn collect_locals(
                 locals.extend(collect_locals(else_branch, locals_types, context)?);
             }
         }
-        Expression::Match {
-            value,
-            branches,
-            span,
-        } => {
+        ExpressionKind::Match { value, branches } => {
             let value_type = infer_type(value, locals_types, context)?;
-            locals.push((format!("__match_val_{}", span.start()), value_type));
+            locals.push((format!("__match_val_{}", expr.span.start()), value_type));
             locals.extend(collect_locals(value, locals_types, context)?);
             for (pattern, branch) in branches {
                 let value_type = infer_type(value, locals_types, context)?;
@@ -1021,38 +1030,41 @@ fn emit_expression(
             loop_stack,
         );
     }
-    match expr {
-        Expression::Literal(ExpressionLiteral::Number(value), _) => {
+    match &expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => {
             func.instruction(&Instruction::I32Const(*value));
             Ok(())
         }
-        Expression::Literal(ExpressionLiteral::Boolean(value), _) => {
+        ExpressionKind::Literal(ExpressionLiteral::Boolean(value)) => {
             func.instruction(&Instruction::I32Const(if *value { 1 } else { 0 }));
             Ok(())
         }
-        Expression::Identifier(identifier, span) => {
+        ExpressionKind::Identifier(identifier) => {
             let local_index = locals.get(&identifier.name).copied().ok_or_else(|| {
                 Diagnostic::new(format!(
                     "Identifier `{}` is not a local variable or parameter",
                     identifier.name
                 ))
-                .with_span(*span)
+                .with_span(expr.span)
             })?;
             func.instruction(&Instruction::LocalGet(local_index));
             Ok(())
         }
-        Expression::Assignment { target, expr, span } => match target {
+        ExpressionKind::Assignment {
+            target,
+            expr: value,
+        } => match target {
             LValue::Identifier(identifier, _) => {
                 let local_index = locals.get(&identifier.name).copied().ok_or_else(|| {
                     Diagnostic::new(format!(
                         "Identifier `{}` is not a local variable or parameter",
                         identifier.name
                     ))
-                    .with_span(*span)
+                    .with_span(expr.span)
                 })?;
 
                 emit_expression(
-                    expr,
+                    value,
                     locals,
                     locals_types,
                     func,
@@ -1099,7 +1111,7 @@ fn emit_expression(
                     loop_stack,
                 )?;
                 emit_expression(
-                    expr,
+                    value,
                     locals,
                     locals_types,
                     func,
@@ -1126,7 +1138,7 @@ fn emit_expression(
                 )
             }
         },
-        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, op), _) => {
+        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(left, right, op)) => {
             match op {
                 BinaryIntrinsicOperator::BooleanAnd => {
                     emit_expression(
@@ -1249,17 +1261,17 @@ fn emit_expression(
             }
             Ok(())
         }
-        Expression::IntrinsicOperation(
-            IntrinsicOperation::Unary(_, UnaryIntrinsicOperator::EnumFromStruct),
-            span,
-        ) => Err(
-            Diagnostic::new("enum intrinsic should be resolved before wasm lowering")
-                .with_span(*span),
-        ),
-        Expression::IntrinsicOperation(
-            IntrinsicOperation::Unary(operand, UnaryIntrinsicOperator::BooleanNot),
+        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
             _,
-        ) => {
+            UnaryIntrinsicOperator::EnumFromStruct,
+        )) => Err(
+            Diagnostic::new("enum intrinsic should be resolved before wasm lowering")
+                .with_span(expr.span),
+        ),
+        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
+            operand,
+            UnaryIntrinsicOperator::BooleanNot,
+        )) => {
             emit_expression(
                 operand,
                 locals,
@@ -1273,29 +1285,30 @@ fn emit_expression(
             func.instruction(&Instruction::I32Eqz);
             Ok(())
         }
-        Expression::Diverge {
+        ExpressionKind::Diverge {
             value,
             divergance_type: DivergeExpressionType::Break,
-            span,
         } => {
-            let loop_ctx = loop_stack.last().cloned().ok_or_else(|| {
-                Diagnostic::new("`break` used outside of a loop").with_span(*span)
-            })?;
+            let span = expr.span;
+            let loop_ctx = loop_stack
+                .last()
+                .cloned()
+                .ok_or_else(|| Diagnostic::new("`break` used outside of a loop").with_span(span))?;
 
             let break_value = value
                 .as_ref()
                 .map(|expr| expr.as_ref().clone())
-                .unwrap_or_else(|| Expression::Struct(vec![], *span));
+                .unwrap_or_else(|| Expression::new(ExpressionKind::Struct(vec![]), span));
 
             let expected_type = loop_ctx.result_type.as_ref().ok_or_else(|| {
                 Diagnostic::new("`break` cannot be used in a loop without a break value")
-                    .with_span(*span)
+                    .with_span(span)
             })?;
 
             let value_type = infer_type(&break_value, locals_types, context)?;
             if &value_type != expected_type {
                 return Err(
-                    Diagnostic::new("break value does not match loop result type").with_span(*span),
+                    Diagnostic::new("break value does not match loop result type").with_span(span),
                 );
             }
 
@@ -1317,7 +1330,7 @@ fn emit_expression(
             func.instruction(&Instruction::Br(break_depth));
             Ok(())
         }
-        Expression::Loop { body, .. } => {
+        ExpressionKind::Loop { body } => {
             let loop_result_type = determine_loop_result_type(body, locals_types, context)?;
             if let Some(result_type) = loop_result_type {
                 let block_type = wasm_encoder::BlockType::Result(result_type.to_val_type(type_ctx));
@@ -1376,25 +1389,23 @@ fn emit_expression(
             }
             Ok(())
         }
-        Expression::FunctionCall {
-            function,
-            argument,
-            span,
+        ExpressionKind::FunctionCall {
+            function, argument, ..
         } => {
-            if let Expression::EnumConstructor {
+            if let ExpressionKind::EnumConstructor {
                 enum_type,
                 variant,
                 variant_index,
                 ..
-            } = function.as_ref()
+            } = &function.kind
             {
-                let enum_value = Expression::EnumValue {
+                let enum_value = ExpressionKind::EnumValue {
                     enum_type: enum_type.clone(),
                     variant: variant.clone(),
                     variant_index: *variant_index,
                     payload: Some(argument.clone()),
-                    span: *span,
-                };
+                }
+                .with_span(expr.span);
                 return emit_expression(
                     &enum_value,
                     locals,
@@ -1409,10 +1420,10 @@ fn emit_expression(
 
             Err(
                 Diagnostic::new("Function calls are not supported in wasm exports yet")
-                    .with_span(*span),
+                    .with_span(expr.span),
             )
         }
-        Expression::If {
+        ExpressionKind::If {
             condition,
             then_branch,
             else_branch,
@@ -1488,7 +1499,7 @@ fn emit_expression(
             control_stack.pop();
             Ok(())
         }
-        Expression::Binding(binding, _) => {
+        ExpressionKind::Binding(binding) => {
             let pattern = unwrap_pattern(binding.pattern.clone());
             if let BindingPattern::EnumVariant {
                 enum_type,
@@ -1561,23 +1572,23 @@ fn emit_expression(
                 if let Some(payload_pattern) = payload.clone() {
                     // Extract payload
                     // We construct a property access expression for the payload
-                    let payload_access_expr = Expression::PropertyAccess {
-                        object: Box::new(Expression::PropertyAccess {
-                            object: Box::new(binding.expr.clone()),
-                            property: "payload".to_string(),
-                            span: *pattern_span,
-                        }),
+                    let payload_access_expr = ExpressionKind::PropertyAccess {
+                        object: Box::new(
+                            ExpressionKind::PropertyAccess {
+                                object: Box::new(binding.expr.clone()),
+                                property: "payload".to_string(),
+                            }
+                            .with_span(*pattern_span),
+                        ),
                         property: variant.name.clone(),
-                        span: *pattern_span,
-                    };
+                    }
+                    .with_span(*pattern_span);
 
-                    let payload_binding = Expression::Binding(
-                        Box::new(Binding {
-                            pattern: *payload_pattern,
-                            expr: payload_access_expr,
-                        }),
-                        *pattern_span,
-                    );
+                    let payload_binding = ExpressionKind::Binding(Box::new(Binding {
+                        pattern: *payload_pattern,
+                        expr: payload_access_expr,
+                    }))
+                    .with_span(*pattern_span);
 
                     emit_expression(
                         &payload_binding,
@@ -1608,7 +1619,10 @@ fn emit_expression(
 
             if let (
                 BindingPattern::Struct(pattern_fields, _),
-                Expression::Struct(value_fields, _),
+                Expression {
+                    kind: ExpressionKind::Struct(value_fields),
+                    ..
+                },
             ) = (&pattern, &binding.expr)
             {
                 let mut comparisons_emitted = false;
@@ -1724,27 +1738,24 @@ fn emit_expression(
                 Ok(())
             }
         }
-        Expression::EnumAccess {
-            enum_expr,
-            variant,
-            span,
-        } => {
-            if let Expression::EnumType(variants, _) = enum_expr.as_ref()
+        ExpressionKind::EnumAccess { enum_expr, variant } => {
+            let span = expr.span;
+            if let ExpressionKind::EnumType(variants) = &enum_expr.kind
                 && let Some((variant_index, (_, payload_type))) = variants
                     .iter()
                     .enumerate()
                     .find(|(_, (id, _))| id.name == variant.name)
             {
-                if let Expression::Struct(fields, _) = payload_type
+                if let ExpressionKind::Struct(fields) = &payload_type.kind
                     && fields.is_empty()
                 {
-                    let value = Expression::EnumValue {
+                    let value = ExpressionKind::EnumValue {
                         enum_type: enum_expr.clone(),
                         variant: variant.clone(),
                         variant_index,
                         payload: None,
-                        span: *span,
-                    };
+                    }
+                    .with_span(span);
                     return emit_expression(
                         &value,
                         locals,
@@ -1757,13 +1768,13 @@ fn emit_expression(
                     );
                 }
 
-                let constructor = Expression::EnumConstructor {
+                let constructor = ExpressionKind::EnumConstructor {
                     enum_type: enum_expr.clone(),
                     variant: variant.clone(),
                     variant_index,
                     payload_type: Box::new(payload_type.clone()),
-                    span: *span,
-                };
+                }
+                .with_span(span);
                 return emit_expression(
                     &constructor,
                     locals,
@@ -1776,12 +1787,9 @@ fn emit_expression(
                 );
             }
 
-            Err(
-                Diagnostic::new("Enum access could not be resolved in wasm export")
-                    .with_span(*span),
-            )
+            Err(Diagnostic::new("Enum access could not be resolved in wasm export").with_span(span))
         }
-        Expression::Block(exprs, _) => {
+        ExpressionKind::Block(exprs) => {
             for (i, e) in exprs.iter().enumerate() {
                 emit_expression(
                     e,
@@ -1805,7 +1813,7 @@ fn emit_expression(
             }
             Ok(())
         }
-        Expression::Diverge {
+        ExpressionKind::Diverge {
             value,
             divergance_type: DivergeExpressionType::Return,
             ..
@@ -1816,7 +1824,7 @@ fn emit_expression(
             let inner_expr = value
                 .as_ref()
                 .map(|expr| expr.as_ref().clone())
-                .unwrap_or_else(|| Expression::Struct(vec![], expr.span()));
+                .unwrap_or_else(|| Expression::new(ExpressionKind::Struct(vec![]), expr.span));
             emit_expression(
                 &inner_expr,
                 locals,
@@ -1830,7 +1838,7 @@ fn emit_expression(
             func.instruction(&Instruction::Return);
             Ok(())
         }
-        Expression::Struct(items, _span) => {
+        ExpressionKind::Struct(items) => {
             let mut sorted_items = items.clone();
             sorted_items.sort_by(|(a_name, _), (b_name, _)| a_name.name.cmp(&b_name.name));
 
@@ -1841,7 +1849,7 @@ fn emit_expression(
             }
 
             let type_index = type_ctx.get_type_index(&field_types).ok_or_else(|| {
-                Diagnostic::new("Struct type not found in context").with_span(expr.span())
+                Diagnostic::new("Struct type not found in context").with_span(expr.span)
             })?;
 
             for (_, value) in sorted_items {
@@ -1860,11 +1868,7 @@ fn emit_expression(
             func.instruction(&Instruction::StructNew(type_index));
             Ok(())
         }
-        Expression::PropertyAccess {
-            object,
-            property,
-            span,
-        } => {
+        ExpressionKind::PropertyAccess { object, property } => {
             let object_type = infer_type(object, locals_types, context)?;
             if let WasmType::Struct(fields) = object_type {
                 let field_index =
@@ -1873,7 +1877,7 @@ fn emit_expression(
                         .position(|(n, _)| n == property)
                         .ok_or_else(|| {
                             Diagnostic::new(format!("Field `{}` not found in struct", property))
-                                .with_span(*span)
+                                .with_span(expr.span)
                         })?;
 
                 let type_index = type_ctx
@@ -1896,14 +1900,10 @@ fn emit_expression(
                 });
                 Ok(())
             } else {
-                Err(Diagnostic::new("Property access on non-struct type").with_span(*span))
+                Err(Diagnostic::new("Property access on non-struct type").with_span(expr.span))
             }
         }
-        Expression::Match {
-            value,
-            branches,
-            span,
-        } => {
+        ExpressionKind::Match { value, branches } => {
             emit_expression(
                 value,
                 locals,
@@ -1915,7 +1915,7 @@ fn emit_expression(
                 loop_stack,
             )?;
 
-            let temp_local_name = format!("__match_val_{}", span.start());
+            let temp_local_name = format!("__match_val_{}", expr.span.start());
             let temp_local_index = locals
                 .get(&temp_local_name)
                 .copied()
@@ -1937,16 +1937,12 @@ fn emit_expression(
             func.instruction(&Instruction::Block(block_type));
 
             for (pattern, branch) in branches {
-                let check_expr = Expression::Binding(
-                    Box::new(Binding {
-                        pattern: pattern.clone(),
-                        expr: Expression::Identifier(
-                            Identifier::new(temp_local_name.clone()),
-                            *span,
-                        ),
-                    }),
-                    *span,
-                );
+                let check_expr = ExpressionKind::Binding(Box::new(Binding {
+                    pattern: pattern.clone(),
+                    expr: ExpressionKind::Identifier(Identifier::new(temp_local_name.clone()))
+                        .with_span(expr.span),
+                }))
+                .with_span(expr.span);
 
                 emit_expression(
                     &check_expr,
@@ -1983,9 +1979,8 @@ fn emit_expression(
 
             Ok(())
         }
-        other => Err(
-            Diagnostic::new("Expression is not supported in wasm exports yet")
-                .with_span(other.span()),
+        _ => Err(
+            Diagnostic::new("Expression is not supported in wasm exports yet").with_span(expr.span),
         ),
     }
 }

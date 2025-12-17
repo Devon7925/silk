@@ -1,4 +1,4 @@
-use silk::parsing::{Expression, ExpressionLiteral};
+use silk::parsing::{ExpressionKind, ExpressionLiteral};
 use silk::test_support::evaluate_text_to_expression;
 
 #[test]
@@ -18,8 +18,8 @@ fn functions_accept_struct_parameters() {
     let (expr, _) =
         evaluate_text_to_expression(program).unwrap_or_else(|err| panic!("{}", err.message));
 
-    match expr {
-        Expression::Literal(ExpressionLiteral::Number(value), _) => assert_eq!(value, -1),
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, -1),
         other => panic!("Expected numeric literal, got {:?}", other),
     }
 }
@@ -55,8 +55,8 @@ fn struct_variables_support_property_access() {
     let (expr, _) =
         evaluate_text_to_expression(program).unwrap_or_else(|err| panic!("{}", err.message));
 
-    match expr {
-        Expression::Literal(ExpressionLiteral::Number(value), _) => assert_eq!(value, 2),
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 2),
         other => panic!("Expected numeric literal, got {:?}", other),
     }
 }
@@ -78,8 +78,8 @@ fn functions_can_return_structs() {
     let (expr, _) =
         evaluate_text_to_expression(program).unwrap_or_else(|err| panic!("{}", err.message));
 
-    match expr {
-        Expression::Literal(ExpressionLiteral::Number(value), _) => assert_eq!(value, 6),
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 6),
         other => panic!("Expected numeric literal, got {:?}", other),
     }
 }

@@ -1,12 +1,12 @@
-use silk::parsing::{Expression, ExpressionLiteral};
+use silk::parsing::{ExpressionKind, ExpressionLiteral};
 use silk::test_support::evaluate_text_to_expression;
 
 #[test]
 fn if_expression_returns_then_branch() {
     let (expr, _) = evaluate_text_to_expression("if true then 1 else 2")
         .expect("if expression should evaluate");
-    match expr {
-        Expression::Literal(ExpressionLiteral::Number(value), _) => {
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => {
             assert_eq!(value, 1);
         }
         other => panic!("Expected numeric literal, got {:?}", other),
@@ -17,8 +17,8 @@ fn if_expression_returns_then_branch() {
 fn else_branch_is_used_when_condition_is_false() {
     let (expr, _) = evaluate_text_to_expression("if false then 1 else 2")
         .expect("if expression should evaluate");
-    match expr {
-        Expression::Literal(ExpressionLiteral::Number(value), _) => {
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => {
             assert_eq!(value, 2);
         }
         other => panic!("Expected numeric literal, got {:?}", other),
@@ -29,8 +29,8 @@ fn else_branch_is_used_when_condition_is_false() {
 fn else_if_chains_resolve_first_true_branch() {
     let (expr, _) = evaluate_text_to_expression("if false then 1 else if true then 2 else 3")
         .expect("else if chain should evaluate");
-    match expr {
-        Expression::Literal(ExpressionLiteral::Number(value), _) => {
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => {
             assert_eq!(value, 2);
         }
         other => panic!("Expected numeric literal, got {:?}", other),
@@ -41,8 +41,8 @@ fn else_if_chains_resolve_first_true_branch() {
 fn block_with_trailing_semicolon_returns_empty_struct() {
     let (expr, _) =
         evaluate_text_to_expression("( 1; )").expect("block expression should evaluate");
-    match expr {
-        Expression::Struct(items, _) => assert!(items.is_empty(), "Expected empty struct"),
+    match expr.kind {
+        ExpressionKind::Struct(items) => assert!(items.is_empty(), "Expected empty struct"),
         other => panic!("Expected empty struct, got {:?}", other),
     }
 }
@@ -91,8 +91,8 @@ fn return_allows_unbalanced_if_in_statement_position() {
     let (expr, _) = evaluate_text_to_expression(program)
         .expect("if expression with return in one branch should evaluate");
 
-    match expr {
-        Expression::Literal(ExpressionLiteral::Number(value), _) => assert_eq!(value, 2),
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 2),
         other => panic!("Expected numeric literal, got {:?}", other),
     }
 }

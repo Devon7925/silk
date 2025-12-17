@@ -1,4 +1,4 @@
-use silk::parsing::{Expression, ExpressionLiteral};
+use silk::parsing::{ExpressionKind, ExpressionLiteral};
 use silk::test_support::evaluate_text_to_simplified_expression;
 
 #[test]
@@ -19,12 +19,13 @@ fn nested_mutation() {
         );
     });
 
-    let Expression::Block(statements, _) = expr else {
+    let ExpressionKind::Block(statements) = expr.kind else {
         panic!("Expected block expression, got {:?}", expr);
     };
 
-    match statements.iter().last().unwrap() {
-        Expression::Literal(ExpressionLiteral::Number(value), _) => assert_eq!(value, &9),
+    let last = statements.iter().last().unwrap();
+    match &last.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(*value, 9),
         other => panic!("Expected numeric literal, got {:?}", other),
-    }
+    };
 }

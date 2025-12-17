@@ -1,4 +1,4 @@
-use silk::parsing::{Expression, ExpressionLiteral};
+use silk::parsing::{ExpressionKind, ExpressionLiteral};
 use silk::test_support::evaluate_text_to_expression;
 
 #[test]
@@ -21,8 +21,8 @@ fn functions_can_be_passed_as_arguments() {
     let (expr, _) = evaluate_text_to_expression(program)
         .unwrap_or_else(|err| panic!("{}", err.render_with_source(program)));
 
-    match expr {
-        Expression::Literal(ExpressionLiteral::Number(value), _) => assert_eq!(value, 42),
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 42),
         other => panic!("Expected numeric literal, got {:?}", other),
     }
 }
@@ -43,8 +43,8 @@ fn functions_can_be_returned() {
     let (expr, _) =
         evaluate_text_to_expression(program).unwrap_or_else(|err| panic!("{}", err.message));
 
-    match expr {
-        Expression::Literal(ExpressionLiteral::Number(value), _) => assert_eq!(value, 10),
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 10),
         other => panic!("Expected numeric literal, got {:?}", other),
     }
 }
@@ -63,8 +63,8 @@ fn return_exits_function_early() {
     let (expr, _) =
         evaluate_text_to_expression(program).unwrap_or_else(|err| panic!("{}", err.message));
 
-    match expr {
-        Expression::Literal(ExpressionLiteral::Number(value), _) => assert_eq!(value, 42),
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 42),
         other => panic!("Expected numeric literal, got {:?}", other),
     }
 }

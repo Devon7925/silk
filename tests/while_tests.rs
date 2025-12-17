@@ -1,5 +1,6 @@
 use silk::{
     parsing::parse_block,
+    parsing::{ExpressionKind, ExpressionLiteral},
     test_support::{evaluate_text_to_expression, interpret_program, intrinsic_context},
 };
 
@@ -22,10 +23,8 @@ fn while_accumulates_until_limit() {
     let (expr, _) =
         evaluate_text_to_expression(program).unwrap_or_else(|err| panic!("{}", err.message));
 
-    match expr {
-        silk::parsing::Expression::Literal(silk::parsing::ExpressionLiteral::Number(value), _) => {
-            assert_eq!(value, 10)
-        }
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 10),
         other => panic!("Expected numeric literal, got {:?}", other),
     }
 }
@@ -43,10 +42,8 @@ fn while_with_initially_false_condition_skips_body() {
     let (expr, _) =
         evaluate_text_to_expression(program).unwrap_or_else(|err| panic!("{}", err.message));
 
-    match expr {
-        silk::parsing::Expression::Literal(silk::parsing::ExpressionLiteral::Number(value), _) => {
-            assert_eq!(value, 3)
-        }
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 3),
         other => panic!("Expected numeric literal, got {:?}", other),
     }
 }

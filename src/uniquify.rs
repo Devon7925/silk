@@ -3,7 +3,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::parsing::{
-    Binding, BindingAnnotation, BindingPattern, Expression, Identifier, IntrinsicOperation, LValue,
+    Binding, BindingAnnotation, BindingPattern, Expression, ExpressionKind, Identifier,
+    IntrinsicOperation, LValue,
 };
 
 #[derive(Default, Clone)]
@@ -139,35 +140,31 @@ fn uniquify_annotations(
 }
 
 fn uniquify_expression(expr: Expression, scopes: &mut ScopeStack) -> Expression {
-    match expr {
-        Expression::IntrinsicOperation(IntrinsicOperation::Binary(left, right, op), span) => {
-            Expression::IntrinsicOperation(
-                IntrinsicOperation::Binary(
-                    Box::new(uniquify_expression(*left, scopes)),
-                    Box::new(uniquify_expression(*right, scopes)),
-                    op,
-                ),
-                span,
-            )
+    let span = expr.span;
+    match expr.kind {
+        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(left, right, op)) => {
+            ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(
+                Box::new(uniquify_expression(*left, scopes)),
+                Box::new(uniquify_expression(*right, scopes)),
+                op,
+            ))
+            .with_span(span)
         }
-        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, op), span) => {
-            Expression::IntrinsicOperation(
-                IntrinsicOperation::Unary(Box::new(uniquify_expression(*operand, scopes)), op),
-                span,
-            )
+        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(operand, op)) => {
+            ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
+                Box::new(uniquify_expression(*operand, scopes)),
+                op,
+            ))
+            .with_span(span)
         }
-        Expression::EnumType(variants, span) => Expression::EnumType(
+        ExpressionKind::EnumType(variants) => ExpressionKind::EnumType(
             variants
                 .into_iter()
                 .map(|(id, ty)| (id, uniquify_expression(ty, scopes)))
                 .collect(),
-            span,
-        ),
-        Expression::Match {
-            value,
-            branches,
-            span,
-        } => {
+        )
+        .with_span(span),
+        ExpressionKind::Match { value, branches } => {
             let value = Box::new(uniquify_expression(*value, scopes));
             let branches = branches
                 .into_iter()
@@ -179,182 +176,155 @@ fn uniquify_expression(expr: Expression, scopes: &mut ScopeStack) -> Expression 
                     (pattern, branch_expr)
                 })
                 .collect();
-            Expression::Match {
-                value,
-                branches,
-                span,
-            }
+            Expression::new(ExpressionKind::Match { value, branches }, span)
         }
-        Expression::EnumValue {
+        ExpressionKind::EnumValue {
             enum_type,
             variant,
             variant_index,
             payload,
-            span,
-        } => Expression::EnumValue {
+        } => ExpressionKind::EnumValue {
             enum_type: Box::new(uniquify_expression(*enum_type, scopes)),
             variant,
             variant_index,
             payload: payload.map(|p| Box::new(uniquify_expression(*p, scopes))),
-            span,
-        },
-        Expression::EnumConstructor {
+        }
+        .with_span(span),
+        ExpressionKind::EnumConstructor {
             enum_type,
             variant,
             variant_index,
             payload_type,
-            span,
-        } => Expression::EnumConstructor {
+        } => ExpressionKind::EnumConstructor {
             enum_type: Box::new(uniquify_expression(*enum_type, scopes)),
             variant,
             variant_index,
             payload_type: Box::new(uniquify_expression(*payload_type, scopes)),
-            span,
-        },
-        Expression::EnumAccess {
-            enum_expr,
-            variant,
-            span,
-        } => Expression::EnumAccess {
+        }
+        .with_span(span),
+        ExpressionKind::EnumAccess { enum_expr, variant } => ExpressionKind::EnumAccess {
             enum_expr: Box::new(uniquify_expression(*enum_expr, scopes)),
             variant,
-            span,
-        },
-        Expression::If {
+        }
+        .with_span(span),
+        ExpressionKind::If {
             condition,
             then_branch,
             else_branch,
-            span,
         } => {
-            let condition = Box::new(uniquify_expression(*condition, scopes));
             let mut then_scopes = scopes.clone();
             then_scopes.push();
-            let then_branch = Box::new(uniquify_expression(*then_branch, &mut then_scopes));
-            let else_branch = else_branch.map(|branch| {
-                let mut else_scopes = scopes.clone();
-                else_scopes.push();
-                Box::new(uniquify_expression(*branch, &mut else_scopes))
-            });
-            Expression::If {
-                condition,
-                then_branch,
-                else_branch,
-                span,
+            let mut else_scopes = scopes.clone();
+            else_scopes.push();
+            ExpressionKind::If {
+                condition: Box::new(uniquify_expression(*condition, scopes)),
+                then_branch: Box::new(uniquify_expression(*then_branch, &mut then_scopes)),
+                else_branch: else_branch
+                    .map(|branch| Box::new(uniquify_expression(*branch, &mut else_scopes))),
             }
+            .with_span(span)
         }
-        Expression::AttachImplementation {
+        ExpressionKind::AttachImplementation {
             type_expr,
             implementation,
-            span,
-        } => Expression::AttachImplementation {
+        } => ExpressionKind::AttachImplementation {
             type_expr: Box::new(uniquify_expression(*type_expr, scopes)),
             implementation: Box::new(uniquify_expression(*implementation, scopes)),
-            span,
-        },
-        Expression::Function {
+        }
+        .with_span(span),
+        ExpressionKind::Function {
             parameter,
             return_type,
             body,
-            span,
         } => {
-            let mut inner_scopes = scopes.clone();
-            inner_scopes.push();
-            let parameter = uniquify_binding_pattern(parameter, &mut inner_scopes);
+            let mut function_scopes = scopes.clone();
+            function_scopes.push();
+            let parameter = uniquify_binding_pattern(parameter, &mut function_scopes);
             let return_type =
-                return_type.map(|ret| Box::new(uniquify_expression(*ret, &mut inner_scopes)));
-            let body = Box::new(uniquify_expression(*body, &mut inner_scopes));
-            Expression::Function {
+                return_type.map(|rt| Box::new(uniquify_expression(*rt, &mut function_scopes)));
+            let body = uniquify_expression(*body, &mut function_scopes);
+            ExpressionKind::Function {
                 parameter,
                 return_type,
-                body,
-                span,
+                body: Box::new(body),
             }
+            .with_span(span)
         }
-        Expression::FunctionType {
+        ExpressionKind::FunctionType {
             parameter,
             return_type,
-            span,
-        } => Expression::FunctionType {
-            parameter: Box::new(uniquify_expression(*parameter, scopes)),
-            return_type: Box::new(uniquify_expression(*return_type, scopes)),
-            span,
-        },
-        Expression::Struct(fields, span) => Expression::Struct(
+        } => {
+            let mut function_type_scopes = scopes.clone();
+            function_type_scopes.push();
+            ExpressionKind::FunctionType {
+                parameter: Box::new(uniquify_expression(*parameter, &mut function_type_scopes)),
+                return_type: Box::new(uniquify_expression(*return_type, &mut function_type_scopes)),
+            }
+            .with_span(span)
+        }
+        ExpressionKind::Struct(fields) => ExpressionKind::Struct(
             fields
                 .into_iter()
-                .map(|(id, value)| (id, uniquify_expression(value, scopes)))
+                .map(|(id, expr)| (id, uniquify_expression(expr, scopes)))
                 .collect(),
-            span,
-        ),
-        Expression::IntrinsicType(_, _) => expr,
-        Expression::Literal(_, _) => expr,
-        Expression::Identifier(identifier, span) => {
-            Expression::Identifier(scopes.resolve(&identifier), span)
+        )
+        .with_span(span),
+        ExpressionKind::IntrinsicType(_) | ExpressionKind::Literal(_) => expr,
+        ExpressionKind::Identifier(identifier) => {
+            ExpressionKind::Identifier(scopes.resolve(&identifier)).with_span(span)
         }
-        Expression::Operation {
+        ExpressionKind::Operation {
             operator,
             left,
             right,
-            span,
-        } => Expression::Operation {
+        } => ExpressionKind::Operation {
             operator,
             left: Box::new(uniquify_expression(*left, scopes)),
             right: Box::new(uniquify_expression(*right, scopes)),
-            span,
-        },
-        Expression::Assignment { target, expr, span } => Expression::Assignment {
+        }
+        .with_span(span),
+        ExpressionKind::Assignment { target, expr } => ExpressionKind::Assignment {
             target: uniquify_lvalue(target, scopes),
             expr: Box::new(uniquify_expression(*expr, scopes)),
-            span,
-        },
-        Expression::FunctionCall {
-            function,
-            argument,
-            span,
-        } => Expression::FunctionCall {
+        }
+        .with_span(span),
+        ExpressionKind::FunctionCall { function, argument } => ExpressionKind::FunctionCall {
             function: Box::new(uniquify_expression(*function, scopes)),
             argument: Box::new(uniquify_expression(*argument, scopes)),
-            span,
-        },
-        Expression::PropertyAccess {
-            object,
-            property,
-            span,
-        } => Expression::PropertyAccess {
+        }
+        .with_span(span),
+        ExpressionKind::PropertyAccess { object, property } => ExpressionKind::PropertyAccess {
             object: Box::new(uniquify_expression(*object, scopes)),
             property,
-            span,
-        },
-        Expression::Binding(binding, span) => {
-            let expr = uniquify_expression(binding.expr, scopes);
-            let pattern = uniquify_binding_pattern(binding.pattern, scopes);
-            Expression::Binding(Box::new(Binding { pattern, expr }), span)
         }
-        Expression::Block(expressions, span) => {
-            let mut inner_scopes = scopes.clone();
-            inner_scopes.push();
-            let expressions = expressions
-                .into_iter()
-                .map(|expr| uniquify_expression(expr, &mut inner_scopes))
-                .collect();
-            Expression::Block(expressions, span)
+        .with_span(span),
+        ExpressionKind::Binding(binding) => {
+            let mut binding_scopes = scopes.clone();
+            binding_scopes.push();
+            let pattern = uniquify_binding_pattern(binding.pattern, &mut binding_scopes);
+            let expr = uniquify_expression(binding.expr, &mut binding_scopes);
+            ExpressionKind::Binding(Box::new(Binding { pattern, expr })).with_span(span)
         }
-        Expression::Diverge {
+        ExpressionKind::Block(expressions) => {
+            let mut block_scopes = scopes.clone();
+            block_scopes.push();
+            Expression::new(ExpressionKind::Block(expressions), span)
+        }
+        ExpressionKind::Diverge {
             value,
             divergance_type,
-            span,
-        } => Expression::Diverge {
+        } => ExpressionKind::Diverge {
             value: value.map(|v| Box::new(uniquify_expression(*v, scopes))),
             divergance_type,
-            span,
-        },
-        Expression::Loop { body, span } => {
+        }
+        .with_span(span),
+        ExpressionKind::Loop { body } => {
             let mut loop_scopes = scopes.clone();
             loop_scopes.push();
-            Expression::Loop {
+            ExpressionKind::Loop {
                 body: Box::new(uniquify_expression(*body, &mut loop_scopes)),
-                span,
             }
+            .with_span(span)
         }
     }
 }

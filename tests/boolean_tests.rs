@@ -1,12 +1,13 @@
-use silk::parsing::{Expression, ExpressionLiteral};
+use silk::parsing::{ExpressionKind, ExpressionLiteral};
 use silk::test_support::evaluate_text_to_expression;
 
 fn evaluate_text_to_bool(program: &str) -> bool {
     match evaluate_text_to_expression(program)
         .expect("Failed to interpret parsed expression")
         .0
+        .kind
     {
-        Expression::Literal(ExpressionLiteral::Boolean(value), _) => value,
+        ExpressionKind::Literal(ExpressionLiteral::Boolean(value)) => value,
         val => panic!("Expected boolean result, got {:?}", val),
     }
 }

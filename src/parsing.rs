@@ -225,131 +225,110 @@ pub enum DivergeExpressionType {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Expression {
-    IntrinsicType(IntrinsicType, SourceSpan),
-    IntrinsicOperation(IntrinsicOperation, SourceSpan),
-    EnumType(Vec<(Identifier, Expression)>, SourceSpan),
+pub enum ExpressionKind {
+    IntrinsicType(IntrinsicType),
+    IntrinsicOperation(IntrinsicOperation),
+    EnumType(Vec<(Identifier, Expression)>),
     Match {
         value: Box<Expression>,
         branches: Vec<(BindingPattern, Expression)>,
-        span: SourceSpan,
     },
     EnumValue {
         enum_type: Box<Expression>,
         variant: Identifier,
         variant_index: usize,
         payload: Option<Box<Expression>>,
-        span: SourceSpan,
     },
     EnumConstructor {
         enum_type: Box<Expression>,
         variant: Identifier,
         variant_index: usize,
         payload_type: Box<Expression>,
-        span: SourceSpan,
     },
     EnumAccess {
         enum_expr: Box<Expression>,
         variant: Identifier,
-        span: SourceSpan,
     },
     If {
         condition: Box<Expression>,
         then_branch: Box<Expression>,
         else_branch: Option<Box<Expression>>,
-        span: SourceSpan,
     },
     AttachImplementation {
         type_expr: Box<Expression>,
         implementation: Box<Expression>,
-        span: SourceSpan,
     },
     Function {
         parameter: BindingPattern,
         return_type: Option<Box<Expression>>,
         body: Box<Expression>,
-        span: SourceSpan,
     },
     FunctionType {
         parameter: Box<Expression>,
         return_type: Box<Expression>,
-        span: SourceSpan,
     },
-    Struct(Vec<(Identifier, Expression)>, SourceSpan),
-    Literal(ExpressionLiteral, SourceSpan),
-    Identifier(Identifier, SourceSpan),
+    Struct(Vec<(Identifier, Expression)>),
+    Literal(ExpressionLiteral),
+    Identifier(Identifier),
     Operation {
         operator: String,
         left: Box<Expression>,
         right: Box<Expression>,
-        span: SourceSpan,
     },
     Assignment {
         target: LValue,
         expr: Box<Expression>,
-        span: SourceSpan,
     },
     FunctionCall {
         function: Box<Expression>,
         argument: Box<Expression>,
-        span: SourceSpan,
     },
     PropertyAccess {
         object: Box<Expression>,
         property: String,
-        span: SourceSpan,
     },
-    Binding(Box<Binding>, SourceSpan),
-    Block(Vec<Expression>, SourceSpan),
+    Binding(Box<Binding>),
+    Block(Vec<Expression>),
     Diverge {
         value: Option<Box<Expression>>,
         divergance_type: DivergeExpressionType,
-        span: SourceSpan,
     },
     Loop {
         body: Box<Expression>,
-        span: SourceSpan,
     },
 }
 
+impl ExpressionKind {
+    pub fn with_span(self, span: SourceSpan) -> Expression {
+        Expression { kind: self, span }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Expression {
+    pub kind: ExpressionKind,
+    pub span: SourceSpan,
+}
+
 impl Expression {
+    pub fn new(kind: ExpressionKind, span: SourceSpan) -> Self {
+        Self { kind, span }
+    }
+
     pub fn span(&self) -> SourceSpan {
-        match self {
-            Expression::IntrinsicType(_, span)
-            | Expression::IntrinsicOperation(_, span)
-            | Expression::EnumType(_, span)
-            | Expression::EnumAccess { span, .. }
-            | Expression::Struct(_, span)
-            | Expression::If { span, .. }
-            | Expression::Match { span, .. }
-            | Expression::Literal(_, span)
-            | Expression::Identifier(_, span)
-            | Expression::Binding(_, span)
-            | Expression::Block(_, span)
-            | Expression::Diverge { span, .. }
-            | Expression::Loop { span, .. }
-            | Expression::Assignment { span, .. }
-            | Expression::EnumValue { span, .. }
-            | Expression::EnumConstructor { span, .. }
-            | Expression::AttachImplementation { span, .. }
-            | Expression::Function { span, .. }
-            | Expression::FunctionType { span, .. }
-            | Expression::Operation { span, .. }
-            | Expression::FunctionCall { span, .. }
-            | Expression::PropertyAccess { span, .. } => *span,
-        }
+        self.span
     }
 
     // approximately decompiles the expression to a pretty-printed string
     pub fn pretty_print(&self) -> String {
-        match self {
-            Expression::IntrinsicType(ty, _) => match ty {
+        match &self.kind {
+            ExpressionKind::IntrinsicType(ty) => match ty {
                 IntrinsicType::I32 => "i32".to_string(),
                 IntrinsicType::Boolean => "boolean".to_string(),
                 IntrinsicType::Type => "type".to_string(),
                 IntrinsicType::Target => "target".to_string(),
             },
-            Expression::IntrinsicOperation(op, _) => match op {
+            ExpressionKind::IntrinsicOperation(op) => match op {
                 IntrinsicOperation::Binary(left, right, op) => {
                     let op_str = match op {
                         BinaryIntrinsicOperator::I32Add => "+",
@@ -381,16 +360,14 @@ impl Expression {
                     format!("{}({})", op_str, operand.pretty_print())
                 }
             },
-            Expression::EnumType(variants, _) => {
+            ExpressionKind::EnumType(variants) => {
                 let variant_strs: Vec<String> = variants
                     .iter()
                     .map(|(name, ty)| format!("{}({})", name.name, ty.pretty_print()))
                     .collect();
                 format!("enum {{ {} }}", variant_strs.join(", "))
             }
-            Expression::Match {
-                value, branches, ..
-            } => {
+            ExpressionKind::Match { value, branches } => {
                 let branch_strs: Vec<String> = branches
                     .iter()
                     .map(|(pattern, body)| {
@@ -403,7 +380,7 @@ impl Expression {
                     branch_strs.join(", ")
                 )
             }
-            Expression::EnumValue {
+            ExpressionKind::EnumValue {
                 enum_type,
                 variant,
                 payload,
@@ -420,7 +397,7 @@ impl Expression {
                     payload_str
                 )
             }
-            Expression::EnumConstructor {
+            ExpressionKind::EnumConstructor {
                 enum_type,
                 variant,
                 payload_type,
@@ -433,14 +410,13 @@ impl Expression {
                     payload_type.pretty_print()
                 )
             }
-            Expression::EnumAccess {
-                enum_expr, variant, ..
-            } => format!("{}::{}", enum_expr.pretty_print(), variant.name),
-            Expression::If {
+            ExpressionKind::EnumAccess { enum_expr, variant } => {
+                format!("{}::{}", enum_expr.pretty_print(), variant.name)
+            }
+            ExpressionKind::If {
                 condition,
                 then_branch,
                 else_branch,
-                ..
             } => {
                 let else_str = else_branch
                     .as_ref()
@@ -453,7 +429,7 @@ impl Expression {
                     else_str
                 )
             }
-            Expression::AttachImplementation {
+            ExpressionKind::AttachImplementation {
                 type_expr,
                 implementation,
                 ..
@@ -472,11 +448,10 @@ impl Expression {
                 };
                 format!("{} @ {}", type_expr.pretty_print(), implementation_str)
             }
-            Expression::Function {
+            ExpressionKind::Function {
                 parameter,
                 return_type,
                 body,
-                ..
             } => {
                 let return_str = return_type
                     .as_ref()
@@ -489,23 +464,22 @@ impl Expression {
                     body.pretty_print()
                 )
             }
-            Expression::FunctionType {
+            ExpressionKind::FunctionType {
                 parameter,
                 return_type,
-                ..
             } => format!(
                 "({}) => {}",
                 parameter.pretty_print(),
                 return_type.pretty_print()
             ),
-            Expression::Struct(fields, _) => {
+            ExpressionKind::Struct(fields) => {
                 let field_strs: Vec<String> = fields
                     .iter()
                     .map(|(name, value)| format!("{} = {}", name.name, value.pretty_print()))
                     .collect();
                 format!("{{ {} }}", field_strs.join(", "))
             }
-            Expression::Literal(lit, _) => match lit {
+            ExpressionKind::Literal(lit) => match lit {
                 ExpressionLiteral::Number(n) => n.to_string(),
                 ExpressionLiteral::Boolean(b) => b.to_string(),
                 ExpressionLiteral::Target(t) => match t {
@@ -513,42 +487,40 @@ impl Expression {
                     TargetLiteral::WasmTarget => "wasm".to_string(),
                 },
             },
-            Expression::Identifier(id, _) => id.name.clone(),
-            Expression::Operation {
+            ExpressionKind::Identifier(id) => id.name.clone(),
+            ExpressionKind::Operation {
                 operator,
                 left,
                 right,
-                ..
             } => format!(
                 "{} {} {}",
                 left.pretty_print(),
                 operator,
                 right.pretty_print()
             ),
-            Expression::Assignment { target, expr, .. } => {
+            ExpressionKind::Assignment { target, expr } => {
                 format!("{} = {}", target.pretty_print(), expr.pretty_print())
             }
-            Expression::FunctionCall {
-                function, argument, ..
-            } => format!("{}({})", function.pretty_print(), argument.pretty_print()),
-            Expression::PropertyAccess {
-                object, property, ..
-            } => format!("{}.{}", object.pretty_print(), property),
-            Expression::Binding(binding, _) => {
+            ExpressionKind::FunctionCall { function, argument } => {
+                format!("{}({})", function.pretty_print(), argument.pretty_print())
+            }
+            ExpressionKind::PropertyAccess { object, property } => {
+                format!("{}.{}", object.pretty_print(), property)
+            }
+            ExpressionKind::Binding(binding) => {
                 format!(
                     "{} := {}",
                     binding.pattern.pretty_print(),
                     binding.expr.pretty_print()
                 )
             }
-            Expression::Block(exprs, _) => {
+            ExpressionKind::Block(exprs) => {
                 let expr_strs: Vec<String> = exprs.iter().map(|e| e.pretty_print()).collect();
                 format!("( {} )", expr_strs.join("; "))
             }
-            Expression::Diverge {
+            ExpressionKind::Diverge {
                 value,
                 divergance_type,
-                ..
             } => {
                 let keyword = match divergance_type {
                     DivergeExpressionType::Return => "return",
@@ -559,7 +531,7 @@ impl Expression {
                     None => keyword.to_string(),
                 }
             }
-            Expression::Loop { body, .. } => format!("loop {}", body.pretty_print()),
+            ExpressionKind::Loop { body } => format!("loop {}", body.pretty_print()),
         }
     }
 }
@@ -649,9 +621,9 @@ fn parse_match_expression_with_source<'a>(
             break;
         }
         let (branch_expr, rest) = parse_operation_expression_with_guard(source, remaining)?;
-        let Expression::Function {
+        let ExpressionKind::Function {
             parameter, body, ..
-        } = branch_expr
+        } = branch_expr.kind
         else {
             return Err(diagnostic_here(
                 source,
@@ -671,11 +643,11 @@ fn parse_match_expression_with_source<'a>(
     let span = consumed_span(source, start_slice, remaining);
 
     Ok((
-        Expression::Match {
+        ExpressionKind::Match {
             value: Box::new(value),
             branches,
-            span,
-        },
+        }
+        .with_span(span),
         remaining,
     ))
 }
@@ -725,12 +697,12 @@ fn parse_if_expression_with_source<'a>(
 
     let span = consumed_span(source, start_slice, remaining);
     Ok((
-        Expression::If {
+        ExpressionKind::If {
             condition: Box::new(condition),
             then_branch: Box::new(then_branch),
             else_branch: else_branch.map(Box::new),
-            span,
-        },
+        }
+        .with_span(span),
         remaining,
     ))
 }
@@ -853,8 +825,8 @@ fn test_enum_pattern_parse2() {
             payload,
             ..
         } => {
-            match *enum_type {
-                Expression::Identifier(Identifier { name, .. }, _) if name == "Option" => {}
+            match enum_type.kind {
+                ExpressionKind::Identifier(Identifier { name, .. }) if name == "Option" => {}
                 _ => panic!("Expected enum type identifier 'Option'"),
             }
             assert_eq!(variant.name, "Some");
@@ -871,15 +843,10 @@ fn test_enum_pattern_parse2() {
 }
 
 fn expression_to_lvalue(expression: Expression) -> Result<LValue, Diagnostic> {
-    match expression {
-        Expression::Identifier(identifier, source_span) => {
-            Ok(LValue::Identifier(identifier, source_span))
-        }
-        Expression::PropertyAccess {
-            object,
-            property,
-            span,
-        } => {
+    let span = expression.span;
+    match expression.kind {
+        ExpressionKind::Identifier(identifier) => Ok(LValue::Identifier(identifier, span)),
+        ExpressionKind::PropertyAccess { object, property } => {
             let object_lvalue = expression_to_lvalue(*object)?;
             Ok(LValue::PropertyAccess {
                 object: Box::new(object_lvalue),
@@ -887,26 +854,7 @@ fn expression_to_lvalue(expression: Expression) -> Result<LValue, Diagnostic> {
                 span,
             })
         }
-        Expression::EnumAccess { .. }
-        | Expression::Struct { .. }
-        | Expression::Literal { .. }
-        | Expression::FunctionCall { .. }
-        | Expression::EnumValue { .. }
-        | Expression::EnumConstructor { .. }
-        | Expression::IntrinsicType(..)
-        | Expression::If { .. }
-        | Expression::AttachImplementation { .. }
-        | Expression::Function { .. }
-        | Expression::FunctionType { .. }
-        | Expression::IntrinsicOperation(..)
-        | Expression::EnumType(..)
-        | Expression::Match { .. }
-        | Expression::Operation { .. }
-        | Expression::Assignment { .. }
-        | Expression::Binding(..)
-        | Expression::Block(..)
-        | Expression::Diverge { .. }
-        | Expression::Loop { .. } => {
+        _ => {
             Err(Diagnostic::new("Invalid binding pattern expression").with_span(expression.span()))
         }
     }
@@ -915,26 +863,24 @@ fn expression_to_lvalue(expression: Expression) -> Result<LValue, Diagnostic> {
 fn pattern_expression_to_binding_pattern(
     pattern_expression: Expression,
 ) -> Result<BindingPattern, Diagnostic> {
-    match pattern_expression {
-        Expression::Literal(expression_literal, source_span) => {
-            Ok(BindingPattern::Literal(expression_literal, source_span))
+    let span = pattern_expression.span;
+    match pattern_expression.kind {
+        ExpressionKind::Literal(expression_literal) => {
+            Ok(BindingPattern::Literal(expression_literal, span))
         }
-        Expression::Identifier(identifier, source_span) => {
-            Ok(BindingPattern::Identifier(identifier, source_span))
-        }
-        Expression::Struct(items, source_span) => {
+        ExpressionKind::Identifier(identifier) => Ok(BindingPattern::Identifier(identifier, span)),
+        ExpressionKind::Struct(items) => {
             let mut field_patterns = Vec::new();
             for (identifier, expr) in items {
                 let field_pattern = pattern_expression_to_binding_pattern(expr)?;
                 field_patterns.push((identifier, field_pattern));
             }
-            Ok(BindingPattern::Struct(field_patterns, source_span))
+            Ok(BindingPattern::Struct(field_patterns, span))
         }
-        Expression::Operation {
+        ExpressionKind::Operation {
             operator,
             left,
             right,
-            span,
         } if operator == ":" => {
             let left_pattern = pattern_expression_to_binding_pattern(*left)?;
             Ok(BindingPattern::TypeHint(
@@ -943,13 +889,13 @@ fn pattern_expression_to_binding_pattern(
                 span,
             ))
         }
-        Expression::FunctionCall {
-            function,
-            argument,
-            span,
-        } => match *function {
-            Expression::EnumAccess {
-                enum_expr, variant, ..
+        ExpressionKind::FunctionCall { function, argument } => match *function {
+            Expression {
+                kind:
+                    ExpressionKind::EnumAccess {
+                        enum_expr, variant, ..
+                    },
+                ..
             } => Ok(BindingPattern::EnumVariant {
                 enum_type: enum_expr,
                 variant,
@@ -962,10 +908,8 @@ fn pattern_expression_to_binding_pattern(
                 span,
             }),
         },
-        Expression::EnumAccess {
-            enum_expr,
-            variant,
-            span,
+        ExpressionKind::EnumAccess {
+            enum_expr, variant, ..
         } => Ok(BindingPattern::EnumVariant {
             enum_type: enum_expr,
             variant,
@@ -973,47 +917,30 @@ fn pattern_expression_to_binding_pattern(
             span,
         }),
 
-        Expression::EnumValue { .. }
-        | Expression::EnumConstructor { .. }
-        | Expression::PropertyAccess { .. }
-        | Expression::IntrinsicType(..)
-        | Expression::If { .. }
-        | Expression::AttachImplementation { .. }
-        | Expression::Function { .. }
-        | Expression::FunctionType { .. }
-        | Expression::IntrinsicOperation(..)
-        | Expression::EnumType(..)
-        | Expression::Match { .. }
-        | Expression::Operation { .. }
-        | Expression::Assignment { .. }
-        | Expression::Binding(..)
-        | Expression::Block(..)
-        | Expression::Diverge { .. }
-        | Expression::Loop { .. } => Err(Diagnostic::new("Invalid binding pattern expression")
-            .with_span(pattern_expression.span())),
+        _ => Err(Diagnostic::new("Invalid binding pattern expression").with_span(span)),
     }
 }
 
 fn extract_binding_annotations_from_expression(
     expression: Expression,
 ) -> Result<Vec<BindingAnnotation>, Diagnostic> {
-    match expression {
-        Expression::Identifier(Identifier { name: id, .. }, span) if id == "mut" => {
+    let span = expression.span();
+    match expression.kind {
+        ExpressionKind::Identifier(Identifier { name: id, .. }) if id == "mut" => {
             Ok(vec![BindingAnnotation::Mutable(span)])
         }
-        Expression::FunctionCall {
-            function, argument, ..
-        } => match *function {
-            Expression::Identifier(Identifier { name: id, .. }, ann_span) if id == "export" => {
-                Ok(vec![BindingAnnotation::Export(*argument, ann_span)])
-            }
+        ExpressionKind::FunctionCall { function, argument } => match *function {
+            Expression {
+                kind: ExpressionKind::Identifier(Identifier { name: id, .. }),
+                span: ann_span,
+            } if id == "export" => Ok(vec![BindingAnnotation::Export(*argument, ann_span)]),
             other => {
                 let mut annotations = extract_binding_annotations_from_expression(other)?;
                 annotations.extend(extract_binding_annotations_from_expression(*argument)?);
                 Ok(annotations)
             }
         },
-        _ => Err(Diagnostic::new("Invalid binding annotation").with_span(expression.span())),
+        _ => Err(Diagnostic::new("Invalid binding annotation").with_span(span)),
     }
 }
 
@@ -1109,7 +1036,7 @@ fn parse_struct_expression<'a>(
 
             if let Some(rest) = remaining.strip_prefix("}") {
                 let span = consumed_span(source, start_slice, rest);
-                return Ok((Expression::Struct(items, span), rest));
+                return Ok((ExpressionKind::Struct(items).with_span(span), rest));
             }
 
             if let Some((identifier, after_identifier)) = parse_identifier(remaining) {
@@ -1124,7 +1051,7 @@ fn parse_struct_expression<'a>(
 
                     if let Some(rest) = remaining.strip_prefix("}") {
                         let span = consumed_span(source, start_slice, rest);
-                        return Ok((Expression::Struct(items, span), rest));
+                        return Ok((ExpressionKind::Struct(items).with_span(span), rest));
                     }
 
                     remaining = remaining.strip_prefix(",").ok_or_else(|| {
@@ -1142,7 +1069,7 @@ fn parse_struct_expression<'a>(
 
             if let Some(rest) = remaining.strip_prefix("}") {
                 let span = consumed_span(source, start_slice, rest);
-                return Ok((Expression::Struct(items, span), rest));
+                return Ok((ExpressionKind::Struct(items).with_span(span), rest));
             }
 
             remaining = remaining.strip_prefix(",").ok_or_else(|| {
@@ -1190,11 +1117,11 @@ fn parse_return_expression_with_source<'a>(
 
     let span = consumed_span(source, start_slice, rest);
     Some(Ok((
-        Expression::Diverge {
+        ExpressionKind::Diverge {
             divergance_type: DivergeExpressionType::Return,
             value: value.map(Box::new),
-            span,
-        },
+        }
+        .with_span(span),
         rest,
     )))
 }
@@ -1232,11 +1159,11 @@ fn parse_break_expression_with_source<'a>(
 
     let span = consumed_span(source, start_slice, rest);
     Some(Ok((
-        Expression::Diverge {
+        ExpressionKind::Diverge {
             divergance_type: DivergeExpressionType::Break,
             value: value.map(Box::new),
-            span,
-        },
+        }
+        .with_span(span),
         rest,
     )))
 }
@@ -1275,10 +1202,10 @@ fn parse_loop_expression_with_source<'a>(
         Ok((body, rest)) => {
             let span = consumed_span(source, start_slice, rest);
             Some(Ok((
-                Expression::Loop {
+                ExpressionKind::Loop {
                     body: Box::new(body),
-                    span,
-                },
+                }
+                .with_span(span),
                 rest,
             )))
         }
@@ -1337,31 +1264,33 @@ fn parse_while_expression_with_source<'a>(
             let span = consumed_span(source, start_slice, rest);
             let condition_span = condition.span();
             Some(Ok((
-                Expression::Loop {
-                    body: Box::new(Expression::Block(
-                        vec![
-                            Expression::If {
-                                condition: Box::new(Expression::IntrinsicOperation(
-                                    IntrinsicOperation::Unary(
+                ExpressionKind::Loop {
+                    body: Box::new(
+                        ExpressionKind::Block(vec![
+                            ExpressionKind::If {
+                                condition: Box::new(
+                                    ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
                                         Box::new(condition),
                                         UnaryIntrinsicOperator::BooleanNot,
-                                    ),
-                                    condition_span,
-                                )),
-                                then_branch: Box::new(Expression::Diverge {
-                                    value: None,
-                                    divergance_type: DivergeExpressionType::Break,
-                                    span: condition_span,
-                                }),
+                                    ))
+                                    .with_span(condition_span),
+                                ),
+                                then_branch: Box::new(
+                                    ExpressionKind::Diverge {
+                                        value: None,
+                                        divergance_type: DivergeExpressionType::Break,
+                                    }
+                                    .with_span(condition_span),
+                                ),
                                 else_branch: None,
-                                span: condition_span,
-                            },
+                            }
+                            .with_span(condition_span),
                             body,
-                        ],
-                        span,
-                    )),
-                    span,
-                },
+                        ])
+                        .with_span(span),
+                    ),
+                }
+                .with_span(span),
                 rest,
             )))
         }
@@ -1411,11 +1340,14 @@ fn parse_isolated_expression_with_source_with_guard<'a>(
     }
     if let Some((identifier, remaining)) = parse_identifier(file) {
         let span = consumed_span(source, file, remaining);
-        return Ok((Expression::Identifier(identifier, span), remaining));
+        return Ok((
+            ExpressionKind::Identifier(identifier).with_span(span),
+            remaining,
+        ));
     }
     if let Some((literal, remaining)) = parse_literal(file) {
         let span = consumed_span(source, file, remaining);
-        return Ok((Expression::Literal(literal, span), remaining));
+        return Ok((ExpressionKind::Literal(literal).with_span(span), remaining));
     }
     Err(diagnostic_here(
         source,
@@ -1466,11 +1398,11 @@ fn parse_assignment_expression_with_guard<'a>(
             let (expr, remaining) = parse_operation_expression_with_guard(source, after_equals)?;
             let span = consumed_span(source, start_slice, remaining);
             return Ok((
-                Expression::Assignment {
+                ExpressionKind::Assignment {
                     target,
                     expr: Box::new(expr),
-                    span,
-                },
+                }
+                .with_span(span),
                 remaining,
             ));
         }
@@ -1577,41 +1509,35 @@ fn parse_operation_expression_with_min_precedence<'a>(
             diagnostic_at_eof(source, "Expected left operand when reducing operation")
         })?;
         let span = left.span().merge(&right.span());
-        operand_stack.push(match operator.as_str() {
+        let processed_operation = match operator.as_str() {
             "=" => {
                 let target = expression_to_lvalue(left)?;
-                Expression::Assignment {
+                ExpressionKind::Assignment {
                     target,
                     expr: Box::new(right),
-                    span,
                 }
             }
             ":=" => {
                 let pattern = pattern_expression_to_binding_pattern(left)?;
-                Expression::Binding(
-                    Box::new(Binding {
-                        pattern,
-                        expr: right,
-                    }),
-                    span,
-                )
+                ExpressionKind::Binding(Box::new(Binding {
+                    pattern,
+                    expr: right,
+                }))
             }
             "=>" => {
                 let pattern = pattern_expression_to_binding_pattern(left)?;
-                Expression::Function {
+                ExpressionKind::Function {
                     parameter: pattern,
                     return_type: None,
                     body: Box::new(right),
-                    span,
                 }
             }
-            "->" => Expression::FunctionType {
+            "->" => ExpressionKind::FunctionType {
                 parameter: Box::new(left),
                 return_type: Box::new(right),
-                span,
             },
             "::" => {
-                let Expression::Identifier(variant, _) = right else {
+                let ExpressionKind::Identifier(variant) = right.kind else {
                     return Err(diagnostic_here(
                         source,
                         "",
@@ -1619,23 +1545,20 @@ fn parse_operation_expression_with_min_precedence<'a>(
                         "Expected identifier as enum variant in enum access",
                     ));
                 };
-                Expression::EnumAccess {
+                ExpressionKind::EnumAccess {
                     enum_expr: Box::new(left),
                     variant,
-                    span,
                 }
             }
-            "." => match right {
-                Expression::Identifier(property, _) => Expression::PropertyAccess {
+            "." => match right.kind {
+                ExpressionKind::Identifier(property) => ExpressionKind::PropertyAccess {
                     object: Box::new(left),
                     property: property.name,
-                    span,
                 },
-                Expression::Literal(ExpressionLiteral::Number(num), _) => {
-                    Expression::PropertyAccess {
+                ExpressionKind::Literal(ExpressionLiteral::Number(num)) => {
+                    ExpressionKind::PropertyAccess {
                         object: Box::new(left),
                         property: num.to_string(),
-                        span,
                     }
                 }
                 _ => {
@@ -1647,18 +1570,17 @@ fn parse_operation_expression_with_min_precedence<'a>(
                     ));
                 }
             },
-            "" => Expression::FunctionCall {
+            "" => ExpressionKind::FunctionCall {
                 function: Box::new(left),
                 argument: Box::new(right),
-                span,
             },
-            operator => Expression::Operation {
+            operator => ExpressionKind::Operation {
                 operator: operator.to_string(),
                 left: Box::new(left),
                 right: Box::new(right),
-                span,
             },
-        });
+        };
+        operand_stack.push(Expression::new(processed_operation, span));
         Ok(())
     }
 
@@ -1749,10 +1671,8 @@ fn parse_block_with_terminators<'a>(
     }
 
     if ended_with_semicolon && let Some(last_span) = expressions.last().map(|expr| expr.span()) {
-        expressions.push(Expression::Struct(
-            vec![],
-            SourceSpan::new(last_span.end(), 0),
-        ));
+        expressions
+            .push(ExpressionKind::Struct(vec![]).with_span(SourceSpan::new(last_span.end(), 0)));
     }
 
     if expressions.len() == 1 {
@@ -1762,26 +1682,30 @@ fn parse_block_with_terminators<'a>(
             .iter()
             .skip(1)
             .fold(expressions[0].span(), |acc, expr| acc.merge(&expr.span()));
-        Ok((Expression::Block(expressions, span), remaining))
+        Ok((
+            Expression::new(ExpressionKind::Block(expressions), span),
+            remaining,
+        ))
     }
 }
 
 #[test]
 fn parse_basic_let() {
-    let parsed = parse_block(
+    let Ok((parsed, "")) = parse_block(
         "
 x := 42;
 y: i32 := x
     ",
-    )
-    .unwrap();
+    ) else {
+        panic!()
+    };
 
-    let (Expression::Block(parsed, _), "") = parsed else {
+    let ExpressionKind::Block(parsed) = parsed.kind else {
         panic!()
     };
     assert_eq!(parsed.len(), 2);
 
-    let Expression::Binding(binding1, _) = &parsed[0] else {
+    let ExpressionKind::Binding(binding1) = &parsed[0].kind else {
         panic!()
     };
     assert_eq!(
@@ -1789,15 +1713,15 @@ y: i32 := x
         true
     );
     assert_eq!(
-        matches!(binding1.expr, Expression::Literal(ExpressionLiteral::Number(lit), _) if lit == 42),
+        matches!(&binding1.expr.kind, ExpressionKind::Literal(ExpressionLiteral::Number(lit)) if *lit == 42),
         true
     );
 
-    let Expression::Binding(binding2, _) = &parsed[1] else {
+    let ExpressionKind::Binding(binding2) = &parsed[1].kind else {
         panic!()
     };
     assert_eq!(
-        matches!(binding2.expr, Expression::Identifier(ref lit, _) if lit.name == "x"),
+        matches!(&binding2.expr.kind, ExpressionKind::Identifier(lit) if lit.name == "x"),
         true
     );
     let BindingPattern::TypeHint(binding2, binding2_type, _) = &binding2.pattern else {
@@ -1805,28 +1729,29 @@ y: i32 := x
     };
     assert!(matches!(**binding2, BindingPattern::Identifier(ref hint, _) if hint.name == "y"));
     assert_eq!(
-        matches!(**binding2_type, Expression::Identifier(ref hint, _) if hint.name == "i32"),
+        matches!(binding2_type.kind, ExpressionKind::Identifier(ref hint) if hint.name == "i32"),
         true
     );
 }
 
 #[test]
 fn parse_binding_with_export_annotation() {
-    let parsed = parse_block(
+    let Ok((parsed, "")) = parse_block(
         "
 (export js) foo := 42;
 (export wasm) (export js) bar := foo;
 bar
     ",
-    )
-    .unwrap();
+    ) else {
+        panic!()
+    };
 
-    let (Expression::Block(parsed, _), "") = parsed else {
+    let ExpressionKind::Block(parsed) = parsed.kind else {
         panic!()
     };
     assert_eq!(parsed.len(), 3);
 
-    let Expression::Binding(binding1, _) = &parsed[0] else {
+    let ExpressionKind::Binding(binding1) = &parsed[0].kind else {
         panic!()
     };
     let BindingPattern::Annotated {
@@ -1840,13 +1765,16 @@ bar
     assert_eq!(annotations.len(), 1);
     match &annotations[0] {
         BindingAnnotation::Export(target_expr, _) => match target_expr {
-            Expression::Identifier(identifier, _) => assert_eq!(identifier.name, "js"),
+            Expression {
+                kind: ExpressionKind::Identifier(identifier),
+                ..
+            } => assert_eq!(identifier.name, "js"),
             other => panic!("expected target identifier, got {:?}", other),
         },
         other => panic!("unexpected annotation: {:?}", other),
     }
 
-    let Expression::Binding(binding2, _) = &parsed[1] else {
+    let ExpressionKind::Binding(binding2) = &parsed[1].kind else {
         panic!()
     };
     let BindingPattern::Annotated { annotations, .. } = &binding2.pattern else {
@@ -1859,18 +1787,19 @@ bar
 
 #[test]
 fn parse_struct_pattern_with_inner_multiple_annotations() {
-    let parsed = parse_block(
+    let Ok((parsed, "")) = parse_block(
         "
 { foo = (export js) mut foo_binding, bar } := value;
 foo_binding
     ",
-    )
-    .unwrap();
-
-    let (Expression::Block(parsed, _), "") = parsed else {
+    ) else {
         panic!()
     };
-    let Expression::Binding(binding, _) = &parsed[0] else {
+
+    let ExpressionKind::Block(parsed) = parsed.kind else {
+        panic!()
+    };
+    let ExpressionKind::Binding(binding) = &parsed[0].kind else {
         panic!()
     };
     let BindingPattern::Struct(fields, _) = &binding.pattern else {
@@ -1894,18 +1823,19 @@ foo_binding
 
 #[test]
 fn parse_struct_pattern_with_inner_export_annotation() {
-    let parsed = parse_block(
+    let Ok((parsed, "")) = parse_block(
         "
 { foo = (export js) foo_binding, bar } := value;
 foo_binding
     ",
-    )
-    .unwrap();
-
-    let (Expression::Block(parsed, _), "") = parsed else {
+    ) else {
         panic!()
     };
-    let Expression::Binding(binding, _) = &parsed[0] else {
+
+    let ExpressionKind::Block(parsed) = parsed.kind else {
+        panic!()
+    };
+    let ExpressionKind::Binding(binding) = &parsed[0].kind else {
         panic!()
     };
     let BindingPattern::Struct(fields, _) = &binding.pattern else {
@@ -1923,19 +1853,20 @@ foo_binding
 
 #[test]
 fn parse_mutable_binding_and_assignment() {
-    let parsed = parse_block(
+    let Ok((parsed, "")) = parse_block(
         "
 mut foo := 1;
 foo = 2
     ",
-    )
-    .unwrap();
-
-    let (Expression::Block(parsed, _), "") = parsed else {
+    ) else {
         panic!()
     };
 
-    let Expression::Binding(binding, _) = &parsed[0] else {
+    let ExpressionKind::Block(parsed) = parsed.kind else {
+        panic!()
+    };
+
+    let ExpressionKind::Binding(binding) = &parsed[0].kind else {
         panic!("expected binding expression")
     };
     let BindingPattern::Annotated { annotations, .. } = &binding.pattern else {
@@ -1947,7 +1878,7 @@ foo = 2
             .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)))
     );
 
-    let Expression::Assignment { target, .. } = &parsed[1] else {
+    let ExpressionKind::Assignment { target, .. } = &parsed[1].kind else {
         panic!("expected assignment expression")
     };
     assert!(matches!(
@@ -1958,70 +1889,67 @@ foo = 2
 
 #[test]
 fn parse_operation_expression_precedence() {
-    let (expr, remaining) = parse_operation_expression("1 + 2 * 3 / 4 - 5").unwrap();
-    assert_eq!(remaining, "");
-    let Expression::Operation {
+    let Ok((expr, "")) = parse_operation_expression("1 + 2 * 3 / 4 - 5") else {
+        panic!();
+    };
+    let ExpressionKind::Operation {
         operator,
         left,
         right,
-        span: _,
-    } = expr
+    } = &expr.kind
     else {
         panic!()
     };
     assert_eq!(operator, "-");
     assert!(matches!(
-        *right,
-        Expression::Literal(ExpressionLiteral::Number(5), _)
+        &right.kind,
+        ExpressionKind::Literal(ExpressionLiteral::Number(5))
     ));
 
-    let Expression::Operation {
+    let ExpressionKind::Operation {
         operator,
         left,
         right,
-        span: _,
-    } = *left
+    } = &left.kind
     else {
         panic!();
     };
     assert_eq!(operator, "+");
     assert!(matches!(
-        *left,
-        Expression::Literal(ExpressionLiteral::Number(1), _)
+        &left.kind,
+        ExpressionKind::Literal(ExpressionLiteral::Number(1))
     ));
 
-    let Expression::Operation {
+    let ExpressionKind::Operation {
         operator,
         left,
         right,
-        span: _,
-    } = *right
+    } = &right.kind
     else {
         panic!();
     };
     assert_eq!(operator, "/");
     assert!(matches!(
-        *right,
-        Expression::Literal(ExpressionLiteral::Number(4), _)
+        &right.kind,
+        ExpressionKind::Literal(ExpressionLiteral::Number(4))
     ));
 
-    let Expression::Operation {
+    let ExpressionKind::Operation {
         operator,
         left,
         right,
-        span: _,
-    } = *left
+    } = &left.kind
     else {
         panic!();
     };
     assert_eq!(operator, "*");
     assert!(matches!(
-        *left,
-        Expression::Literal(ExpressionLiteral::Number(2), _)
+        &left.kind,
+        ExpressionKind::Literal(ExpressionLiteral::Number(2))
     ));
     assert!(matches!(
-        *right,
-        Expression::Literal(ExpressionLiteral::Number(3), _)
+        &right.kind,
+        ExpressionKind::Literal(ExpressionLiteral::Number(3))
     ));
 }
 
@@ -2037,12 +1965,12 @@ foo(123)
 
     assert!(remaining.trim().is_empty());
 
-    let Expression::Block(items, _) = expr else {
+    let ExpressionKind::Block(items) = &expr.kind else {
         panic!("expected block with binding and call");
     };
     assert_eq!(items.len(), 2);
 
-    let Expression::Binding(binding, _) = &items[0] else {
+    let ExpressionKind::Binding(binding) = &items[0].kind else {
         panic!("first expression should be binding");
     };
     assert!(matches!(
@@ -2050,16 +1978,15 @@ foo(123)
         BindingPattern::Identifier(Identifier { name, .. }, _) if name == "foo"
     ));
 
-    let Expression::Function {
+    let ExpressionKind::Function {
         parameter,
         return_type,
         body,
-        span: _,
-    } = &binding.expr
+    } = &binding.expr.kind
     else {
         panic!(
             "binding should store function expression, got {:?}",
-            binding.expr
+            binding.expr.kind
         );
     };
 
@@ -2071,33 +1998,28 @@ foo(123)
         BindingPattern::Identifier(Identifier { name, .. }, _) if name == "bar"
     ));
     assert!(matches!(
-        type_hint.as_ref(),
-        Expression::Identifier(Identifier { name, .. }, _) if name == "i32"
+        &type_hint.kind,
+        ExpressionKind::Identifier(Identifier { name, .. }) if name == "i32"
     ));
     assert!(matches!(return_type.as_ref(), None));
     assert!(matches!(
-        **body,
-        Expression::Operation {
-            operator: ref op,
+        &body.kind,
+        ExpressionKind::Operation {
+            operator: op,
             ..
         } if op == "+"
     ));
 
-    let Expression::FunctionCall {
-        function,
-        argument,
-        span: _,
-    } = &items[1]
-    else {
+    let ExpressionKind::FunctionCall { function, argument } = &items[1].kind else {
         panic!("expected function call as second expression");
     };
     assert!(matches!(
-        function.as_ref(),
-        Expression::Identifier(Identifier { name, .. }, _) if name == "foo"
+        &function.kind,
+        ExpressionKind::Identifier(Identifier { name, .. }) if name == "foo"
     ));
     assert!(matches!(
-        **argument,
-        Expression::Literal(ExpressionLiteral::Number(123), _)
+        &argument.kind,
+        ExpressionKind::Literal(ExpressionLiteral::Number(123))
     ));
 }
 
@@ -2111,7 +2033,7 @@ fn parse_function_struct_parameter_pattern() {
     .unwrap();
     assert!(remaining.trim().is_empty());
 
-    let Expression::Function { parameter, .. } = expr else {
+    let ExpressionKind::Function { parameter, .. } = &expr.kind else {
         panic!("expected function expression");
     };
     let BindingPattern::Struct(fields, _) = parameter else {
@@ -2129,8 +2051,8 @@ fn parse_function_struct_parameter_pattern() {
         BindingPattern::Identifier(Identifier { name, .. }, _) if name == "bar1"
     ));
     assert!(matches!(
-        first_type.as_ref(),
-        Expression::Identifier(Identifier { name, .. }, _) if name == "i32"
+        &first_type.kind,
+        ExpressionKind::Identifier(Identifier { name, .. }) if name == "i32"
     ));
 
     let (second_name, second_pattern) = &fields[1];
@@ -2143,8 +2065,8 @@ fn parse_function_struct_parameter_pattern() {
         BindingPattern::Identifier(Identifier { name, .. }, _) if name == "bar2"
     ));
     assert!(matches!(
-        second_type.as_ref(),
-        Expression::Identifier(Identifier { name, .. }, _) if name == "i32"
+        &second_type.kind,
+        ExpressionKind::Identifier(Identifier { name, .. }) if name == "i32"
     ));
 }
 
@@ -2152,7 +2074,7 @@ fn parse_function_struct_parameter_pattern() {
 fn parse_struct_literal_named_and_tuple_fields() {
     let (expr, remaining) = parse_isolated_expression("{foo = 10, 20, bar = 30}").unwrap();
     assert!(remaining.trim().is_empty());
-    let Expression::Struct(items, _) = expr else {
+    let ExpressionKind::Struct(items) = &expr.kind else {
         panic!("expected struct literal");
     };
     assert_eq!(items.len(), 3);
@@ -2181,28 +2103,22 @@ fn parse_struct_property_access_chain() {
     let (expr, remaining) = parse_operation_expression("foo.bar.baz").expect("parse");
     assert!(remaining.trim().is_empty());
 
-    let Expression::PropertyAccess {
-        object,
-        property,
-        span: _,
-    } = expr
-    else {
+    let ExpressionKind::PropertyAccess { object, property } = &expr.kind else {
         panic!("expected outer property access");
     };
     assert_eq!(property, "baz");
 
-    let Expression::PropertyAccess {
+    let ExpressionKind::PropertyAccess {
         object: inner_object,
         property: inner_property,
-        span: _,
-    } = *object
+    } = &object.kind
     else {
         panic!("expected inner property access");
     };
     assert_eq!(inner_property, "bar");
     assert!(matches!(
-        *inner_object,
-        Expression::Identifier(Identifier { name, .. }, _) if name == "foo"
+        &inner_object.kind,
+        ExpressionKind::Identifier(Identifier { name, .. }) if name == "foo"
     ));
 }
 
@@ -2211,30 +2127,20 @@ fn parse_struct_property_access_then_call() {
     let (expr, remaining) = parse_operation_expression("foo.bar baz").expect("parse");
     assert!(remaining.trim().is_empty());
 
-    let Expression::FunctionCall {
-        function,
-        argument,
-        span: _,
-    } = expr
-    else {
+    let ExpressionKind::FunctionCall { function, argument } = &expr.kind else {
         panic!("expected function call");
     };
     assert!(matches!(
-        *argument,
-        Expression::Identifier(Identifier { name, .. }, _) if name == "baz"
+        &argument.kind,
+        ExpressionKind::Identifier(Identifier { name, .. }) if name == "baz"
     ));
-    let Expression::PropertyAccess {
-        object,
-        property,
-        span: _,
-    } = *function
-    else {
+    let ExpressionKind::PropertyAccess { object, property } = &function.kind else {
         panic!("expected property access as function part");
     };
     assert_eq!(property, "bar");
     assert!(matches!(
-        *object,
-        Expression::Identifier(Identifier { name, .. }, _) if name == "foo"
+        &object.kind,
+        ExpressionKind::Identifier(Identifier { name, .. }) if name == "foo"
     ));
 }
 

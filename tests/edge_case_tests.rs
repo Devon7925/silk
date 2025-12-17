@@ -1,4 +1,4 @@
-use silk::parsing::{Expression, ExpressionLiteral, parse_block};
+use silk::parsing::{Expression, ExpressionKind, ExpressionLiteral, parse_block};
 use silk::test_support::{
     Context, interpret_program, intrinsic_context, simplify_context, simplify_expression,
 };
@@ -20,14 +20,15 @@ fn evaluate_text_to_simplified_expression(
 }
 
 fn assert_final_number(result: Expression, expected: i32) {
-    match result {
-        Expression::Literal(ExpressionLiteral::Number(value), _) => {
-            assert_eq!(value, expected)
-        }
-        Expression::Block(expressions, _) => match expressions.last() {
-            Some(Expression::Literal(ExpressionLiteral::Number(value), _)) => {
-                assert_eq!(*value, expected)
-            }
+    match result.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, expected),
+        ExpressionKind::Block(expressions) => match expressions.last() {
+            Some(expr) => match &expr.kind {
+                ExpressionKind::Literal(ExpressionLiteral::Number(value)) => {
+                    assert_eq!(*value, expected)
+                }
+                other => panic!("Expected final numeric literal, got {:?}", other),
+            },
             other => panic!("Expected final numeric literal, got {:?}", other),
         },
         other => panic!("Expected numeric literal, got {:?}", other),
@@ -118,8 +119,8 @@ fn test_negative_number_literal() {
         .expect("exported binding found");
 
     assert!(matches!(
-        binding.value,
-        Expression::Literal(ExpressionLiteral::Number(-5), _)
+        binding.value.kind,
+        ExpressionKind::Literal(ExpressionLiteral::Number(-5))
     ));
 }
 

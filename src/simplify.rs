@@ -1,5 +1,5 @@
 use crate::interpret::Context;
-use crate::parsing::Identifier;
+use crate::parsing::{ExpressionKind, Identifier};
 use crate::{
     Diagnostic,
     interpret::BindingContext,
@@ -11,44 +11,38 @@ use std::collections::HashMap;
 use crate::parsing::{BindingAnnotation, ExpressionLiteral, TargetLiteral};
 
 pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
-    match expr {
-        Expression::IntrinsicOperation(
-            IntrinsicOperation::Binary(left, right, op),
-            source_span,
-        ) => Ok(Expression::IntrinsicOperation(
-            IntrinsicOperation::Binary(
+    let span = expr.span;
+    let result = match expr.kind {
+        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(left, right, op)) => {
+            ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(
                 Box::new(simplify_expression(*left)?),
                 Box::new(simplify_expression(*right)?),
                 op,
-            ),
-            source_span,
-        )),
-        Expression::IntrinsicOperation(IntrinsicOperation::Unary(operand, op), source_span) => {
-            Ok(Expression::IntrinsicOperation(
-                IntrinsicOperation::Unary(Box::new(simplify_expression(*operand)?), op),
-                source_span,
             ))
+            .with_span(span)
         }
-        Expression::AttachImplementation { type_expr, .. } => simplify_expression(*type_expr),
-        Expression::If {
+        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(operand, op)) => {
+            ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
+                Box::new(simplify_expression(*operand)?),
+                op,
+            ))
+            .with_span(span)
+        }
+        ExpressionKind::AttachImplementation { type_expr, .. } => simplify_expression(*type_expr)?,
+        ExpressionKind::If {
             condition,
             then_branch,
             else_branch,
-            span,
-        } => Ok(Expression::If {
+        } => ExpressionKind::If {
             condition: Box::new(simplify_expression(*condition)?),
             then_branch: Box::new(simplify_expression(*then_branch)?),
             else_branch: match else_branch {
                 Some(branch) => Some(Box::new(simplify_expression(*branch)?)),
                 None => None,
             },
-            span,
-        }),
-        Expression::Match {
-            value,
-            branches,
-            span,
-        } => Ok(Expression::Match {
+        }
+        .with_span(span),
+        ExpressionKind::Match { value, branches } => ExpressionKind::Match {
             value: Box::new(simplify_expression(*value)?),
             branches: branches
                 .into_iter()
@@ -59,195 +53,182 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
                     ))
                 })
                 .collect::<Result<Vec<_>, Diagnostic>>()?,
-            span,
-        }),
-        Expression::Function {
+        }
+        .with_span(span),
+        ExpressionKind::Function {
             parameter,
             return_type,
             body,
-            span,
-        } => Ok(Expression::Function {
+        } => ExpressionKind::Function {
             parameter: simplify_binding_pattern(parameter)?,
-            return_type: Some(Box::new(simplify_expression(*return_type.unwrap())?)),
+            return_type: Some(Box::new(simplify_expression(
+                *return_type.expect("Function return type should be Some"),
+            )?)),
             body: Box::new(simplify_expression(*body)?),
-            span,
-        }),
-        Expression::FunctionType {
+        }
+        .with_span(span),
+        ExpressionKind::FunctionType {
             parameter,
             return_type,
-            span,
-        } => Ok(Expression::FunctionType {
+        } => ExpressionKind::FunctionType {
             parameter: Box::new(simplify_expression(*parameter)?),
             return_type: Box::new(simplify_expression(*return_type)?),
-            span,
-        }),
-        Expression::Loop { body, span } => Ok(Expression::Loop {
+        }
+        .with_span(span),
+        ExpressionKind::Loop { body } => ExpressionKind::Loop {
             body: Box::new(simplify_expression(*body)?),
-            span,
-        }),
-        Expression::Struct(items, source_span) => {
+        }
+        .with_span(span),
+        ExpressionKind::Struct(items) => {
             let simplified_items = items
                 .into_iter()
                 .map(|(id, expr)| Ok((id, simplify_expression(expr)?)))
                 .collect::<Result<_, Diagnostic>>()?;
-            Ok(Expression::Struct(simplified_items, source_span))
+
+            ExpressionKind::Struct(simplified_items).with_span(span)
         }
-        Expression::Operation {
+        ExpressionKind::Operation {
             operator,
             left,
             right,
-            span,
         } => {
             if let Some(intrinsic) = intrinsic_operator(&operator) {
-                Ok(Expression::IntrinsicOperation(
-                    IntrinsicOperation::Binary(
-                        Box::new(simplify_expression(*left)?),
-                        Box::new(simplify_expression(*right)?),
-                        intrinsic,
-                    ),
-                    span,
+                ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(
+                    Box::new(simplify_expression(*left)?),
+                    Box::new(simplify_expression(*right)?),
+                    intrinsic,
                 ))
+                .with_span(span)
             } else {
-                Ok(Expression::FunctionCall {
-                    function: Box::new(Expression::PropertyAccess {
-                        object: Box::new(simplify_expression(*left)?),
-                        property: operator,
+                ExpressionKind::FunctionCall {
+                    function: Box::new(Expression::new(
+                        ExpressionKind::PropertyAccess {
+                            object: Box::new(simplify_expression(*left)?),
+                            property: operator,
+                        },
                         span,
-                    }),
+                    )),
                     argument: Box::new(simplify_expression(*right)?),
-                    span,
-                })
+                }
+                .with_span(span)
             }
         }
-        Expression::FunctionCall {
-            function,
-            argument,
-            span,
-        } => Ok(Expression::FunctionCall {
+        ExpressionKind::FunctionCall { function, argument } => ExpressionKind::FunctionCall {
             function: Box::new(simplify_expression(*function)?),
             argument: Box::new(simplify_expression(*argument)?),
-            span,
-        }),
-        Expression::PropertyAccess {
-            object,
-            property,
-            span,
-        } => Ok(Expression::PropertyAccess {
+        }
+        .with_span(span),
+        ExpressionKind::PropertyAccess { object, property } => ExpressionKind::PropertyAccess {
             object: Box::new(simplify_expression(*object)?),
             property,
-            span,
-        }),
-        Expression::Diverge {
+        }
+        .with_span(span),
+        ExpressionKind::Diverge {
             value,
             divergance_type,
-            span,
-        } => Ok(Expression::Diverge {
+        } => ExpressionKind::Diverge {
             value: match value {
                 Some(expr) => Some(Box::new(simplify_expression(*expr)?)),
                 None => None,
             },
             divergance_type,
-            span,
-        }),
-        Expression::EnumType(variants, span) => Ok(Expression::EnumType(
+        }
+        .with_span(span),
+        ExpressionKind::EnumType(variants) => ExpressionKind::EnumType(
             variants
                 .into_iter()
                 .map(|(id, ty)| Ok((id, simplify_expression(ty)?)))
                 .collect::<Result<_, Diagnostic>>()?,
-            span,
-        )),
-        Expression::EnumAccess {
-            enum_expr,
-            variant,
-            span,
-        } => {
+        )
+        .with_span(span),
+        ExpressionKind::EnumAccess { enum_expr, variant } => {
             let simplified_enum = simplify_expression(*enum_expr)?;
-            if let Expression::EnumType(variants, _) = &simplified_enum
+            if let ExpressionKind::EnumType(variants) = &simplified_enum.kind
                 && let Some((variant_index, (_id, payload_type))) = variants
                     .iter()
                     .enumerate()
                     .find(|(_, (id, _))| id.name == variant.name)
             {
-                if let Expression::Struct(fields, _) = payload_type
+                if let ExpressionKind::Struct(fields) = &payload_type.kind
                     && fields.is_empty()
                 {
-                    return Ok(Expression::EnumValue {
+                    ExpressionKind::EnumValue {
                         enum_type: Box::new(simplified_enum.clone()),
                         variant,
                         variant_index,
                         payload: None,
-                        span,
-                    });
+                    }
+                    .with_span(span)
+                } else {
+                    ExpressionKind::EnumConstructor {
+                        enum_type: Box::new(simplified_enum.clone()),
+                        variant,
+                        variant_index,
+                        payload_type: Box::new(payload_type.clone()),
+                    }
+                    .with_span(span)
                 }
-
-                return Ok(Expression::EnumConstructor {
-                    enum_type: Box::new(simplified_enum.clone()),
+            } else {
+                ExpressionKind::EnumAccess {
+                    enum_expr: Box::new(simplified_enum),
                     variant,
-                    variant_index,
-                    payload_type: Box::new(payload_type.clone()),
-                    span,
-                });
+                }
+                .with_span(span)
             }
-
-            Ok(Expression::EnumAccess {
-                enum_expr: Box::new(simplified_enum),
-                variant,
-                span,
-            })
         }
-        Expression::EnumConstructor {
+        ExpressionKind::EnumConstructor {
             enum_type,
             variant,
             variant_index,
             payload_type,
-            span,
-        } => Ok(Expression::EnumConstructor {
+        } => ExpressionKind::EnumConstructor {
             enum_type: Box::new(simplify_expression(*enum_type)?),
             variant,
             variant_index,
             payload_type: Box::new(simplify_expression(*payload_type)?),
-            span,
-        }),
-        Expression::EnumValue {
+        }
+        .with_span(span),
+        ExpressionKind::EnumValue {
             enum_type,
             variant,
             variant_index,
             payload,
-            span,
-        } => Ok(Expression::EnumValue {
+        } => ExpressionKind::EnumValue {
             enum_type: Box::new(simplify_expression(*enum_type)?),
             variant,
             variant_index,
-            payload: match payload {
-                Some(payload) => Some(Box::new(simplify_expression(*payload)?)),
-                None => None,
-            },
-            span,
-        }),
-        Expression::Assignment { target, expr, span } => Ok(Expression::Assignment {
+            payload: payload
+                .map(|payload| Ok(Box::new(simplify_expression(*payload)?)))
+                .transpose()?,
+        }
+        .with_span(span),
+        ExpressionKind::Assignment { target, expr } => ExpressionKind::Assignment {
             target,
             expr: Box::new(simplify_expression(*expr)?),
-            span,
-        }),
-        Expression::Binding(binding, source_span) => {
+        }
+        .with_span(span),
+        ExpressionKind::Binding(binding) => {
             let binding = Binding {
                 pattern: simplify_binding_pattern(binding.pattern)?,
-                ..*binding
+                expr: simplify_expression(binding.expr)?,
             };
-            Ok(Expression::Binding(Box::new(binding), source_span))
+
+            ExpressionKind::Binding(Box::new(binding)).with_span(span)
         }
-        Expression::Block(expressions, source_span) => {
-            let simplified_exprs: Vec<Expression> = expressions
+        ExpressionKind::Block(expressions) => {
+            let simplified_exprs = expressions
                 .into_iter()
                 .map(simplify_expression)
-                .collect::<Result<_, Diagnostic>>()?;
-
-            Ok(Expression::Block(simplified_exprs, source_span))
+                .collect::<Result<Vec<_>, Diagnostic>>()?;
+            ExpressionKind::Block(simplified_exprs).with_span(span)
         }
-        expr @ (Expression::Identifier(..)
-        | Expression::IntrinsicType(..)
-        | Expression::Literal(..)) => Ok(expr),
-    }
+        ExpressionKind::Identifier(id) => Expression::new(ExpressionKind::Identifier(id), span),
+        ExpressionKind::IntrinsicType(intrinsic) => {
+            ExpressionKind::IntrinsicType(intrinsic).with_span(span)
+        }
+        ExpressionKind::Literal(lit) => Expression::new(ExpressionKind::Literal(lit), span),
+    };
+    Ok(result)
 }
 
 fn intrinsic_operator(operator: &str) -> Option<BinaryIntrinsicOperator> {
@@ -391,11 +372,11 @@ fn interpret_exported_function() {
             _ => None,
         })
         .expect("expected export annotation");
-    if let Expression::Literal(ExpressionLiteral::Target(TargetLiteral::JSTarget), _) = target_expr
-    {
-    } else {
+    let ExpressionKind::Literal(ExpressionLiteral::Target(TargetLiteral::JSTarget)) =
+        target_expr.kind
+    else {
         panic!("expected js target in export annotation");
-    }
+    };
     println!("Exported binding value: {:?}", exported_binding.value);
 }
 
@@ -417,11 +398,10 @@ fn interpret_exported_function_w_binding() {
             _ => None,
         })
         .expect("expected export annotation");
-    if let Expression::Literal(ExpressionLiteral::Target(TargetLiteral::WasmTarget), _) =
-        target_expr
-    {
-    } else {
+    let ExpressionKind::Literal(ExpressionLiteral::Target(TargetLiteral::WasmTarget)) =
+        target_expr.kind
+    else {
         panic!("expected wasm target in export annotation");
-    }
+    };
     println!("Exported binding value: {:?}", exported_binding.value);
 }

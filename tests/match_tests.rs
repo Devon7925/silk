@@ -1,4 +1,4 @@
-use silk::parsing::{Expression, ExpressionLiteral};
+use silk::parsing::{ExpressionKind, ExpressionLiteral};
 use silk::test_support::evaluate_text_to_expression;
 
 #[test]
@@ -22,8 +22,8 @@ fn match_selects_correct_branch() {
         );
     });
 
-    match expr {
-        Expression::Literal(ExpressionLiteral::Number(value), _) => assert_eq!(value, 5),
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 5),
         other => panic!("Expected numeric literal, got {:?}", other),
     }
 }
@@ -49,8 +49,8 @@ fn match_allows_literal_branch() {
         );
     });
 
-    match expr {
-        Expression::Literal(ExpressionLiteral::Number(value), _) => assert_eq!(value, 5),
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 5),
         other => panic!("Expected numeric literal, got {:?}", other),
     }
 }
