@@ -133,10 +133,6 @@ fn dummy_span() -> SourceSpan {
     SourceSpan::default()
 }
 
-fn empty_struct_expr(span: SourceSpan) -> Expression {
-    Expression::new(ExpressionKind::Struct(vec![]), span)
-}
-
 fn identifier_expr(name: &str) -> Expression {
     ExpressionKind::Identifier(Identifier::new(name.to_string())).with_span(dummy_span())
 }
@@ -350,37 +346,29 @@ pub fn interpret_expression(
                 branch_type(&then_branch, &then_context)?;
             let else_context = context.clone();
 
-            let interpreted_else = if let Some(else_branch) = else_branch {
-                let (interpreted_else, else_type, else_diverges) =
-                    branch_type(&else_branch, &else_context)?;
+            let (interpreted_else, else_type, else_diverges) =
+                branch_type(&else_branch, &else_context)?;
 
-                if !types_equivalent(&then_type.kind, &else_type.kind)
-                    && !then_diverges
-                    && !else_diverges
-                {
-                    return Err(diagnostic("Type mismatch between if branches", span));
-                }
-
-                Some(Box::new(interpreted_else))
-            } else {
-                None
-            };
+            if !types_equivalent(&then_type.kind, &else_type.kind)
+                && !then_diverges
+                && !else_diverges
+            {
+                return Err(diagnostic("Type mismatch between if branches", span));
+            }
 
             if let ExpressionKind::Literal(ExpressionLiteral::Boolean(condition_value)) =
                 interpreted_condition.kind
             {
                 if condition_value {
                     interpret_expression(*then_branch, context)?
-                } else if let Some(interpreted_else) = interpreted_else {
-                    interpret_expression(*interpreted_else, context)?
                 } else {
-                    empty_struct_expr(dummy_span())
+                    interpret_expression(interpreted_else, context)?
                 }
             } else {
                 let interpreted = ExpressionKind::If {
                     condition: Box::new(interpreted_condition),
                     then_branch: Box::new(interpreted_then),
-                    else_branch: interpreted_else,
+                    else_branch: Box::new(interpreted_else),
                 }
                 .with_span(span);
                 let possibly_mutated_values = get_possibly_mutated_values(&interpreted);
@@ -446,13 +434,10 @@ pub fn interpret_expression(
             value,
             divergance_type,
         } => {
-            let evaluated_value = match value {
-                Some(expr) => interpret_expression(*expr, context)?,
-                None => empty_struct_expr(span),
-            };
+            let evaluated_value = interpret_expression(*value, context)?;
 
             ExpressionKind::Diverge {
-                value: Some(Box::new(evaluated_value)),
+                value: Box::new(evaluated_value),
                 divergance_type,
             }
             .with_span(span)
@@ -477,9 +462,7 @@ pub fn interpret_expression(
                     match divergance_type {
                         DivergeExpressionType::Return => break iteration_value,
                         DivergeExpressionType::Break => {
-                            break *value.clone().unwrap_or_else(|| {
-                                Box::new(empty_struct_expr(iteration_value.span))
-                            });
+                            break *value.clone();
                         }
                     }
                 }
@@ -565,7 +548,7 @@ pub fn interpret_expression(
                         divergance_type: DivergeExpressionType::Return,
                     } = body_value.kind
                     {
-                        return Ok(*value.expect("Return value should be populated"));
+                        return Ok(*value);
                     }
                     return Ok(body_value);
                 }
@@ -586,7 +569,7 @@ pub fn interpret_expression(
                     enum_type,
                     variant,
                     variant_index,
-                    payload: Some(Box::new(argument_value)),
+                    payload: Box::new(argument_value),
                 }
                 .with_span(span.merge(&function_value.span))
             } else if is_resolved_constant(&function_value) {
@@ -657,7 +640,7 @@ pub fn interpret_expression(
                         enum_type: Box::new(interpreted_enum),
                         variant,
                         variant_index,
-                        payload: None,
+                        payload: Box::new(ExpressionKind::Struct(vec![]).with_span(span)),
                     }
                 } else {
                     ExpressionKind::EnumConstructor {
@@ -684,10 +667,7 @@ pub fn interpret_expression(
             enum_type: Box::new(interpret_expression(*enum_type, context)?),
             variant,
             variant_index,
-            payload: match payload {
-                Some(value) => Some(Box::new(interpret_expression(*value, context)?)),
-                None => None,
-            },
+            payload: Box::new(interpret_expression(*payload, context)?),
         }
         .with_span(span),
         ExpressionKind::EnumConstructor {
@@ -955,13 +935,7 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
 
             target_type
         }
-        ExpressionKind::Diverge { value, .. } => {
-            let inner_value = value
-                .as_ref()
-                .map(|expr| expr.as_ref().clone())
-                .unwrap_or_else(|| empty_struct_expr(span));
-            get_type_of_expression(&inner_value, context)?
-        }
+        ExpressionKind::Diverge { value, .. } => get_type_of_expression(&value, context)?,
         ExpressionKind::If {
             condition,
             then_branch,
@@ -969,17 +943,13 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
         } => {
             ensure_boolean_condition(condition, span, context, "If")?;
 
-            let inferred_else = else_branch
-                .as_ref()
-                .map(|expr| expr.as_ref().clone())
-                .unwrap_or_else(|| empty_struct_expr(SourceSpan::new(span.end(), 0)));
             let mut then_context = context.clone();
             collect_bindings(condition, &mut then_context)?;
             let then_type = get_type_of_expression(then_branch, &then_context)?;
-            let else_type = get_type_of_expression(&inferred_else, context)?;
+            let else_type = get_type_of_expression(&else_branch, context)?;
             if !types_equivalent(&then_type.kind, &else_type.kind) {
                 let then_returns = expression_does_diverge(then_branch, false, false);
-                let else_returns = expression_does_diverge(&inferred_else, false, false);
+                let else_returns = expression_does_diverge(&else_branch, false, false);
 
                 if then_returns && !else_returns {
                     return Ok(else_type);
@@ -1217,11 +1187,7 @@ pub fn collect_break_values(expr: &Expression) -> Vec<Expression> {
             divergance_type: DivergeExpressionType::Break,
         } = &current_expr.kind
         {
-            let val = value
-                .as_ref()
-                .map(|v| *v.clone())
-                .unwrap_or_else(|| empty_struct_expr(current_expr.span));
-            values.push(val);
+            values.push(*value.clone());
         }
         values
     })
@@ -1275,10 +1241,7 @@ pub fn expression_does_diverge(expr: &Expression, possibility: bool, in_inner_lo
             ..
         } => {
             let then_diverges = expression_does_diverge(then_branch, possibility, in_inner_loop);
-            let else_diverges = else_branch
-                .as_ref()
-                .map(|branch| expression_does_diverge(branch, possibility, in_inner_loop))
-                .unwrap_or(false);
+            let else_diverges = expression_does_diverge(else_branch, possibility, in_inner_loop);
             if possibility {
                 then_diverges || else_diverges
             } else {
@@ -1319,10 +1282,7 @@ pub fn expression_does_diverge(expr: &Expression, possibility: bool, in_inner_lo
             enum_type, payload, ..
         } => {
             expression_does_diverge(enum_type, possibility, in_inner_loop)
-                || payload
-                    .as_ref()
-                    .map(|payload| expression_does_diverge(payload, possibility, in_inner_loop))
-                    .unwrap_or(false)
+                || expression_does_diverge(payload, possibility, in_inner_loop)
         }
         ExpressionKind::EnumConstructor {
             enum_type,
@@ -1359,22 +1319,13 @@ pub fn expression_does_diverge(expr: &Expression, possibility: bool, in_inner_lo
 
 pub fn expression_exports(expr: &Expression) -> bool {
     match &expr.kind {
-        ExpressionKind::Diverge {
-            value: Some(value), ..
-        } => expression_exports(value),
+        ExpressionKind::Diverge { value, .. } => expression_exports(value),
         ExpressionKind::Block(exprs) => exprs.iter().any(expression_exports),
         ExpressionKind::If {
             then_branch,
             else_branch,
             ..
-        } => {
-            let then_diverges = expression_exports(then_branch);
-            let else_diverges = else_branch
-                .as_ref()
-                .map(|else_branch| expression_exports(else_branch))
-                .unwrap_or(false);
-            then_diverges || else_diverges
-        }
+        } => expression_exports(then_branch) || expression_exports(else_branch),
         ExpressionKind::Binding(binding) => {
             pattern_exports(&binding.pattern) || expression_exports(&binding.expr)
         }
@@ -1395,13 +1346,7 @@ pub fn expression_exports(expr: &Expression) -> bool {
         ExpressionKind::EnumAccess { enum_expr, .. } => expression_exports(enum_expr),
         ExpressionKind::EnumValue {
             enum_type, payload, ..
-        } => {
-            expression_exports(enum_type)
-                || payload
-                    .as_ref()
-                    .map(|else_branch| expression_exports(else_branch))
-                    .unwrap_or(false)
-        }
+        } => expression_exports(enum_type) || expression_exports(&payload),
         ExpressionKind::EnumConstructor {
             enum_type,
             payload_type,
@@ -1421,8 +1366,7 @@ pub fn expression_exports(expr: &Expression) -> bool {
         ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(operand, _)) => {
             expression_exports(operand)
         }
-        ExpressionKind::Diverge { value: None, .. }
-        | ExpressionKind::Literal(_)
+        ExpressionKind::Literal(_)
         | ExpressionKind::Identifier(_)
         | ExpressionKind::IntrinsicType(_)
         | ExpressionKind::EnumType(_)
@@ -1643,11 +1587,7 @@ fn fold_expression<T, U: Fn(&Expression, T) -> T>(
             enum_type, payload, ..
         } => {
             let state_with_type = fold_expression(enum_type, new_state, item_processor);
-            if let Some(payload_expr) = payload {
-                fold_expression(payload_expr, state_with_type, item_processor)
-            } else {
-                state_with_type
-            }
+            fold_expression(&payload, state_with_type, item_processor)
         }
         ExpressionKind::EnumConstructor {
             enum_type,
@@ -1669,11 +1609,7 @@ fn fold_expression<T, U: Fn(&Expression, T) -> T>(
             let state_with_condition = fold_expression(condition, new_state, item_processor);
             let state_with_then =
                 fold_expression(then_branch, state_with_condition, item_processor);
-            if let Some(else_expr) = else_branch {
-                fold_expression(else_expr, state_with_then, item_processor)
-            } else {
-                state_with_then
-            }
+            fold_expression(else_branch, state_with_then, item_processor)
         }
         ExpressionKind::AttachImplementation {
             type_expr,
@@ -1726,13 +1662,7 @@ fn fold_expression<T, U: Fn(&Expression, T) -> T>(
         ExpressionKind::Block(expressions) => expressions.iter().fold(new_state, |state, expr| {
             fold_expression(expr, state, item_processor)
         }),
-        ExpressionKind::Diverge { value, .. } => {
-            if let Some(value_expr) = value {
-                fold_expression(value_expr, new_state, item_processor)
-            } else {
-                new_state
-            }
-        }
+        ExpressionKind::Diverge { value, .. } => fold_expression(&value, new_state, item_processor),
         ExpressionKind::Loop { body, .. } => fold_expression(body, new_state, item_processor),
     }
 }
@@ -2467,13 +2397,9 @@ fn bind_pattern_from_value(
             }
 
             if let Some(payload_pattern) = payload {
-                let payload_value_owned = value_payload
-                    .as_ref()
-                    .map(|v| v.as_ref().clone())
-                    .unwrap_or_else(|| empty_struct_expr(span));
                 bind_pattern_from_value(
                     *payload_pattern.clone(),
-                    &payload_value_owned,
+                    &value_payload,
                     context,
                     passed_annotations,
                     preserve_behavior,
@@ -2631,13 +2557,7 @@ fn is_resolved_constant(expr: &Expression) -> bool {
         }
         ExpressionKind::EnumValue {
             enum_type, payload, ..
-        } => {
-            is_resolved_constant(enum_type)
-                && payload
-                    .as_ref()
-                    .map(|p| is_resolved_constant(p))
-                    .unwrap_or(true)
-        }
+        } => is_resolved_constant(enum_type) && is_resolved_constant(&payload),
         ExpressionKind::EnumConstructor {
             enum_type,
             payload_type,
@@ -2731,10 +2651,7 @@ fn is_resolved_const_function_expression(expr: &Expression, function_context: &C
             enum_type, payload, ..
         } => {
             is_resolved_const_function_expression(enum_type, function_context)
-                && payload
-                    .as_ref()
-                    .map(|p| is_resolved_const_function_expression(p, function_context))
-                    .unwrap_or(true)
+                && is_resolved_const_function_expression(&payload, function_context)
         }
         ExpressionKind::EnumConstructor {
             enum_type,

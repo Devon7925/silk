@@ -237,7 +237,7 @@ pub enum ExpressionKind {
         enum_type: Box<Expression>,
         variant: Identifier,
         variant_index: usize,
-        payload: Option<Box<Expression>>,
+        payload: Box<Expression>,
     },
     EnumConstructor {
         enum_type: Box<Expression>,
@@ -252,7 +252,7 @@ pub enum ExpressionKind {
     If {
         condition: Box<Expression>,
         then_branch: Box<Expression>,
-        else_branch: Option<Box<Expression>>,
+        else_branch: Box<Expression>,
     },
     AttachImplementation {
         type_expr: Box<Expression>,
@@ -290,7 +290,7 @@ pub enum ExpressionKind {
     Binding(Box<Binding>),
     Block(Vec<Expression>),
     Diverge {
-        value: Option<Box<Expression>>,
+        value: Box<Expression>,
         divergance_type: DivergeExpressionType,
     },
     Loop {
@@ -386,10 +386,7 @@ impl Expression {
                 payload,
                 ..
             } => {
-                let payload_str = payload
-                    .as_ref()
-                    .map(|p| format!("({})", p.pretty_print()))
-                    .unwrap_or_default();
+                let payload_str = format!("({})", payload.pretty_print());
                 format!(
                     "{}::{}{}",
                     enum_type.pretty_print(),
@@ -418,10 +415,7 @@ impl Expression {
                 then_branch,
                 else_branch,
             } => {
-                let else_str = else_branch
-                    .as_ref()
-                    .map(|b| format!(" else {}", b.pretty_print()))
-                    .unwrap_or_default();
+                let else_str = format!(" else {}", else_branch.pretty_print());
                 format!(
                     "if {} then {}{}",
                     condition.pretty_print(),
@@ -526,10 +520,7 @@ impl Expression {
                     DivergeExpressionType::Return => "return",
                     DivergeExpressionType::Break => "break",
                 };
-                match value {
-                    Some(v) => format!("{} {}", keyword, v.pretty_print()),
-                    None => keyword.to_string(),
-                }
+                format!("{} {}", keyword, value.pretty_print())
             }
             ExpressionKind::Loop { body } => format!("loop {}", body.pretty_print()),
         }
@@ -700,7 +691,7 @@ fn parse_if_expression_with_source<'a>(
         ExpressionKind::If {
             condition: Box::new(condition),
             then_branch: Box::new(then_branch),
-            else_branch: else_branch.map(Box::new),
+            else_branch: Box::new(else_branch.unwrap_or(Expression { kind: ExpressionKind::Struct(vec![]), span: SourceSpan::new(span.end(), 0) })),
         }
         .with_span(span),
         remaining,
@@ -1119,7 +1110,7 @@ fn parse_return_expression_with_source<'a>(
     Some(Ok((
         ExpressionKind::Diverge {
             divergance_type: DivergeExpressionType::Return,
-            value: value.map(Box::new),
+            value: Box::new(value.unwrap_or(Expression::new(ExpressionKind::Struct(vec![]), span))),
         }
         .with_span(span),
         rest,
@@ -1161,7 +1152,7 @@ fn parse_break_expression_with_source<'a>(
     Some(Ok((
         ExpressionKind::Diverge {
             divergance_type: DivergeExpressionType::Break,
-            value: value.map(Box::new),
+            value: Box::new(value.unwrap_or(Expression::new(ExpressionKind::Struct(vec![]), span))),
         }
         .with_span(span),
         rest,
@@ -1277,12 +1268,12 @@ fn parse_while_expression_with_source<'a>(
                                 ),
                                 then_branch: Box::new(
                                     ExpressionKind::Diverge {
-                                        value: None,
+                                        value: Box::new(Expression::new(ExpressionKind::Struct(vec![]), span)),
                                         divergance_type: DivergeExpressionType::Break,
                                     }
                                     .with_span(condition_span),
                                 ),
-                                else_branch: None,
+                                else_branch: Box::new(Expression::new(ExpressionKind::Struct(vec![]), span)),
                             }
                             .with_span(condition_span),
                             body,

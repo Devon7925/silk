@@ -36,10 +36,7 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
         } => ExpressionKind::If {
             condition: Box::new(simplify_expression(*condition)?),
             then_branch: Box::new(simplify_expression(*then_branch)?),
-            else_branch: match else_branch {
-                Some(branch) => Some(Box::new(simplify_expression(*branch)?)),
-                None => None,
-            },
+            else_branch: Box::new(simplify_expression(*else_branch)?),
         }
         .with_span(span),
         ExpressionKind::Match { value, branches } => ExpressionKind::Match {
@@ -127,10 +124,7 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             value,
             divergance_type,
         } => ExpressionKind::Diverge {
-            value: match value {
-                Some(expr) => Some(Box::new(simplify_expression(*expr)?)),
-                None => None,
-            },
+            value: Box::new(simplify_expression(*value)?),
             divergance_type,
         }
         .with_span(span),
@@ -156,7 +150,7 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
                         enum_type: Box::new(simplified_enum.clone()),
                         variant,
                         variant_index,
-                        payload: None,
+                        payload: Box::new(ExpressionKind::Struct(vec![]).with_span(span)),
                     }
                     .with_span(span)
                 } else {
@@ -197,9 +191,7 @@ pub fn simplify_expression(expr: Expression) -> Result<Expression, Diagnostic> {
             enum_type: Box::new(simplify_expression(*enum_type)?),
             variant,
             variant_index,
-            payload: payload
-                .map(|payload| Ok(Box::new(simplify_expression(*payload)?)))
-                .transpose()?,
+            payload: Box::new(simplify_expression(*payload)?),
         }
         .with_span(span),
         ExpressionKind::Assignment { target, expr } => ExpressionKind::Assignment {

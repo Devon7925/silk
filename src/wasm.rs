@@ -88,7 +88,7 @@ fn default_value_for_type(ty: &Expression) -> Option<Expression> {
                     ),
                     variant: first_variant.clone(),
                     variant_index: 0,
-                    payload: Some(Box::new(default_value_for_type(first_ty)?)),
+                    payload: Box::new(default_value_for_type(first_ty)?),
                 }
                 .with_span(ty.span),
             )
@@ -109,10 +109,7 @@ fn materialize_enum_value(enum_value: &Expression) -> Option<Expression> {
         let mut payload_fields = Vec::new();
         for (idx, (name, ty)) in variants.iter().enumerate() {
             let value = if idx == *variant_index {
-                match payload {
-                    Some(val) => *val.clone(),
-                    None => default_value_for_type(ty)?,
-                }
+                *payload.clone()
             } else {
                 default_value_for_type(ty)?
             };
@@ -438,9 +435,7 @@ fn collect_types(
         } => {
             collect_types(condition, ctx, locals_types, context)?;
             collect_types(then_branch, ctx, locals_types, context)?;
-            if let Some(else_branch) = else_branch {
-                collect_types(else_branch, ctx, locals_types, context)?;
-            }
+            collect_types(else_branch, ctx, locals_types, context)?;
         }
         ExpressionKind::Match {
             value, branches, ..
@@ -537,19 +532,15 @@ fn expression_produces_value(
             else_branch,
             ..
         } => {
-            if let Some(else_branch) = else_branch {
-                let then_produces_value =
-                    expression_produces_value(then_branch, locals_types, context, type_ctx)?;
-                let else_produces_value =
-                    expression_produces_value(else_branch, locals_types, context, type_ctx)?;
-                let then_diverges = expression_does_diverge(then_branch, false, false);
-                let else_diverges = expression_does_diverge(else_branch, false, false);
-                Ok(then_produces_value && else_produces_value
-                    || ((then_diverges || else_diverges)
-                        && (then_produces_value || else_produces_value)))
-            } else {
-                Ok(false)
-            }
+            let then_produces_value =
+                expression_produces_value(then_branch, locals_types, context, type_ctx)?;
+            let else_produces_value =
+                expression_produces_value(else_branch, locals_types, context, type_ctx)?;
+            let then_diverges = expression_does_diverge(then_branch, false, false);
+            let else_diverges = expression_does_diverge(else_branch, false, false);
+            Ok(then_produces_value && else_produces_value
+                || ((then_diverges || else_diverges)
+                    && (then_produces_value || else_produces_value)))
         }
         ExpressionKind::Block(exprs) => {
             let Some(last) = exprs.last() else {
@@ -607,13 +598,7 @@ fn infer_type(
 
             Ok(value_type)
         }
-        ExpressionKind::Diverge { value, .. } => {
-            let inner_expr = value
-                .as_ref()
-                .map(|expr| expr.as_ref().clone())
-                .unwrap_or_else(|| Expression::new(ExpressionKind::Struct(vec![]), expr.span));
-            infer_type(&inner_expr, locals_types, context)
-        }
+        ExpressionKind::Diverge { value, .. } => infer_type(&value, locals_types, context),
         ExpressionKind::Loop { body } => {
             if let Some(result_type) = determine_loop_result_type(body, locals_types, context)? {
                 return Ok(result_type);
@@ -900,9 +885,7 @@ fn collect_locals(
         } => {
             locals.extend(collect_locals(condition, locals_types, context)?);
             locals.extend(collect_locals(then_branch, locals_types, context)?);
-            if let Some(else_branch) = else_branch {
-                locals.extend(collect_locals(else_branch, locals_types, context)?);
-            }
+            locals.extend(collect_locals(else_branch, locals_types, context)?);
         }
         ExpressionKind::Match { value, branches } => {
             let value_type = infer_type(value, locals_types, context)?;
@@ -1295,17 +1278,12 @@ fn emit_expression(
                 .cloned()
                 .ok_or_else(|| Diagnostic::new("`break` used outside of a loop").with_span(span))?;
 
-            let break_value = value
-                .as_ref()
-                .map(|expr| expr.as_ref().clone())
-                .unwrap_or_else(|| Expression::new(ExpressionKind::Struct(vec![]), span));
-
             let expected_type = loop_ctx.result_type.as_ref().ok_or_else(|| {
                 Diagnostic::new("`break` cannot be used in a loop without a break value")
                     .with_span(span)
             })?;
 
-            let value_type = infer_type(&break_value, locals_types, context)?;
+            let value_type = infer_type(&value, locals_types, context)?;
             if &value_type != expected_type {
                 return Err(
                     Diagnostic::new("break value does not match loop result type").with_span(span),
@@ -1313,7 +1291,7 @@ fn emit_expression(
             }
 
             emit_expression(
-                &break_value,
+                &value,
                 locals,
                 locals_types,
                 func,
@@ -1403,7 +1381,7 @@ fn emit_expression(
                     enum_type: enum_type.clone(),
                     variant: variant.clone(),
                     variant_index: *variant_index,
-                    payload: Some(argument.clone()),
+                    payload: argument.clone(),
                 }
                 .with_span(expr.span);
                 return emit_expression(
@@ -1439,28 +1417,25 @@ fn emit_expression(
                 control_stack,
                 loop_stack,
             )?;
-            let result_type = infer_type(then_branch, locals_types, context)?;
-            let wasm_result_type = result_type.to_val_type(type_ctx);
             let then_produces_value =
                 expression_produces_value(then_branch, locals_types, context, type_ctx)?;
-            let else_produces_value = if let Some(else_branch) = else_branch {
-                expression_produces_value(else_branch, locals_types, context, type_ctx)?
-            } else {
-                false
-            };
+            let else_produces_value =
+                expression_produces_value(else_branch, locals_types, context, type_ctx)?;
 
             let then_diverges = expression_does_diverge(then_branch, false, false);
-            let else_diverges = if let Some(else_branch) = else_branch {
-                expression_does_diverge(else_branch, false, false)
-            } else {
-                false
-            };
+            let else_diverges = expression_does_diverge(else_branch, false, false);
 
             control_stack.push(ControlFrame::If);
             let block_type = if (then_produces_value && else_produces_value)
                 || ((then_diverges || else_diverges)
                     && (then_produces_value || else_produces_value))
             {
+                let result_type = if then_produces_value {
+                    infer_type(then_branch, locals_types, context)?
+                } else {
+                    infer_type(else_branch, locals_types, context)?
+                };
+                let wasm_result_type = result_type.to_val_type(type_ctx);
                 wasm_encoder::BlockType::Result(wasm_result_type)
             } else {
                 wasm_encoder::BlockType::Empty
@@ -1479,19 +1454,17 @@ fn emit_expression(
             if then_produces_value && matches!(block_type, wasm_encoder::BlockType::Empty) {
                 func.instruction(&Instruction::Drop);
             }
-            if let Some(else_expr) = else_branch {
-                func.instruction(&Instruction::Else);
-                emit_expression(
-                    else_expr,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    context,
-                    control_stack,
-                    loop_stack,
-                )?;
-            }
+            func.instruction(&Instruction::Else);
+            emit_expression(
+                &else_branch,
+                locals,
+                locals_types,
+                func,
+                type_ctx,
+                context,
+                control_stack,
+                loop_stack,
+            )?;
             if else_produces_value && matches!(block_type, wasm_encoder::BlockType::Empty) {
                 func.instruction(&Instruction::Drop);
             }
@@ -1753,7 +1726,7 @@ fn emit_expression(
                         enum_type: enum_expr.clone(),
                         variant: variant.clone(),
                         variant_index,
-                        payload: None,
+                        payload: Box::new(ExpressionKind::Struct(vec![]).with_span(span)),
                     }
                     .with_span(span);
                     return emit_expression(
@@ -1818,15 +1791,8 @@ fn emit_expression(
             divergance_type: DivergeExpressionType::Return,
             ..
         } => {
-            if value.is_none() {
-                eprintln!("return without value");
-            }
-            let inner_expr = value
-                .as_ref()
-                .map(|expr| expr.as_ref().clone())
-                .unwrap_or_else(|| Expression::new(ExpressionKind::Struct(vec![]), expr.span));
             emit_expression(
-                &inner_expr,
+                &value,
                 locals,
                 locals_types,
                 func,

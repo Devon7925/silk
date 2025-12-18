@@ -187,7 +187,7 @@ fn uniquify_expression(expr: Expression, scopes: &mut ScopeStack) -> Expression 
             enum_type: Box::new(uniquify_expression(*enum_type, scopes)),
             variant,
             variant_index,
-            payload: payload.map(|p| Box::new(uniquify_expression(*p, scopes))),
+            payload: Box::new(uniquify_expression(*payload, scopes)),
         }
         .with_span(span),
         ExpressionKind::EnumConstructor {
@@ -219,8 +219,7 @@ fn uniquify_expression(expr: Expression, scopes: &mut ScopeStack) -> Expression 
             ExpressionKind::If {
                 condition: Box::new(uniquify_expression(*condition, scopes)),
                 then_branch: Box::new(uniquify_expression(*then_branch, &mut then_scopes)),
-                else_branch: else_branch
-                    .map(|branch| Box::new(uniquify_expression(*branch, &mut else_scopes))),
+                else_branch: Box::new(uniquify_expression(*else_branch, &mut else_scopes)),
             }
             .with_span(span)
         }
@@ -314,7 +313,7 @@ fn uniquify_expression(expr: Expression, scopes: &mut ScopeStack) -> Expression 
             value,
             divergance_type,
         } => ExpressionKind::Diverge {
-            value: value.map(|v| Box::new(uniquify_expression(*v, scopes))),
+            value: Box::new(uniquify_expression(*value, scopes)),
             divergance_type,
         }
         .with_span(span),
