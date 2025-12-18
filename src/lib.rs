@@ -1,16 +1,13 @@
 mod diagnostics;
-mod interpret;
 pub mod parsing;
-mod simplify;
 mod uniquify;
+mod interpret;
+mod intermediate;
 mod wasm;
 
 pub mod test_support {
     pub use crate::interpret::{
         Context, evaluate_text_to_expression, interpret_program, intrinsic_context,
-    };
-    pub use crate::simplify::{
-        evaluate_text_to_simplified_expression, simplify_context, simplify_expression,
     };
     pub use crate::wasm::compile_exports;
 }
@@ -33,8 +30,6 @@ pub fn compile(file: String) -> Result<Vec<u8>, Diagnostic> {
     }
     let uniquified = uniquify::uniquify_program(ast);
     let mut context = interpret::intrinsic_context();
-    let (value, program_context) = interpret::interpret_program(uniquified, &mut context)?;
-    let _simplified_value = simplify::simplify_expression(value)?;
-    let simplified_context = simplify::simplify_context(program_context)?;
-    wasm::compile_exports(&simplified_context)
+    let (_value, program_context) = interpret::interpret_program(uniquified, &mut context)?;
+    wasm::compile_exports(&program_context)
 }

@@ -1,6 +1,6 @@
 use silk::parsing::{Expression, ExpressionKind, ExpressionLiteral, parse_block};
 use silk::test_support::{
-    Context, interpret_program, intrinsic_context, simplify_context, simplify_expression,
+    Context, interpret_program, intrinsic_context,
 };
 
 fn evaluate_text_to_simplified_expression(
@@ -13,10 +13,7 @@ fn evaluate_text_to_simplified_expression(
     );
 
     let mut context = intrinsic_context();
-    let (result, context) = interpret_program(expression, &mut context)?;
-    let simplified_expression = simplify_expression(result)?;
-    let simplified_context = simplify_context(context)?;
-    Ok((simplified_expression, simplified_context))
+    interpret_program(expression, &mut context)
 }
 
 fn assert_final_number(result: Expression, expected: i32) {
