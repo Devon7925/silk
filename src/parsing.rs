@@ -1260,16 +1260,10 @@ fn parse_while_expression_with_source<'a>(
             Some(Ok((
                 ExpressionKind::Loop {
                     body: Box::new(
-                        ExpressionKind::Block(vec![
                             ExpressionKind::If {
-                                condition: Box::new(
-                                    ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
-                                        Box::new(condition),
-                                        UnaryIntrinsicOperator::BooleanNot,
-                                    ))
-                                    .with_span(condition_span),
-                                ),
-                                then_branch: Box::new(
+                                condition: Box::new(condition),
+                                then_branch: Box::new(body),
+                                else_branch: Box::new(
                                     ExpressionKind::Diverge {
                                         value: Box::new(Expression::new(
                                             ExpressionKind::Struct(vec![]),
@@ -1279,15 +1273,8 @@ fn parse_while_expression_with_source<'a>(
                                     }
                                     .with_span(condition_span),
                                 ),
-                                else_branch: Box::new(Expression::new(
-                                    ExpressionKind::Struct(vec![]),
-                                    span,
-                                )),
                             }
                             .with_span(condition_span),
-                            body,
-                        ])
-                        .with_span(span),
                     ),
                 }
                 .with_span(span),
