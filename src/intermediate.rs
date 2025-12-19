@@ -208,19 +208,18 @@ pub fn expression_to_intermediate(
                 .with_span(*span);
                 return expression_to_intermediate(enum_value, builder);
             }
-            if let ExpressionKind::EnumAccess { enum_expr, variant } = &function.kind {
-                if let Some(enum_type) = builder.resolve_enum_type_expression(enum_expr) {
-                    if let Some((variant_index, _)) = enum_variant_info(&enum_type, variant) {
-                        let enum_value = ExpressionKind::EnumValue {
-                            enum_type: Box::new(enum_type),
-                            variant: variant.clone(),
-                            variant_index,
-                            payload: argument.clone(),
-                        }
-                        .with_span(*span);
-                        return expression_to_intermediate(enum_value, builder);
-                    }
+            if let ExpressionKind::EnumAccess { enum_expr, variant } = &function.kind
+                && let Some(enum_type) = builder.resolve_enum_type_expression(enum_expr)
+                && let Some((variant_index, _)) = enum_variant_info(&enum_type, variant)
+            {
+                let enum_value = ExpressionKind::EnumValue {
+                    enum_type: Box::new(enum_type),
+                    variant: variant.clone(),
+                    variant_index,
+                    payload: argument.clone(),
                 }
+                .with_span(*span);
+                return expression_to_intermediate(enum_value, builder);
             }
             let function_index = match *function {
                 Expression {
@@ -278,22 +277,19 @@ pub fn expression_to_intermediate(
             body: Box::new(expression_to_intermediate(*body, builder)),
         },
         ExpressionKind::EnumAccess { enum_expr, variant } => {
-            if let Some(enum_type) = builder.resolve_enum_type_expression(&enum_expr) {
-                if let Some((variant_index, payload_type)) = enum_variant_info(&enum_type, &variant)
-                {
-                    if let ExpressionKind::Struct(fields) = &payload_type.kind
-                        && fields.is_empty()
-                    {
-                        let enum_value = ExpressionKind::EnumValue {
-                            enum_type: Box::new(enum_type),
-                            variant,
-                            variant_index,
-                            payload: Box::new(ExpressionKind::Struct(Vec::new()).with_span(*span)),
-                        }
-                        .with_span(*span);
-                        return expression_to_intermediate(enum_value, builder);
-                    }
+            if let Some(enum_type) = builder.resolve_enum_type_expression(&enum_expr)
+                && let Some((variant_index, payload_type)) = enum_variant_info(&enum_type, &variant)
+                && let ExpressionKind::Struct(fields) = &payload_type.kind
+                && fields.is_empty()
+            {
+                let enum_value = ExpressionKind::EnumValue {
+                    enum_type: Box::new(enum_type),
+                    variant,
+                    variant_index,
+                    payload: Box::new(ExpressionKind::Struct(Vec::new()).with_span(*span)),
                 }
+                .with_span(*span);
+                return expression_to_intermediate(enum_value, builder);
             }
             panic!("Unsupported enum constructor reference in intermediate lowering");
         }
@@ -417,11 +413,11 @@ impl IntermediateBuilder {
         }
 
         for scope in self.enum_context.bindings.iter().rev() {
-            if let Some((BindingContext::Bound(value, _), _)) = scope.get(identifier) {
-                if matches!(value.kind, ExpressionKind::Function { .. }) {
-                    let index = self.register_function(Some(identifier.clone()), value.clone());
-                    return Some(index);
-                }
+            if let Some((BindingContext::Bound(value, _), _)) = scope.get(identifier)
+                && matches!(value.kind, ExpressionKind::Function { .. })
+            {
+                let index = self.register_function(Some(identifier.clone()), value.clone());
+                return Some(index);
             }
         }
 
@@ -438,10 +434,10 @@ impl IntermediateBuilder {
             panic!("Expected function expression for lowering");
         };
 
-        if let Some(name) = &name {
-            if let Some(index) = self.function_indices.get(name) {
-                return *index;
-            }
+        if let Some(name) = &name
+            && let Some(index) = self.function_indices.get(name)
+        {
+            return *index;
         }
 
         let index = self.functions.len();

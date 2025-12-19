@@ -935,7 +935,7 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
 
             target_type
         }
-        ExpressionKind::Diverge { value, .. } => get_type_of_expression(&value, context)?,
+        ExpressionKind::Diverge { value, .. } => get_type_of_expression(value, context)?,
         ExpressionKind::If {
             condition,
             then_branch,
@@ -946,10 +946,10 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
             let mut then_context = context.clone();
             collect_bindings(condition, &mut then_context)?;
             let then_type = get_type_of_expression(then_branch, &then_context)?;
-            let else_type = get_type_of_expression(&else_branch, context)?;
+            let else_type = get_type_of_expression(else_branch, context)?;
             if !types_equivalent(&then_type.kind, &else_type.kind) {
                 let then_returns = expression_does_diverge(then_branch, false, false);
-                let else_returns = expression_does_diverge(&else_branch, false, false);
+                let else_returns = expression_does_diverge(else_branch, false, false);
 
                 if then_returns && !else_returns {
                     return Ok(else_type);
@@ -1346,7 +1346,7 @@ pub fn expression_exports(expr: &Expression) -> bool {
         ExpressionKind::EnumAccess { enum_expr, .. } => expression_exports(enum_expr),
         ExpressionKind::EnumValue {
             enum_type, payload, ..
-        } => expression_exports(enum_type) || expression_exports(&payload),
+        } => expression_exports(enum_type) || expression_exports(payload),
         ExpressionKind::EnumConstructor {
             enum_type,
             payload_type,
@@ -1587,7 +1587,7 @@ fn fold_expression<T, U: Fn(&Expression, T) -> T>(
             enum_type, payload, ..
         } => {
             let state_with_type = fold_expression(enum_type, new_state, item_processor);
-            fold_expression(&payload, state_with_type, item_processor)
+            fold_expression(payload, state_with_type, item_processor)
         }
         ExpressionKind::EnumConstructor {
             enum_type,
@@ -1662,7 +1662,7 @@ fn fold_expression<T, U: Fn(&Expression, T) -> T>(
         ExpressionKind::Block(expressions) => expressions.iter().fold(new_state, |state, expr| {
             fold_expression(expr, state, item_processor)
         }),
-        ExpressionKind::Diverge { value, .. } => fold_expression(&value, new_state, item_processor),
+        ExpressionKind::Diverge { value, .. } => fold_expression(value, new_state, item_processor),
         ExpressionKind::Loop { body, .. } => fold_expression(body, new_state, item_processor),
     }
 }
@@ -2399,7 +2399,7 @@ fn bind_pattern_from_value(
             if let Some(payload_pattern) = payload {
                 bind_pattern_from_value(
                     *payload_pattern.clone(),
-                    &value_payload,
+                    value_payload,
                     context,
                     passed_annotations,
                     preserve_behavior,
@@ -2557,7 +2557,7 @@ fn is_resolved_constant(expr: &Expression) -> bool {
         }
         ExpressionKind::EnumValue {
             enum_type, payload, ..
-        } => is_resolved_constant(enum_type) && is_resolved_constant(&payload),
+        } => is_resolved_constant(enum_type) && is_resolved_constant(payload),
         ExpressionKind::EnumConstructor {
             enum_type,
             payload_type,
@@ -2651,7 +2651,7 @@ fn is_resolved_const_function_expression(expr: &Expression, function_context: &C
             enum_type, payload, ..
         } => {
             is_resolved_const_function_expression(enum_type, function_context)
-                && is_resolved_const_function_expression(&payload, function_context)
+                && is_resolved_const_function_expression(payload, function_context)
         }
         ExpressionKind::EnumConstructor {
             enum_type,
