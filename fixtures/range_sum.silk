@@ -26,11 +26,9 @@ range_next := (mut range: Range) => (
     ) else Option(i32)::None
 );
 
-// TODO: replace summed_range with range.
-// Currently this fails because current_range would get defined to range then the function parameter range would get defined to current_range, causing a stack overflow
-(export wasm) sum_range := (summed_range: Range) => ( 
+(export wasm) sum_range := (range: Range) => ( 
     mut total := 0;
-    mut current_range := summed_range;
+    mut current_range := range;
     while Option(i32)::Some(value) := range_next(current_range) do (
         total = total + value;
     );
