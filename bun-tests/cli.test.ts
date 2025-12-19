@@ -61,13 +61,13 @@ test("compiles a wasm export to a file", () => {
   }
 }, TEST_TIMEOUT_MS);
 
-test("prints diagnostics for invalid programs", () => {
-  const invalidPath = join(projectRoot, "fixtures", "invalid_export.silk");
-  const result = runSilk([invalidPath]);
+test("compiles a global wasm export", async () => {
+  const moduleBytes = compileFixtureToBytes("invalid_export.silk");
+  const { instance } = await WebAssembly.instantiate(moduleBytes);
+  const answer = instance.exports.answer as WebAssembly.Global;
 
-  expect(result.exitCode).not.toBe(0);
-  expect(result.stderr).toContain("Compilation failed for");
-  expect(result.stderr).toContain("Only functions can be exported to wasm");
+  expect(answer).toBeInstanceOf(WebAssembly.Global);
+  expect(answer.value).toBe(42);
 }, TEST_TIMEOUT_MS);
 
 test("runs wasm_export module and returns const value", async () => {

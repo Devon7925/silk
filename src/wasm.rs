@@ -1,15 +1,18 @@
 use wasm_encoder::{
-    CodeSection, ExportKind, ExportSection, FieldType, Function, FunctionSection, HeapType,
-    Instruction, Module, RefType, StorageType, TypeSection, ValType,
+    CodeSection, ConstExpr, ExportKind, ExportSection, FieldType, Function, FunctionSection,
+    GlobalSection, GlobalType, HeapType, Instruction, Module, RefType, StorageType, TypeSection,
+    ValType,
 };
 
 use crate::{
     diagnostics::{Diagnostic, SourceSpan},
-    interpret::{self, AnnotatedBinding, expression_does_diverge},
+    intermediate::{
+        IntermediateBinding, IntermediateBindingPattern, IntermediateExportType, IntermediateKind,
+        IntermediateIntrinsicOperation, IntermediateResult, IntermediateType,
+    },
     parsing::{
-        BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, DivergeExpressionType,
-        Expression, ExpressionKind, ExpressionLiteral, Identifier, IntrinsicOperation,
-        IntrinsicType, LValue, TargetLiteral, UnaryIntrinsicOperator,
+        BinaryIntrinsicOperator, DivergeExpressionType, ExpressionLiteral, Identifier, LValue,
+        TargetLiteral, UnaryIntrinsicOperator,
     },
 };
 
@@ -30,6 +33,19 @@ enum ControlFrame {
 struct LoopContext {
     break_target_index: usize,
     result_type: Option<WasmType>,
+}
+
+#[derive(Default)]
+struct MatchCounter {
+    next_id: usize,
+}
+
+impl MatchCounter {
+    fn next_name(&mut self) -> String {
+        let name = format!("__match_val_{}", self.next_id);
+        self.next_id += 1;
+        name
+    }
 }
 
 impl WasmType {
@@ -63,88 +79,29 @@ fn format_wasm_type(ty: &WasmType) -> String {
     }
 }
 
-fn default_value_for_type(ty: &Expression) -> Option<Expression> {
-    match &ty.kind {
-        ExpressionKind::IntrinsicType(IntrinsicType::I32 | IntrinsicType::Boolean) => {
-            Some(ExpressionKind::Literal(ExpressionLiteral::Number(0)).with_span(ty.span))
+fn intermediate_type_to_wasm(ty: &IntermediateType) -> WasmType {
+    match ty {
+        IntermediateType::I32 => WasmType::I32,
+        IntermediateType::Struct(fields) => {
+            let mut wasm_fields = fields
+                .iter()
+                .map(|(name, ty)| (name.clone(), intermediate_type_to_wasm(ty)))
+                .collect::<Vec<_>>();
+            wasm_fields.sort_by(|a, b| a.0.cmp(&b.0));
+            WasmType::Struct(wasm_fields)
         }
-        ExpressionKind::Struct(fields) => {
-            let mut values = Vec::new();
-            for (id, field_ty) in fields {
-                values.push((id.clone(), default_value_for_type(field_ty)?));
-            }
-            Some(Expression::new(ExpressionKind::Struct(values), ty.span))
-        }
-        ExpressionKind::AttachImplementation { type_expr, .. } => default_value_for_type(type_expr),
-        ExpressionKind::EnumType(variants) => {
-            if variants.is_empty() {
-                return None;
-            }
-            let (first_variant, first_ty) = &variants[0];
-            Some(
-                ExpressionKind::EnumValue {
-                    enum_type: Box::new(
-                        ExpressionKind::EnumType(variants.clone()).with_span(ty.span),
-                    ),
-                    variant: first_variant.clone(),
-                    variant_index: 0,
-                    payload: Box::new(default_value_for_type(first_ty)?),
-                }
-                .with_span(ty.span),
-            )
-        }
-        _ => None,
     }
 }
 
-fn materialize_enum_value(enum_value: &Expression) -> Option<Expression> {
-    if let ExpressionKind::EnumValue {
-        enum_type,
-        variant: _variant,
-        variant_index,
-        payload,
-    } = &enum_value.kind
-        && let ExpressionKind::EnumType(variants) = &enum_type.kind
-    {
-        let mut payload_fields = Vec::new();
-        for (idx, (name, ty)) in variants.iter().enumerate() {
-            let value = if idx == *variant_index {
-                *payload.clone()
-            } else {
-                default_value_for_type(ty)?
-            };
-            payload_fields.push((Identifier::new(name.name.clone()), value));
-        }
-
-        let payload_struct =
-            Expression::new(ExpressionKind::Struct(payload_fields), enum_value.span);
-        let tag_expr = ExpressionKind::Literal(ExpressionLiteral::Number(*variant_index as i32))
-            .with_span(enum_value.span);
-        return Some(Expression::new(
-            ExpressionKind::Struct(vec![
-                (Identifier::new("payload".to_string()), payload_struct),
-                (Identifier::new("tag".to_string()), tag_expr),
-            ]),
-            enum_value.span,
-        ));
-    }
-    None
-}
-
-fn lvalue_to_expression(target: &LValue) -> Expression {
+fn lvalue_to_intermediate(target: &LValue) -> IntermediateKind {
     match target {
-        LValue::Identifier(identifier, span) => {
-            Expression::new(ExpressionKind::Identifier(identifier.clone()), *span)
-        }
+        LValue::Identifier(identifier, _) => IntermediateKind::Identifier(identifier.clone()),
         LValue::PropertyAccess {
-            object,
-            property,
-            span,
-        } => ExpressionKind::PropertyAccess {
-            object: Box::new(lvalue_to_expression(object)),
+            object, property, ..
+        } => IntermediateKind::PropertyAccess {
+            object: Box::new(lvalue_to_intermediate(object)),
             property: property.clone(),
-        }
-        .with_span(*span),
+        },
     }
 }
 
@@ -167,53 +124,6 @@ fn ensure_lvalue_local(
         }
         LValue::PropertyAccess { object, .. } => ensure_lvalue_local(object, locals_types, span),
     }
-}
-
-fn enum_wasm_type(
-    enum_type: &Expression,
-    ctx: &interpret::Context,
-) -> Result<WasmType, Diagnostic> {
-    if let ExpressionKind::EnumType(variants) = &enum_type.kind {
-        let mut payload_fields = Vec::new();
-        for (id, ty) in variants {
-            let wasm_ty = resolve_type(ctx, ty)?;
-            payload_fields.push((id.name.clone(), wasm_ty));
-        }
-        payload_fields.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut outer_fields = vec![
-            (
-                "payload".to_string(),
-                WasmType::Struct(payload_fields.clone()),
-            ),
-            ("tag".to_string(), WasmType::I32),
-        ];
-        outer_fields.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(WasmType::Struct(outer_fields))
-    } else {
-        Err(Diagnostic::new("Expected enum type expression").with_span(enum_type.span()))
-    }
-}
-
-fn enum_variant_index_from_context(
-    enum_expr: &Expression,
-    variant: &Identifier,
-    context: &interpret::Context,
-    span: SourceSpan,
-) -> Result<usize, Diagnostic> {
-    let mut ctx = context.clone();
-    if let Some(Expression {
-        kind: ExpressionKind::EnumType(variants),
-        ..
-    }) = interpret::resolve_enum_type_expression(enum_expr, &mut ctx)
-        && let Some((index, _)) = variants
-            .iter()
-            .enumerate()
-            .find(|(_, (id, _))| id.name == variant.name)
-    {
-        return Ok(index);
-    }
-
-    Err(Diagnostic::new("Unknown enum or variant in wasm lowering").with_span(span))
 }
 
 struct TypeContext {
@@ -259,26 +169,43 @@ struct WasmFunctionParam {
 struct WasmFunctionExport {
     name: String,
     params: Vec<WasmFunctionParam>,
-    body: Expression,
+    body: IntermediateKind,
     return_type: WasmType,
 }
 
-pub fn compile_exports(context: &interpret::Context) -> Result<Vec<u8>, Diagnostic> {
-    let exports = collect_wasm_exports(context)?;
-    if exports.is_empty() {
+struct WasmGlobalExport {
+    name: String,
+    ty: WasmType,
+    init: IntermediateKind,
+}
+
+struct WasmExports {
+    functions: Vec<WasmFunctionExport>,
+    globals: Vec<WasmGlobalExport>,
+}
+
+pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Diagnostic> {
+    let exports = collect_wasm_exports(intermediate)?;
+    if exports.functions.is_empty() && exports.globals.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut module = Module::new();
     let mut type_section = TypeSection::new();
     let mut function_section = FunctionSection::new();
+    let mut global_section = GlobalSection::new();
     let mut export_section = ExportSection::new();
     let mut code_section = CodeSection::new();
 
     let mut type_ctx = TypeContext::new();
 
-    // First pass: Collect all types
-    for export in &exports {
+    let function_return_types = intermediate
+        .functions
+        .iter()
+        .map(|function| intermediate_type_to_wasm(&function.return_type))
+        .collect::<Vec<_>>();
+
+    for export in &exports.functions {
         let mut locals_types = std::collections::HashMap::new();
         for param in &export.params {
             if let WasmType::Struct(fields) = &param.ty {
@@ -289,10 +216,20 @@ pub fn compile_exports(context: &interpret::Context) -> Result<Vec<u8>, Diagnost
         if let WasmType::Struct(fields) = &export.return_type {
             type_ctx.get_or_register_type(fields.clone());
         }
-        collect_types(&export.body, &mut type_ctx, &mut locals_types, context)?;
+        collect_types(
+            &export.body,
+            &mut type_ctx,
+            &mut locals_types,
+            &function_return_types,
+        )?;
     }
 
-    // Emit types
+    for global in &exports.globals {
+        if let WasmType::Struct(fields) = &global.ty {
+            type_ctx.get_or_register_type(fields.clone());
+        }
+    }
+
     for fields in &type_ctx.struct_types {
         let wasm_fields = fields.iter().map(|(_, ty)| {
             let val_type = ty.to_val_type(&type_ctx);
@@ -314,11 +251,10 @@ pub fn compile_exports(context: &interpret::Context) -> Result<Vec<u8>, Diagnost
         }]);
     }
 
-    let mut function_type_indices = Vec::new();
     let struct_type_count = type_ctx.struct_types.len() as u32;
     let mut next_type_index = struct_type_count;
 
-    for export in &exports {
+    for export in &exports.functions {
         let param_types: Vec<ValType> = export
             .params
             .iter()
@@ -327,24 +263,39 @@ pub fn compile_exports(context: &interpret::Context) -> Result<Vec<u8>, Diagnost
         let return_types = vec![export.return_type.to_val_type(&type_ctx)];
 
         type_section.function(param_types, return_types);
-        function_type_indices.push(next_type_index);
         function_section.function(next_type_index);
         next_type_index += 1;
     }
 
-    for (function_index, export) in exports.iter().enumerate() {
+    for global in &exports.globals {
+        let init_expr = const_expr_for_global(&global.init, &global.ty)?;
+        global_section.global(
+            GlobalType {
+                val_type: global.ty.to_val_type(&type_ctx),
+                mutable: false,
+                shared: false,
+            },
+            &init_expr,
+        );
+    }
+
+    for (function_index, export) in exports.functions.iter().enumerate() {
         let mut locals = Vec::new();
         let mut local_indices = std::collections::HashMap::new();
         let mut locals_types = std::collections::HashMap::new();
 
-        // Add parameters
         for (j, param) in export.params.iter().enumerate() {
             local_indices.insert(param.name.clone(), j as u32);
             locals_types.insert(param.name.clone(), param.ty.clone());
         }
 
-        // Collect additional locals from body
-        let body_locals = collect_locals(&export.body, &mut locals_types, context)?;
+        let mut match_counter = MatchCounter::default();
+        let body_locals = collect_locals(
+            &export.body,
+            &mut locals_types,
+            &function_return_types,
+            &mut match_counter,
+        )?;
         for (name, ty) in body_locals {
             if !local_indices.contains_key(&name) {
                 local_indices.insert(name.clone(), (export.params.len() + locals.len()) as u32);
@@ -357,19 +308,25 @@ pub fn compile_exports(context: &interpret::Context) -> Result<Vec<u8>, Diagnost
         let mut control_stack = Vec::new();
         let mut loop_stack = Vec::new();
 
+        let mut match_counter = MatchCounter::default();
         emit_expression(
             &export.body,
             &local_indices,
             &locals_types,
             &mut func,
             &type_ctx,
-            context,
+            &function_return_types,
             &mut control_stack,
             &mut loop_stack,
+            &mut match_counter,
         )?;
 
-        let body_produces_value =
-            expression_produces_value(&export.body, &locals_types, context, &type_ctx)?;
+        let body_produces_value = expression_produces_value(
+            &export.body,
+            &locals_types,
+            &function_return_types,
+            &type_ctx,
+        )?;
         let body_transfers_control = expression_does_diverge(&export.body, false, false);
         if body_produces_value {
             func.instruction(&Instruction::Return);
@@ -384,98 +341,145 @@ pub fn compile_exports(context: &interpret::Context) -> Result<Vec<u8>, Diagnost
 
     module.section(&type_section);
     module.section(&function_section);
+    if !exports.globals.is_empty() {
+        module.section(&global_section);
+    }
+    for (global_index, global) in exports.globals.iter().enumerate() {
+        export_section.export(&global.name, ExportKind::Global, global_index as u32);
+    }
     module.section(&export_section);
     module.section(&code_section);
 
     Ok(module.finish())
 }
 
+fn collect_wasm_exports(intermediate: &IntermediateResult) -> Result<WasmExports, Diagnostic> {
+    let mut functions = Vec::new();
+    let mut globals = Vec::new();
+
+    for export in &intermediate.exports {
+        if export.target != TargetLiteral::WasmTarget {
+            continue;
+        }
+        match export.export_type {
+            IntermediateExportType::Function => {
+                let function = intermediate.functions.get(export.index).ok_or_else(|| {
+                    Diagnostic::new(format!(
+                        "Export `{}` references unknown function index {}",
+                        export.name, export.index
+                    ))
+                    .with_span(SourceSpan::default())
+                })?;
+
+                let return_type = intermediate_type_to_wasm(&function.return_type);
+                let params = extract_function_params(&function.parameter, &function.input_type)?;
+
+                functions.push(WasmFunctionExport {
+                    name: export.name.clone(),
+                    params,
+                    body: (*function.body).clone(),
+                    return_type,
+                });
+            }
+            IntermediateExportType::Global => {
+                let global = intermediate.globals.get(export.index).ok_or_else(|| {
+                    Diagnostic::new(format!(
+                        "Export `{}` references unknown global index {}",
+                        export.name, export.index
+                    ))
+                    .with_span(SourceSpan::default())
+                })?;
+                globals.push(WasmGlobalExport {
+                    name: global.name.clone(),
+                    ty: intermediate_type_to_wasm(&global.ty),
+                    init: global.value.clone(),
+                });
+            }
+        }
+    }
+
+    functions.sort_by(|a, b| a.name.cmp(&b.name));
+    globals.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(WasmExports { functions, globals })
+}
+
+fn const_expr_for_global(expr: &IntermediateKind, ty: &WasmType) -> Result<ConstExpr, Diagnostic> {
+    match (ty, expr) {
+        (WasmType::I32, IntermediateKind::Literal(ExpressionLiteral::Number(value))) => {
+            Ok(ConstExpr::i32_const(*value))
+        }
+        (WasmType::I32, IntermediateKind::Literal(ExpressionLiteral::Boolean(value))) => {
+            Ok(ConstExpr::i32_const(if *value { 1 } else { 0 }))
+        }
+        _ => Err(Diagnostic::new(
+            "Unsupported global initializer for wasm export".to_string(),
+        )
+        .with_span(SourceSpan::default())),
+    }
+}
+
 fn collect_types(
-    expr: &Expression,
+    expr: &IntermediateKind,
     ctx: &mut TypeContext,
     locals_types: &mut std::collections::HashMap<String, WasmType>,
-    context: &interpret::Context,
+    function_return_types: &[WasmType],
 ) -> Result<(), Diagnostic> {
-    if let Some(struct_expr) = materialize_enum_value(expr) {
-        return collect_types(&struct_expr, ctx, locals_types, context);
-    }
-    match &expr.kind {
-        ExpressionKind::Struct(fields) => {
+    match expr {
+        IntermediateKind::Struct(fields) => {
             let mut field_types = Vec::new();
             for (name, value) in fields {
-                collect_types(value, ctx, locals_types, context)?;
-                let ty = infer_type(value, locals_types, context)?;
+                collect_types(value, ctx, locals_types, function_return_types)?;
+                let ty = infer_type(value, locals_types, function_return_types)?;
                 field_types.push((name.name.clone(), ty));
             }
             field_types.sort_by(|a, b| a.0.cmp(&b.0));
             ctx.get_or_register_type(field_types);
         }
-        ExpressionKind::Block(exprs) => {
+        IntermediateKind::Block(exprs) => {
             for e in exprs {
-                collect_types(e, ctx, locals_types, context)?;
+                collect_types(e, ctx, locals_types, function_return_types)?;
             }
         }
-        ExpressionKind::Binding(binding) => {
-            collect_types(&binding.expr, ctx, locals_types, context)?;
-            let ty = infer_type(&binding.expr, locals_types, context)?;
+        IntermediateKind::Binding(binding) => {
+            collect_types(&binding.expr, ctx, locals_types, function_return_types)?;
+            let ty = infer_type(&binding.expr, locals_types, function_return_types)?;
             let mut locals = Vec::new();
             collect_locals_for_pattern(binding.pattern.clone(), ty, locals_types, &mut locals)?;
         }
-        ExpressionKind::FunctionCall {
-            function, argument, ..
-        } => {
-            collect_types(function, ctx, locals_types, context)?;
-            collect_types(argument, ctx, locals_types, context)?;
+        IntermediateKind::FunctionCall { argument, .. } => {
+            collect_types(argument, ctx, locals_types, function_return_types)?;
         }
-        ExpressionKind::If {
+        IntermediateKind::If {
             condition,
             then_branch,
             else_branch,
-            ..
         } => {
-            collect_types(condition, ctx, locals_types, context)?;
-            collect_types(then_branch, ctx, locals_types, context)?;
-            collect_types(else_branch, ctx, locals_types, context)?;
+            collect_types(condition, ctx, locals_types, function_return_types)?;
+            collect_types(then_branch, ctx, locals_types, function_return_types)?;
+            collect_types(else_branch, ctx, locals_types, function_return_types)?;
         }
-        ExpressionKind::Match {
-            value, branches, ..
-        } => {
-            collect_types(value, ctx, locals_types, context)?;
+        IntermediateKind::Match { value, branches } => {
+            collect_types(value, ctx, locals_types, function_return_types)?;
             for (_, branch) in branches {
-                collect_types(branch, ctx, locals_types, context)?;
+                collect_types(branch, ctx, locals_types, function_return_types)?;
             }
         }
-        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _)) => {
-            collect_types(left, ctx, locals_types, context)?;
-            collect_types(right, ctx, locals_types, context)?;
+        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
+            left,
+            right,
+            _,
+        )) => {
+            collect_types(left, ctx, locals_types, function_return_types)?;
+            collect_types(right, ctx, locals_types, function_return_types)?;
         }
-        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(operand, _)) => {
-            collect_types(operand, ctx, locals_types, context)?;
+        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(operand, _)) => {
+            collect_types(operand, ctx, locals_types, function_return_types)?;
         }
-        ExpressionKind::Loop { body } => {
-            collect_types(body, ctx, locals_types, context)?;
+        IntermediateKind::Loop { body } => {
+            collect_types(body, ctx, locals_types, function_return_types)?;
         }
-        ExpressionKind::PropertyAccess { object, .. } => {
-            collect_types(object, ctx, locals_types, context)?;
-        }
-        ExpressionKind::EnumType(variants) => {
-            for (_, ty) in variants {
-                collect_types(ty, ctx, locals_types, context)?;
-            }
-            if let WasmType::Struct(fields) = enum_wasm_type(expr, context)? {
-                ctx.get_or_register_type(fields);
-            }
-        }
-        ExpressionKind::EnumConstructor {
-            enum_type,
-            payload_type,
-            ..
-        } => {
-            collect_types(enum_type, ctx, locals_types, context)?;
-            collect_types(payload_type, ctx, locals_types, context)?;
-        }
-        ExpressionKind::EnumAccess { enum_expr, .. } => {
-            collect_types(enum_expr, ctx, locals_types, context)?;
+        IntermediateKind::PropertyAccess { object, .. } => {
+            collect_types(object, ctx, locals_types, function_return_types)?;
         }
         _ => {}
     }
@@ -483,15 +487,15 @@ fn collect_types(
 }
 
 fn determine_loop_result_type(
-    body: &Expression,
+    body: &IntermediateKind,
     locals_types: &std::collections::HashMap<String, WasmType>,
-    context: &interpret::Context,
+    function_return_types: &[WasmType],
 ) -> Result<Option<WasmType>, Diagnostic> {
-    let break_values = interpret::collect_break_values(body);
+    let break_values = collect_break_values(body);
     let mut break_types = Vec::new();
 
     for val in break_values {
-        let ty = infer_type(&val, locals_types, context)?;
+        let ty = infer_type(&val, locals_types, function_return_types)?;
         break_types.push(ty);
     }
 
@@ -510,7 +514,7 @@ fn determine_loop_result_type(
                 format_wasm_type(first_type),
                 format_wasm_type(&other)
             ))
-            .with_span(body.span()));
+            .with_span(SourceSpan::default()));
         }
 
         Ok(Some(first_type.clone()))
@@ -520,334 +524,237 @@ fn determine_loop_result_type(
 }
 
 fn expression_produces_value(
-    expr: &Expression,
+    expr: &IntermediateKind,
     locals_types: &std::collections::HashMap<String, WasmType>,
-    context: &interpret::Context,
+    function_return_types: &[WasmType],
     type_ctx: &TypeContext,
 ) -> Result<bool, Diagnostic> {
-    match &expr.kind {
-        ExpressionKind::Diverge { .. } => Ok(false),
-        ExpressionKind::If {
+    match expr {
+        IntermediateKind::Diverge { .. } => Ok(false),
+        IntermediateKind::If {
             then_branch,
             else_branch,
             ..
         } => {
             let then_produces_value =
-                expression_produces_value(then_branch, locals_types, context, type_ctx)?;
+                expression_produces_value(then_branch, locals_types, function_return_types, type_ctx)?;
             let else_produces_value =
-                expression_produces_value(else_branch, locals_types, context, type_ctx)?;
+                expression_produces_value(else_branch, locals_types, function_return_types, type_ctx)?;
             let then_diverges = expression_does_diverge(then_branch, false, false);
             let else_diverges = expression_does_diverge(else_branch, false, false);
             Ok(then_produces_value && else_produces_value
                 || ((then_diverges || else_diverges)
                     && (then_produces_value || else_produces_value)))
         }
-        ExpressionKind::Block(exprs) => {
+        IntermediateKind::Block(exprs) => {
             let Some(last) = exprs.last() else {
                 panic!("Empty block shouldn't exist")
             };
             let diverges = exprs
                 .iter()
                 .any(|e| expression_does_diverge(e, false, false));
-            Ok(!diverges && expression_produces_value(last, locals_types, context, type_ctx)?)
+            Ok(!diverges
+                && expression_produces_value(last, locals_types, function_return_types, type_ctx)?)
         }
-        ExpressionKind::Loop { body } => {
-            Ok(determine_loop_result_type(body, locals_types, context)?.is_some())
-        }
+        IntermediateKind::Loop { body } => Ok(
+            determine_loop_result_type(body, locals_types, function_return_types)?.is_some(),
+        ),
         _ => Ok(true),
     }
 }
 
 fn infer_type(
-    expr: &Expression,
+    expr: &IntermediateKind,
     locals_types: &std::collections::HashMap<String, WasmType>,
-    context: &interpret::Context,
+    function_return_types: &[WasmType],
 ) -> Result<WasmType, Diagnostic> {
-    if let Some(struct_expr) = materialize_enum_value(expr) {
-        return infer_type(&struct_expr, locals_types, context);
-    }
-    match &expr.kind {
-        ExpressionKind::Literal(ExpressionLiteral::Number(_)) => Ok(WasmType::I32),
-        ExpressionKind::Literal(ExpressionLiteral::Boolean(_)) => Ok(WasmType::I32),
-        ExpressionKind::Struct(fields) => {
+    match expr {
+        IntermediateKind::Literal(ExpressionLiteral::Number(_)) => Ok(WasmType::I32),
+        IntermediateKind::Literal(ExpressionLiteral::Boolean(_)) => Ok(WasmType::I32),
+        IntermediateKind::Struct(fields) => {
             let mut field_types = Vec::new();
             for (name, value) in fields {
-                let ty = infer_type(value, locals_types, context)?;
+                let ty = infer_type(value, locals_types, function_return_types)?;
                 field_types.push((name.name.clone(), ty));
             }
             field_types.sort_by(|a, b| a.0.cmp(&b.0));
             Ok(WasmType::Struct(field_types))
         }
-        ExpressionKind::Identifier(identifier) => {
+        IntermediateKind::Identifier(identifier) => {
             locals_types.get(&identifier.name).cloned().ok_or_else(|| {
                 Diagnostic::new(format!("Unknown identifier `{}`", identifier.name))
-                    .with_span(expr.span)
+                    .with_span(SourceSpan::default())
             })
         }
-        ExpressionKind::Assignment { target, expr: rhs } => {
-            let value_type = infer_type(rhs, locals_types, context)?;
-            let target_expr = lvalue_to_expression(target);
-            let existing_type = infer_type(&target_expr, locals_types, context)?;
+        IntermediateKind::Assignment { target, expr: rhs } => {
+            let value_type = infer_type(rhs, locals_types, function_return_types)?;
+            let target_expr = lvalue_to_intermediate(target);
+            let existing_type = infer_type(&target_expr, locals_types, function_return_types)?;
 
             if value_type != existing_type {
                 return Err(Diagnostic::new(
                     "Cannot assign value of different type to target".to_string(),
                 )
-                .with_span(expr.span));
+                .with_span(SourceSpan::default()));
             }
 
             Ok(value_type)
         }
-        ExpressionKind::Diverge { value, .. } => infer_type(&value, locals_types, context),
-        ExpressionKind::Loop { body } => {
-            if let Some(result_type) = determine_loop_result_type(body, locals_types, context)? {
+        IntermediateKind::Diverge { value, .. } => {
+            infer_type(value, locals_types, function_return_types)
+        }
+        IntermediateKind::Loop { body } => {
+            if let Some(result_type) =
+                determine_loop_result_type(body, locals_types, function_return_types)?
+            {
                 return Ok(result_type);
             }
 
-            infer_type(body, locals_types, context)
+            infer_type(body, locals_types, function_return_types)
         }
-        ExpressionKind::FunctionCall { .. } => Ok(WasmType::I32),
-        ExpressionKind::PropertyAccess { object, property } => {
-            let object_type = infer_type(object, locals_types, context)?;
+        IntermediateKind::FunctionCall { function, .. } => function_return_types
+            .get(*function)
+            .cloned()
+            .ok_or_else(|| {
+                Diagnostic::new("Unknown function call target".to_string())
+                    .with_span(SourceSpan::default())
+            }),
+        IntermediateKind::PropertyAccess { object, property } => {
+            let object_type = infer_type(object, locals_types, function_return_types)?;
             if let WasmType::Struct(fields) = object_type {
                 if let Some((_, field_type)) = fields.iter().find(|(n, _)| n == property) {
                     Ok(field_type.clone())
                 } else {
-                    Err(
-                        Diagnostic::new(format!("Field `{}` not found in struct", property))
-                            .with_span(expr.span),
-                    )
+                    Err(Diagnostic::new(format!(
+                        "Field `{}` not found in struct",
+                        property
+                    ))
+                    .with_span(SourceSpan::default()))
                 }
             } else {
-                Err(Diagnostic::new("Property access on non-struct type").with_span(expr.span))
+                Err(Diagnostic::new("Property access on non-struct type").with_span(
+                    SourceSpan::default(),
+                ))
             }
         }
-        ExpressionKind::IntrinsicOperation(..) => Ok(WasmType::I32),
-        ExpressionKind::If { then_branch, .. } => infer_type(then_branch, locals_types, context),
-        ExpressionKind::Block(exprs) => {
+        IntermediateKind::IntrinsicOperation(..) => Ok(WasmType::I32),
+        IntermediateKind::If { then_branch, .. } => {
+            infer_type(then_branch, locals_types, function_return_types)
+        }
+        IntermediateKind::Block(exprs) => {
             if let Some(last) = exprs.last() {
-                infer_type(last, locals_types, context)
+                infer_type(last, locals_types, function_return_types)
             } else {
                 Ok(WasmType::I32)
             }
         }
-        ExpressionKind::Binding(..) => Ok(WasmType::I32),
-        ExpressionKind::Match { branches, .. } => {
+        IntermediateKind::Binding(..) => Ok(WasmType::I32),
+        IntermediateKind::Match { branches, .. } => {
             if let Some((_, branch)) = branches.first() {
-                infer_type(branch, locals_types, context)
+                infer_type(branch, locals_types, function_return_types)
             } else {
-                Ok(WasmType::I32) // todo: should be never type
+                Ok(WasmType::I32)
             }
         }
-        ExpressionKind::EnumType(_) => enum_wasm_type(expr, context),
-        ExpressionKind::EnumConstructor { enum_type, .. }
-        | ExpressionKind::EnumAccess {
-            enum_expr: enum_type,
-            ..
-        } => enum_wasm_type(enum_type, context),
         _ => Ok(WasmType::I32),
     }
 }
 
-fn collect_wasm_exports(
-    context: &interpret::Context,
-) -> Result<Vec<WasmFunctionExport>, Diagnostic> {
-    let mut exports = Vec::new();
-    for binding in context.annotated_bindings() {
-        let AnnotatedBinding {
-            identifier: name,
-            annotations,
-            value,
-        } = binding;
-        let Some(annotation_span) = wasm_annotation_span(&annotations) else {
-            continue;
-        };
-        let export = lower_function_export(context, &name, value, annotation_span)?;
-        exports.push(export);
-    }
-    exports.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(exports)
-}
-
-fn lower_function_export(
-    context: &interpret::Context,
-    binding_name: &Identifier,
-    value: Expression,
-    annotation_span: SourceSpan,
-) -> Result<WasmFunctionExport, Diagnostic> {
-    let Expression {
-        kind:
-            ExpressionKind::Function {
-                parameter,
-                return_type,
-                body,
-            },
-        ..
-    } = value
-    else {
-        return Err(Diagnostic::new(format!(
-            "Only functions can be exported to wasm (binding `{}`)",
-            binding_name.name
-        ))
-        .with_span(annotation_span));
-    };
-
-    let return_type = resolve_type(context, &return_type.unwrap())?;
-    let params = extract_function_params(context, parameter)?;
-
-    Ok(WasmFunctionExport {
-        name: binding_name.name.clone(),
-        params,
-        body: *body,
-        return_type,
-    })
-}
-
-fn resolve_type(context: &interpret::Context, expr: &Expression) -> Result<WasmType, Diagnostic> {
-    match &expr.kind {
-        ExpressionKind::IntrinsicType(IntrinsicType::I32) => Ok(WasmType::I32),
-        ExpressionKind::IntrinsicType(IntrinsicType::Boolean) => Ok(WasmType::I32),
-        ExpressionKind::Struct(fields) => {
-            let mut field_types = Vec::new();
-            for (name, value) in fields {
-                let ty = resolve_type(context, value)?;
-                field_types.push((name.name.clone(), ty));
-            }
-            field_types.sort_by(|a, b| a.0.cmp(&b.0));
-            Ok(WasmType::Struct(field_types))
-        }
-        ExpressionKind::Identifier(identifier) => {
-            if let Some((binding, _)) = context.get_identifier(identifier) {
-                match binding {
-                    interpret::BindingContext::Bound(value, _) => resolve_type(context, value),
-                    _ => Err(Diagnostic::new(format!(
-                        "Type alias `{}` is not bound to a value",
-                        identifier.name
-                    ))
-                    .with_span(expr.span)),
-                }
-            } else {
-                Err(
-                    Diagnostic::new(format!("Unknown type `{}`", identifier.name))
-                        .with_span(expr.span),
-                )
-            }
-        }
-        ExpressionKind::AttachImplementation { type_expr, .. } => resolve_type(context, type_expr),
-        ExpressionKind::EnumType(_) => enum_wasm_type(expr, context),
-        _ => Err(Diagnostic::new("Unsupported type for WASM").with_span(expr.span())),
-    }
-}
-
-fn wasm_annotation_span(annotations: &[BindingAnnotation]) -> Option<SourceSpan> {
-    annotations.iter().find_map(|annotation| match annotation {
-        BindingAnnotation::Export(
-            Expression {
-                kind: ExpressionKind::Literal(ExpressionLiteral::Target(TargetLiteral::WasmTarget)),
-                ..
-            },
-            span,
-        ) => Some(*span),
-        _ => None,
-    })
-}
-
 fn extract_function_params(
-    context: &interpret::Context,
-    pattern: BindingPattern,
+    pattern: &IntermediateBindingPattern,
+    ty: &IntermediateType,
 ) -> Result<Vec<WasmFunctionParam>, Diagnostic> {
     match pattern {
-        BindingPattern::Struct(fields, _) => {
+        IntermediateBindingPattern::Struct(fields, _) => {
+            let IntermediateType::Struct(field_types) = ty else {
+                return Err(Diagnostic::new(
+                    "Struct pattern requires struct parameter type",
+                )
+                .with_span(pattern_span(pattern)));
+            };
             let mut params = Vec::new();
-            for (_name, sub_pattern) in fields {
-                // We expect sub_pattern to be a TypeHint for the field
-                // But wait, in `fn({x: i32})`, the pattern for field `x` is `TypeHint(Identifier(x), i32)`.
-                // The name in `fields` is the field name in the struct literal if it were a literal?
-                // No, in BindingPattern::Struct, it's `(Identifier, BindingPattern)`.
-                // If I write `fn({x: i32})`, the parser produces `Struct` pattern.
-                // The identifier is `x`. The sub_pattern is `TypeHint(Identifier(x), i32)`.
-                // Actually, let's look at `parse_struct_binding_pattern_with_source`.
-                // It parses `Identifier` then optional `:` pattern.
-                // If `x: i32`, it parses `x` as identifier, then `i32` as type hint?
-                // No, `parse_binding_pattern_with_source` handles type hint.
-
-                // Let's assume sub_pattern handles the extraction.
-                let sub_params = extract_function_params(context, sub_pattern)?;
+            for (field_id, sub_pattern) in fields {
+                let field_ty = field_types
+                    .iter()
+                    .find(|(name, _)| name == &field_id.name)
+                    .map(|(_, ty)| ty)
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!(
+                            "Missing field {} in struct parameter type",
+                            field_id.name
+                        ))
+                        .with_span(pattern_span(sub_pattern))
+                    })?;
+                let sub_params = extract_function_params(sub_pattern, field_ty)?;
                 params.extend(sub_params);
             }
             Ok(params)
         }
-        BindingPattern::Annotated { pattern, .. } => extract_function_params(context, *pattern),
-        BindingPattern::TypeHint(inner, ty_expr, _) => {
-            let ty = resolve_type(context, &ty_expr)?;
-            let name = extract_identifier_from_pattern(*inner)?;
-            Ok(vec![WasmFunctionParam { name, ty }])
+        IntermediateBindingPattern::Identifier(identifier, _) => {
+            Ok(vec![WasmFunctionParam {
+                name: identifier.name.clone(),
+                ty: intermediate_type_to_wasm(ty),
+            }])
         }
-        BindingPattern::EnumVariant { .. } => Err(Diagnostic::new(
-            "Enum patterns are not supported in exported parameters",
-        )
-        .with_span(pattern.span())),
-        BindingPattern::Literal(_, _) => Err(Diagnostic::new(
+        IntermediateBindingPattern::Literal(_, _) => Err(Diagnostic::new(
             "Literal patterns cannot be used in function parameters",
         )
-        .with_span(pattern.span())),
-        BindingPattern::Identifier(_, _) => Err(Diagnostic::new(
-            "Wasm exports currently require parameter type hints",
+        .with_span(pattern_span(pattern))),
+        IntermediateBindingPattern::EnumVariant { .. } => Err(Diagnostic::new(
+            "Enum patterns are not supported in exported parameters",
         )
-        .with_span(pattern.span())),
+        .with_span(pattern_span(pattern))),
     }
 }
 
-fn extract_identifier_from_pattern(pattern: BindingPattern) -> Result<String, Diagnostic> {
+fn extract_identifier_from_pattern(
+    pattern: &IntermediateBindingPattern,
+) -> Result<String, Diagnostic> {
     match pattern {
-        BindingPattern::Identifier(identifier, _) => Ok(identifier.name),
-        BindingPattern::Annotated { pattern, .. } => extract_identifier_from_pattern(*pattern),
-        BindingPattern::TypeHint(pattern, _, _) => extract_identifier_from_pattern(*pattern),
-        BindingPattern::Struct(ref items, _) => {
+        IntermediateBindingPattern::Identifier(identifier, _) => Ok(identifier.name.clone()),
+        IntermediateBindingPattern::Struct(items, _) => {
             for (_, pat) in items {
-                if let Ok(name) = extract_identifier_from_pattern(pat.clone()) {
+                if let Ok(name) = extract_identifier_from_pattern(pat) {
                     return Ok(name);
                 }
             }
-            Err(
-                Diagnostic::new("Struct patterns require at least one identifier")
-                    .with_span(pattern.span()),
-            )
+            Err(Diagnostic::new("Struct patterns require at least one identifier")
+                .with_span(pattern_span(pattern)))
         }
-        BindingPattern::EnumVariant {
+        IntermediateBindingPattern::EnumVariant {
             payload: Some(payload),
             ..
-        } => extract_identifier_from_pattern(*payload),
-        BindingPattern::EnumVariant { .. } => Err(Diagnostic::new(
+        } => extract_identifier_from_pattern(payload),
+        IntermediateBindingPattern::EnumVariant { .. } => Err(Diagnostic::new(
             "Cannot extract identifier from enum pattern",
         )
-        .with_span(pattern.span())),
-        BindingPattern::Literal(_, _) => Err(Diagnostic::new(
+        .with_span(pattern_span(pattern))),
+        IntermediateBindingPattern::Literal(_, _) => Err(Diagnostic::new(
             "Literal patterns cannot be used in function parameters",
         )
-        .with_span(pattern.span())),
+        .with_span(pattern_span(pattern))),
     }
 }
 
-fn unwrap_pattern(mut pattern: BindingPattern) -> BindingPattern {
-    loop {
-        pattern = match pattern {
-            BindingPattern::Annotated { pattern, .. } => *pattern,
-            BindingPattern::TypeHint(inner, _, _) => *inner,
-            other => return other,
-        };
+fn pattern_span(pattern: &IntermediateBindingPattern) -> SourceSpan {
+    match pattern {
+        IntermediateBindingPattern::Identifier(_, span)
+        | IntermediateBindingPattern::Literal(_, span)
+        | IntermediateBindingPattern::Struct(_, span)
+        | IntermediateBindingPattern::EnumVariant { span, .. } => *span,
     }
 }
 
 fn collect_locals(
-    expr: &Expression,
+    expr: &IntermediateKind,
     locals_types: &mut std::collections::HashMap<String, WasmType>,
-    context: &interpret::Context,
+    function_return_types: &[WasmType],
+    match_counter: &mut MatchCounter,
 ) -> Result<Vec<(String, WasmType)>, Diagnostic> {
     let mut locals = Vec::new();
-    match &expr.kind {
-        ExpressionKind::Binding(binding) => {
-            let expr_type = infer_type(&binding.expr, locals_types, context)?;
+    match expr {
+        IntermediateKind::Binding(binding) => {
+            let expr_type = infer_type(&binding.expr, locals_types, function_return_types)?;
             collect_locals_for_pattern(
                 binding.pattern.clone(),
                 expr_type,
@@ -855,46 +762,118 @@ fn collect_locals(
                 &mut locals,
             )?;
 
-            locals.extend(collect_locals(&binding.expr, locals_types, context)?);
+            locals.extend(collect_locals(
+                &binding.expr,
+                locals_types,
+                function_return_types,
+                match_counter,
+            )?);
         }
-        ExpressionKind::Assignment { target, expr } => {
-            ensure_lvalue_local(target, locals_types, expr.span)?;
-            locals.extend(collect_locals(expr, locals_types, context)?);
+        IntermediateKind::Assignment { target, expr } => {
+            ensure_lvalue_local(target, locals_types, SourceSpan::default())?;
+            locals.extend(collect_locals(
+                expr,
+                locals_types,
+                function_return_types,
+                match_counter,
+            )?);
         }
-        ExpressionKind::Block(exprs) => {
+        IntermediateKind::Block(exprs) => {
             for e in exprs {
-                locals.extend(collect_locals(e, locals_types, context)?);
+                locals.extend(collect_locals(
+                    e,
+                    locals_types,
+                    function_return_types,
+                    match_counter,
+                )?);
             }
         }
-        ExpressionKind::Function { body: _body, .. } => {}
-        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(left, right, _)) => {
-            locals.extend(collect_locals(left, locals_types, context)?);
-            locals.extend(collect_locals(right, locals_types, context)?);
+        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
+            left,
+            right,
+            _,
+        )) => {
+            locals.extend(collect_locals(
+                left,
+                locals_types,
+                function_return_types,
+                match_counter,
+            )?);
+            locals.extend(collect_locals(
+                right,
+                locals_types,
+                function_return_types,
+                match_counter,
+            )?);
         }
-        ExpressionKind::FunctionCall {
-            function, argument, ..
-        } => {
-            locals.extend(collect_locals(function, locals_types, context)?);
-            locals.extend(collect_locals(argument, locals_types, context)?);
+        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(
+            operand,
+            _,
+        )) => {
+            locals.extend(collect_locals(
+                operand,
+                locals_types,
+                function_return_types,
+                match_counter,
+            )?);
         }
-        ExpressionKind::If {
+        IntermediateKind::FunctionCall { argument, .. } => {
+            locals.extend(collect_locals(
+                argument,
+                locals_types,
+                function_return_types,
+                match_counter,
+            )?);
+        }
+        IntermediateKind::If {
             condition,
             then_branch,
             else_branch,
-            ..
         } => {
-            locals.extend(collect_locals(condition, locals_types, context)?);
-            locals.extend(collect_locals(then_branch, locals_types, context)?);
-            locals.extend(collect_locals(else_branch, locals_types, context)?);
+            locals.extend(collect_locals(
+                condition,
+                locals_types,
+                function_return_types,
+                match_counter,
+            )?);
+            locals.extend(collect_locals(
+                then_branch,
+                locals_types,
+                function_return_types,
+                match_counter,
+            )?);
+            locals.extend(collect_locals(
+                else_branch,
+                locals_types,
+                function_return_types,
+                match_counter,
+            )?);
         }
-        ExpressionKind::Match { value, branches } => {
-            let value_type = infer_type(value, locals_types, context)?;
-            locals.push((format!("__match_val_{}", expr.span.start()), value_type));
-            locals.extend(collect_locals(value, locals_types, context)?);
+        IntermediateKind::Match { value, branches } => {
+            let value_type = infer_type(value, locals_types, function_return_types)?;
+            let temp_local_name = match_counter.next_name();
+            locals.push((temp_local_name.clone(), value_type.clone()));
+            locals_types.insert(temp_local_name, value_type);
+            locals.extend(collect_locals(
+                value,
+                locals_types,
+                function_return_types,
+                match_counter,
+            )?);
             for (pattern, branch) in branches {
-                let value_type = infer_type(value, locals_types, context)?;
-                collect_locals_for_pattern(pattern.clone(), value_type, locals_types, &mut locals)?;
-                locals.extend(collect_locals(branch, locals_types, context)?);
+                let value_type = infer_type(value, locals_types, function_return_types)?;
+                collect_locals_for_pattern(
+                    pattern.clone(),
+                    value_type,
+                    locals_types,
+                    &mut locals,
+                )?;
+                locals.extend(collect_locals(
+                    branch,
+                    locals_types,
+                    function_return_types,
+                    match_counter,
+                )?);
             }
         }
         _ => {}
@@ -903,21 +882,21 @@ fn collect_locals(
 }
 
 fn collect_locals_for_pattern(
-    pattern: BindingPattern,
+    pattern: IntermediateBindingPattern,
     expr_type: WasmType,
     locals_types: &mut std::collections::HashMap<String, WasmType>,
     locals: &mut Vec<(String, WasmType)>,
 ) -> Result<(), Diagnostic> {
     match pattern {
-        BindingPattern::Identifier(identifier, _) => {
+        IntermediateBindingPattern::Identifier(identifier, _) => {
             locals.push((identifier.name.clone(), expr_type.clone()));
             locals_types.insert(identifier.name, expr_type);
             Ok(())
         }
-        BindingPattern::Struct(items, span) => {
+        IntermediateBindingPattern::Struct(items, span) => {
             let WasmType::Struct(field_types) = expr_type else {
                 return Err(
-                    Diagnostic::new("Struct pattern requires struct value type").with_span(span)
+                    Diagnostic::new("Struct pattern requires struct value type").with_span(span),
                 );
             };
 
@@ -931,19 +910,18 @@ fn collect_locals_for_pattern(
                             "Missing field {} in struct type",
                             field_identifier.name
                         ))
-                        .with_span(field_pattern.span())
+                        .with_span(pattern_span(&field_pattern))
                     })?;
-                collect_locals_for_pattern(field_pattern, field_type, locals_types, locals)?;
+                collect_locals_for_pattern(
+                    field_pattern,
+                    field_type,
+                    locals_types,
+                    locals,
+                )?;
             }
             Ok(())
         }
-        BindingPattern::TypeHint(inner, _, _) => {
-            collect_locals_for_pattern(*inner, expr_type, locals_types, locals)
-        }
-        BindingPattern::Annotated { pattern, .. } => {
-            collect_locals_for_pattern(*pattern, expr_type, locals_types, locals)
-        }
-        BindingPattern::EnumVariant {
+        IntermediateBindingPattern::EnumVariant {
             variant,
             payload,
             span,
@@ -975,75 +953,66 @@ fn collect_locals_for_pattern(
                         })?
                 }
                 _ => {
-                    return Err(
-                        Diagnostic::new("Enum pattern requires struct-backed enum type")
-                            .with_span(span),
-                    );
+                    return Err(Diagnostic::new(
+                        "Enum pattern requires struct-backed enum value",
+                    )
+                    .with_span(span));
                 }
             };
 
             if let Some(payload_pattern) = payload {
-                collect_locals_for_pattern(*payload_pattern, payload_type, locals_types, locals)?;
+                collect_locals_for_pattern(
+                    *payload_pattern,
+                    payload_type,
+                    locals_types,
+                    locals,
+                )?;
             }
             Ok(())
         }
-        BindingPattern::Literal(_, _) => Ok(()),
+        IntermediateBindingPattern::Literal(_, _) => Ok(()),
     }
 }
 
 fn emit_expression(
-    expr: &Expression,
+    expr: &IntermediateKind,
     locals: &std::collections::HashMap<String, u32>,
     locals_types: &std::collections::HashMap<String, WasmType>,
     func: &mut Function,
     type_ctx: &TypeContext,
-    context: &interpret::Context,
+    function_return_types: &[WasmType],
     control_stack: &mut Vec<ControlFrame>,
     loop_stack: &mut Vec<LoopContext>,
+    match_counter: &mut MatchCounter,
 ) -> Result<(), Diagnostic> {
-    if let Some(struct_expr) = materialize_enum_value(expr) {
-        return emit_expression(
-            &struct_expr,
-            locals,
-            locals_types,
-            func,
-            type_ctx,
-            context,
-            control_stack,
-            loop_stack,
-        );
-    }
-    match &expr.kind {
-        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => {
+    match expr {
+        IntermediateKind::Literal(ExpressionLiteral::Number(value)) => {
             func.instruction(&Instruction::I32Const(*value));
             Ok(())
         }
-        ExpressionKind::Literal(ExpressionLiteral::Boolean(value)) => {
+        IntermediateKind::Literal(ExpressionLiteral::Boolean(value)) => {
             func.instruction(&Instruction::I32Const(if *value { 1 } else { 0 }));
             Ok(())
         }
-        ExpressionKind::Identifier(identifier) => {
+        IntermediateKind::Identifier(identifier) => {
             let local_index = locals.get(&identifier.name).copied().ok_or_else(|| {
                 Diagnostic::new(format!(
                     "Identifier `{}` is not a local variable or parameter",
                     identifier.name
                 ))
-                .with_span(expr.span)
+                .with_span(SourceSpan::default())
             })?;
             func.instruction(&Instruction::LocalGet(local_index));
             Ok(())
         }
-        ExpressionKind::Assignment {
-            target,
-            expr: value,
-        } => match target {
+        IntermediateKind::Assignment { target, expr: value } => match target {
             LValue::Identifier(identifier, _) => {
                 let local_index = locals.get(&identifier.name).copied().ok_or_else(|| {
                     Diagnostic::new(format!(
                         "Identifier `{}` is not a local variable or parameter",
                         identifier.name
                     ))
-                    .with_span(expr.span)
+                    .with_span(SourceSpan::default())
                 })?;
 
                 emit_expression(
@@ -1052,9 +1021,10 @@ fn emit_expression(
                     locals_types,
                     func,
                     type_ctx,
-                    context,
+                    function_return_types,
                     control_stack,
                     loop_stack,
+                    match_counter,
                 )?;
                 func.instruction(&Instruction::LocalTee(local_index));
                 Ok(())
@@ -1062,21 +1032,24 @@ fn emit_expression(
             LValue::PropertyAccess {
                 object,
                 property,
-                span: target_span,
+                ..
             } => {
-                let object_expr = lvalue_to_expression(object);
-                let object_type = infer_type(&object_expr, locals_types, context)?;
+                let object_expr = lvalue_to_intermediate(object);
+                let object_type = infer_type(&object_expr, locals_types, function_return_types)?;
                 let WasmType::Struct(fields) = object_type else {
                     return Err(Diagnostic::new("Property assignment on non-struct type")
-                        .with_span(*target_span));
+                        .with_span(SourceSpan::default()));
                 };
 
                 let field_index = fields
                     .iter()
                     .position(|(name, _)| name == property)
                     .ok_or_else(|| {
-                        Diagnostic::new(format!("Field `{}` not found in struct", property))
-                            .with_span(*target_span)
+                        Diagnostic::new(format!(
+                            "Field `{}` not found in struct",
+                            property
+                        ))
+                        .with_span(SourceSpan::default())
                     })? as u32;
 
                 let type_index = type_ctx
@@ -1089,9 +1062,10 @@ fn emit_expression(
                     locals_types,
                     func,
                     type_ctx,
-                    context,
+                    function_return_types,
                     control_stack,
                     loop_stack,
+                    match_counter,
                 )?;
                 emit_expression(
                     value,
@@ -1099,29 +1073,35 @@ fn emit_expression(
                     locals_types,
                     func,
                     type_ctx,
-                    context,
+                    function_return_types,
                     control_stack,
                     loop_stack,
+                    match_counter,
                 )?;
                 func.instruction(&Instruction::StructSet {
                     struct_type_index: type_index,
                     field_index,
                 });
 
-                let full_target_expr = lvalue_to_expression(target);
+                let full_target_expr = lvalue_to_intermediate(target);
                 emit_expression(
                     &full_target_expr,
                     locals,
                     locals_types,
                     func,
                     type_ctx,
-                    context,
+                    function_return_types,
                     control_stack,
                     loop_stack,
+                    match_counter,
                 )
             }
         },
-        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(left, right, op)) => {
+        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
+            left,
+            right,
+            op,
+        )) => {
             match op {
                 BinaryIntrinsicOperator::BooleanAnd => {
                     emit_expression(
@@ -1130,9 +1110,10 @@ fn emit_expression(
                         locals_types,
                         func,
                         type_ctx,
-                        context,
+                        function_return_types,
                         control_stack,
                         loop_stack,
+                        match_counter,
                     )?;
                     control_stack.push(ControlFrame::If);
                     func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
@@ -1144,9 +1125,10 @@ fn emit_expression(
                         locals_types,
                         func,
                         type_ctx,
-                        context,
+                        function_return_types,
                         control_stack,
                         loop_stack,
+                        match_counter,
                     )?;
                     func.instruction(&Instruction::Else);
                     func.instruction(&Instruction::I32Const(0));
@@ -1160,9 +1142,10 @@ fn emit_expression(
                         locals_types,
                         func,
                         type_ctx,
-                        context,
+                        function_return_types,
                         control_stack,
                         loop_stack,
+                        match_counter,
                     )?;
                     control_stack.push(ControlFrame::If);
                     func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
@@ -1176,9 +1159,10 @@ fn emit_expression(
                         locals_types,
                         func,
                         type_ctx,
-                        context,
+                        function_return_types,
                         control_stack,
                         loop_stack,
+                        match_counter,
                     )?;
                     func.instruction(&Instruction::End);
                     control_stack.pop();
@@ -1190,9 +1174,10 @@ fn emit_expression(
                         locals_types,
                         func,
                         type_ctx,
-                        context,
+                        function_return_types,
                         control_stack,
                         loop_stack,
+                        match_counter,
                     )?;
                     emit_expression(
                         right,
@@ -1200,9 +1185,10 @@ fn emit_expression(
                         locals_types,
                         func,
                         type_ctx,
-                        context,
+                        function_return_types,
                         control_stack,
                         loop_stack,
+                        match_counter,
                     )?;
                     match op {
                         BinaryIntrinsicOperator::I32Add => {
@@ -1244,14 +1230,14 @@ fn emit_expression(
             }
             Ok(())
         }
-        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
+        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(
             _,
             UnaryIntrinsicOperator::EnumFromStruct,
         )) => Err(
             Diagnostic::new("enum intrinsic should be resolved before wasm lowering")
-                .with_span(expr.span),
+                .with_span(SourceSpan::default()),
         ),
-        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
+        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(
             operand,
             UnaryIntrinsicOperator::BooleanNot,
         )) => {
@@ -1261,44 +1247,47 @@ fn emit_expression(
                 locals_types,
                 func,
                 type_ctx,
-                context,
+                function_return_types,
                 control_stack,
                 loop_stack,
+                match_counter,
             )?;
             func.instruction(&Instruction::I32Eqz);
             Ok(())
         }
-        ExpressionKind::Diverge {
+        IntermediateKind::Diverge {
             value,
             divergance_type: DivergeExpressionType::Break,
         } => {
-            let span = expr.span;
             let loop_ctx = loop_stack
                 .last()
                 .cloned()
-                .ok_or_else(|| Diagnostic::new("`break` used outside of a loop").with_span(span))?;
+                .ok_or_else(|| {
+                    Diagnostic::new("`break` used outside of a loop")
+                        .with_span(SourceSpan::default())
+                })?;
 
             let expected_type = loop_ctx.result_type.as_ref().ok_or_else(|| {
                 Diagnostic::new("`break` cannot be used in a loop without a break value")
-                    .with_span(span)
+                    .with_span(SourceSpan::default())
             })?;
 
-            let value_type = infer_type(&value, locals_types, context)?;
+            let value_type = infer_type(value, locals_types, function_return_types)?;
             if &value_type != expected_type {
-                return Err(
-                    Diagnostic::new("break value does not match loop result type").with_span(span),
-                );
+                return Err(Diagnostic::new("break value does not match loop result type")
+                    .with_span(SourceSpan::default()));
             }
 
             emit_expression(
-                &value,
+                value,
                 locals,
                 locals_types,
                 func,
                 type_ctx,
-                context,
+                function_return_types,
                 control_stack,
                 loop_stack,
+                match_counter,
             )?;
 
             let break_depth = control_stack
@@ -1308,8 +1297,9 @@ fn emit_expression(
             func.instruction(&Instruction::Br(break_depth));
             Ok(())
         }
-        ExpressionKind::Loop { body } => {
-            let loop_result_type = determine_loop_result_type(body, locals_types, context)?;
+        IntermediateKind::Loop { body } => {
+            let loop_result_type =
+                determine_loop_result_type(body, locals_types, function_return_types)?;
             if let Some(result_type) = loop_result_type {
                 let block_type = wasm_encoder::BlockType::Result(result_type.to_val_type(type_ctx));
 
@@ -1329,11 +1319,17 @@ fn emit_expression(
                     locals_types,
                     func,
                     type_ctx,
-                    context,
+                    function_return_types,
                     control_stack,
                     loop_stack,
+                    match_counter,
                 )?;
-                if expression_produces_value(body, locals_types, context, type_ctx)? {
+                if expression_produces_value(
+                    body,
+                    locals_types,
+                    function_return_types,
+                    type_ctx,
+                )? {
                     func.instruction(&Instruction::Drop);
                 }
                 func.instruction(&Instruction::Br(0));
@@ -1354,11 +1350,17 @@ fn emit_expression(
                     locals_types,
                     func,
                     type_ctx,
-                    context,
+                    function_return_types,
                     control_stack,
                     loop_stack,
+                    match_counter,
                 )?;
-                if expression_produces_value(body, locals_types, context, type_ctx)? {
+                if expression_produces_value(
+                    body,
+                    locals_types,
+                    function_return_types,
+                    type_ctx,
+                )? {
                     func.instruction(&Instruction::Drop);
                 }
                 func.instruction(&Instruction::Br(0));
@@ -1367,45 +1369,14 @@ fn emit_expression(
             }
             Ok(())
         }
-        ExpressionKind::FunctionCall {
-            function, argument, ..
-        } => {
-            if let ExpressionKind::EnumConstructor {
-                enum_type,
-                variant,
-                variant_index,
-                ..
-            } = &function.kind
-            {
-                let enum_value = ExpressionKind::EnumValue {
-                    enum_type: enum_type.clone(),
-                    variant: variant.clone(),
-                    variant_index: *variant_index,
-                    payload: argument.clone(),
-                }
-                .with_span(expr.span);
-                return emit_expression(
-                    &enum_value,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    context,
-                    control_stack,
-                    loop_stack,
-                );
-            }
-
-            Err(
-                Diagnostic::new("Function calls are not supported in wasm exports yet")
-                    .with_span(expr.span),
-            )
-        }
-        ExpressionKind::If {
+        IntermediateKind::FunctionCall { .. } => Err(Diagnostic::new(
+            "Function calls are not supported in wasm exports yet",
+        )
+        .with_span(SourceSpan::default())),
+        IntermediateKind::If {
             condition,
             then_branch,
             else_branch,
-            ..
         } => {
             emit_expression(
                 condition,
@@ -1413,14 +1384,23 @@ fn emit_expression(
                 locals_types,
                 func,
                 type_ctx,
-                context,
+                function_return_types,
                 control_stack,
                 loop_stack,
+                match_counter,
             )?;
-            let then_produces_value =
-                expression_produces_value(then_branch, locals_types, context, type_ctx)?;
-            let else_produces_value =
-                expression_produces_value(else_branch, locals_types, context, type_ctx)?;
+            let then_produces_value = expression_produces_value(
+                then_branch,
+                locals_types,
+                function_return_types,
+                type_ctx,
+            )?;
+            let else_produces_value = expression_produces_value(
+                else_branch,
+                locals_types,
+                function_return_types,
+                type_ctx,
+            )?;
 
             let then_diverges = expression_does_diverge(then_branch, false, false);
             let else_diverges = expression_does_diverge(else_branch, false, false);
@@ -1431,9 +1411,9 @@ fn emit_expression(
                     && (then_produces_value || else_produces_value))
             {
                 let result_type = if then_produces_value {
-                    infer_type(then_branch, locals_types, context)?
+                    infer_type(then_branch, locals_types, function_return_types)?
                 } else {
-                    infer_type(else_branch, locals_types, context)?
+                    infer_type(else_branch, locals_types, function_return_types)?
                 };
                 let wasm_result_type = result_type.to_val_type(type_ctx);
                 wasm_encoder::BlockType::Result(wasm_result_type)
@@ -1447,23 +1427,25 @@ fn emit_expression(
                 locals_types,
                 func,
                 type_ctx,
-                context,
+                function_return_types,
                 control_stack,
                 loop_stack,
+                match_counter,
             )?;
             if then_produces_value && matches!(block_type, wasm_encoder::BlockType::Empty) {
                 func.instruction(&Instruction::Drop);
             }
             func.instruction(&Instruction::Else);
             emit_expression(
-                &else_branch,
+                else_branch,
                 locals,
                 locals_types,
                 func,
                 type_ctx,
-                context,
+                function_return_types,
                 control_stack,
                 loop_stack,
+                match_counter,
             )?;
             if else_produces_value && matches!(block_type, wasm_encoder::BlockType::Empty) {
                 func.instruction(&Instruction::Drop);
@@ -1472,33 +1454,33 @@ fn emit_expression(
             control_stack.pop();
             Ok(())
         }
-        ExpressionKind::Binding(binding) => {
-            let pattern = unwrap_pattern(binding.pattern.clone());
-            if let BindingPattern::EnumVariant {
-                enum_type,
+        IntermediateKind::Binding(binding) => {
+            let pattern = &binding.pattern;
+            if let IntermediateBindingPattern::EnumVariant {
                 variant,
+                variant_index,
                 payload,
-                span: pattern_span,
-            } = &pattern
+                span,
+            } = pattern
             {
-                let value_type = infer_type(&binding.expr, locals_types, context)?;
+                let value_type =
+                    infer_type(&binding.expr, locals_types, function_return_types)?;
                 let WasmType::Struct(fields) = value_type else {
-                    return Err(
-                        Diagnostic::new("Enum bindings require struct-backed enum value")
-                            .with_span(*pattern_span),
-                    );
+                    return Err(Diagnostic::new(
+                        "Enum bindings require struct-backed enum value",
+                    )
+                    .with_span(*span));
                 };
 
                 let tag_field_index = fields
                     .iter()
                     .position(|(name, _)| name == "tag")
                     .ok_or_else(|| {
-                        Diagnostic::new("Enum tag missing in wasm lowering")
-                            .with_span(*pattern_span)
+                        Diagnostic::new("Enum tag missing in wasm lowering").with_span(*span)
                     })? as u32;
 
                 let type_index = type_ctx.get_type_index(&fields).ok_or_else(|| {
-                    Diagnostic::new("Enum type not registered").with_span(*pattern_span)
+                    Diagnostic::new("Enum type not registered").with_span(*span)
                 })?;
 
                 let payload_struct = fields
@@ -1508,15 +1490,8 @@ fn emit_expression(
                     .expect("Payload field should exist");
                 let WasmType::Struct(_payload_fields) = payload_struct else {
                     return Err(Diagnostic::new("Enum payload expected to be a struct")
-                        .with_span(*pattern_span));
+                        .with_span(*span));
                 };
-
-                let variant_index = enum_variant_index_from_context(
-                    enum_type.as_ref(),
-                    variant,
-                    context,
-                    *pattern_span,
-                )? as i32;
 
                 emit_expression(
                     &binding.expr,
@@ -1524,44 +1499,37 @@ fn emit_expression(
                     locals_types,
                     func,
                     type_ctx,
-                    context,
+                    function_return_types,
                     control_stack,
                     loop_stack,
+                    match_counter,
                 )?;
                 func.instruction(&Instruction::StructGet {
                     struct_type_index: type_index,
                     field_index: tag_field_index,
                 });
-                func.instruction(&Instruction::I32Const(variant_index));
+                func.instruction(&Instruction::I32Const(*variant_index as i32));
                 func.instruction(&Instruction::I32Eq);
 
-                // If tag matches (1), we proceed to check payload.
-                // We use `if (result i32)` block.
                 control_stack.push(ControlFrame::If);
                 func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
                     ValType::I32,
                 )));
 
                 if let Some(payload_pattern) = payload.clone() {
-                    // Extract payload
-                    // We construct a property access expression for the payload
-                    let payload_access_expr = ExpressionKind::PropertyAccess {
-                        object: Box::new(
-                            ExpressionKind::PropertyAccess {
-                                object: Box::new(binding.expr.clone()),
-                                property: "payload".to_string(),
-                            }
-                            .with_span(*pattern_span),
-                        ),
+                    let payload_access_expr = IntermediateKind::PropertyAccess {
+                        object: Box::new(IntermediateKind::PropertyAccess {
+                            object: Box::new(binding.expr.clone()),
+                            property: "payload".to_string(),
+                        }),
                         property: variant.name.clone(),
-                    }
-                    .with_span(*pattern_span);
+                    };
 
-                    let payload_binding = ExpressionKind::Binding(Box::new(Binding {
+                    let payload_binding = IntermediateKind::Binding(Box::new(IntermediateBinding {
                         pattern: *payload_pattern,
+                        binding_type: binding.binding_type.clone(),
                         expr: payload_access_expr,
-                    }))
-                    .with_span(*pattern_span);
+                    }));
 
                     emit_expression(
                         &payload_binding,
@@ -1569,16 +1537,14 @@ fn emit_expression(
                         locals_types,
                         func,
                         type_ctx,
-                        context,
+                        function_return_types,
                         control_stack,
                         loop_stack,
+                        match_counter,
                     )?;
-                    // The binding expression returns 1 (i32) on success.
-                    // We drop it and push 1 to be explicit and safe.
                     func.instruction(&Instruction::Drop);
                     func.instruction(&Instruction::I32Const(1));
                 } else {
-                    // No payload to check, so if tag matched, we are good.
                     func.instruction(&Instruction::I32Const(1));
                 }
 
@@ -1591,12 +1557,9 @@ fn emit_expression(
             }
 
             if let (
-                BindingPattern::Struct(pattern_fields, _),
-                Expression {
-                    kind: ExpressionKind::Struct(value_fields),
-                    ..
-                },
-            ) = (&pattern, &binding.expr)
+                IntermediateBindingPattern::Struct(pattern_fields, _),
+                IntermediateKind::Struct(value_fields),
+            ) = (pattern, &binding.expr)
             {
                 let mut comparisons_emitted = false;
                 for (field_identifier, field_pattern) in pattern_fields {
@@ -1609,38 +1572,43 @@ fn emit_expression(
                                 "Missing field {} in struct binding",
                                 field_identifier.name
                             ))
-                            .with_span(field_pattern.span())
+                            .with_span(pattern_span(field_pattern))
                         })?;
 
-                    match unwrap_pattern(field_pattern.clone()) {
-                        BindingPattern::Literal(ExpressionLiteral::Number(expected), _) => {
+                    match field_pattern {
+                        IntermediateBindingPattern::Literal(
+                            ExpressionLiteral::Number(expected),
+                            _,
+                        ) => {
                             emit_expression(
                                 value_expr,
                                 locals,
                                 locals_types,
                                 func,
                                 type_ctx,
-                                context,
+                                function_return_types,
                                 control_stack,
                                 loop_stack,
+                                match_counter,
                             )?;
-                            func.instruction(&Instruction::I32Const(expected));
+                            func.instruction(&Instruction::I32Const(*expected));
                             func.instruction(&Instruction::I32Eq);
                             if comparisons_emitted {
                                 func.instruction(&Instruction::I32And);
                             }
                             comparisons_emitted = true;
                         }
-                        BindingPattern::Identifier(identifier, _) => {
+                        IntermediateBindingPattern::Identifier(identifier, _) => {
                             emit_expression(
                                 value_expr,
                                 locals,
                                 locals_types,
                                 func,
                                 type_ctx,
-                                context,
+                                function_return_types,
                                 control_stack,
                                 loop_stack,
+                                match_counter,
                             )?;
                             let local_index = locals
                                 .get(&identifier.name)
@@ -1652,7 +1620,7 @@ fn emit_expression(
                             return Err(Diagnostic::new(
                                 "Unsupported pattern in struct binding for wasm emission",
                             )
-                            .with_span(field_pattern.span()));
+                            .with_span(pattern_span(field_pattern)));
                         }
                     }
                 }
@@ -1661,16 +1629,17 @@ fn emit_expression(
                     func.instruction(&Instruction::I32Const(1));
                 }
                 Ok(())
-            } else if let BindingPattern::Literal(literal, _) = &pattern {
+            } else if let IntermediateBindingPattern::Literal(literal, span) = pattern {
                 emit_expression(
                     &binding.expr,
                     locals,
                     locals_types,
                     func,
                     type_ctx,
-                    context,
+                    function_return_types,
                     control_stack,
                     loop_stack,
+                    match_counter,
                 )?;
                 match literal {
                     ExpressionLiteral::Number(val) => {
@@ -1685,7 +1654,7 @@ fn emit_expression(
                         return Err(Diagnostic::new(
                             "Unsupported literal pattern in binding for wasm emission",
                         )
-                        .with_span(pattern.span()));
+                        .with_span(*span));
                     }
                 }
                 Ok(())
@@ -1696,9 +1665,10 @@ fn emit_expression(
                     locals_types,
                     func,
                     type_ctx,
-                    context,
+                    function_return_types,
                     control_stack,
                     loop_stack,
+                    match_counter,
                 )?;
                 let name = extract_identifier_from_pattern(pattern)?;
                 let local_index = locals
@@ -1706,63 +1676,11 @@ fn emit_expression(
                     .copied()
                     .unwrap_or_else(|| panic!("Local '{}' should have been collected", name));
                 func.instruction(&Instruction::LocalSet(local_index));
-                // Binding to an identifier always succeeds
                 func.instruction(&Instruction::I32Const(1));
                 Ok(())
             }
         }
-        ExpressionKind::EnumAccess { enum_expr, variant } => {
-            let span = expr.span;
-            if let ExpressionKind::EnumType(variants) = &enum_expr.kind
-                && let Some((variant_index, (_, payload_type))) = variants
-                    .iter()
-                    .enumerate()
-                    .find(|(_, (id, _))| id.name == variant.name)
-            {
-                if let ExpressionKind::Struct(fields) = &payload_type.kind
-                    && fields.is_empty()
-                {
-                    let value = ExpressionKind::EnumValue {
-                        enum_type: enum_expr.clone(),
-                        variant: variant.clone(),
-                        variant_index,
-                        payload: Box::new(ExpressionKind::Struct(vec![]).with_span(span)),
-                    }
-                    .with_span(span);
-                    return emit_expression(
-                        &value,
-                        locals,
-                        locals_types,
-                        func,
-                        type_ctx,
-                        context,
-                        control_stack,
-                        loop_stack,
-                    );
-                }
-
-                let constructor = ExpressionKind::EnumConstructor {
-                    enum_type: enum_expr.clone(),
-                    variant: variant.clone(),
-                    variant_index,
-                    payload_type: Box::new(payload_type.clone()),
-                }
-                .with_span(span);
-                return emit_expression(
-                    &constructor,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    context,
-                    control_stack,
-                    loop_stack,
-                );
-            }
-
-            Err(Diagnostic::new("Enum access could not be resolved in wasm export").with_span(span))
-        }
-        ExpressionKind::Block(exprs) => {
+        IntermediateKind::Block(exprs) => {
             for (i, e) in exprs.iter().enumerate() {
                 emit_expression(
                     e,
@@ -1770,52 +1688,59 @@ fn emit_expression(
                     locals_types,
                     func,
                     type_ctx,
-                    context,
+                    function_return_types,
                     control_stack,
                     loop_stack,
+                    match_counter,
                 )?;
                 if i < exprs.len() - 1 {
                     if expression_does_diverge(e, false, false) {
                         break;
                     }
 
-                    if expression_produces_value(e, locals_types, context, type_ctx)? {
+                    if expression_produces_value(
+                        e,
+                        locals_types,
+                        function_return_types,
+                        type_ctx,
+                    )? {
                         func.instruction(&Instruction::Drop);
                     }
                 }
             }
             Ok(())
         }
-        ExpressionKind::Diverge {
+        IntermediateKind::Diverge {
             value,
             divergance_type: DivergeExpressionType::Return,
-            ..
         } => {
             emit_expression(
-                &value,
+                value,
                 locals,
                 locals_types,
                 func,
                 type_ctx,
-                context,
+                function_return_types,
                 control_stack,
                 loop_stack,
+                match_counter,
             )?;
             func.instruction(&Instruction::Return);
             Ok(())
         }
-        ExpressionKind::Struct(items) => {
+        IntermediateKind::Struct(items) => {
             let mut sorted_items = items.clone();
             sorted_items.sort_by(|(a_name, _), (b_name, _)| a_name.name.cmp(&b_name.name));
 
             let mut field_types = Vec::new();
             for (name, value) in &sorted_items {
-                let ty = infer_type(value, locals_types, context)?;
+                let ty = infer_type(value, locals_types, function_return_types)?;
                 field_types.push((name.name.clone(), ty));
             }
 
             let type_index = type_ctx.get_type_index(&field_types).ok_or_else(|| {
-                Diagnostic::new("Struct type not found in context").with_span(expr.span)
+                Diagnostic::new("Struct type not found in context")
+                    .with_span(SourceSpan::default())
             })?;
 
             for (_, value) in sorted_items {
@@ -1825,25 +1750,29 @@ fn emit_expression(
                     locals_types,
                     func,
                     type_ctx,
-                    context,
+                    function_return_types,
                     control_stack,
                     loop_stack,
+                    match_counter,
                 )?;
             }
 
             func.instruction(&Instruction::StructNew(type_index));
             Ok(())
         }
-        ExpressionKind::PropertyAccess { object, property } => {
-            let object_type = infer_type(object, locals_types, context)?;
+        IntermediateKind::PropertyAccess { object, property } => {
+            let object_type = infer_type(object, locals_types, function_return_types)?;
             if let WasmType::Struct(fields) = object_type {
                 let field_index =
                     fields
                         .iter()
                         .position(|(n, _)| n == property)
                         .ok_or_else(|| {
-                            Diagnostic::new(format!("Field `{}` not found in struct", property))
-                                .with_span(expr.span)
+                            Diagnostic::new(format!(
+                                "Field `{}` not found in struct",
+                                property
+                            ))
+                            .with_span(SourceSpan::default())
                         })?;
 
                 let type_index = type_ctx
@@ -1856,9 +1785,10 @@ fn emit_expression(
                     locals_types,
                     func,
                     type_ctx,
-                    context,
+                    function_return_types,
                     control_stack,
                     loop_stack,
+                    match_counter,
                 )?;
                 func.instruction(&Instruction::StructGet {
                     struct_type_index: type_index,
@@ -1866,22 +1796,24 @@ fn emit_expression(
                 });
                 Ok(())
             } else {
-                Err(Diagnostic::new("Property access on non-struct type").with_span(expr.span))
+                Err(Diagnostic::new("Property access on non-struct type")
+                    .with_span(SourceSpan::default()))
             }
         }
-        ExpressionKind::Match { value, branches } => {
+        IntermediateKind::Match { value, branches } => {
             emit_expression(
                 value,
                 locals,
                 locals_types,
                 func,
                 type_ctx,
-                context,
+                function_return_types,
                 control_stack,
                 loop_stack,
+                match_counter,
             )?;
 
-            let temp_local_name = format!("__match_val_{}", expr.span.start());
+            let temp_local_name = match_counter.next_name();
             let temp_local_index = locals
                 .get(&temp_local_name)
                 .copied()
@@ -1894,7 +1826,7 @@ fn emit_expression(
                     .map(|(_, b)| b)
                     .expect("Match must have branches"),
                 locals_types,
-                context,
+                function_return_types,
             )?;
             let wasm_result_type = result_type.to_val_type(type_ctx);
             let block_type = wasm_encoder::BlockType::Result(wasm_result_type);
@@ -1903,12 +1835,11 @@ fn emit_expression(
             func.instruction(&Instruction::Block(block_type));
 
             for (pattern, branch) in branches {
-                let check_expr = ExpressionKind::Binding(Box::new(Binding {
+                let check_expr = IntermediateKind::Binding(Box::new(IntermediateBinding {
                     pattern: pattern.clone(),
-                    expr: ExpressionKind::Identifier(Identifier::new(temp_local_name.clone()))
-                        .with_span(expr.span),
-                }))
-                .with_span(expr.span);
+                    binding_type: IntermediateType::I32,
+                    expr: IntermediateKind::Identifier(Identifier::new(temp_local_name.clone())),
+                }));
 
                 emit_expression(
                     &check_expr,
@@ -1916,9 +1847,10 @@ fn emit_expression(
                     locals_types,
                     func,
                     type_ctx,
-                    context,
+                    function_return_types,
                     control_stack,
                     loop_stack,
+                    match_counter,
                 )?;
 
                 func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
@@ -1929,9 +1861,10 @@ fn emit_expression(
                     locals_types,
                     func,
                     type_ctx,
-                    context,
+                    function_return_types,
                     control_stack,
                     loop_stack,
+                    match_counter,
                 )?;
 
                 func.instruction(&Instruction::Br(1));
@@ -1945,8 +1878,132 @@ fn emit_expression(
 
             Ok(())
         }
-        _ => Err(
-            Diagnostic::new("Expression is not supported in wasm exports yet").with_span(expr.span),
-        ),
+        _ => Err(Diagnostic::new("Expression is not supported in wasm exports yet")
+            .with_span(SourceSpan::default())),
+    }
+}
+
+fn expression_does_diverge(expr: &IntermediateKind, possibility: bool, in_inner_loop: bool) -> bool {
+    match expr {
+        IntermediateKind::Diverge {
+            divergance_type: DivergeExpressionType::Break,
+            ..
+        } => !in_inner_loop,
+        IntermediateKind::Diverge {
+            divergance_type: DivergeExpressionType::Return,
+            ..
+        } => true,
+        IntermediateKind::Block(exprs) => exprs
+            .iter()
+            .any(|expr| expression_does_diverge(expr, possibility, in_inner_loop)),
+        IntermediateKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let then_diverges = expression_does_diverge(then_branch, possibility, in_inner_loop);
+            let else_diverges = expression_does_diverge(else_branch, possibility, in_inner_loop);
+            if possibility {
+                then_diverges || else_diverges
+            } else {
+                then_diverges && else_diverges
+            }
+        }
+        IntermediateKind::Binding(binding) => {
+            expression_does_diverge(&binding.expr, possibility, in_inner_loop)
+        }
+        IntermediateKind::Assignment { expr, .. } => {
+            expression_does_diverge(expr, possibility, in_inner_loop)
+        }
+        IntermediateKind::FunctionCall { argument, .. } => {
+            expression_does_diverge(argument, possibility, in_inner_loop)
+        }
+        IntermediateKind::Loop { body } => expression_does_diverge(body, possibility, true),
+        IntermediateKind::PropertyAccess { object, .. } => {
+            expression_does_diverge(object, possibility, in_inner_loop)
+        }
+        IntermediateKind::Match { value, branches } => {
+            expression_does_diverge(value, possibility, in_inner_loop)
+                || branches
+                    .iter()
+                    .all(|(_, branch)| expression_does_diverge(branch, possibility, in_inner_loop))
+        }
+        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
+            left,
+            right,
+            _,
+        )) => {
+            expression_does_diverge(left, possibility, in_inner_loop)
+                || expression_does_diverge(right, possibility, in_inner_loop)
+        }
+        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(operand, _)) => {
+            expression_does_diverge(operand, possibility, in_inner_loop)
+        }
+        IntermediateKind::Struct(fields) => fields
+            .iter()
+            .any(|(_, expr)| expression_does_diverge(expr, possibility, in_inner_loop)),
+        IntermediateKind::Literal(_) | IntermediateKind::Identifier(_) => false,
+    }
+}
+
+fn collect_break_values(expr: &IntermediateKind) -> Vec<IntermediateKind> {
+    let mut values = Vec::new();
+    collect_break_values_inner(expr, &mut values);
+    values
+}
+
+fn collect_break_values_inner(expr: &IntermediateKind, values: &mut Vec<IntermediateKind>) {
+    match expr {
+        IntermediateKind::Diverge {
+            value,
+            divergance_type: DivergeExpressionType::Break,
+        } => {
+            values.push((**value).clone());
+        }
+        IntermediateKind::Block(exprs) => {
+            for expr in exprs {
+                collect_break_values_inner(expr, values);
+            }
+        }
+        IntermediateKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_break_values_inner(then_branch, values);
+            collect_break_values_inner(else_branch, values);
+        }
+        IntermediateKind::Binding(binding) => collect_break_values_inner(&binding.expr, values),
+        IntermediateKind::Assignment { expr, .. } => collect_break_values_inner(expr, values),
+        IntermediateKind::FunctionCall { argument, .. } => {
+            collect_break_values_inner(argument, values);
+        }
+        IntermediateKind::Loop { body } => collect_break_values_inner(body, values),
+        IntermediateKind::PropertyAccess { object, .. } => {
+            collect_break_values_inner(object, values);
+        }
+        IntermediateKind::Match { value, branches } => {
+            collect_break_values_inner(value, values);
+            for (_, branch) in branches {
+                collect_break_values_inner(branch, values);
+            }
+        }
+        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
+            left,
+            right,
+            _,
+        )) => {
+            collect_break_values_inner(left, values);
+            collect_break_values_inner(right, values);
+        }
+        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(operand, _)) => {
+            collect_break_values_inner(operand, values);
+        }
+        IntermediateKind::Struct(fields) => {
+            for (_, expr) in fields {
+                collect_break_values_inner(expr, values);
+            }
+        }
+        _ => {}
     }
 }

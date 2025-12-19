@@ -120,13 +120,39 @@ fn exporting_non_function_reports_diagnostic() {
 (export wasm) answer: i32 := 42;
 answer
 "#;
-    let err = compile(program.to_string()).expect_err("expected failure");
-    assert!(
-        err.message
-            .contains("Only functions can be exported to wasm"),
-        "unexpected diagnostic message: {}",
-        err.message
-    );
+    let wasm = compile(program.to_string()).expect("compilation should succeed");
+
+    let mut exports = Vec::new();
+    let mut global_values = Vec::new();
+
+    for payload in Parser::new(0).parse_all(&wasm) {
+        match payload.expect("failed to parse wasm payload") {
+            Payload::ExportSection(section) => {
+                for export in section {
+                    let export = export.expect("invalid export entry");
+                    exports.push((export.name.to_string(), export.kind));
+                }
+            }
+            Payload::GlobalSection(section) => {
+                for global in section {
+                    let global = global.expect("invalid global entry");
+                    let mut reader = global.init_expr.get_operators_reader();
+                    match reader.read().expect("const expr operator") {
+                        Operator::I32Const { value } => global_values.push(value),
+                        other => panic!("unexpected global initializer: {:?}", other),
+                    }
+                    assert!(
+                        matches!(reader.read().expect("const expr end"), Operator::End),
+                        "expected global initializer to end"
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(exports, vec![("answer".to_string(), wasmparser::ExternalKind::Global)]);
+    assert_eq!(global_values, vec![42]);
 }
 
 #[test]

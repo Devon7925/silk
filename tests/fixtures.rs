@@ -1,4 +1,4 @@
-use silk::test_support::{compile_exports, evaluate_text_to_expression};
+use silk::test_support::{compile_exports, context_to_intermediate, evaluate_text_to_expression};
 
 #[test]
 fn interpret_pass_pair() {
@@ -8,7 +8,8 @@ fn interpret_pass_pair() {
             panic!("{}", err.render_with_source(&program));
         });
     println!("Result: {:?}", result.pretty_print());
-    compile_exports(&context).unwrap_or_else(|err| {
+    let intermediate = context_to_intermediate(&context);
+    compile_exports(&intermediate).unwrap_or_else(|err| {
         panic!("{}", err.render_with_source(&program));
     });
 }
@@ -21,7 +22,8 @@ fn interpret_range_sum() {
             panic!("{}", err.render_with_source(&program));
         });
     println!("Result: {:?}", result.pretty_print());
-    compile_exports(&context).unwrap_or_else(|err| {
+    let intermediate = context_to_intermediate(&context);
+    compile_exports(&intermediate).unwrap_or_else(|err| {
         panic!("{}", err.render_with_source(&program));
     });
 }
@@ -34,7 +36,8 @@ fn interpret_generic_option_while() {
             panic!("{}", err.render_with_source(&program));
         });
     println!("Result: {:?}", result.pretty_print());
-    compile_exports(&context).unwrap_or_else(|err| {
+    let intermediate = context_to_intermediate(&context);
+    compile_exports(&intermediate).unwrap_or_else(|err| {
         panic!("{}", err.render_with_source(&program));
     });
 }

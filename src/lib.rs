@@ -9,6 +9,7 @@ pub mod test_support {
     pub use crate::interpret::{
         Context, evaluate_text_to_expression, interpret_program, intrinsic_context,
     };
+    pub use crate::intermediate::{context_to_intermediate, IntermediateResult};
     pub use crate::wasm::compile_exports;
 }
 
@@ -31,5 +32,6 @@ pub fn compile(file: String) -> Result<Vec<u8>, Diagnostic> {
     let uniquified = uniquify::uniquify_program(ast);
     let mut context = interpret::intrinsic_context();
     let (_value, program_context) = interpret::interpret_program(uniquified, &mut context)?;
-    wasm::compile_exports(&program_context)
+    let intermediate = intermediate::context_to_intermediate(&program_context);
+    wasm::compile_exports(&intermediate)
 }
