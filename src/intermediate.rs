@@ -420,6 +420,15 @@ impl IntermediateBuilder {
             return Some(index);
         }
 
+        for scope in self.enum_context.bindings.iter().rev() {
+            if let Some((BindingContext::Bound(value, _), _)) = scope.get(identifier) {
+                if matches!(value.kind, ExpressionKind::Function { .. }) {
+                    let index = self.register_function(Some(identifier.clone()), value.clone());
+                    return Some(index);
+                }
+            }
+        }
+
         None
     }
 

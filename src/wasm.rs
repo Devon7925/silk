@@ -7,8 +7,8 @@ use wasm_encoder::{
 use crate::{
     diagnostics::{Diagnostic, SourceSpan},
     intermediate::{
-        IntermediateBinding, IntermediateBindingPattern, IntermediateExportType, IntermediateKind,
-        IntermediateIntrinsicOperation, IntermediateResult, IntermediateType,
+        IntermediateBinding, IntermediateBindingPattern, IntermediateExportType, IntermediateFunction,
+        IntermediateKind, IntermediateIntrinsicOperation, IntermediateResult, IntermediateType,
     },
     parsing::{
         BinaryIntrinsicOperator, DivergeExpressionType, ExpressionLiteral, Identifier, LValue,
@@ -166,11 +166,15 @@ struct WasmFunctionParam {
     ty: WasmType,
 }
 
-struct WasmFunctionExport {
-    name: String,
+struct WasmFunctionDef {
     params: Vec<WasmFunctionParam>,
     body: IntermediateKind,
     return_type: WasmType,
+}
+
+struct WasmFunctionExport {
+    name: String,
+    index: usize,
 }
 
 struct WasmGlobalExport {
@@ -190,6 +194,19 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
         return Ok(Vec::new());
     }
 
+    let all_functions = intermediate
+        .functions
+        .iter()
+        .map(|function| {
+            let params = extract_function_params(&function.parameter, &function.input_type)?;
+            Ok(WasmFunctionDef {
+                params,
+                body: (*function.body).clone(),
+                return_type: intermediate_type_to_wasm(&function.return_type),
+            })
+        })
+        .collect::<Result<Vec<_>, Diagnostic>>()?;
+
     let mut module = Module::new();
     let mut type_section = TypeSection::new();
     let mut function_section = FunctionSection::new();
@@ -205,19 +222,19 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
         .map(|function| intermediate_type_to_wasm(&function.return_type))
         .collect::<Vec<_>>();
 
-    for export in &exports.functions {
+    for function in &all_functions {
         let mut locals_types = std::collections::HashMap::new();
-        for param in &export.params {
+        for param in &function.params {
             if let WasmType::Struct(fields) = &param.ty {
                 type_ctx.get_or_register_type(fields.clone());
             }
             locals_types.insert(param.name.clone(), param.ty.clone());
         }
-        if let WasmType::Struct(fields) = &export.return_type {
+        if let WasmType::Struct(fields) = &function.return_type {
             type_ctx.get_or_register_type(fields.clone());
         }
         collect_types(
-            &export.body,
+            &function.body,
             &mut type_ctx,
             &mut locals_types,
             &function_return_types,
@@ -254,13 +271,13 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
     let struct_type_count = type_ctx.struct_types.len() as u32;
     let mut next_type_index = struct_type_count;
 
-    for export in &exports.functions {
-        let param_types: Vec<ValType> = export
+    for function in &all_functions {
+        let param_types: Vec<ValType> = function
             .params
             .iter()
             .map(|param| param.ty.to_val_type(&type_ctx))
             .collect();
-        let return_types = vec![export.return_type.to_val_type(&type_ctx)];
+        let return_types = vec![function.return_type.to_val_type(&type_ctx)];
 
         type_section.function(param_types, return_types);
         function_section.function(next_type_index);
@@ -279,26 +296,26 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
         );
     }
 
-    for (function_index, export) in exports.functions.iter().enumerate() {
+    for function in &all_functions {
         let mut locals = Vec::new();
         let mut local_indices = std::collections::HashMap::new();
         let mut locals_types = std::collections::HashMap::new();
 
-        for (j, param) in export.params.iter().enumerate() {
+        for (j, param) in function.params.iter().enumerate() {
             local_indices.insert(param.name.clone(), j as u32);
             locals_types.insert(param.name.clone(), param.ty.clone());
         }
 
         let mut match_counter = MatchCounter::default();
         let body_locals = collect_locals(
-            &export.body,
+            &function.body,
             &mut locals_types,
             &function_return_types,
             &mut match_counter,
         )?;
         for (name, ty) in body_locals {
             if !local_indices.contains_key(&name) {
-                local_indices.insert(name.clone(), (export.params.len() + locals.len()) as u32);
+                local_indices.insert(name.clone(), (function.params.len() + locals.len()) as u32);
                 locals.push(ty.clone());
             }
         }
@@ -310,24 +327,25 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
 
         let mut match_counter = MatchCounter::default();
         emit_expression(
-            &export.body,
+            &function.body,
             &local_indices,
             &locals_types,
             &mut func,
             &type_ctx,
             &function_return_types,
+            &intermediate.functions,
             &mut control_stack,
             &mut loop_stack,
             &mut match_counter,
         )?;
 
         let body_produces_value = expression_produces_value(
-            &export.body,
+            &function.body,
             &locals_types,
             &function_return_types,
             &type_ctx,
         )?;
-        let body_transfers_control = expression_does_diverge(&export.body, false, false);
+        let body_transfers_control = expression_does_diverge(&function.body, false, false);
         if body_produces_value {
             func.instruction(&Instruction::Return);
         } else if body_transfers_control {
@@ -335,14 +353,15 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
         }
         func.instruction(&Instruction::End);
         code_section.function(&func);
-
-        export_section.export(&export.name, ExportKind::Func, function_index as u32);
     }
 
     module.section(&type_section);
     module.section(&function_section);
     if !exports.globals.is_empty() {
         module.section(&global_section);
+    }
+    for export in &exports.functions {
+        export_section.export(&export.name, ExportKind::Func, export.index as u32);
     }
     for (global_index, global) in exports.globals.iter().enumerate() {
         export_section.export(&global.name, ExportKind::Global, global_index as u32);
@@ -363,7 +382,7 @@ fn collect_wasm_exports(intermediate: &IntermediateResult) -> Result<WasmExports
         }
         match export.export_type {
             IntermediateExportType::Function => {
-                let function = intermediate.functions.get(export.index).ok_or_else(|| {
+                intermediate.functions.get(export.index).ok_or_else(|| {
                     Diagnostic::new(format!(
                         "Export `{}` references unknown function index {}",
                         export.name, export.index
@@ -371,14 +390,9 @@ fn collect_wasm_exports(intermediate: &IntermediateResult) -> Result<WasmExports
                     .with_span(SourceSpan::default())
                 })?;
 
-                let return_type = intermediate_type_to_wasm(&function.return_type);
-                let params = extract_function_params(&function.parameter, &function.input_type)?;
-
                 functions.push(WasmFunctionExport {
                     name: export.name.clone(),
-                    params,
-                    body: (*function.body).clone(),
-                    return_type,
+                    index: export.index,
                 });
             }
             IntermediateExportType::Global => {
@@ -818,6 +832,10 @@ fn collect_locals(
             )?);
         }
         IntermediateKind::FunctionCall { argument, .. } => {
+            let arg_type = infer_type(argument, locals_types, function_return_types)?;
+            let temp_local_name = match_counter.next_name();
+            locals.push((temp_local_name.clone(), arg_type.clone()));
+            locals_types.insert(temp_local_name, arg_type);
             locals.extend(collect_locals(
                 argument,
                 locals_types,
@@ -974,6 +992,85 @@ fn collect_locals_for_pattern(
     }
 }
 
+fn emit_call_arguments(
+    pattern: &IntermediateBindingPattern,
+    input_type: &IntermediateType,
+    argument_expr: IntermediateKind,
+    locals: &std::collections::HashMap<String, u32>,
+    locals_types: &std::collections::HashMap<String, WasmType>,
+    func: &mut Function,
+    type_ctx: &TypeContext,
+    function_return_types: &[WasmType],
+    functions: &[IntermediateFunction],
+    control_stack: &mut Vec<ControlFrame>,
+    loop_stack: &mut Vec<LoopContext>,
+    match_counter: &mut MatchCounter,
+) -> Result<(), Diagnostic> {
+    match pattern {
+        IntermediateBindingPattern::Identifier(_, _) => emit_expression(
+            &argument_expr,
+            locals,
+            locals_types,
+            func,
+            type_ctx,
+            function_return_types,
+            functions,
+            control_stack,
+            loop_stack,
+            match_counter,
+        ),
+        IntermediateBindingPattern::Struct(fields, _) => {
+            let IntermediateType::Struct(field_types) = input_type else {
+                return Err(Diagnostic::new(
+                    "Struct pattern requires struct parameter type",
+                )
+                .with_span(pattern_span(pattern)));
+            };
+
+            for (field_id, sub_pattern) in fields {
+                let field_ty = field_types
+                    .iter()
+                    .find(|(name, _)| name == &field_id.name)
+                    .map(|(_, ty)| ty)
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!(
+                            "Missing field {} in struct parameter type",
+                            field_id.name
+                        ))
+                        .with_span(pattern_span(sub_pattern))
+                    })?;
+                let field_expr = IntermediateKind::PropertyAccess {
+                    object: Box::new(argument_expr.clone()),
+                    property: field_id.name.clone(),
+                };
+                emit_call_arguments(
+                    sub_pattern,
+                    field_ty,
+                    field_expr,
+                    locals,
+                    locals_types,
+                    func,
+                    type_ctx,
+                    function_return_types,
+                    functions,
+                    control_stack,
+                    loop_stack,
+                    match_counter,
+                )?;
+            }
+            Ok(())
+        }
+        IntermediateBindingPattern::Literal(_, _) => Err(Diagnostic::new(
+            "Literal patterns cannot be used in function parameters",
+        )
+        .with_span(pattern_span(pattern))),
+        IntermediateBindingPattern::EnumVariant { .. } => Err(Diagnostic::new(
+            "Enum patterns are not supported in function parameters",
+        )
+        .with_span(pattern_span(pattern))),
+    }
+}
+
 fn emit_expression(
     expr: &IntermediateKind,
     locals: &std::collections::HashMap<String, u32>,
@@ -981,6 +1078,7 @@ fn emit_expression(
     func: &mut Function,
     type_ctx: &TypeContext,
     function_return_types: &[WasmType],
+    functions: &[IntermediateFunction],
     control_stack: &mut Vec<ControlFrame>,
     loop_stack: &mut Vec<LoopContext>,
     match_counter: &mut MatchCounter,
@@ -1022,6 +1120,7 @@ fn emit_expression(
                     func,
                     type_ctx,
                     function_return_types,
+                    functions,
                     control_stack,
                     loop_stack,
                     match_counter,
@@ -1063,6 +1162,7 @@ fn emit_expression(
                     func,
                     type_ctx,
                     function_return_types,
+                    functions,
                     control_stack,
                     loop_stack,
                     match_counter,
@@ -1074,6 +1174,7 @@ fn emit_expression(
                     func,
                     type_ctx,
                     function_return_types,
+                    functions,
                     control_stack,
                     loop_stack,
                     match_counter,
@@ -1091,6 +1192,7 @@ fn emit_expression(
                     func,
                     type_ctx,
                     function_return_types,
+                    functions,
                     control_stack,
                     loop_stack,
                     match_counter,
@@ -1111,6 +1213,7 @@ fn emit_expression(
                         func,
                         type_ctx,
                         function_return_types,
+                        functions,
                         control_stack,
                         loop_stack,
                         match_counter,
@@ -1126,6 +1229,7 @@ fn emit_expression(
                         func,
                         type_ctx,
                         function_return_types,
+                        functions,
                         control_stack,
                         loop_stack,
                         match_counter,
@@ -1143,6 +1247,7 @@ fn emit_expression(
                         func,
                         type_ctx,
                         function_return_types,
+                        functions,
                         control_stack,
                         loop_stack,
                         match_counter,
@@ -1160,6 +1265,7 @@ fn emit_expression(
                         func,
                         type_ctx,
                         function_return_types,
+                        functions,
                         control_stack,
                         loop_stack,
                         match_counter,
@@ -1175,6 +1281,7 @@ fn emit_expression(
                         func,
                         type_ctx,
                         function_return_types,
+                        functions,
                         control_stack,
                         loop_stack,
                         match_counter,
@@ -1186,6 +1293,7 @@ fn emit_expression(
                         func,
                         type_ctx,
                         function_return_types,
+                        functions,
                         control_stack,
                         loop_stack,
                         match_counter,
@@ -1248,6 +1356,7 @@ fn emit_expression(
                 func,
                 type_ctx,
                 function_return_types,
+                functions,
                 control_stack,
                 loop_stack,
                 match_counter,
@@ -1285,6 +1394,7 @@ fn emit_expression(
                 func,
                 type_ctx,
                 function_return_types,
+                functions,
                 control_stack,
                 loop_stack,
                 match_counter,
@@ -1320,6 +1430,7 @@ fn emit_expression(
                     func,
                     type_ctx,
                     function_return_types,
+                    functions,
                     control_stack,
                     loop_stack,
                     match_counter,
@@ -1351,6 +1462,7 @@ fn emit_expression(
                     func,
                     type_ctx,
                     function_return_types,
+                    functions,
                     control_stack,
                     loop_stack,
                     match_counter,
@@ -1369,10 +1481,60 @@ fn emit_expression(
             }
             Ok(())
         }
-        IntermediateKind::FunctionCall { .. } => Err(Diagnostic::new(
-            "Function calls are not supported in wasm exports yet",
-        )
-        .with_span(SourceSpan::default())),
+        IntermediateKind::FunctionCall { function, argument } => {
+            let callee = functions.get(*function).ok_or_else(|| {
+                Diagnostic::new("Unknown function call target".to_string())
+                    .with_span(SourceSpan::default())
+            })?;
+
+            let arg_type = infer_type(argument, locals_types, function_return_types)?;
+            let temp_local_name = match_counter.next_name();
+            let temp_local_index = locals
+                .get(&temp_local_name)
+                .copied()
+                .expect("Temp local should exist");
+
+            emit_expression(
+                argument,
+                locals,
+                locals_types,
+                func,
+                type_ctx,
+                function_return_types,
+                functions,
+                control_stack,
+                loop_stack,
+                match_counter,
+            )?;
+            func.instruction(&Instruction::LocalSet(temp_local_index));
+
+            let temp_identifier = IntermediateKind::Identifier(Identifier::new(temp_local_name));
+            emit_call_arguments(
+                &callee.parameter,
+                &callee.input_type,
+                temp_identifier,
+                locals,
+                locals_types,
+                func,
+                type_ctx,
+                function_return_types,
+                functions,
+                control_stack,
+                loop_stack,
+                match_counter,
+            )?;
+
+            let expected_type = intermediate_type_to_wasm(&callee.input_type);
+            if arg_type != expected_type {
+                return Err(Diagnostic::new(
+                    "Function call argument does not match function input type".to_string(),
+                )
+                .with_span(SourceSpan::default()));
+            }
+
+            func.instruction(&Instruction::Call(*function as u32));
+            Ok(())
+        }
         IntermediateKind::If {
             condition,
             then_branch,
@@ -1385,6 +1547,7 @@ fn emit_expression(
                 func,
                 type_ctx,
                 function_return_types,
+                functions,
                 control_stack,
                 loop_stack,
                 match_counter,
@@ -1428,6 +1591,7 @@ fn emit_expression(
                 func,
                 type_ctx,
                 function_return_types,
+                functions,
                 control_stack,
                 loop_stack,
                 match_counter,
@@ -1443,6 +1607,7 @@ fn emit_expression(
                 func,
                 type_ctx,
                 function_return_types,
+                functions,
                 control_stack,
                 loop_stack,
                 match_counter,
@@ -1500,6 +1665,7 @@ fn emit_expression(
                     func,
                     type_ctx,
                     function_return_types,
+                    functions,
                     control_stack,
                     loop_stack,
                     match_counter,
@@ -1538,6 +1704,7 @@ fn emit_expression(
                         func,
                         type_ctx,
                         function_return_types,
+                        functions,
                         control_stack,
                         loop_stack,
                         match_counter,
@@ -1587,6 +1754,7 @@ fn emit_expression(
                                 func,
                                 type_ctx,
                                 function_return_types,
+                                functions,
                                 control_stack,
                                 loop_stack,
                                 match_counter,
@@ -1606,6 +1774,7 @@ fn emit_expression(
                                 func,
                                 type_ctx,
                                 function_return_types,
+                                functions,
                                 control_stack,
                                 loop_stack,
                                 match_counter,
@@ -1637,6 +1806,7 @@ fn emit_expression(
                     func,
                     type_ctx,
                     function_return_types,
+                    functions,
                     control_stack,
                     loop_stack,
                     match_counter,
@@ -1666,6 +1836,7 @@ fn emit_expression(
                     func,
                     type_ctx,
                     function_return_types,
+                    functions,
                     control_stack,
                     loop_stack,
                     match_counter,
@@ -1689,6 +1860,7 @@ fn emit_expression(
                     func,
                     type_ctx,
                     function_return_types,
+                    functions,
                     control_stack,
                     loop_stack,
                     match_counter,
@@ -1721,6 +1893,7 @@ fn emit_expression(
                 func,
                 type_ctx,
                 function_return_types,
+                functions,
                 control_stack,
                 loop_stack,
                 match_counter,
@@ -1751,6 +1924,7 @@ fn emit_expression(
                     func,
                     type_ctx,
                     function_return_types,
+                    functions,
                     control_stack,
                     loop_stack,
                     match_counter,
@@ -1786,6 +1960,7 @@ fn emit_expression(
                     func,
                     type_ctx,
                     function_return_types,
+                    functions,
                     control_stack,
                     loop_stack,
                     match_counter,
@@ -1808,6 +1983,7 @@ fn emit_expression(
                 func,
                 type_ctx,
                 function_return_types,
+                functions,
                 control_stack,
                 loop_stack,
                 match_counter,
@@ -1848,6 +2024,7 @@ fn emit_expression(
                     func,
                     type_ctx,
                     function_return_types,
+                    functions,
                     control_stack,
                     loop_stack,
                     match_counter,
@@ -1862,6 +2039,7 @@ fn emit_expression(
                     func,
                     type_ctx,
                     function_return_types,
+                    functions,
                     control_stack,
                     loop_stack,
                     match_counter,
