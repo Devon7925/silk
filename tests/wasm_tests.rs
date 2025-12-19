@@ -151,7 +151,10 @@ answer
         }
     }
 
-    assert_eq!(exports, vec![("answer".to_string(), wasmparser::ExternalKind::Global)]);
+    assert_eq!(
+        exports,
+        vec![("answer".to_string(), wasmparser::ExternalKind::Global)]
+    );
     assert_eq!(global_values, vec![42]);
 }
 

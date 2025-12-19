@@ -7,8 +7,9 @@ use wasm_encoder::{
 use crate::{
     diagnostics::{Diagnostic, SourceSpan},
     intermediate::{
-        IntermediateBinding, IntermediateBindingPattern, IntermediateExportType, IntermediateFunction,
-        IntermediateKind, IntermediateIntrinsicOperation, IntermediateResult, IntermediateType,
+        IntermediateBinding, IntermediateBindingPattern, IntermediateExportType,
+        IntermediateFunction, IntermediateIntrinsicOperation, IntermediateKind, IntermediateResult,
+        IntermediateType,
     },
     parsing::{
         BinaryIntrinsicOperator, DivergeExpressionType, ExpressionLiteral, Identifier, LValue,
@@ -425,10 +426,10 @@ fn const_expr_for_global(expr: &IntermediateKind, ty: &WasmType) -> Result<Const
         (WasmType::I32, IntermediateKind::Literal(ExpressionLiteral::Boolean(value))) => {
             Ok(ConstExpr::i32_const(if *value { 1 } else { 0 }))
         }
-        _ => Err(Diagnostic::new(
-            "Unsupported global initializer for wasm export".to_string(),
-        )
-        .with_span(SourceSpan::default())),
+        _ => Err(
+            Diagnostic::new("Unsupported global initializer for wasm export".to_string())
+                .with_span(SourceSpan::default()),
+        ),
     }
 }
 
@@ -550,10 +551,18 @@ fn expression_produces_value(
             else_branch,
             ..
         } => {
-            let then_produces_value =
-                expression_produces_value(then_branch, locals_types, function_return_types, type_ctx)?;
-            let else_produces_value =
-                expression_produces_value(else_branch, locals_types, function_return_types, type_ctx)?;
+            let then_produces_value = expression_produces_value(
+                then_branch,
+                locals_types,
+                function_return_types,
+                type_ctx,
+            )?;
+            let else_produces_value = expression_produces_value(
+                else_branch,
+                locals_types,
+                function_return_types,
+                type_ctx,
+            )?;
             let then_diverges = expression_does_diverge(then_branch, false, false);
             let else_diverges = expression_does_diverge(else_branch, false, false);
             Ok(then_produces_value && else_produces_value
@@ -570,9 +579,9 @@ fn expression_produces_value(
             Ok(!diverges
                 && expression_produces_value(last, locals_types, function_return_types, type_ctx)?)
         }
-        IntermediateKind::Loop { body } => Ok(
-            determine_loop_result_type(body, locals_types, function_return_types)?.is_some(),
-        ),
+        IntermediateKind::Loop { body } => {
+            Ok(determine_loop_result_type(body, locals_types, function_return_types)?.is_some())
+        }
         _ => Ok(true),
     }
 }
@@ -639,16 +648,14 @@ fn infer_type(
                 if let Some((_, field_type)) = fields.iter().find(|(n, _)| n == property) {
                     Ok(field_type.clone())
                 } else {
-                    Err(Diagnostic::new(format!(
-                        "Field `{}` not found in struct",
-                        property
-                    ))
-                    .with_span(SourceSpan::default()))
+                    Err(
+                        Diagnostic::new(format!("Field `{}` not found in struct", property))
+                            .with_span(SourceSpan::default()),
+                    )
                 }
             } else {
-                Err(Diagnostic::new("Property access on non-struct type").with_span(
-                    SourceSpan::default(),
-                ))
+                Err(Diagnostic::new("Property access on non-struct type")
+                    .with_span(SourceSpan::default()))
             }
         }
         IntermediateKind::IntrinsicOperation(..) => Ok(WasmType::I32),
@@ -681,10 +688,10 @@ fn extract_function_params(
     match pattern {
         IntermediateBindingPattern::Struct(fields, _) => {
             let IntermediateType::Struct(field_types) = ty else {
-                return Err(Diagnostic::new(
-                    "Struct pattern requires struct parameter type",
-                )
-                .with_span(pattern_span(pattern)));
+                return Err(
+                    Diagnostic::new("Struct pattern requires struct parameter type")
+                        .with_span(pattern_span(pattern)),
+                );
             };
             let mut params = Vec::new();
             for (field_id, sub_pattern) in fields {
@@ -704,12 +711,10 @@ fn extract_function_params(
             }
             Ok(params)
         }
-        IntermediateBindingPattern::Identifier(identifier, _) => {
-            Ok(vec![WasmFunctionParam {
-                name: identifier.name.clone(),
-                ty: intermediate_type_to_wasm(ty),
-            }])
-        }
+        IntermediateBindingPattern::Identifier(identifier, _) => Ok(vec![WasmFunctionParam {
+            name: identifier.name.clone(),
+            ty: intermediate_type_to_wasm(ty),
+        }]),
         IntermediateBindingPattern::Literal(_, _) => Err(Diagnostic::new(
             "Literal patterns cannot be used in function parameters",
         )
@@ -732,8 +737,10 @@ fn extract_identifier_from_pattern(
                     return Ok(name);
                 }
             }
-            Err(Diagnostic::new("Struct patterns require at least one identifier")
-                .with_span(pattern_span(pattern)))
+            Err(
+                Diagnostic::new("Struct patterns require at least one identifier")
+                    .with_span(pattern_span(pattern)),
+            )
         }
         IntermediateBindingPattern::EnumVariant {
             payload: Some(payload),
@@ -820,10 +827,7 @@ fn collect_locals(
                 match_counter,
             )?);
         }
-        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(
-            operand,
-            _,
-        )) => {
+        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(operand, _)) => {
             locals.extend(collect_locals(
                 operand,
                 locals_types,
@@ -880,12 +884,7 @@ fn collect_locals(
             )?);
             for (pattern, branch) in branches {
                 let value_type = infer_type(value, locals_types, function_return_types)?;
-                collect_locals_for_pattern(
-                    pattern.clone(),
-                    value_type,
-                    locals_types,
-                    &mut locals,
-                )?;
+                collect_locals_for_pattern(pattern.clone(), value_type, locals_types, &mut locals)?;
                 locals.extend(collect_locals(
                     branch,
                     locals_types,
@@ -914,7 +913,7 @@ fn collect_locals_for_pattern(
         IntermediateBindingPattern::Struct(items, span) => {
             let WasmType::Struct(field_types) = expr_type else {
                 return Err(
-                    Diagnostic::new("Struct pattern requires struct value type").with_span(span),
+                    Diagnostic::new("Struct pattern requires struct value type").with_span(span)
                 );
             };
 
@@ -930,12 +929,7 @@ fn collect_locals_for_pattern(
                         ))
                         .with_span(pattern_span(&field_pattern))
                     })?;
-                collect_locals_for_pattern(
-                    field_pattern,
-                    field_type,
-                    locals_types,
-                    locals,
-                )?;
+                collect_locals_for_pattern(field_pattern, field_type, locals_types, locals)?;
             }
             Ok(())
         }
@@ -971,20 +965,15 @@ fn collect_locals_for_pattern(
                         })?
                 }
                 _ => {
-                    return Err(Diagnostic::new(
-                        "Enum pattern requires struct-backed enum value",
-                    )
-                    .with_span(span));
+                    return Err(
+                        Diagnostic::new("Enum pattern requires struct-backed enum value")
+                            .with_span(span),
+                    );
                 }
             };
 
             if let Some(payload_pattern) = payload {
-                collect_locals_for_pattern(
-                    *payload_pattern,
-                    payload_type,
-                    locals_types,
-                    locals,
-                )?;
+                collect_locals_for_pattern(*payload_pattern, payload_type, locals_types, locals)?;
             }
             Ok(())
         }
@@ -1021,10 +1010,10 @@ fn emit_call_arguments(
         ),
         IntermediateBindingPattern::Struct(fields, _) => {
             let IntermediateType::Struct(field_types) = input_type else {
-                return Err(Diagnostic::new(
-                    "Struct pattern requires struct parameter type",
-                )
-                .with_span(pattern_span(pattern)));
+                return Err(
+                    Diagnostic::new("Struct pattern requires struct parameter type")
+                        .with_span(pattern_span(pattern)),
+                );
             };
 
             for (field_id, sub_pattern) in fields {
@@ -1103,7 +1092,10 @@ fn emit_expression(
             func.instruction(&Instruction::LocalGet(local_index));
             Ok(())
         }
-        IntermediateKind::Assignment { target, expr: value } => match target {
+        IntermediateKind::Assignment {
+            target,
+            expr: value,
+        } => match target {
             LValue::Identifier(identifier, _) => {
                 let local_index = locals.get(&identifier.name).copied().ok_or_else(|| {
                     Diagnostic::new(format!(
@@ -1129,9 +1121,7 @@ fn emit_expression(
                 Ok(())
             }
             LValue::PropertyAccess {
-                object,
-                property,
-                ..
+                object, property, ..
             } => {
                 let object_expr = lvalue_to_intermediate(object);
                 let object_type = infer_type(&object_expr, locals_types, function_return_types)?;
@@ -1144,11 +1134,8 @@ fn emit_expression(
                     .iter()
                     .position(|(name, _)| name == property)
                     .ok_or_else(|| {
-                        Diagnostic::new(format!(
-                            "Field `{}` not found in struct",
-                            property
-                        ))
-                        .with_span(SourceSpan::default())
+                        Diagnostic::new(format!("Field `{}` not found in struct", property))
+                            .with_span(SourceSpan::default())
                     })? as u32;
 
                 let type_index = type_ctx
@@ -1368,13 +1355,9 @@ fn emit_expression(
             value,
             divergance_type: DivergeExpressionType::Break,
         } => {
-            let loop_ctx = loop_stack
-                .last()
-                .cloned()
-                .ok_or_else(|| {
-                    Diagnostic::new("`break` used outside of a loop")
-                        .with_span(SourceSpan::default())
-                })?;
+            let loop_ctx = loop_stack.last().cloned().ok_or_else(|| {
+                Diagnostic::new("`break` used outside of a loop").with_span(SourceSpan::default())
+            })?;
 
             let expected_type = loop_ctx.result_type.as_ref().ok_or_else(|| {
                 Diagnostic::new("`break` cannot be used in a loop without a break value")
@@ -1383,8 +1366,10 @@ fn emit_expression(
 
             let value_type = infer_type(value, locals_types, function_return_types)?;
             if &value_type != expected_type {
-                return Err(Diagnostic::new("break value does not match loop result type")
-                    .with_span(SourceSpan::default()));
+                return Err(
+                    Diagnostic::new("break value does not match loop result type")
+                        .with_span(SourceSpan::default()),
+                );
             }
 
             emit_expression(
@@ -1435,12 +1420,7 @@ fn emit_expression(
                     loop_stack,
                     match_counter,
                 )?;
-                if expression_produces_value(
-                    body,
-                    locals_types,
-                    function_return_types,
-                    type_ctx,
-                )? {
+                if expression_produces_value(body, locals_types, function_return_types, type_ctx)? {
                     func.instruction(&Instruction::Drop);
                 }
                 func.instruction(&Instruction::Br(0));
@@ -1467,12 +1447,7 @@ fn emit_expression(
                     loop_stack,
                     match_counter,
                 )?;
-                if expression_produces_value(
-                    body,
-                    locals_types,
-                    function_return_types,
-                    type_ctx,
-                )? {
+                if expression_produces_value(body, locals_types, function_return_types, type_ctx)? {
                     func.instruction(&Instruction::Drop);
                 }
                 func.instruction(&Instruction::Br(0));
@@ -1628,13 +1603,12 @@ fn emit_expression(
                 span,
             } = pattern
             {
-                let value_type =
-                    infer_type(&binding.expr, locals_types, function_return_types)?;
+                let value_type = infer_type(&binding.expr, locals_types, function_return_types)?;
                 let WasmType::Struct(fields) = value_type else {
-                    return Err(Diagnostic::new(
-                        "Enum bindings require struct-backed enum value",
-                    )
-                    .with_span(*span));
+                    return Err(
+                        Diagnostic::new("Enum bindings require struct-backed enum value")
+                            .with_span(*span),
+                    );
                 };
 
                 let tag_field_index = fields
@@ -1644,9 +1618,9 @@ fn emit_expression(
                         Diagnostic::new("Enum tag missing in wasm lowering").with_span(*span)
                     })? as u32;
 
-                let type_index = type_ctx.get_type_index(&fields).ok_or_else(|| {
-                    Diagnostic::new("Enum type not registered").with_span(*span)
-                })?;
+                let type_index = type_ctx
+                    .get_type_index(&fields)
+                    .ok_or_else(|| Diagnostic::new("Enum type not registered").with_span(*span))?;
 
                 let payload_struct = fields
                     .iter()
@@ -1654,8 +1628,9 @@ fn emit_expression(
                     .map(|(_, ty)| ty)
                     .expect("Payload field should exist");
                 let WasmType::Struct(_payload_fields) = payload_struct else {
-                    return Err(Diagnostic::new("Enum payload expected to be a struct")
-                        .with_span(*span));
+                    return Err(
+                        Diagnostic::new("Enum payload expected to be a struct").with_span(*span)
+                    );
                 };
 
                 emit_expression(
@@ -1691,11 +1666,12 @@ fn emit_expression(
                         property: variant.name.clone(),
                     };
 
-                    let payload_binding = IntermediateKind::Binding(Box::new(IntermediateBinding {
-                        pattern: *payload_pattern,
-                        binding_type: binding.binding_type.clone(),
-                        expr: payload_access_expr,
-                    }));
+                    let payload_binding =
+                        IntermediateKind::Binding(Box::new(IntermediateBinding {
+                            pattern: *payload_pattern,
+                            binding_type: binding.binding_type.clone(),
+                            expr: payload_access_expr,
+                        }));
 
                     emit_expression(
                         &payload_binding,
@@ -1870,12 +1846,8 @@ fn emit_expression(
                         break;
                     }
 
-                    if expression_produces_value(
-                        e,
-                        locals_types,
-                        function_return_types,
-                        type_ctx,
-                    )? {
+                    if expression_produces_value(e, locals_types, function_return_types, type_ctx)?
+                    {
                         func.instruction(&Instruction::Drop);
                     }
                 }
@@ -1912,8 +1884,7 @@ fn emit_expression(
             }
 
             let type_index = type_ctx.get_type_index(&field_types).ok_or_else(|| {
-                Diagnostic::new("Struct type not found in context")
-                    .with_span(SourceSpan::default())
+                Diagnostic::new("Struct type not found in context").with_span(SourceSpan::default())
             })?;
 
             for (_, value) in sorted_items {
@@ -1942,11 +1913,8 @@ fn emit_expression(
                         .iter()
                         .position(|(n, _)| n == property)
                         .ok_or_else(|| {
-                            Diagnostic::new(format!(
-                                "Field `{}` not found in struct",
-                                property
-                            ))
-                            .with_span(SourceSpan::default())
+                            Diagnostic::new(format!("Field `{}` not found in struct", property))
+                                .with_span(SourceSpan::default())
                         })?;
 
                 let type_index = type_ctx
@@ -2056,12 +2024,18 @@ fn emit_expression(
 
             Ok(())
         }
-        _ => Err(Diagnostic::new("Expression is not supported in wasm exports yet")
-            .with_span(SourceSpan::default())),
+        _ => Err(
+            Diagnostic::new("Expression is not supported in wasm exports yet")
+                .with_span(SourceSpan::default()),
+        ),
     }
 }
 
-fn expression_does_diverge(expr: &IntermediateKind, possibility: bool, in_inner_loop: bool) -> bool {
+fn expression_does_diverge(
+    expr: &IntermediateKind,
+    possibility: bool,
+    in_inner_loop: bool,
+) -> bool {
     match expr {
         IntermediateKind::Diverge {
             divergance_type: DivergeExpressionType::Break,

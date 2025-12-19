@@ -1,15 +1,15 @@
 mod diagnostics;
+mod intermediate;
+mod interpret;
 pub mod parsing;
 mod uniquify;
-mod interpret;
-mod intermediate;
 mod wasm;
 
 pub mod test_support {
+    pub use crate::intermediate::{IntermediateResult, context_to_intermediate};
     pub use crate::interpret::{
         Context, evaluate_text_to_expression, interpret_program, intrinsic_context,
     };
-    pub use crate::intermediate::{context_to_intermediate, IntermediateResult};
     pub use crate::wasm::compile_exports;
 }
 

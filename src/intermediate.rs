@@ -138,23 +138,21 @@ pub fn expression_to_intermediate(
 ) -> IntermediateKind {
     let span = &expr.span;
     match expr.kind {
-        ExpressionKind::IntrinsicOperation(op) => {
-            IntermediateKind::IntrinsicOperation(match op {
-                crate::parsing::IntrinsicOperation::Binary(left, right, operator) => {
-                    IntermediateIntrinsicOperation::Binary(
-                        Box::new(expression_to_intermediate(*left, builder)),
-                        Box::new(expression_to_intermediate(*right, builder)),
-                        operator,
-                    )
-                }
-                crate::parsing::IntrinsicOperation::Unary(operand, operator) => {
-                    IntermediateIntrinsicOperation::Unary(
-                        Box::new(expression_to_intermediate(*operand, builder)),
-                        operator,
-                    )
-                }
-            })
-        }
+        ExpressionKind::IntrinsicOperation(op) => IntermediateKind::IntrinsicOperation(match op {
+            crate::parsing::IntrinsicOperation::Binary(left, right, operator) => {
+                IntermediateIntrinsicOperation::Binary(
+                    Box::new(expression_to_intermediate(*left, builder)),
+                    Box::new(expression_to_intermediate(*right, builder)),
+                    operator,
+                )
+            }
+            crate::parsing::IntrinsicOperation::Unary(operand, operator) => {
+                IntermediateIntrinsicOperation::Unary(
+                    Box::new(expression_to_intermediate(*operand, builder)),
+                    operator,
+                )
+            }
+        }),
         ExpressionKind::Match { value, branches } => IntermediateKind::Match {
             value: Box::new(expression_to_intermediate(*value, builder)),
             branches: branches
@@ -290,9 +288,7 @@ pub fn expression_to_intermediate(
                             enum_type: Box::new(enum_type),
                             variant,
                             variant_index,
-                            payload: Box::new(
-                                ExpressionKind::Struct(Vec::new()).with_span(*span),
-                            ),
+                            payload: Box::new(ExpressionKind::Struct(Vec::new()).with_span(*span)),
                         }
                         .with_span(*span);
                         return expression_to_intermediate(enum_value, builder);
@@ -569,9 +565,7 @@ impl IntermediateBuilder {
                 let payload = IntermediateType::Struct(
                     variants
                         .iter()
-                        .map(|(name, ty)| {
-                            (name.name.clone(), self.type_expr_to_intermediate(ty))
-                        })
+                        .map(|(name, ty)| (name.name.clone(), self.type_expr_to_intermediate(ty)))
                         .collect(),
                 );
                 IntermediateType::Struct(vec![
@@ -611,9 +605,8 @@ impl IntermediateBuilder {
                 let enum_type = self
                     .resolve_enum_type_expression(&enum_type)
                     .unwrap_or_else(|| *enum_type.clone());
-                let (variant_index, _) = enum_variant_info(&enum_type, &variant).unwrap_or_else(
-                    || panic!("Unknown enum variant `{}`", variant.name),
-                );
+                let (variant_index, _) = enum_variant_info(&enum_type, &variant)
+                    .unwrap_or_else(|| panic!("Unknown enum variant `{}`", variant.name));
                 IntermediateBindingPattern::EnumVariant {
                     variant,
                     variant_index,
@@ -705,8 +698,7 @@ fn materialize_enum_value(enum_value: &ExpressionKind, span: &SourceSpan) -> Opt
             payload_fields.push((Identifier::new(name.name.clone()), value));
         }
 
-        let payload_struct =
-            Expression::new(ExpressionKind::Struct(payload_fields), *span);
+        let payload_struct = Expression::new(ExpressionKind::Struct(payload_fields), *span);
         let tag_expr = ExpressionKind::Literal(ExpressionLiteral::Number(*variant_index as i32))
             .with_span(*span);
         return Some(Expression::new(

@@ -1,7 +1,5 @@
 use silk::parsing::{Expression, ExpressionKind, ExpressionLiteral, parse_block};
-use silk::test_support::{
-    Context, interpret_program, intrinsic_context,
-};
+use silk::test_support::{Context, interpret_program, intrinsic_context};
 
 fn evaluate_text_to_simplified_expression(
     program: &str,

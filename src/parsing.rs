@@ -691,7 +691,10 @@ fn parse_if_expression_with_source<'a>(
         ExpressionKind::If {
             condition: Box::new(condition),
             then_branch: Box::new(then_branch),
-            else_branch: Box::new(else_branch.unwrap_or(Expression { kind: ExpressionKind::Struct(vec![]), span: SourceSpan::new(span.end(), 0) })),
+            else_branch: Box::new(else_branch.unwrap_or(Expression {
+                kind: ExpressionKind::Struct(vec![]),
+                span: SourceSpan::new(span.end(), 0),
+            })),
         }
         .with_span(span),
         remaining,
@@ -1268,12 +1271,18 @@ fn parse_while_expression_with_source<'a>(
                                 ),
                                 then_branch: Box::new(
                                     ExpressionKind::Diverge {
-                                        value: Box::new(Expression::new(ExpressionKind::Struct(vec![]), span)),
+                                        value: Box::new(Expression::new(
+                                            ExpressionKind::Struct(vec![]),
+                                            span,
+                                        )),
                                         divergance_type: DivergeExpressionType::Break,
                                     }
                                     .with_span(condition_span),
                                 ),
-                                else_branch: Box::new(Expression::new(ExpressionKind::Struct(vec![]), span)),
+                                else_branch: Box::new(Expression::new(
+                                    ExpressionKind::Struct(vec![]),
+                                    span,
+                                )),
                             }
                             .with_span(condition_span),
                             body,

@@ -18,7 +18,7 @@ fn nested_mutation() {
             err.render_with_source(program)
         );
     });
-    
+
     match &expr.kind {
         ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(*value, 9),
         other => panic!("Expected numeric literal, got {:?}", other),
