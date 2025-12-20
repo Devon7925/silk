@@ -7,7 +7,7 @@ use wasm_encoder::{
 use crate::{
     diagnostics::{Diagnostic, SourceSpan},
     intermediate::{
-        IntermediateBindingPattern, IntermediateExportType, IntermediateFunction,
+        IntermediateBinding, IntermediateExportType, IntermediateFunction,
         IntermediateIntrinsicOperation, IntermediateKind, IntermediateResult, IntermediateType,
     },
     parsing::{
@@ -455,10 +455,11 @@ fn collect_types(
             }
         }
         IntermediateKind::Binding(binding) => {
+            let binding = binding.as_ref();
             collect_types(&binding.expr, ctx, locals_types, function_return_types)?;
             let ty = infer_type(&binding.expr, locals_types, function_return_types)?;
             let mut locals = Vec::new();
-            collect_locals_for_pattern(binding.pattern.clone(), ty, locals_types, &mut locals)?;
+            collect_locals_for_pattern(binding, ty, locals_types, &mut locals)?;
         }
         IntermediateKind::FunctionCall { argument, .. } => {
             collect_types(argument, ctx, locals_types, function_return_types)?;
@@ -729,25 +730,6 @@ fn stripped_binding_pattern(pattern: &BindingPattern) -> &BindingPattern {
     }
 }
 
-fn extract_identifier_from_pattern(
-    pattern: &IntermediateBindingPattern,
-) -> Result<String, Diagnostic> {
-    match pattern {
-        IntermediateBindingPattern::Identifier(identifier, _) => Ok(identifier.name.clone()),
-        IntermediateBindingPattern::Literal(_, _) => Err(Diagnostic::new(
-            "Literal patterns cannot be used in function parameters",
-        )
-        .with_span(pattern_span(pattern))),
-    }
-}
-
-fn pattern_span(pattern: &IntermediateBindingPattern) -> SourceSpan {
-    match pattern {
-        IntermediateBindingPattern::Identifier(_, span)
-        | IntermediateBindingPattern::Literal(_, span) => *span,
-    }
-}
-
 fn collect_locals(
     expr: &IntermediateKind,
     locals_types: &mut std::collections::HashMap<String, WasmType>,
@@ -757,13 +739,9 @@ fn collect_locals(
     let mut locals = Vec::new();
     match expr {
         IntermediateKind::Binding(binding) => {
+            let binding = binding.as_ref();
             let expr_type = infer_type(&binding.expr, locals_types, function_return_types)?;
-            collect_locals_for_pattern(
-                binding.pattern.clone(),
-                expr_type,
-                locals_types,
-                &mut locals,
-            )?;
+            collect_locals_for_pattern(binding, expr_type, locals_types, &mut locals)?;
 
             locals.extend(collect_locals(
                 &binding.expr,
@@ -867,19 +845,15 @@ fn collect_locals(
 }
 
 fn collect_locals_for_pattern(
-    pattern: IntermediateBindingPattern,
+    binding: &IntermediateBinding,
     expr_type: WasmType,
     locals_types: &mut std::collections::HashMap<String, WasmType>,
     locals: &mut Vec<(String, WasmType)>,
 ) -> Result<(), Diagnostic> {
-    match pattern {
-        IntermediateBindingPattern::Identifier(identifier, _) => {
-            locals.push((identifier.name.clone(), expr_type.clone()));
-            locals_types.insert(identifier.name, expr_type);
-            Ok(())
-        }
-        IntermediateBindingPattern::Literal(_, _) => Ok(()),
-    }
+    let name = binding.identifier.name.clone();
+    locals.push((name.clone(), expr_type.clone()));
+    locals_types.insert(name, expr_type);
+    Ok(())
 }
 
 fn emit_call_arguments(
@@ -1504,60 +1478,27 @@ fn emit_expression(
             Ok(())
         }
         IntermediateKind::Binding(binding) => {
-            let pattern = &binding.pattern;
-
-            if let IntermediateBindingPattern::Literal(literal, span) = pattern {
-                emit_expression(
-                    &binding.expr,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    function_return_types,
-                    functions,
-                    control_stack,
-                    loop_stack,
-                    match_counter,
-                )?;
-                match literal {
-                    ExpressionLiteral::Number(val) => {
-                        func.instruction(&Instruction::I32Const(*val));
-                        func.instruction(&Instruction::I32Eq);
-                    }
-                    ExpressionLiteral::Boolean(val) => {
-                        func.instruction(&Instruction::I32Const(if *val { 1 } else { 0 }));
-                        func.instruction(&Instruction::I32Eq);
-                    }
-                    _ => {
-                        return Err(Diagnostic::new(
-                            "Unsupported literal pattern in binding for wasm emission",
-                        )
-                        .with_span(*span));
-                    }
-                }
-                Ok(())
-            } else {
-                emit_expression(
-                    &binding.expr,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    function_return_types,
-                    functions,
-                    control_stack,
-                    loop_stack,
-                    match_counter,
-                )?;
-                let name = extract_identifier_from_pattern(pattern)?;
-                let local_index = locals
-                    .get(&name)
-                    .copied()
-                    .unwrap_or_else(|| panic!("Local '{}' should have been collected", name));
-                func.instruction(&Instruction::LocalSet(local_index));
-                func.instruction(&Instruction::I32Const(1));
-                Ok(())
-            }
+            let binding = binding.as_ref();
+            emit_expression(
+                &binding.expr,
+                locals,
+                locals_types,
+                func,
+                type_ctx,
+                function_return_types,
+                functions,
+                control_stack,
+                loop_stack,
+                match_counter,
+            )?;
+            let name = binding.identifier.name.clone();
+            let local_index = locals
+                .get(&name)
+                .copied()
+                .unwrap_or_else(|| panic!("Local '{}' should have been collected", name));
+            func.instruction(&Instruction::LocalSet(local_index));
+            func.instruction(&Instruction::I32Const(1));
+            Ok(())
         }
         IntermediateKind::Block(exprs) => {
             for (i, e) in exprs.iter().enumerate() {

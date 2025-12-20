@@ -46,12 +46,6 @@ pub enum IntermediateKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum IntermediateBindingPattern {
-    Identifier(Identifier, SourceSpan),
-    Literal(ExpressionLiteral, SourceSpan),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntermediateIntrinsicOperation {
     Binary(
         Box<IntermediateKind>,
@@ -63,7 +57,7 @@ pub enum IntermediateIntrinsicOperation {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IntermediateBinding {
-    pub pattern: IntermediateBindingPattern,
+    pub identifier: Identifier,
     pub binding_type: IntermediateType,
     pub expr: IntermediateKind,
 }
@@ -145,16 +139,12 @@ pub fn expression_to_intermediate(
         }),
         ExpressionKind::Match { value, branches } => {
             let match_value = *value;
-            let match_value_span = match_value.span;
             let match_value_type = builder.expression_value_type(&match_value);
             let lowered_value = expression_to_intermediate(match_value, builder);
             let temp_identifier = builder.next_match_temp_identifier();
 
             let match_binding = IntermediateKind::Binding(Box::new(IntermediateBinding {
-                pattern: IntermediateBindingPattern::Identifier(
-                    temp_identifier.clone(),
-                    match_value_span,
-                ),
+                identifier: temp_identifier.clone(),
                 binding_type: match_value_type.clone(),
                 expr: lowered_value,
             }));
@@ -270,7 +260,6 @@ pub fn expression_to_intermediate(
         },
         ExpressionKind::Binding(binding) => {
             let Binding { pattern, expr } = *binding;
-            let expr_span = expr.span;
             let binding_type = builder.infer_binding_type(&pattern, &expr);
             let stripped_pattern = builder.strip_binding_pattern(pattern.clone());
             let lowered_expr = expression_to_intermediate(expr, builder);
@@ -278,10 +267,7 @@ pub fn expression_to_intermediate(
             if matches!(stripped_pattern, BindingPattern::EnumVariant { .. }) {
                 let temp_identifier = builder.next_match_temp_identifier();
                 let temp_binding = IntermediateKind::Binding(Box::new(IntermediateBinding {
-                    pattern: IntermediateBindingPattern::Identifier(
-                        temp_identifier.clone(),
-                        expr_span,
-                    ),
+                    identifier: temp_identifier.clone(),
                     binding_type: binding_type.clone(),
                     expr: lowered_expr,
                 }));
@@ -294,10 +280,7 @@ pub fn expression_to_intermediate(
             } else if matches!(stripped_pattern, BindingPattern::Struct { .. }) {
                 let temp_identifier = builder.next_match_temp_identifier();
                 let temp_binding = IntermediateKind::Binding(Box::new(IntermediateBinding {
-                    pattern: IntermediateBindingPattern::Identifier(
-                        temp_identifier.clone(),
-                        expr_span,
-                    ),
+                    identifier: temp_identifier.clone(),
                     binding_type: binding_type.clone(),
                     expr: lowered_expr,
                 }));
@@ -308,11 +291,7 @@ pub fn expression_to_intermediate(
                 );
                 IntermediateKind::Block(vec![temp_binding, condition])
             } else {
-                IntermediateKind::Binding(Box::new(IntermediateBinding {
-                    pattern: builder.lower_binding_pattern(pattern),
-                    binding_type,
-                    expr: lowered_expr,
-                }))
+                builder.lower_binding_pattern_match(pattern, lowered_expr, binding_type)
             }
         }
         ExpressionKind::Block(expressions) => IntermediateKind::Block(
@@ -773,10 +752,25 @@ impl IntermediateBuilder {
                     tag_condition
                 }
             }
+            BindingPattern::Literal(literal, span) => {
+                let literal = match literal {
+                    ExpressionLiteral::Number(_) => literal,
+                    ExpressionLiteral::Boolean(_) => literal,
+                    other => panic!(
+                        "Unsupported literal pattern in binding lowering: {:?} at {:?}",
+                        other, span
+                    ),
+                };
+                IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
+                    Box::new(value_expr),
+                    Box::new(IntermediateKind::Literal(literal)),
+                    BinaryIntrinsicOperator::I32Equal,
+                ))
+            }
             other => {
-                let lowered_pattern = self.lower_binding_pattern(other);
+                let identifier = self.lower_binding_pattern(other);
                 IntermediateKind::Binding(Box::new(IntermediateBinding {
-                    pattern: lowered_pattern,
+                    identifier,
                     binding_type: value_type,
                     expr: value_expr,
                 }))
@@ -784,14 +778,9 @@ impl IntermediateBuilder {
         }
     }
 
-    fn lower_binding_pattern(&mut self, pattern: BindingPattern) -> IntermediateBindingPattern {
+    fn lower_binding_pattern(&mut self, pattern: BindingPattern) -> Identifier {
         match pattern {
-            BindingPattern::Identifier(identifier, span) => {
-                IntermediateBindingPattern::Identifier(identifier, span)
-            }
-            BindingPattern::Literal(literal, span) => {
-                IntermediateBindingPattern::Literal(literal, span)
-            }
+            BindingPattern::Identifier(identifier, _) => identifier,
             BindingPattern::Struct { .. } => {
                 panic!(
                     "Struct binding patterns should be lowered via `lower_binding_pattern_match`"
@@ -802,6 +791,7 @@ impl IntermediateBuilder {
             }
             BindingPattern::TypeHint(pattern, _, _) => self.lower_binding_pattern(*pattern),
             BindingPattern::Annotated { pattern, .. } => self.lower_binding_pattern(*pattern),
+            other @ BindingPattern::Literal(..) => panic!("Unexpected pattern {:?} for identifier binding", other),
         }
     }
 }
