@@ -13,10 +13,6 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntermediateKind {
     IntrinsicOperation(IntermediateIntrinsicOperation),
-    Match {
-        value: Box<IntermediateKind>,
-        branches: Vec<(IntermediateBindingPattern, IntermediateKind)>,
-    },
     If {
         condition: Box<IntermediateKind>,
         then_branch: Box<IntermediateKind>,
@@ -46,6 +42,7 @@ pub enum IntermediateKind {
     Loop {
         body: Box<IntermediateKind>,
     },
+    Unreachable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,9 +150,23 @@ pub fn expression_to_intermediate(
                 )
             }
         }),
-        ExpressionKind::Match { value, branches } => IntermediateKind::Match {
-            value: Box::new(expression_to_intermediate(*value, builder)),
-            branches: branches
+        ExpressionKind::Match { value, branches } => {
+            let match_value = *value;
+            let match_value_span = match_value.span;
+            let match_value_type = builder.expression_value_type(&match_value);
+            let lowered_value = expression_to_intermediate(match_value, builder);
+            let temp_identifier = builder.next_match_temp_identifier();
+
+            let match_binding = IntermediateKind::Binding(Box::new(IntermediateBinding {
+                pattern: IntermediateBindingPattern::Identifier(
+                    temp_identifier.clone(),
+                    match_value_span,
+                ),
+                binding_type: match_value_type.clone(),
+                expr: lowered_value,
+            }));
+
+            let lowered_branches = branches
                 .into_iter()
                 .map(|(pattern, body)| {
                     (
@@ -163,8 +174,25 @@ pub fn expression_to_intermediate(
                         expression_to_intermediate(body, builder),
                     )
                 })
-                .collect(),
-        },
+                .collect::<Vec<_>>();
+
+            let mut match_expr = IntermediateKind::Unreachable;
+            for (pattern, branch) in lowered_branches.into_iter().rev() {
+                let condition = IntermediateKind::Binding(Box::new(IntermediateBinding {
+                    pattern,
+                    binding_type: match_value_type.clone(),
+                    expr: IntermediateKind::Identifier(temp_identifier.clone()),
+                }));
+
+                match_expr = IntermediateKind::If {
+                    condition: Box::new(condition),
+                    then_branch: Box::new(branch),
+                    else_branch: Box::new(match_expr),
+                };
+            }
+
+            IntermediateKind::Block(vec![match_binding, match_expr])
+        }
         ExpressionKind::If {
             condition,
             then_branch,
@@ -320,6 +348,7 @@ pub struct IntermediateBuilder {
     inline_bindings: HashMap<Identifier, Expression>,
     type_aliases: HashMap<Identifier, Expression>,
     enum_context: Context,
+    match_temp_counter: usize,
 }
 
 impl IntermediateBuilder {
@@ -332,7 +361,14 @@ impl IntermediateBuilder {
             inline_bindings: HashMap::new(),
             type_aliases: HashMap::new(),
             enum_context,
+            match_temp_counter: 0,
         }
+    }
+
+    fn next_match_temp_identifier(&mut self) -> Identifier {
+        let name = format!("__match_val_{}", self.match_temp_counter);
+        self.match_temp_counter += 1;
+        Identifier::new(name)
     }
 
     fn collect_type_aliases(&mut self, context: &Context) {

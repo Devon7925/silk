@@ -473,12 +473,6 @@ fn collect_types(
             collect_types(then_branch, ctx, locals_types, function_return_types)?;
             collect_types(else_branch, ctx, locals_types, function_return_types)?;
         }
-        IntermediateKind::Match { value, branches } => {
-            collect_types(value, ctx, locals_types, function_return_types)?;
-            for (_, branch) in branches {
-                collect_types(branch, ctx, locals_types, function_return_types)?;
-            }
-        }
         IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
             left,
             right,
@@ -546,6 +540,7 @@ fn expression_produces_value(
 ) -> Result<bool, Diagnostic> {
     match expr {
         IntermediateKind::Diverge { .. } => Ok(false),
+        IntermediateKind::Unreachable => Ok(false),
         IntermediateKind::If {
             then_branch,
             else_branch,
@@ -670,13 +665,7 @@ fn infer_type(
             }
         }
         IntermediateKind::Binding(..) => Ok(WasmType::I32),
-        IntermediateKind::Match { branches, .. } => {
-            if let Some((_, branch)) = branches.first() {
-                infer_type(branch, locals_types, function_return_types)
-            } else {
-                Ok(WasmType::I32)
-            }
-        }
+        IntermediateKind::Unreachable => Ok(WasmType::I32),
         _ => Ok(WasmType::I32),
     }
 }
@@ -913,28 +902,6 @@ fn collect_locals(
                 function_return_types,
                 match_counter,
             )?);
-        }
-        IntermediateKind::Match { value, branches } => {
-            let value_type = infer_type(value, locals_types, function_return_types)?;
-            let temp_local_name = match_counter.next_name();
-            locals.push((temp_local_name.clone(), value_type.clone()));
-            locals_types.insert(temp_local_name, value_type);
-            locals.extend(collect_locals(
-                value,
-                locals_types,
-                function_return_types,
-                match_counter,
-            )?);
-            for (pattern, branch) in branches {
-                let value_type = infer_type(value, locals_types, function_return_types)?;
-                collect_locals_for_pattern(pattern.clone(), value_type, locals_types, &mut locals)?;
-                locals.extend(collect_locals(
-                    branch,
-                    locals_types,
-                    function_return_types,
-                    match_counter,
-                )?);
-            }
         }
         IntermediateKind::Loop { body } => {
             locals.extend(collect_locals(
@@ -2016,85 +1983,8 @@ fn emit_expression(
                     .with_span(SourceSpan::default()))
             }
         }
-        IntermediateKind::Match { value, branches } => {
-            emit_expression(
-                value,
-                locals,
-                locals_types,
-                func,
-                type_ctx,
-                function_return_types,
-                functions,
-                control_stack,
-                loop_stack,
-                match_counter,
-            )?;
-
-            let temp_local_name = match_counter.next_name();
-            let temp_local_index = locals
-                .get(&temp_local_name)
-                .copied()
-                .expect("Temp local should exist");
-            func.instruction(&Instruction::LocalSet(temp_local_index));
-
-            let result_type = infer_type(
-                branches
-                    .first()
-                    .map(|(_, b)| b)
-                    .expect("Match must have branches"),
-                locals_types,
-                function_return_types,
-            )?;
-            let wasm_result_type = result_type.to_val_type(type_ctx);
-            let block_type = wasm_encoder::BlockType::Result(wasm_result_type);
-
-            control_stack.push(ControlFrame::Block);
-            func.instruction(&Instruction::Block(block_type));
-
-            for (pattern, branch) in branches {
-                let check_expr = IntermediateKind::Binding(Box::new(IntermediateBinding {
-                    pattern: pattern.clone(),
-                    binding_type: IntermediateType::I32,
-                    expr: IntermediateKind::Identifier(Identifier::new(temp_local_name.clone())),
-                }));
-
-                emit_expression(
-                    &check_expr,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    function_return_types,
-                    functions,
-                    control_stack,
-                    loop_stack,
-                    match_counter,
-                )?;
-
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
-
-                emit_expression(
-                    branch,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    function_return_types,
-                    functions,
-                    control_stack,
-                    loop_stack,
-                    match_counter,
-                )?;
-
-                func.instruction(&Instruction::Br(1));
-                func.instruction(&Instruction::End);
-            }
-
+        IntermediateKind::Unreachable => {
             func.instruction(&Instruction::Unreachable);
-
-            func.instruction(&Instruction::End);
-            control_stack.pop();
-
             Ok(())
         }
         _ => Err(
@@ -2114,6 +2004,7 @@ fn expression_does_diverge(
             divergance_type: DivergeExpressionType::Break,
             ..
         } => !in_inner_loop,
+        IntermediateKind::Unreachable => true,
         IntermediateKind::Diverge {
             divergance_type: DivergeExpressionType::Return,
             ..
@@ -2146,12 +2037,6 @@ fn expression_does_diverge(
         IntermediateKind::Loop { body } => expression_does_diverge(body, possibility, true),
         IntermediateKind::PropertyAccess { object, .. } => {
             expression_does_diverge(object, possibility, in_inner_loop)
-        }
-        IntermediateKind::Match { value, branches } => {
-            expression_does_diverge(value, possibility, in_inner_loop)
-                || branches
-                    .iter()
-                    .all(|(_, branch)| expression_does_diverge(branch, possibility, in_inner_loop))
         }
         IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
             left,
@@ -2206,12 +2091,6 @@ fn collect_break_values_inner(expr: &IntermediateKind, values: &mut Vec<Intermed
         IntermediateKind::Loop { body } => collect_break_values_inner(body, values),
         IntermediateKind::PropertyAccess { object, .. } => {
             collect_break_values_inner(object, values);
-        }
-        IntermediateKind::Match { value, branches } => {
-            collect_break_values_inner(value, values);
-            for (_, branch) in branches {
-                collect_break_values_inner(branch, values);
-            }
         }
         IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
             left,
