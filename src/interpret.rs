@@ -339,6 +339,8 @@ pub fn interpret_expression(
             let condition_for_pattern = condition_expr.clone();
             let interpreted_condition = interpret_expression(condition_expr, context)?;
 
+            ensure_boolean_condition(&interpreted_condition, span, context, "If")?;
+
             let mut then_context = context.clone();
             collect_bindings(&condition_for_pattern, &mut then_context)?;
 
