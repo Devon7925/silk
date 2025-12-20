@@ -764,7 +764,6 @@ fn collect_locals(
                 function_return_types,
                 match_counter,
             )?);
-
         }
         IntermediateKind::Assignment { target, expr } => {
             ensure_lvalue_local(target, locals_types, SourceSpan::default())?;

@@ -1260,21 +1260,21 @@ fn parse_while_expression_with_source<'a>(
             Some(Ok((
                 ExpressionKind::Loop {
                     body: Box::new(
-                            ExpressionKind::If {
-                                condition: Box::new(condition),
-                                then_branch: Box::new(body),
-                                else_branch: Box::new(
-                                    ExpressionKind::Diverge {
-                                        value: Box::new(Expression::new(
-                                            ExpressionKind::Struct(vec![]),
-                                            span,
-                                        )),
-                                        divergance_type: DivergeExpressionType::Break,
-                                    }
-                                    .with_span(condition_span),
-                                ),
-                            }
-                            .with_span(condition_span),
+                        ExpressionKind::If {
+                            condition: Box::new(condition),
+                            then_branch: Box::new(body),
+                            else_branch: Box::new(
+                                ExpressionKind::Diverge {
+                                    value: Box::new(Expression::new(
+                                        ExpressionKind::Struct(vec![]),
+                                        span,
+                                    )),
+                                    divergance_type: DivergeExpressionType::Break,
+                                }
+                                .with_span(condition_span),
+                            ),
+                        }
+                        .with_span(condition_span),
                     ),
                 }
                 .with_span(span),

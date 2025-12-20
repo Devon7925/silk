@@ -551,7 +551,11 @@ impl IntermediateBuilder {
         }
     }
 
-    fn infer_binding_type(&mut self, pattern: &BindingPattern, expr: &Expression) -> IntermediateType {
+    fn infer_binding_type(
+        &mut self,
+        pattern: &BindingPattern,
+        expr: &Expression,
+    ) -> IntermediateType {
         match pattern {
             BindingPattern::EnumVariant { enum_type, .. } => {
                 let enum_type = self
@@ -682,15 +686,14 @@ impl IntermediateBuilder {
                     object: Box::new(value_expr.clone()),
                     property: "tag".to_string(),
                 };
-                let tag_condition = IntermediateKind::IntrinsicOperation(
-                    IntermediateIntrinsicOperation::Binary(
+                let tag_condition =
+                    IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
                         Box::new(tag_expr),
                         Box::new(IntermediateKind::Literal(ExpressionLiteral::Number(
                             variant_index as i32,
                         ))),
                         BinaryIntrinsicOperator::I32Equal,
-                    ),
-                );
+                    ));
 
                 if let Some(payload_pattern) = payload {
                     let payload_access = IntermediateKind::PropertyAccess {
