@@ -11,7 +11,7 @@
 * [x] return;
 * [ ] for (Iterator trait)
 * [x] match
-* [ ] replace old match with new match
+* [x] replace old match with new match
 
 ```silk
 param |> match {

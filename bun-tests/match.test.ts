@@ -37,11 +37,11 @@ describe("match expressions", () => {
     const code = `
       (export wasm) main := {} => (
         x := 10;
-        match x with (
+        x |> match {
           10 => 1,
           20 => 2,
           else => 3
-        )
+        }
       );
       {}
     `;
@@ -53,11 +53,11 @@ describe("match expressions", () => {
     const code = `
       (export wasm) main := {} => (
         x := 30;
-        match x with (
+        x |> match {
           10 => 1,
           20 => 2,
           else => 3
-        )
+        }
       );
       {}
     `;
@@ -69,10 +69,10 @@ describe("match expressions", () => {
     const code = `
       (export wasm) main := {} => (
         x := true;
-        match x with (
+        x |> match {
           true => 1,
           false => 0
-        )
+        }
       );
       {}
     `;
@@ -86,11 +86,11 @@ describe("match expressions", () => {
 
       (export wasm) main := {} => (
         c := Color::Green;
-        match c with (
+        c |> match {
           Color::Red => 1,
           Color::Green => 2,
           Color::Blue => 3
-        )
+        }
       );
       {}
     `;
@@ -104,10 +104,10 @@ describe("match expressions", () => {
 
       (export wasm) main := {} => (
         r := Result::Ok(42);
-        match r with (
+        r |> match {
           Result::Ok(v) => v,
           Result::Err(e) => e
-        )
+        }
       );
       {}
     `;
@@ -121,10 +121,10 @@ describe("match expressions", () => {
 
       (export wasm) main := {} => (
         r := Result::Err(10);
-        match r with (
+        r |> match {
           Result::Ok(v) => v,
           else => 0
-        )
+        }
       );
       {}
     `;
@@ -136,13 +136,13 @@ describe("match expressions", () => {
     const code = `
       (export wasm) main := {} => (
         x := 1;
-        match x with (
+        x |> match {
           1 => (
             y := 2;
             y + 1
           ),
           else => 0
-        )
+        }
       );
       {}
     `;

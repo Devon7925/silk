@@ -193,6 +193,7 @@ pub enum IntrinsicType {
 pub enum UnaryIntrinsicOperator {
     BooleanNot,
     EnumFromStruct,
+    MatchFromStruct,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -356,6 +357,7 @@ impl Expression {
                     let op_str = match op {
                         UnaryIntrinsicOperator::BooleanNot => "!",
                         UnaryIntrinsicOperator::EnumFromStruct => "enum",
+                        UnaryIntrinsicOperator::MatchFromStruct => "match",
                     };
                     format!("{}({})", op_str, operand.pretty_print())
                 }
@@ -558,89 +560,6 @@ fn parse_if_expression<'a>(
     }
 
     Some(parse_if_expression_with_source(source, file))
-}
-
-fn parse_match_expression<'a>(
-    source: &'a str,
-    file: &'a str,
-) -> Option<Result<(Expression, &'a str), Diagnostic>> {
-    const KEYWORD: &str = "match";
-    if !file.starts_with(KEYWORD) {
-        return None;
-    }
-
-    let after_keyword = &file[KEYWORD.len()..];
-    if after_keyword
-        .chars()
-        .next()
-        .filter(|c| c.is_alphanumeric() || *c == '_')
-        .is_some()
-    {
-        return None;
-    }
-
-    Some(parse_match_expression_with_source(source, file))
-}
-
-fn parse_match_expression_with_source<'a>(
-    source: &'a str,
-    file: &'a str,
-) -> Result<(Expression, &'a str), Diagnostic> {
-    let start_slice = file;
-    let mut remaining = file
-        .strip_prefix("match")
-        .ok_or_else(|| diagnostic_here(source, file, 5, "Expected match"))?;
-
-    remaining = parse_optional_whitespace(remaining);
-    let (value, mut remaining) = parse_operation_expression_with_guard(source, remaining)?;
-    remaining = parse_optional_whitespace(remaining);
-    remaining = remaining
-        .strip_prefix("with")
-        .ok_or_else(|| diagnostic_here(source, remaining, 4, "Expected with after match value"))?;
-    remaining = parse_optional_whitespace(remaining);
-
-    let mut branches = Vec::new();
-
-    remaining = remaining
-        .strip_prefix("(")
-        .ok_or_else(|| diagnostic_here(source, remaining, 1, "Expected ( to start match"))?;
-
-    loop {
-        remaining = parse_optional_whitespace(remaining);
-        if let Some(rest) = remaining.strip_prefix(")") {
-            remaining = rest;
-            break;
-        }
-        let (branch_expr, rest) = parse_operation_expression_with_guard(source, remaining)?;
-        let ExpressionKind::Function {
-            parameter, body, ..
-        } = branch_expr.kind
-        else {
-            return Err(diagnostic_here(
-                source,
-                remaining,
-                1,
-                "Expected match branch to be a function",
-            ));
-        };
-        branches.push((parameter, *body));
-        remaining = parse_optional_whitespace(rest);
-
-        if let Some(rest) = remaining.strip_prefix(",") {
-            remaining = parse_optional_whitespace(rest);
-        }
-    }
-
-    let span = consumed_span(source, start_slice, remaining);
-
-    Ok((
-        ExpressionKind::Match {
-            value: Box::new(value),
-            branches,
-        }
-        .with_span(span),
-        remaining,
-    ))
 }
 
 fn parse_if_expression_with_source<'a>(
@@ -971,8 +890,7 @@ pub fn parse_operator(file: &str) -> Option<(String, &str)> {
     }
 
     let stop_words = [
-        "if", "then", "else", "match", "with", "fn", "let", "return", "break", "loop", "while",
-        "do",
+        "if", "then", "else", "match", "fn", "let", "return", "break", "loop", "while", "do",
     ];
     let word = file
         .chars()
@@ -1035,7 +953,10 @@ fn parse_struct_expression<'a>(
 
             if let Some((identifier, after_identifier)) = parse_identifier(remaining) {
                 let after_ws = parse_optional_whitespace(after_identifier);
-                if let Some(after_equals) = after_ws.strip_prefix("=") {
+
+                if let Some((operator, after_equals)) = parse_operator(after_ws)
+                    && operator == "="
+                {
                     let after_ws = parse_optional_whitespace(after_equals);
                     let (value_expr, rest) =
                         parse_operation_expression_with_source(source, after_ws)?;
@@ -1102,8 +1023,10 @@ fn parse_return_expression_with_source<'a>(
 
     let value_start = remaining.chars().next();
     let (value, rest) = if remaining.is_empty()
-        || matches!(value_start, Some(';') | Some(')') | Some(']') | Some('}') | Some(','))
-    {
+        || matches!(
+            value_start,
+            Some(';') | Some(')') | Some(']') | Some('}') | Some(',')
+        ) {
         (None, remaining)
     } else {
         match parse_operation_expression_with_guard(source, remaining) {
@@ -1147,8 +1070,10 @@ fn parse_break_expression_with_source<'a>(
     let value_start = remaining.chars().next();
 
     let (value, rest) = if remaining.is_empty()
-        || matches!(value_start, Some(';') | Some(')') | Some(']') | Some('}') | Some(','))
-    {
+        || matches!(
+            value_start,
+            Some(';') | Some(')') | Some(']') | Some('}') | Some(',')
+        ) {
         (None, remaining)
     } else {
         match parse_operation_expression_with_guard(source, remaining) {
@@ -1318,9 +1243,6 @@ fn parse_isolated_expression_with_source_with_guard<'a>(
     }
     if let Some(loop_parse) = parse_loop_expression_with_source(source, file) {
         return loop_parse;
-    }
-    if let Some(match_parse) = parse_match_expression(source, file) {
-        return match_parse;
     }
     if let Some(if_parse) = parse_if_expression(source, file) {
         return if_parse;
@@ -1529,20 +1451,20 @@ fn parse_operation_expression_with_min_precedence<'a>(
                 parameter: Box::new(left),
                 return_type: Box::new(right),
             },
-        "::" => {
-            let ExpressionKind::Identifier(variant) = right.kind else {
-                return Err(diagnostic_here(
-                    source,
-                    "",
-                    1,
-                    "Expected identifier as enum variant in enum access",
-                ));
-            };
-            ExpressionKind::EnumAccess {
-                enum_expr: Box::new(left),
-                variant,
+            "::" => {
+                let ExpressionKind::Identifier(variant) = right.kind else {
+                    return Err(diagnostic_here(
+                        source,
+                        "",
+                        1,
+                        "Expected identifier as enum variant in enum access",
+                    ));
+                };
+                ExpressionKind::EnumAccess {
+                    enum_expr: Box::new(left),
+                    variant,
+                }
             }
-        }
             "." => match right.kind {
                 ExpressionKind::Identifier(property) => ExpressionKind::PropertyAccess {
                     object: Box::new(left),
@@ -1563,19 +1485,19 @@ fn parse_operation_expression_with_min_precedence<'a>(
                     ));
                 }
             },
-        "" => ExpressionKind::FunctionCall {
-            function: Box::new(left),
-            argument: Box::new(right),
-        },
-        "|>" => ExpressionKind::FunctionCall {
-            function: Box::new(right),
-            argument: Box::new(left),
-        },
-        operator => ExpressionKind::Operation {
-            operator: operator.to_string(),
-            left: Box::new(left),
-            right: Box::new(right),
-        },
+            "" => ExpressionKind::FunctionCall {
+                function: Box::new(left),
+                argument: Box::new(right),
+            },
+            "|>" => ExpressionKind::FunctionCall {
+                function: Box::new(right),
+                argument: Box::new(left),
+            },
+            operator => ExpressionKind::Operation {
+                operator: operator.to_string(),
+                left: Box::new(left),
+                right: Box::new(right),
+            },
         };
         operand_stack.push(Expression::new(processed_operation, span));
         Ok(())

@@ -222,3 +222,16 @@ fn test_assignment_respects_type_hints() {
         Ok(_) => panic!("type mismatched assignment should fail"),
     }
 }
+
+#[test]
+fn with_is_not_reserved_keyword() {
+    let program = "
+        with := 5;
+        with
+        ";
+
+    let (result, _context) =
+        evaluate_text_to_simplified_expression(program).expect("interpretation should succeed");
+
+    assert_final_number(result, 5);
+}

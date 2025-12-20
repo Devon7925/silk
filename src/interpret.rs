@@ -754,7 +754,12 @@ pub fn interpret_expression(
             }
             IntrinsicOperation::Unary(operand, op) => {
                 let evaluated_operand = interpret_expression(*operand, context)?;
-                if !is_resolved_constant(&evaluated_operand) {
+                let op_requires_const_argument = match op {
+                    UnaryIntrinsicOperator::BooleanNot => true,
+                    UnaryIntrinsicOperator::EnumFromStruct => true,
+                    UnaryIntrinsicOperator::MatchFromStruct => false,
+                };
+                if !is_resolved_constant(&evaluated_operand) && op_requires_const_argument {
                     return Ok(Expression::new(
                         ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
                             Box::new(evaluated_operand),
@@ -764,6 +769,9 @@ pub fn interpret_expression(
                     ));
                 }
                 match op {
+                    UnaryIntrinsicOperator::MatchFromStruct => {
+                        interpret_match_from_struct(evaluated_operand, span, context)?
+                    }
                     UnaryIntrinsicOperator::BooleanNot => match evaluated_operand.kind {
                         ExpressionKind::Literal(ExpressionLiteral::Boolean(b)) => {
                             ExpressionKind::Literal(ExpressionLiteral::Boolean(!b))
@@ -964,7 +972,18 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
             then_type
         }
         ExpressionKind::Match { value, branches } => {
-            let value_type = get_type_of_expression(value, context)?;
+            // TODO: this is badly handled
+            let value_type = match get_type_of_expression(value, context) {
+                Ok(resolved) => Some(resolved),
+                Err(err)
+                    if err
+                        .message
+                        .starts_with("Cannot determine type of unbound identifier:") =>
+                {
+                    None
+                }
+                Err(err) => return Err(err),
+            };
             let mut branch_type: Option<Expression> = None;
 
             for (pattern, branch) in branches {
@@ -973,7 +992,7 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
                     pattern.clone(),
                     &mut branch_context,
                     Vec::new(),
-                    Some(value_type.clone()),
+                    value_type.clone(),
                 )?;
                 let branch_ty = get_type_of_expression(branch, &branch_context)?;
                 if let Some(existing) = &branch_type {
@@ -1178,6 +1197,16 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
             _,
             UnaryIntrinsicOperator::EnumFromStruct,
         )) => interpret_expression(identifier_expr("type"), &mut context.clone())?,
+        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
+            _,
+            UnaryIntrinsicOperator::MatchFromStruct,
+        )) => {
+            //TODO: check this code
+            return Err(diagnostic(
+                "match intrinsic should be resolved before type checking",
+                span,
+            ));
+        }
     };
     Ok(result)
 }
@@ -2921,6 +2950,40 @@ pub fn intrinsic_context() -> Context {
             Vec::new(),
         ),
     );
+
+    context.bindings.last_mut().unwrap().insert(
+        Identifier::new("match"),
+        (
+            BindingContext::Bound(
+                ExpressionKind::Function {
+                    parameter: BindingPattern::Identifier(
+                        Identifier::new("branches"),
+                        dummy_span(),
+                    ),
+                    return_type: Some(Box::new(
+                        ExpressionKind::FunctionType {
+                            parameter: Box::new(intrinsic_type_expr(IntrinsicType::Type)),
+                            return_type: Box::new(intrinsic_type_expr(IntrinsicType::Type)),
+                        }
+                        .with_span(dummy_span()),
+                    )),
+                    body: Box::new(Expression::new(
+                        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
+                            Box::new(Expression::new(
+                                ExpressionKind::Identifier(Identifier::new("branches")),
+                                dummy_span(),
+                            )),
+                            UnaryIntrinsicOperator::MatchFromStruct,
+                        )),
+                        dummy_span(),
+                    )),
+                }
+                .with_span(dummy_span()),
+                PreserveBehavior::Inline,
+            ),
+            Vec::new(),
+        ),
+    );
     context
 }
 
@@ -3316,4 +3379,54 @@ fn interpret_enum_from_struct(
     }
 
     Ok(ExpressionKind::EnumType(evaluated_variants).with_span(span))
+}
+
+fn interpret_match_from_struct(
+    argument_value: Expression,
+    span: SourceSpan,
+    context: &mut Context,
+) -> Result<Expression, Diagnostic> {
+    let ExpressionKind::Struct(branches) = argument_value.kind else {
+        return Err(diagnostic(
+            format!(
+                "match expects a struct of branch functions, got {:?}",
+                argument_value
+            ),
+            span,
+        ));
+    };
+
+    let mut match_branches = Vec::with_capacity(branches.len());
+    for (_, branch_expr) in branches {
+        let ExpressionKind::Function {
+            parameter, body, ..
+        } = branch_expr.kind
+        else {
+            return Err(diagnostic(
+                "match expects each branch to be a function",
+                branch_expr.span(),
+            ));
+        };
+        match_branches.push((parameter, *body));
+    }
+
+    let match_value = Identifier::new("match_value");
+    let parameter = BindingPattern::Identifier(match_value.clone(), span);
+    let match_expr = ExpressionKind::Match {
+        value: Box::new(ExpressionKind::Identifier(match_value).with_span(span)),
+        branches: match_branches,
+    }
+    .with_span(span);
+
+    let mut type_context = context.clone();
+    bind_pattern_blanks(parameter.clone(), &mut type_context, Vec::new(), None)?;
+    let interpreted_body = interpret_expression(match_expr, &mut type_context)?;
+    let return_type = get_type_of_expression(&interpreted_body, &type_context)?;
+
+    Ok(ExpressionKind::Function {
+        parameter,
+        return_type: Some(Box::new(return_type)),
+        body: Box::new(interpreted_body),
+    }
+    .with_span(span))
 }

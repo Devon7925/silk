@@ -1216,6 +1216,13 @@ fn emit_expression(
                 .with_span(SourceSpan::default()),
         ),
         IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(
+            _,
+            UnaryIntrinsicOperator::MatchFromStruct,
+        )) => Err(
+            Diagnostic::new("match intrinsic should be resolved before wasm lowering")
+                .with_span(SourceSpan::default()),
+        ),
+        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(
             operand,
             UnaryIntrinsicOperator::BooleanNot,
         )) => {
