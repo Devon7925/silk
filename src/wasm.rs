@@ -11,8 +11,8 @@ use crate::{
         IntermediateIntrinsicOperation, IntermediateKind, IntermediateResult, IntermediateType,
     },
     parsing::{
-        BinaryIntrinsicOperator, DivergeExpressionType, ExpressionLiteral, Identifier, LValue,
-        TargetLiteral, UnaryIntrinsicOperator,
+        BinaryIntrinsicOperator, BindingPattern, DivergeExpressionType, ExpressionLiteral,
+        Identifier, LValue, TargetLiteral, UnaryIntrinsicOperator,
     },
 };
 
@@ -670,15 +670,17 @@ fn infer_type(
 }
 
 fn extract_function_params(
-    pattern: &IntermediateBindingPattern,
+    pattern: &BindingPattern,
     ty: &IntermediateType,
 ) -> Result<Vec<WasmFunctionParam>, Diagnostic> {
-    match pattern {
-        IntermediateBindingPattern::Struct(fields, _) => {
-            let IntermediateType::Struct(field_types) = ty else {
+    match stripped_binding_pattern(pattern) {
+        BindingPattern::Struct(fields, span) => {
+            let field_types = if let IntermediateType::Struct(field_types) = ty {
+                field_types
+            } else {
                 return Err(
                     Diagnostic::new("Struct pattern requires struct parameter type")
-                        .with_span(pattern_span(pattern)),
+                        .with_span(*span),
                 );
             };
             let mut params = Vec::new();
@@ -692,21 +694,38 @@ fn extract_function_params(
                             "Missing field {} in struct parameter type",
                             field_id.name
                         ))
-                        .with_span(pattern_span(sub_pattern))
+                        .with_span(sub_pattern.span())
                     })?;
-                let sub_params = extract_function_params(sub_pattern, field_ty)?;
-                params.extend(sub_params);
+                params.extend(extract_function_params(sub_pattern, field_ty)?);
             }
             Ok(params)
         }
-        IntermediateBindingPattern::Identifier(identifier, _) => Ok(vec![WasmFunctionParam {
+        BindingPattern::Identifier(identifier, _) => Ok(vec![WasmFunctionParam {
             name: identifier.name.clone(),
             ty: intermediate_type_to_wasm(ty),
         }]),
-        IntermediateBindingPattern::Literal(_, _) => Err(Diagnostic::new(
+        BindingPattern::Literal(_, span) => Err(Diagnostic::new(
             "Literal patterns cannot be used in function parameters",
         )
-        .with_span(pattern_span(pattern))),
+        .with_span(*span)),
+        BindingPattern::EnumVariant { span, .. } => Err(Diagnostic::new(
+            "Enum patterns cannot be used in function parameters",
+        )
+        .with_span(*span)),
+        BindingPattern::TypeHint(_, _, span) => {
+            Err(Diagnostic::new("Unsupported pattern in function parameter").with_span(*span))
+        }
+        BindingPattern::Annotated { span, .. } => {
+            Err(Diagnostic::new("Unsupported pattern in function parameter").with_span(*span))
+        }
+    }
+}
+
+fn stripped_binding_pattern(pattern: &BindingPattern) -> &BindingPattern {
+    match pattern {
+        BindingPattern::TypeHint(inner, _, _) => stripped_binding_pattern(inner),
+        BindingPattern::Annotated { pattern: inner, .. } => stripped_binding_pattern(inner),
+        other => other,
     }
 }
 
@@ -715,17 +734,6 @@ fn extract_identifier_from_pattern(
 ) -> Result<String, Diagnostic> {
     match pattern {
         IntermediateBindingPattern::Identifier(identifier, _) => Ok(identifier.name.clone()),
-        IntermediateBindingPattern::Struct(items, _) => {
-            for (_, pat) in items {
-                if let Ok(name) = extract_identifier_from_pattern(pat) {
-                    return Ok(name);
-                }
-            }
-            Err(
-                Diagnostic::new("Struct patterns require at least one identifier")
-                    .with_span(pattern_span(pattern)),
-            )
-        }
         IntermediateBindingPattern::Literal(_, _) => Err(Diagnostic::new(
             "Literal patterns cannot be used in function parameters",
         )
@@ -736,8 +744,7 @@ fn extract_identifier_from_pattern(
 fn pattern_span(pattern: &IntermediateBindingPattern) -> SourceSpan {
     match pattern {
         IntermediateBindingPattern::Identifier(_, span)
-        | IntermediateBindingPattern::Literal(_, span)
-        | IntermediateBindingPattern::Struct(_, span) => *span,
+        | IntermediateBindingPattern::Literal(_, span) => *span,
     }
 }
 
@@ -871,35 +878,12 @@ fn collect_locals_for_pattern(
             locals_types.insert(identifier.name, expr_type);
             Ok(())
         }
-        IntermediateBindingPattern::Struct(items, span) => {
-            let WasmType::Struct(field_types) = expr_type else {
-                return Err(
-                    Diagnostic::new("Struct pattern requires struct value type").with_span(span)
-                );
-            };
-
-            for (field_identifier, field_pattern) in items {
-                let field_type = field_types
-                    .iter()
-                    .find(|(name, _)| name == &field_identifier.name)
-                    .map(|(_, ty)| ty.clone())
-                    .ok_or_else(|| {
-                        Diagnostic::new(format!(
-                            "Missing field {} in struct type",
-                            field_identifier.name
-                        ))
-                        .with_span(pattern_span(&field_pattern))
-                    })?;
-                collect_locals_for_pattern(field_pattern, field_type, locals_types, locals)?;
-            }
-            Ok(())
-        }
         IntermediateBindingPattern::Literal(_, _) => Ok(()),
     }
 }
 
 fn emit_call_arguments(
-    pattern: &IntermediateBindingPattern,
+    pattern: &BindingPattern,
     input_type: &IntermediateType,
     argument_expr: IntermediateKind,
     locals: &std::collections::HashMap<String, u32>,
@@ -912,8 +896,8 @@ fn emit_call_arguments(
     loop_stack: &mut Vec<LoopContext>,
     match_counter: &mut MatchCounter,
 ) -> Result<(), Diagnostic> {
-    match pattern {
-        IntermediateBindingPattern::Identifier(_, _) => emit_expression(
+    match stripped_binding_pattern(pattern) {
+        BindingPattern::Identifier(_, _) => emit_expression(
             &argument_expr,
             locals,
             locals_types,
@@ -925,11 +909,13 @@ fn emit_call_arguments(
             loop_stack,
             match_counter,
         ),
-        IntermediateBindingPattern::Struct(fields, _) => {
-            let IntermediateType::Struct(field_types) = input_type else {
+        BindingPattern::Struct(fields, span) => {
+            let field_types = if let IntermediateType::Struct(field_types) = input_type {
+                field_types
+            } else {
                 return Err(
                     Diagnostic::new("Struct pattern requires struct parameter type")
-                        .with_span(pattern_span(pattern)),
+                        .with_span(*span),
                 );
             };
 
@@ -943,7 +929,7 @@ fn emit_call_arguments(
                             "Missing field {} in struct parameter type",
                             field_id.name
                         ))
-                        .with_span(pattern_span(sub_pattern))
+                        .with_span(sub_pattern.span())
                     })?;
                 let field_expr = IntermediateKind::PropertyAccess {
                     object: Box::new(argument_expr.clone()),
@@ -966,10 +952,20 @@ fn emit_call_arguments(
             }
             Ok(())
         }
-        IntermediateBindingPattern::Literal(_, _) => Err(Diagnostic::new(
+        BindingPattern::Literal(_, span) => Err(Diagnostic::new(
             "Literal patterns cannot be used in function parameters",
         )
-        .with_span(pattern_span(pattern))),
+        .with_span(*span)),
+        BindingPattern::EnumVariant { span, .. } => Err(Diagnostic::new(
+            "Enum patterns cannot be used in function parameters",
+        )
+        .with_span(*span)),
+        BindingPattern::TypeHint(_, _, span) => {
+            Err(Diagnostic::new("Unsupported pattern in function parameter").with_span(*span))
+        }
+        BindingPattern::Annotated { span, .. } => {
+            Err(Diagnostic::new("Unsupported pattern in function parameter").with_span(*span))
+        }
     }
 }
 
@@ -1510,82 +1506,7 @@ fn emit_expression(
         IntermediateKind::Binding(binding) => {
             let pattern = &binding.pattern;
 
-            if let (
-                IntermediateBindingPattern::Struct(pattern_fields, _),
-                IntermediateKind::Struct(value_fields),
-            ) = (pattern, &binding.expr)
-            {
-                let mut comparisons_emitted = false;
-                for (field_identifier, field_pattern) in pattern_fields {
-                    let value_expr = value_fields
-                        .iter()
-                        .find(|(id, _)| id.name == field_identifier.name)
-                        .map(|(_, expr)| expr)
-                        .ok_or_else(|| {
-                            Diagnostic::new(format!(
-                                "Missing field {} in struct binding",
-                                field_identifier.name
-                            ))
-                            .with_span(pattern_span(field_pattern))
-                        })?;
-
-                    match field_pattern {
-                        IntermediateBindingPattern::Literal(
-                            ExpressionLiteral::Number(expected),
-                            _,
-                        ) => {
-                            emit_expression(
-                                value_expr,
-                                locals,
-                                locals_types,
-                                func,
-                                type_ctx,
-                                function_return_types,
-                                functions,
-                                control_stack,
-                                loop_stack,
-                                match_counter,
-                            )?;
-                            func.instruction(&Instruction::I32Const(*expected));
-                            func.instruction(&Instruction::I32Eq);
-                            if comparisons_emitted {
-                                func.instruction(&Instruction::I32And);
-                            }
-                            comparisons_emitted = true;
-                        }
-                        IntermediateBindingPattern::Identifier(identifier, _) => {
-                            emit_expression(
-                                value_expr,
-                                locals,
-                                locals_types,
-                                func,
-                                type_ctx,
-                                function_return_types,
-                                functions,
-                                control_stack,
-                                loop_stack,
-                                match_counter,
-                            )?;
-                            let local_index = locals
-                                .get(&identifier.name)
-                                .copied()
-                                .expect("Local should have been collected");
-                            func.instruction(&Instruction::LocalSet(local_index));
-                        }
-                        _ => {
-                            return Err(Diagnostic::new(
-                                "Unsupported pattern in struct binding for wasm emission",
-                            )
-                            .with_span(pattern_span(field_pattern)));
-                        }
-                    }
-                }
-
-                if !comparisons_emitted {
-                    func.instruction(&Instruction::I32Const(1));
-                }
-                Ok(())
-            } else if let IntermediateBindingPattern::Literal(literal, span) = pattern {
+            if let IntermediateBindingPattern::Literal(literal, span) = pattern {
                 emit_expression(
                     &binding.expr,
                     locals,

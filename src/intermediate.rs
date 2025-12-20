@@ -49,7 +49,6 @@ pub enum IntermediateKind {
 pub enum IntermediateBindingPattern {
     Identifier(Identifier, SourceSpan),
     Literal(ExpressionLiteral, SourceSpan),
-    Struct(Vec<(Identifier, IntermediateBindingPattern)>, SourceSpan),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,7 +78,7 @@ pub enum IntermediateType {
 pub struct IntermediateFunction {
     pub input_type: Box<IntermediateType>,
     pub return_type: Box<IntermediateType>,
-    pub parameter: IntermediateBindingPattern,
+    pub parameter: BindingPattern,
     pub body: Box<IntermediateKind>,
 }
 
@@ -277,6 +276,22 @@ pub fn expression_to_intermediate(
             let lowered_expr = expression_to_intermediate(expr, builder);
 
             if matches!(stripped_pattern, BindingPattern::EnumVariant { .. }) {
+                let temp_identifier = builder.next_match_temp_identifier();
+                let temp_binding = IntermediateKind::Binding(Box::new(IntermediateBinding {
+                    pattern: IntermediateBindingPattern::Identifier(
+                        temp_identifier.clone(),
+                        expr_span,
+                    ),
+                    binding_type: binding_type.clone(),
+                    expr: lowered_expr,
+                }));
+                let condition = builder.lower_binding_pattern_match(
+                    pattern,
+                    IntermediateKind::Identifier(temp_identifier.clone()),
+                    binding_type,
+                );
+                IntermediateKind::Block(vec![temp_binding, condition])
+            } else if matches!(stripped_pattern, BindingPattern::Struct { .. }) {
                 let temp_identifier = builder.next_match_temp_identifier();
                 let temp_binding = IntermediateKind::Binding(Box::new(IntermediateBinding {
                     pattern: IntermediateBindingPattern::Identifier(
@@ -494,11 +509,11 @@ impl IntermediateBuilder {
             self.function_indices.insert(name, index);
         }
 
-        let lowered_parameter = self.lower_binding_pattern(parameter.clone());
+        let parameter_clone = parameter.clone();
         self.functions.push(IntermediateFunction {
             input_type: Box::new(IntermediateType::I32),
             return_type: Box::new(IntermediateType::I32),
-            parameter: lowered_parameter.clone(),
+            parameter: parameter_clone.clone(),
             body: Box::new(IntermediateKind::Literal(ExpressionLiteral::Number(0))),
         });
 
@@ -514,7 +529,7 @@ impl IntermediateBuilder {
         self.functions[index] = IntermediateFunction {
             input_type,
             return_type,
-            parameter: lowered_parameter,
+            parameter: parameter_clone,
             body: lowered_body,
         };
 
@@ -669,6 +684,47 @@ impl IntermediateBuilder {
             BindingPattern::Annotated { pattern, .. } => {
                 self.lower_binding_pattern_match(*pattern, value_expr, value_type)
             }
+            BindingPattern::Struct(fields, span) => {
+                let field_types = if let IntermediateType::Struct(fields) = value_type {
+                    fields
+                } else {
+                    panic!("Struct pattern used on non-struct type at {:?}", span);
+                };
+
+                let mut combined_condition: Option<IntermediateKind> = None;
+                for (field_identifier, field_pattern) in fields {
+                    let field_type = field_types
+                        .iter()
+                        .find(|(name, _)| name == &field_identifier.name)
+                        .map(|(_, ty)| ty.clone())
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "Missing field {} in struct pattern at {:?}",
+                                field_identifier.name, span
+                            )
+                        });
+                    let field_expr = IntermediateKind::PropertyAccess {
+                        object: Box::new(value_expr.clone()),
+                        property: field_identifier.name.clone(),
+                    };
+                    let field_condition =
+                        self.lower_binding_pattern_match(field_pattern, field_expr, field_type);
+                    combined_condition = Some(if let Some(current) = combined_condition {
+                        IntermediateKind::IntrinsicOperation(
+                            IntermediateIntrinsicOperation::Binary(
+                                Box::new(current),
+                                Box::new(field_condition),
+                                BinaryIntrinsicOperator::BooleanAnd,
+                            ),
+                        )
+                    } else {
+                        field_condition
+                    });
+                }
+
+                combined_condition
+                    .unwrap_or(IntermediateKind::Literal(ExpressionLiteral::Boolean(true)))
+            }
             BindingPattern::EnumVariant {
                 enum_type,
                 variant,
@@ -736,13 +792,11 @@ impl IntermediateBuilder {
             BindingPattern::Literal(literal, span) => {
                 IntermediateBindingPattern::Literal(literal, span)
             }
-            BindingPattern::Struct(fields, span) => IntermediateBindingPattern::Struct(
-                fields
-                    .into_iter()
-                    .map(|(id, pat)| (id, self.lower_binding_pattern(pat)))
-                    .collect(),
-                span,
-            ),
+            BindingPattern::Struct { .. } => {
+                panic!(
+                    "Struct binding patterns should be lowered via `lower_binding_pattern_match`"
+                )
+            }
             BindingPattern::EnumVariant { .. } => {
                 panic!("Enum binding patterns should be lowered via `lower_binding_pattern_match`")
             }
