@@ -5,8 +5,8 @@
 * [x] if let
 * [x] loop
 * [x] while
-* [ ] while let
-* [ ] break;
+* [x] while let
+* [x] break;
 * [x] break value;
 * [x] return;
 * [ ] for (Iterator trait)

@@ -66,6 +66,48 @@ test("while loops stop when the guard is false", async () => {
     expect(decrement_to_zero(3)).toBe(0);
 }, TEST_TIMEOUT_MS);
 
+test("while with let expression stops when the pattern fails", async () => {
+    const silkCode = `
+    Option := enum { Some = i32, None = {} };
+    (export wasm) sum_until_none := (limit: i32) => (
+        mut iter := 0;
+        mut acc := 0;
+        while Option::Some(value) := (if iter < limit then Option::Some(iter) else Option::None) do (
+            acc = acc + value;
+            iter = iter + 1;
+        );
+        acc
+    );
+    {};
+    `;
+
+    const { sum_until_none } = await compileAndLoad(silkCode, "while_let_binding");
+    expect(sum_until_none(0)).toBe(0);
+    expect(sum_until_none(4)).toBe(6);
+}, TEST_TIMEOUT_MS);
+
+test("while break without an argument exits immediately", async () => {
+    const silkCode = `
+    (export wasm) break_without_value := (limit: i32) => (
+        mut counter := 0;
+        mut sum := 0;
+        while counter < limit do (
+            if counter == 2 then (
+                break
+            );
+            sum = sum + counter;
+            counter = counter + 1;
+        );
+        sum
+    );
+    {};
+    `;
+
+    const { break_without_value } = await compileAndLoad(silkCode, "while_break_without_value");
+    expect(break_without_value(5)).toBe(1);
+    expect(break_without_value(1)).toBe(0);
+}, TEST_TIMEOUT_MS);
+
 afterAll(() => {
     for (const file of TEMP_FILES) {
         try {

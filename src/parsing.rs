@@ -1100,7 +1100,10 @@ fn parse_return_expression_with_source<'a>(
     let start_slice = file;
     let remaining = parse_optional_whitespace(after_keyword);
 
-    let (value, rest) = if remaining.is_empty() {
+    let value_start = remaining.chars().next();
+    let (value, rest) = if remaining.is_empty()
+        || matches!(value_start, Some(';') | Some(')') | Some(']') | Some('}') | Some(','))
+    {
         (None, remaining)
     } else {
         match parse_operation_expression_with_guard(source, remaining) {
@@ -1141,8 +1144,11 @@ fn parse_break_expression_with_source<'a>(
 
     let start_slice = file;
     let remaining = parse_optional_whitespace(after_keyword);
+    let value_start = remaining.chars().next();
 
-    let (value, rest) = if remaining.is_empty() {
+    let (value, rest) = if remaining.is_empty()
+        || matches!(value_start, Some(';') | Some(')') | Some(']') | Some('}') | Some(','))
+    {
         (None, remaining)
     } else {
         match parse_operation_expression_with_guard(source, remaining) {
