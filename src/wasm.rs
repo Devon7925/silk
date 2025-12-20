@@ -776,13 +776,16 @@ fn collect_locals(
     match expr {
         IntermediateKind::Binding(binding) => {
             let expr_type = infer_type(&binding.expr, locals_types, function_return_types)?;
+            let pattern = &binding.pattern;
+            let mut temp_local_name = None;
             if matches!(
                 binding.pattern,
                 IntermediateBindingPattern::EnumVariant { .. }
             ) {
-                let temp_local_name = match_counter.next_name();
-                locals.push((temp_local_name.clone(), expr_type.clone()));
-                locals_types.insert(temp_local_name, expr_type.clone());
+                let name = match_counter.next_name();
+                locals.push((name.clone(), expr_type.clone()));
+                locals_types.insert(name.clone(), expr_type.clone());
+                temp_local_name = Some(name);
             }
             collect_locals_for_pattern(
                 binding.pattern.clone(),
@@ -797,6 +800,38 @@ fn collect_locals(
                 function_return_types,
                 match_counter,
             )?);
+
+            if let (
+                Some(temp_local_name),
+                IntermediateBindingPattern::EnumVariant {
+                    payload: Some(payload_pattern),
+                    variant,
+                    ..
+                },
+            ) = (temp_local_name, pattern)
+            {
+                let enum_value_expr =
+                    IntermediateKind::Identifier(Identifier::new(temp_local_name.clone()));
+                let payload_access_expr = IntermediateKind::PropertyAccess {
+                    object: Box::new(IntermediateKind::PropertyAccess {
+                        object: Box::new(enum_value_expr.clone()),
+                        property: "payload".to_string(),
+                    }),
+                    property: variant.name.clone(),
+                };
+                let payload_binding = IntermediateKind::Binding(Box::new(IntermediateBinding {
+                    pattern: *payload_pattern.clone(),
+                    binding_type: binding.binding_type.clone(),
+                    expr: payload_access_expr,
+                }));
+
+                locals.extend(collect_locals(
+                    &payload_binding,
+                    locals_types,
+                    function_return_types,
+                    match_counter,
+                )?);
+            }
         }
         IntermediateKind::Assignment { target, expr } => {
             ensure_lvalue_local(target, locals_types, SourceSpan::default())?;
