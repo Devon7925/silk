@@ -776,6 +776,14 @@ fn collect_locals(
     match expr {
         IntermediateKind::Binding(binding) => {
             let expr_type = infer_type(&binding.expr, locals_types, function_return_types)?;
+            if matches!(
+                binding.pattern,
+                IntermediateBindingPattern::EnumVariant { .. }
+            ) {
+                let temp_local_name = match_counter.next_name();
+                locals.push((temp_local_name.clone(), expr_type.clone()));
+                locals_types.insert(temp_local_name, expr_type.clone());
+            }
             collect_locals_for_pattern(
                 binding.pattern.clone(),
                 expr_type,
@@ -892,6 +900,14 @@ fn collect_locals(
                     match_counter,
                 )?);
             }
+        }
+        IntermediateKind::Loop { body } => {
+            locals.extend(collect_locals(
+                body,
+                locals_types,
+                function_return_types,
+                match_counter,
+            )?);
         }
         _ => {}
     }
@@ -1603,6 +1619,12 @@ fn emit_expression(
                 span,
             } = pattern
             {
+                let temp_local_name = match_counter.next_name();
+                let temp_local_index = locals
+                    .get(&temp_local_name)
+                    .copied()
+                    .expect("Temp local should exist");
+
                 let value_type = infer_type(&binding.expr, locals_types, function_return_types)?;
                 let WasmType::Struct(fields) = value_type else {
                     return Err(
@@ -1645,6 +1667,22 @@ fn emit_expression(
                     loop_stack,
                     match_counter,
                 )?;
+                func.instruction(&Instruction::LocalSet(temp_local_index));
+
+                let enum_value_expr =
+                    IntermediateKind::Identifier(Identifier::new(temp_local_name.clone()));
+                emit_expression(
+                    &enum_value_expr,
+                    locals,
+                    locals_types,
+                    func,
+                    type_ctx,
+                    function_return_types,
+                    functions,
+                    control_stack,
+                    loop_stack,
+                    match_counter,
+                )?;
                 func.instruction(&Instruction::StructGet {
                     struct_type_index: type_index,
                     field_index: tag_field_index,
@@ -1660,7 +1698,7 @@ fn emit_expression(
                 if let Some(payload_pattern) = payload.clone() {
                     let payload_access_expr = IntermediateKind::PropertyAccess {
                         object: Box::new(IntermediateKind::PropertyAccess {
-                            object: Box::new(binding.expr.clone()),
+                            object: Box::new(enum_value_expr),
                             property: "payload".to_string(),
                         }),
                         property: variant.name.clone(),
