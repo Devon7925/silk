@@ -105,7 +105,7 @@ test("runs range_sum module and returns correct value", async () => {
   const moduleBytes = compileFixtureToBytes("range_sum.silk");
   const { instance } = await WebAssembly.instantiate(moduleBytes);
   const constructRange = instance.exports.construct_range as (min: any, max: any) => any;
-  const rangeSum = instance.exports.range_sum as (range: any) => number;
+  const rangeSum = instance.exports.sum_range as (range: any) => number;
 
   expect(typeof constructRange).toBe("function");
   expect(typeof rangeSum).toBe("function");
