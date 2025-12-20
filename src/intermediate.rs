@@ -592,13 +592,13 @@ impl IntermediateBuilder {
                 .unwrap_or(IntermediateType::I32),
             ExpressionKind::EnumValue { enum_type, .. } => {
                 let enum_type = self
-                    .resolve_enum_type_expression(&enum_type)
+                    .resolve_enum_type_expression(enum_type)
                     .unwrap_or_else(|| *enum_type.clone());
                 self.type_expr_to_intermediate(&enum_type)
             }
             ExpressionKind::EnumConstructor { enum_type, .. } => {
                 let enum_type = self
-                    .resolve_enum_type_expression(&enum_type)
+                    .resolve_enum_type_expression(enum_type)
                     .unwrap_or_else(|| *enum_type.clone());
                 self.type_expr_to_intermediate(&enum_type)
             }
