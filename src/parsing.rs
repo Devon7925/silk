@@ -1004,7 +1004,7 @@ fn operator_precedence(operator: &str) -> u8 {
         "==" | "!=" | "<" | ">" | "<=" | ">=" => 4,
         "&&" => 3,
         "||" | "^" => 2,
-        "=>" | "->" => 1,
+        "=>" | "->" | "|>" => 1,
         ":=" | "=" => 0,
         _ => 5,
     }
@@ -1529,20 +1529,20 @@ fn parse_operation_expression_with_min_precedence<'a>(
                 parameter: Box::new(left),
                 return_type: Box::new(right),
             },
-            "::" => {
-                let ExpressionKind::Identifier(variant) = right.kind else {
-                    return Err(diagnostic_here(
-                        source,
-                        "",
-                        1,
-                        "Expected identifier as enum variant in enum access",
-                    ));
-                };
-                ExpressionKind::EnumAccess {
-                    enum_expr: Box::new(left),
-                    variant,
-                }
+        "::" => {
+            let ExpressionKind::Identifier(variant) = right.kind else {
+                return Err(diagnostic_here(
+                    source,
+                    "",
+                    1,
+                    "Expected identifier as enum variant in enum access",
+                ));
+            };
+            ExpressionKind::EnumAccess {
+                enum_expr: Box::new(left),
+                variant,
             }
+        }
             "." => match right.kind {
                 ExpressionKind::Identifier(property) => ExpressionKind::PropertyAccess {
                     object: Box::new(left),
@@ -1563,15 +1563,19 @@ fn parse_operation_expression_with_min_precedence<'a>(
                     ));
                 }
             },
-            "" => ExpressionKind::FunctionCall {
-                function: Box::new(left),
-                argument: Box::new(right),
-            },
-            operator => ExpressionKind::Operation {
-                operator: operator.to_string(),
-                left: Box::new(left),
-                right: Box::new(right),
-            },
+        "" => ExpressionKind::FunctionCall {
+            function: Box::new(left),
+            argument: Box::new(right),
+        },
+        "|>" => ExpressionKind::FunctionCall {
+            function: Box::new(right),
+            argument: Box::new(left),
+        },
+        operator => ExpressionKind::Operation {
+            operator: operator.to_string(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
         };
         operand_stack.push(Expression::new(processed_operation, span));
         Ok(())
