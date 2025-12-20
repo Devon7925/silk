@@ -7,9 +7,8 @@ use wasm_encoder::{
 use crate::{
     diagnostics::{Diagnostic, SourceSpan},
     intermediate::{
-        IntermediateBinding, IntermediateBindingPattern, IntermediateExportType,
-        IntermediateFunction, IntermediateIntrinsicOperation, IntermediateKind, IntermediateResult,
-        IntermediateType,
+        IntermediateBindingPattern, IntermediateExportType, IntermediateFunction,
+        IntermediateIntrinsicOperation, IntermediateKind, IntermediateResult, IntermediateType,
     },
     parsing::{
         BinaryIntrinsicOperator, DivergeExpressionType, ExpressionLiteral, Identifier, LValue,
@@ -43,7 +42,7 @@ struct MatchCounter {
 
 impl MatchCounter {
     fn next_name(&mut self) -> String {
-        let name = format!("__match_val_{}", self.next_id);
+        let name = format!("__match_temp_{}", self.next_id);
         self.next_id += 1;
         name
     }
@@ -708,10 +707,6 @@ fn extract_function_params(
             "Literal patterns cannot be used in function parameters",
         )
         .with_span(pattern_span(pattern))),
-        IntermediateBindingPattern::EnumVariant { .. } => Err(Diagnostic::new(
-            "Enum patterns are not supported in exported parameters",
-        )
-        .with_span(pattern_span(pattern))),
     }
 }
 
@@ -731,14 +726,6 @@ fn extract_identifier_from_pattern(
                     .with_span(pattern_span(pattern)),
             )
         }
-        IntermediateBindingPattern::EnumVariant {
-            payload: Some(payload),
-            ..
-        } => extract_identifier_from_pattern(payload),
-        IntermediateBindingPattern::EnumVariant { .. } => Err(Diagnostic::new(
-            "Cannot extract identifier from enum pattern",
-        )
-        .with_span(pattern_span(pattern))),
         IntermediateBindingPattern::Literal(_, _) => Err(Diagnostic::new(
             "Literal patterns cannot be used in function parameters",
         )
@@ -750,8 +737,7 @@ fn pattern_span(pattern: &IntermediateBindingPattern) -> SourceSpan {
     match pattern {
         IntermediateBindingPattern::Identifier(_, span)
         | IntermediateBindingPattern::Literal(_, span)
-        | IntermediateBindingPattern::Struct(_, span)
-        | IntermediateBindingPattern::EnumVariant { span, .. } => *span,
+        | IntermediateBindingPattern::Struct(_, span) => *span,
     }
 }
 
@@ -765,17 +751,6 @@ fn collect_locals(
     match expr {
         IntermediateKind::Binding(binding) => {
             let expr_type = infer_type(&binding.expr, locals_types, function_return_types)?;
-            let pattern = &binding.pattern;
-            let mut temp_local_name = None;
-            if matches!(
-                binding.pattern,
-                IntermediateBindingPattern::EnumVariant { .. }
-            ) {
-                let name = match_counter.next_name();
-                locals.push((name.clone(), expr_type.clone()));
-                locals_types.insert(name.clone(), expr_type.clone());
-                temp_local_name = Some(name);
-            }
             collect_locals_for_pattern(
                 binding.pattern.clone(),
                 expr_type,
@@ -790,37 +765,6 @@ fn collect_locals(
                 match_counter,
             )?);
 
-            if let (
-                Some(temp_local_name),
-                IntermediateBindingPattern::EnumVariant {
-                    payload: Some(payload_pattern),
-                    variant,
-                    ..
-                },
-            ) = (temp_local_name, pattern)
-            {
-                let enum_value_expr =
-                    IntermediateKind::Identifier(Identifier::new(temp_local_name.clone()));
-                let payload_access_expr = IntermediateKind::PropertyAccess {
-                    object: Box::new(IntermediateKind::PropertyAccess {
-                        object: Box::new(enum_value_expr.clone()),
-                        property: "payload".to_string(),
-                    }),
-                    property: variant.name.clone(),
-                };
-                let payload_binding = IntermediateKind::Binding(Box::new(IntermediateBinding {
-                    pattern: *payload_pattern.clone(),
-                    binding_type: binding.binding_type.clone(),
-                    expr: payload_access_expr,
-                }));
-
-                locals.extend(collect_locals(
-                    &payload_binding,
-                    locals_types,
-                    function_return_types,
-                    match_counter,
-                )?);
-            }
         }
         IntermediateKind::Assignment { target, expr } => {
             ensure_lvalue_local(target, locals_types, SourceSpan::default())?;
@@ -951,50 +895,6 @@ fn collect_locals_for_pattern(
             }
             Ok(())
         }
-        IntermediateBindingPattern::EnumVariant {
-            variant,
-            payload,
-            span,
-            ..
-        } => {
-            let payload_type = match expr_type {
-                WasmType::Struct(ref fields) => {
-                    let payload_struct = fields
-                        .iter()
-                        .find(|(name, _)| name == "payload")
-                        .map(|(_, ty)| ty)
-                        .ok_or_else(|| {
-                            Diagnostic::new("Enum payload field missing in type context")
-                                .with_span(span)
-                        })?;
-                    let WasmType::Struct(payload_fields) = payload_struct else {
-                        return Err(Diagnostic::new(
-                            "Enum payload is not a struct in wasm lowering",
-                        )
-                        .with_span(span));
-                    };
-                    payload_fields
-                        .iter()
-                        .find(|(name, _)| name == &variant.name)
-                        .map(|(_, ty)| ty.clone())
-                        .ok_or_else(|| {
-                            Diagnostic::new("Enum variant missing in payload struct")
-                                .with_span(span)
-                        })?
-                }
-                _ => {
-                    return Err(
-                        Diagnostic::new("Enum pattern requires struct-backed enum value")
-                            .with_span(span),
-                    );
-                }
-            };
-
-            if let Some(payload_pattern) = payload {
-                collect_locals_for_pattern(*payload_pattern, payload_type, locals_types, locals)?;
-            }
-            Ok(())
-        }
         IntermediateBindingPattern::Literal(_, _) => Ok(()),
     }
 }
@@ -1069,10 +969,6 @@ fn emit_call_arguments(
         }
         IntermediateBindingPattern::Literal(_, _) => Err(Diagnostic::new(
             "Literal patterns cannot be used in function parameters",
-        )
-        .with_span(pattern_span(pattern))),
-        IntermediateBindingPattern::EnumVariant { .. } => Err(Diagnostic::new(
-            "Enum patterns are not supported in function parameters",
         )
         .with_span(pattern_span(pattern))),
     }
@@ -1614,130 +1510,6 @@ fn emit_expression(
         }
         IntermediateKind::Binding(binding) => {
             let pattern = &binding.pattern;
-            if let IntermediateBindingPattern::EnumVariant {
-                variant,
-                variant_index,
-                payload,
-                span,
-            } = pattern
-            {
-                let temp_local_name = match_counter.next_name();
-                let temp_local_index = locals
-                    .get(&temp_local_name)
-                    .copied()
-                    .expect("Temp local should exist");
-
-                let value_type = infer_type(&binding.expr, locals_types, function_return_types)?;
-                let WasmType::Struct(fields) = value_type else {
-                    return Err(
-                        Diagnostic::new("Enum bindings require struct-backed enum value")
-                            .with_span(*span),
-                    );
-                };
-
-                let tag_field_index = fields
-                    .iter()
-                    .position(|(name, _)| name == "tag")
-                    .ok_or_else(|| {
-                        Diagnostic::new("Enum tag missing in wasm lowering").with_span(*span)
-                    })? as u32;
-
-                let type_index = type_ctx
-                    .get_type_index(&fields)
-                    .ok_or_else(|| Diagnostic::new("Enum type not registered").with_span(*span))?;
-
-                let payload_struct = fields
-                    .iter()
-                    .find(|(name, _)| name == "payload")
-                    .map(|(_, ty)| ty)
-                    .expect("Payload field should exist");
-                let WasmType::Struct(_payload_fields) = payload_struct else {
-                    return Err(
-                        Diagnostic::new("Enum payload expected to be a struct").with_span(*span)
-                    );
-                };
-
-                emit_expression(
-                    &binding.expr,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    function_return_types,
-                    functions,
-                    control_stack,
-                    loop_stack,
-                    match_counter,
-                )?;
-                func.instruction(&Instruction::LocalSet(temp_local_index));
-
-                let enum_value_expr =
-                    IntermediateKind::Identifier(Identifier::new(temp_local_name.clone()));
-                emit_expression(
-                    &enum_value_expr,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    function_return_types,
-                    functions,
-                    control_stack,
-                    loop_stack,
-                    match_counter,
-                )?;
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: type_index,
-                    field_index: tag_field_index,
-                });
-                func.instruction(&Instruction::I32Const(*variant_index as i32));
-                func.instruction(&Instruction::I32Eq);
-
-                control_stack.push(ControlFrame::If);
-                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
-                    ValType::I32,
-                )));
-
-                if let Some(payload_pattern) = payload.clone() {
-                    let payload_access_expr = IntermediateKind::PropertyAccess {
-                        object: Box::new(IntermediateKind::PropertyAccess {
-                            object: Box::new(enum_value_expr),
-                            property: "payload".to_string(),
-                        }),
-                        property: variant.name.clone(),
-                    };
-
-                    let payload_binding =
-                        IntermediateKind::Binding(Box::new(IntermediateBinding {
-                            pattern: *payload_pattern,
-                            binding_type: binding.binding_type.clone(),
-                            expr: payload_access_expr,
-                        }));
-
-                    emit_expression(
-                        &payload_binding,
-                        locals,
-                        locals_types,
-                        func,
-                        type_ctx,
-                        function_return_types,
-                        functions,
-                        control_stack,
-                        loop_stack,
-                        match_counter,
-                    )?;
-                    func.instruction(&Instruction::Drop);
-                    func.instruction(&Instruction::I32Const(1));
-                } else {
-                    func.instruction(&Instruction::I32Const(1));
-                }
-
-                func.instruction(&Instruction::Else);
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::End);
-                control_stack.pop();
-
-                return Ok(());
-            }
 
             if let (
                 IntermediateBindingPattern::Struct(pattern_fields, _),
