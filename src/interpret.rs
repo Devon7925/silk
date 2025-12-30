@@ -41,7 +41,7 @@ impl PartialOrd for PreserveBehavior {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BindingContext {
-    Bound(Expression, PreserveBehavior),
+    Bound(Expression, PreserveBehavior, Option<Expression>),
     UnboundWithType(Expression),
     UnboundWithoutType,
 }
@@ -49,8 +49,12 @@ pub enum BindingContext {
 impl BindingContext {
     fn get_bound_type(&self, context: &Context) -> Result<Option<Expression>, Diagnostic> {
         match self {
-            BindingContext::Bound(expression, _) => {
-                Ok(Some(get_type_of_expression(expression, context)?))
+            BindingContext::Bound(expression, _, bound_type) => {
+                if let Some(bound_type) = bound_type {
+                    Ok(Some(bound_type.clone()))
+                } else {
+                    Ok(Some(get_type_of_expression(expression, context)?))
+                }
             }
             BindingContext::UnboundWithType(expression) => Ok(Some(expression.clone())),
             BindingContext::UnboundWithoutType => Ok(None),
@@ -80,7 +84,7 @@ impl Context {
             .iter()
             .filter(|(_, (_, annotations))| !annotations.is_empty())
             .filter_map(|(name, (binding, annotations))| match binding {
-                BindingContext::Bound(value, _) => Some(AnnotatedBinding {
+                BindingContext::Bound(value, _, _) => Some(AnnotatedBinding {
                     identifier: name.clone(),
                     annotations: annotations.clone(),
                     value: value.clone(),
@@ -319,6 +323,7 @@ pub fn interpret_expression(
                     &mut branch_context,
                     Vec::new(),
                     PreserveBehavior::Inline,
+                    None,
                 )?;
 
                 if matched {
@@ -387,7 +392,7 @@ pub fn interpret_expression(
         ExpressionKind::Identifier(identifier) => {
             if let Some((binding, _)) = context.get_identifier(&identifier) {
                 match &binding {
-                    BindingContext::Bound(value, PreserveBehavior::PreserveUsageInLoops) => {
+                    BindingContext::Bound(value, PreserveBehavior::PreserveUsageInLoops, _) => {
                         if context.in_loop {
                             Expression::new(ExpressionKind::Identifier(identifier), span)
                         } else {
@@ -397,10 +402,11 @@ pub fn interpret_expression(
                     BindingContext::Bound(
                         expr,
                         PreserveBehavior::Inline | PreserveBehavior::PreserveBinding,
+                        _,
                     ) => expr.clone(),
                     BindingContext::UnboundWithType(_)
                     | BindingContext::UnboundWithoutType
-                    | BindingContext::Bound(_, PreserveBehavior::PreserveUsage) => {
+                    | BindingContext::Bound(_, PreserveBehavior::PreserveUsage, _) => {
                         Expression::new(ExpressionKind::Identifier(identifier), span)
                     }
                 }
@@ -508,7 +514,7 @@ pub fn interpret_expression(
             let effective_function = if let ExpressionKind::Identifier(ident) = &function_value.kind
             {
                 context.get_identifier(ident).and_then(|b| match &b.0 {
-                    BindingContext::Bound(v, _) => Some(v.clone()),
+                    BindingContext::Bound(v, _, _) => Some(v.clone()),
                     _ => None,
                 })
             } else {
@@ -543,6 +549,7 @@ pub fn interpret_expression(
                         &mut call_context,
                         Vec::new(),
                         PreserveBehavior::Inline,
+                        None,
                     )?;
                     let body_value = interpret_expression(*body, &mut call_context)?;
                     if let ExpressionKind::Diverge {
@@ -791,7 +798,8 @@ pub fn interpret_expression(
             }
         },
         ExpressionKind::PropertyAccess { object, property } => {
-            let evaluated_object = interpret_expression(*object, context)?;
+            let original_object = *object;
+            let evaluated_object = interpret_expression(original_object.clone(), context)?;
             if let ExpressionKind::Struct(items) = &evaluated_object.kind {
                 for (item_id, item_expr) in items {
                     if item_id.name == property {
@@ -800,8 +808,8 @@ pub fn interpret_expression(
                 }
             }
 
-            let object_type = get_type_of_expression(&evaluated_object, context)?;
-            let trait_prop = get_trait_prop_of_type(&object_type, &property, span)?;
+            let object_type = get_type_of_expression(&original_object, context)?;
+            let trait_prop = get_trait_prop_of_type(&object_type, &property, span, context)?;
             match trait_prop.kind {
                 ExpressionKind::Function { .. } => interpret_expression(
                     ExpressionKind::FunctionCall {
@@ -911,7 +919,8 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
                 .clone();
 
             match bound_value.0 {
-                BindingContext::Bound(value, _) => get_type_of_expression(&value, context)?,
+                BindingContext::Bound(_, _, Some(bound_type)) => bound_type.clone(),
+                BindingContext::Bound(value, _, None) => get_type_of_expression(&value, context)?,
                 BindingContext::UnboundWithType(type_expr) => {
                     interpret_expression(type_expr.clone(), &mut context.clone())?
                 }
@@ -1132,7 +1141,7 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
         }
         ExpressionKind::PropertyAccess { object, property } => {
             let object_type = get_type_of_expression(object, context)?;
-            get_trait_prop_of_type(&object_type, property, span)?
+            get_trait_prop_of_type(&object_type, property, span, context)?
         }
         ExpressionKind::IntrinsicType(intrinsic_type) => match intrinsic_type {
             IntrinsicType::I32
@@ -1516,6 +1525,7 @@ fn get_trait_prop_of_type(
     value_type: &Expression,
     trait_prop: &str,
     span: SourceSpan,
+    context: &Context,
 ) -> Result<Expression, Diagnostic> {
     fn get_struct_field(
         items: &[(Identifier, Expression)],
@@ -1541,7 +1551,30 @@ fn get_trait_prop_of_type(
                 return Ok(field);
             }
 
-            get_trait_prop_of_type(type_expr, trait_prop, span)
+            get_trait_prop_of_type(type_expr, trait_prop, span, context)
+        }
+        ExpressionKind::Identifier(identifier) => {
+            let (binding, _) = context.get_identifier(identifier).ok_or_else(|| {
+                diagnostic(
+                    format!("Unbound identifier: {}", identifier.name),
+                    span,
+                )
+            })?;
+            match binding {
+                BindingContext::Bound(value, _, _) => {
+                    get_trait_prop_of_type(value, trait_prop, span, context)
+                }
+                BindingContext::UnboundWithType(type_expr) => {
+                    get_trait_prop_of_type(type_expr, trait_prop, span, context)
+                }
+                BindingContext::UnboundWithoutType => Err(diagnostic(
+                    format!(
+                        "Cannot determine type of unbound identifier: {}",
+                        identifier.name
+                    ),
+                    span,
+                )),
+            }
         }
         ty => Err(diagnostic(
             format!(
@@ -1894,7 +1927,8 @@ fn get_lvalue_type(
             })?;
 
             match binding_ctx {
-                BindingContext::Bound(value, _) => get_type_of_expression(value, context),
+                BindingContext::Bound(_, _, Some(bound_type)) => Ok(bound_type.clone()),
+                BindingContext::Bound(value, _, None) => get_type_of_expression(value, context),
                 BindingContext::UnboundWithType(type_expr) => Ok(type_expr.clone()),
                 BindingContext::UnboundWithoutType => Err(diagnostic(
                     format!("Cannot determine type of {}", identifier.name),
@@ -1945,7 +1979,7 @@ fn get_lvalue_value(
             })?;
 
             match binding_ctx {
-                BindingContext::Bound(value, _) => {
+                BindingContext::Bound(value, _, _) => {
                     if is_resolved_constant(value) {
                         Ok(Some(value.clone()))
                     } else {
@@ -2010,12 +2044,15 @@ fn apply_lvalue_update(
                 ));
             };
 
-            let expected_type = match binding_ctx {
-                BindingContext::Bound(existing, _) => {
-                    get_type_of_expression(existing, &type_context).ok()
+            let (expected_type, bound_type) = match binding_ctx {
+                BindingContext::Bound(existing, _, bound_type) => (
+                    get_type_of_expression(existing, &type_context).ok(),
+                    bound_type.clone(),
+                ),
+                BindingContext::UnboundWithType(expected_ty) => {
+                    (Some(expected_ty.clone()), Some(expected_ty.clone()))
                 }
-                BindingContext::UnboundWithType(expected_ty) => Some(expected_ty.clone()),
-                BindingContext::UnboundWithoutType => None,
+                BindingContext::UnboundWithoutType => (None, None),
             };
 
             if let (Some(expected_ty), Some(actual_ty)) = (&expected_type, &value_type)
@@ -2033,7 +2070,7 @@ fn apply_lvalue_update(
             let binding_type = expected_type.or(value_type);
 
             if is_resolved_constant(&value) {
-                *binding_ctx = BindingContext::Bound(value, PreserveBehavior::Inline);
+                *binding_ctx = BindingContext::Bound(value, PreserveBehavior::Inline, bound_type);
             } else if let Some(binding_ty) = binding_type {
                 *binding_ctx = BindingContext::UnboundWithType(binding_ty);
             } else {
@@ -2175,6 +2212,7 @@ fn interpret_binding(
         } else {
             PreserveBehavior::PreserveUsage
         },
+        None,
     )?;
     let binding_expr = ExpressionKind::Binding(Box::new(Binding {
         pattern: interpreted_pattern,
@@ -2321,6 +2359,7 @@ fn bind_pattern_from_value(
     context: &mut Context,
     passed_annotations: Vec<BindingAnnotation>,
     preserve_behavior: PreserveBehavior,
+    bound_type: Option<Expression>,
 ) -> Result<(bool, PreserveBehavior), Diagnostic> {
     match pattern {
         BindingPattern::Identifier(identifier, _) => {
@@ -2328,7 +2367,7 @@ fn bind_pattern_from_value(
             context.bindings.last_mut().unwrap().insert(
                 identifier,
                 (
-                    BindingContext::Bound(value.clone(), new_preserve_behavior),
+                    BindingContext::Bound(value.clone(), new_preserve_behavior, bound_type),
                     passed_annotations.clone(),
                 ),
             );
@@ -2373,6 +2412,7 @@ fn bind_pattern_from_value(
                     context,
                     passed_annotations.clone(),
                     preserve_behavior,
+                    None,
                 )?;
                 preserve_behavior = Ord::max(preserve_behavior, new_preserve_behavior);
                 if !matched {
@@ -2434,17 +2474,19 @@ fn bind_pattern_from_value(
                     context,
                     passed_annotations,
                     preserve_behavior,
+                    None,
                 )
             } else {
                 Ok((true, preserve_behavior))
             }
         }
-        BindingPattern::TypeHint(inner, _, _) => bind_pattern_from_value(
+        BindingPattern::TypeHint(inner, type_expr, _) => bind_pattern_from_value(
             *inner,
             value,
             context,
             passed_annotations,
             preserve_behavior,
+            Some(*type_expr),
         ),
         BindingPattern::Annotated {
             pattern,
@@ -2480,6 +2522,7 @@ fn bind_pattern_from_value(
                     .chain(new_annotations)
                     .collect(),
                 new_preserve_behavior,
+                bound_type,
             )
         }
     }
@@ -2720,6 +2763,7 @@ pub fn intrinsic_context() -> Context {
                 }
                 .with_span(dummy_span()),
                 PreserveBehavior::Inline,
+                None,
             ),
             Vec::new(),
         ),
@@ -2798,6 +2842,7 @@ pub fn intrinsic_context() -> Context {
                 }
                 .with_span(dummy_span()),
                 PreserveBehavior::Inline,
+                None,
             ),
             Vec::new(),
         ),
@@ -2868,6 +2913,7 @@ pub fn intrinsic_context() -> Context {
                 }
                 .with_span(dummy_span()),
                 PreserveBehavior::Inline,
+                None,
             ),
             Vec::new(),
         ),
@@ -2879,6 +2925,7 @@ pub fn intrinsic_context() -> Context {
             BindingContext::Bound(
                 ExpressionKind::Literal(ExpressionLiteral::Boolean(true)).with_span(dummy_span()),
                 PreserveBehavior::Inline,
+                None,
             ),
             Vec::new(),
         ),
@@ -2890,6 +2937,7 @@ pub fn intrinsic_context() -> Context {
             BindingContext::Bound(
                 ExpressionKind::Literal(ExpressionLiteral::Boolean(false)).with_span(dummy_span()),
                 PreserveBehavior::Inline,
+                None,
             ),
             Vec::new(),
         ),
@@ -2902,6 +2950,7 @@ pub fn intrinsic_context() -> Context {
                 ExpressionKind::Literal(ExpressionLiteral::Target(TargetLiteral::JSTarget))
                     .with_span(dummy_span()),
                 PreserveBehavior::Inline,
+                None,
             ),
             Vec::new(),
         ),
@@ -2914,6 +2963,7 @@ pub fn intrinsic_context() -> Context {
                 ExpressionKind::Literal(ExpressionLiteral::Target(TargetLiteral::WasmTarget))
                     .with_span(dummy_span()),
                 PreserveBehavior::Inline,
+                None,
             ),
             Vec::new(),
         ),
@@ -2946,6 +2996,7 @@ pub fn intrinsic_context() -> Context {
                 }
                 .with_span(dummy_span()),
                 PreserveBehavior::Inline,
+                None,
             ),
             Vec::new(),
         ),
@@ -2980,6 +3031,7 @@ pub fn intrinsic_context() -> Context {
                 }
                 .with_span(dummy_span()),
                 PreserveBehavior::Inline,
+                None,
             ),
             Vec::new(),
         ),
@@ -3112,7 +3164,7 @@ fn test_basic_addition_interpretation() {
 #[test]
 fn i32_is_constant() {
     let binding = intrinsic_context();
-    let Some((BindingContext::Bound(expr, _), _)) = binding.get_identifier(&Identifier::new("i32"))
+    let Some((BindingContext::Bound(expr, _, _), _)) = binding.get_identifier(&Identifier::new("i32"))
     else {
         panic!("i32 binding not found");
     };
@@ -3262,7 +3314,7 @@ fn enum_intrinsic_exposes_function_type() {
         .clone();
 
     match &enum_binding.0 {
-        BindingContext::Bound(expr, _) => {
+        BindingContext::Bound(expr, _, _) => {
             match get_type_of_expression(expr, &mut context).unwrap().kind {
                 ExpressionKind::FunctionType {
                     parameter,

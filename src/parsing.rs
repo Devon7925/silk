@@ -879,7 +879,7 @@ fn parse_grouping_expression_with_source<'a>(
 
 pub fn parse_operator(file: &str) -> Option<(String, &str)> {
     let operator_chars: Vec<char> = vec![
-        '+', '-', '*', '/', '=', '!', '<', '>', '&', '|', '^', ':', '.',
+        '+', '-', '*', '/', '=', '!', '<', '>', '&', '|', '^', ':', '.', '@',
     ];
 
     let stop_sequences = vec![";", ")", ",", "}", "]"];
@@ -916,7 +916,7 @@ pub fn parse_operator(file: &str) -> Option<(String, &str)> {
 fn operator_precedence(operator: &str) -> u8 {
     match operator {
         "" | "::" | "." => 8,
-        ":" => 7,
+        ":" | "@" => 7,
         "*" | "/" => 6,
         "+" | "-" => 5,
         "==" | "!=" | "<" | ">" | "<=" | ">=" => 4,
@@ -1492,6 +1492,10 @@ fn parse_operation_expression_with_min_precedence<'a>(
             "|>" => ExpressionKind::FunctionCall {
                 function: Box::new(right),
                 argument: Box::new(left),
+            },
+            "@" => ExpressionKind::AttachImplementation {
+                type_expr: Box::new(left),
+                implementation: Box::new(right),
             },
             operator => ExpressionKind::Operation {
                 operator: operator.to_string(),
