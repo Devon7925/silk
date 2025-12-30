@@ -380,7 +380,7 @@ impl IntermediateBuilder {
     fn collect_type_aliases(&mut self, context: &Context) {
         for scope in &context.bindings {
             for (identifier, (binding, _)) in scope {
-                let BindingContext::Bound(value, preserve_behavior) = binding else {
+                let BindingContext::Bound(value, preserve_behavior, _) = binding else {
                     continue;
                 };
 
@@ -401,7 +401,7 @@ impl IntermediateBuilder {
         };
 
         for (identifier, (binding, annotations)) in scope {
-            let BindingContext::Bound(value, preserve_behavior) = binding else {
+            let BindingContext::Bound(value, preserve_behavior, _) = binding else {
                 continue;
             };
 
@@ -455,7 +455,7 @@ impl IntermediateBuilder {
         }
 
         for scope in self.enum_context.bindings.iter().rev() {
-            if let Some((BindingContext::Bound(value, _), _)) = scope.get(identifier)
+            if let Some((BindingContext::Bound(value, _, _), _)) = scope.get(identifier)
                 && matches!(value.kind, ExpressionKind::Function { .. })
             {
                 let index = self.register_function(Some(identifier.clone()), value.clone());
