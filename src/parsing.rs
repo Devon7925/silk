@@ -915,8 +915,8 @@ pub fn parse_operator(file: &str) -> Option<(String, &str)> {
 
 fn operator_precedence(operator: &str) -> u8 {
     match operator {
-        "" | "::" | "." => 8,
-        ":" | "@" => 7,
+        "" | "::" | "." | "@" => 8,
+        ":" => 7,
         "*" | "/" => 6,
         "+" | "-" => 5,
         "==" | "!=" | "<" | ">" | "<=" | ">=" => 4,
