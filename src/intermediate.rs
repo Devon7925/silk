@@ -264,20 +264,10 @@ pub fn expression_to_intermediate(
             let stripped_pattern = builder.strip_binding_pattern(pattern.clone());
             let lowered_expr = expression_to_intermediate(expr, builder);
 
-            if matches!(stripped_pattern, BindingPattern::EnumVariant { .. }) {
-                let temp_identifier = builder.next_match_temp_identifier();
-                let temp_binding = IntermediateKind::Binding(Box::new(IntermediateBinding {
-                    identifier: temp_identifier.clone(),
-                    binding_type: binding_type.clone(),
-                    expr: lowered_expr,
-                }));
-                let condition = builder.lower_binding_pattern_match(
-                    pattern,
-                    IntermediateKind::Identifier(temp_identifier.clone()),
-                    binding_type,
-                );
-                IntermediateKind::Block(vec![temp_binding, condition])
-            } else if matches!(stripped_pattern, BindingPattern::Struct { .. }) {
+            if matches!(
+                stripped_pattern,
+                BindingPattern::EnumVariant { .. } | BindingPattern::Struct { .. }
+            ) {
                 let temp_identifier = builder.next_match_temp_identifier();
                 let temp_binding = IntermediateKind::Binding(Box::new(IntermediateBinding {
                     identifier: temp_identifier.clone(),
