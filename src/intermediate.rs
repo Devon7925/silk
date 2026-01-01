@@ -791,7 +791,9 @@ impl IntermediateBuilder {
             }
             BindingPattern::TypeHint(pattern, _, _) => self.lower_binding_pattern(*pattern),
             BindingPattern::Annotated { pattern, .. } => self.lower_binding_pattern(*pattern),
-            other @ BindingPattern::Literal(..) => panic!("Unexpected pattern {:?} for identifier binding", other),
+            other @ BindingPattern::Literal(..) => {
+                panic!("Unexpected pattern {:?} for identifier binding", other)
+            }
         }
     }
 }

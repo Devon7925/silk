@@ -1142,7 +1142,8 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
             }
 
             if let Some(trait_expr) = trait_requirement_from_type_hint(parameter.as_ref()) {
-                let evaluated_argument = interpret_expression(*argument.clone(), &mut call_context)?;
+                let evaluated_argument =
+                    interpret_expression(*argument.clone(), &mut call_context)?;
                 ensure_trait_requirements(&evaluated_argument, &trait_expr, &call_context, span)?;
             }
             interpret_expression(*return_type.clone(), &mut call_context)?
@@ -1578,10 +1579,7 @@ fn get_trait_prop_of_type(
         }
         ExpressionKind::Identifier(identifier) => {
             let (binding, _) = context.get_identifier(identifier).ok_or_else(|| {
-                diagnostic(
-                    format!("Unbound identifier: {}", identifier.name),
-                    span,
-                )
+                diagnostic(format!("Unbound identifier: {}", identifier.name), span)
             })?;
             match binding {
                 BindingContext::Bound(value, _, _) => {
@@ -1667,7 +1665,10 @@ fn ensure_trait_requirements(
         ExpressionKind::IntrinsicType(IntrinsicType::Type)
     ) && !is_type_expression(&type_value_type.kind)
     {
-        return Err(diagnostic("Trait constraints require a type argument", span));
+        return Err(diagnostic(
+            "Trait constraints require a type argument",
+            span,
+        ));
     }
 
     let evaluated_type = interpret_expression(type_value.clone(), &mut context.clone())?;
@@ -1678,7 +1679,10 @@ fn ensure_trait_requirements(
         let field_value = get_trait_prop_of_type(&evaluated_type, &field_id.name, span, context)
             .map_err(|_| {
                 diagnostic(
-                    format!("Type does not implement trait: missing field {}", field_id.name),
+                    format!(
+                        "Type does not implement trait: missing field {}",
+                        field_id.name
+                    ),
                     span,
                 )
             })?;
@@ -1690,10 +1694,7 @@ fn ensure_trait_requirements(
 
         if !types_equivalent(&actual_field_type.kind, &expected_field_type.kind) {
             return Err(diagnostic(
-                format!(
-                    "Trait field {} has mismatched type",
-                    field_id.name
-                ),
+                format!("Trait field {} has mismatched type", field_id.name),
                 span,
             ));
         }
@@ -1722,9 +1723,7 @@ fn resolve_trait_struct(
         evaluated_trait
     };
     let ExpressionKind::Function {
-        parameter,
-        body,
-        ..
+        parameter, body, ..
     } = evaluated_trait.kind
     else {
         return Err(diagnostic("Trait must be a function", span));
@@ -3377,7 +3376,8 @@ fn test_basic_addition_interpretation() {
 #[test]
 fn i32_is_constant() {
     let binding = intrinsic_context();
-    let Some((BindingContext::Bound(expr, _, _), _)) = binding.get_identifier(&Identifier::new("i32"))
+    let Some((BindingContext::Bound(expr, _, _), _)) =
+        binding.get_identifier(&Identifier::new("i32"))
     else {
         panic!("i32 binding not found");
     };
