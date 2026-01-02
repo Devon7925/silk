@@ -58,18 +58,44 @@ impl LValue {
     }
 
     pub fn pretty_print(&self) -> String {
-        match self {
-            LValue::Identifier(id, _) => id.name.clone(),
-            LValue::PropertyAccess {
-                object, property, ..
-            } => format!("{}.{}", object.pretty_print(), property),
+        let mut properties: Vec<&str> = Vec::new();
+        let mut current = self;
+        let base_name;
+
+        loop {
+            match current {
+                LValue::Identifier(id, _) => {
+                    base_name = id.name.clone();
+                    break;
+                }
+                LValue::PropertyAccess {
+                    object, property, ..
+                } => {
+                    properties.push(property.as_str());
+                    current = object;
+                }
+            }
         }
+
+        let mut result = base_name;
+        for property in properties.into_iter().rev() {
+            result.push('.');
+            result.push_str(property);
+        }
+        result
     }
 
     pub fn get_used_identifiers(&self) -> HashSet<Identifier> {
-        match self {
-            LValue::Identifier(identifier, ..) => HashSet::from([identifier.clone()]),
-            LValue::PropertyAccess { object, .. } => object.get_used_identifiers(),
+        let mut current = self;
+        loop {
+            match current {
+                LValue::Identifier(identifier, ..) => {
+                    return HashSet::from([identifier.clone()]);
+                }
+                LValue::PropertyAccess { object, .. } => {
+                    current = object;
+                }
+            }
         }
     }
 }
@@ -106,65 +132,7 @@ impl BindingPattern {
     }
 
     pub fn pretty_print(&self) -> String {
-        match self {
-            BindingPattern::Identifier(id, _) => id.name.clone(),
-            BindingPattern::Literal(lit, _) => match lit {
-                ExpressionLiteral::Number(n) => n.to_string(),
-                ExpressionLiteral::Boolean(b) => b.to_string(),
-                ExpressionLiteral::Target(t) => match t {
-                    TargetLiteral::JSTarget => "js".to_string(),
-                    TargetLiteral::WasmTarget => "wasm".to_string(),
-                },
-            },
-            BindingPattern::Struct(fields, _) => {
-                let field_strs: Vec<String> = fields
-                    .iter()
-                    .map(|(name, pat)| format!("{} = {}", name.name, pat.pretty_print()))
-                    .collect();
-                format!("{{ {} }}", field_strs.join(", "))
-            }
-            BindingPattern::EnumVariant {
-                enum_type,
-                variant,
-                payload,
-                ..
-            } => {
-                let payload_str = payload
-                    .as_ref()
-                    .map(|p| format!("({})", p.pretty_print()))
-                    .unwrap_or_default();
-                format!(
-                    "{}::{}{}",
-                    enum_type.pretty_print(),
-                    variant.name,
-                    payload_str
-                )
-            }
-            BindingPattern::TypeHint(inner, type_expr, _) => {
-                format!("{}: {}", inner.pretty_print(), type_expr.pretty_print())
-            }
-            BindingPattern::Annotated {
-                annotations,
-                pattern,
-                ..
-            } => {
-                let mut result = String::new();
-                for annotation in annotations {
-                    result.push('(');
-                    match annotation {
-                        BindingAnnotation::Export(expr, _) => {
-                            result.push_str(&format!("export {}", expr.pretty_print()));
-                        }
-                        BindingAnnotation::Mutable(_) => {
-                            result.push_str("mut");
-                        }
-                    }
-                    result.push_str(") ");
-                }
-                result.push_str(&pattern.pretty_print());
-                result
-            }
-        }
+        pretty_print_task(PrettyTask::Pattern(self))
     }
 }
 
@@ -322,210 +290,7 @@ impl Expression {
 
     // approximately decompiles the expression to a pretty-printed string
     pub fn pretty_print(&self) -> String {
-        match &self.kind {
-            ExpressionKind::IntrinsicType(ty) => match ty {
-                IntrinsicType::I32 => "i32".to_string(),
-                IntrinsicType::Boolean => "boolean".to_string(),
-                IntrinsicType::Type => "type".to_string(),
-                IntrinsicType::Target => "target".to_string(),
-            },
-            ExpressionKind::IntrinsicOperation(op) => match op {
-                IntrinsicOperation::Binary(left, right, op) => {
-                    let op_str = match op {
-                        BinaryIntrinsicOperator::I32Add => "+",
-                        BinaryIntrinsicOperator::I32Subtract => "-",
-                        BinaryIntrinsicOperator::I32Multiply => "*",
-                        BinaryIntrinsicOperator::I32Divide => "/",
-                        BinaryIntrinsicOperator::I32Equal => "==",
-                        BinaryIntrinsicOperator::I32NotEqual => "!=",
-                        BinaryIntrinsicOperator::I32LessThan => "<",
-                        BinaryIntrinsicOperator::I32GreaterThan => ">",
-                        BinaryIntrinsicOperator::I32LessThanOrEqual => "<=",
-                        BinaryIntrinsicOperator::I32GreaterThanOrEqual => ">=",
-                        BinaryIntrinsicOperator::BooleanAnd => "&&",
-                        BinaryIntrinsicOperator::BooleanOr => "||",
-                        BinaryIntrinsicOperator::BooleanXor => "^",
-                    };
-                    format!(
-                        "{} {} {}",
-                        left.pretty_print(),
-                        op_str,
-                        right.pretty_print()
-                    )
-                }
-                IntrinsicOperation::Unary(operand, op) => {
-                    let op_str = match op {
-                        UnaryIntrinsicOperator::BooleanNot => "!",
-                        UnaryIntrinsicOperator::EnumFromStruct => "enum",
-                        UnaryIntrinsicOperator::MatchFromStruct => "match",
-                    };
-                    format!("{}({})", op_str, operand.pretty_print())
-                }
-            },
-            ExpressionKind::EnumType(variants) => {
-                let variant_strs: Vec<String> = variants
-                    .iter()
-                    .map(|(name, ty)| format!("{}({})", name.name, ty.pretty_print()))
-                    .collect();
-                format!("enum {{ {} }}", variant_strs.join(", "))
-            }
-            ExpressionKind::Match { value, branches } => {
-                let branch_strs: Vec<String> = branches
-                    .iter()
-                    .map(|(pattern, body)| {
-                        format!("{} => {}", pattern.pretty_print(), body.pretty_print())
-                    })
-                    .collect();
-                format!(
-                    "match {} with ({})",
-                    value.pretty_print(),
-                    branch_strs.join(", ")
-                )
-            }
-            ExpressionKind::EnumValue {
-                enum_type,
-                variant,
-                payload,
-                ..
-            } => {
-                let payload_str = format!("({})", payload.pretty_print());
-                format!(
-                    "{}::{}{}",
-                    enum_type.pretty_print(),
-                    variant.name,
-                    payload_str
-                )
-            }
-            ExpressionKind::EnumConstructor {
-                enum_type,
-                variant,
-                payload_type,
-                ..
-            } => {
-                format!(
-                    "{}::{}({})",
-                    enum_type.pretty_print(),
-                    variant.name,
-                    payload_type.pretty_print()
-                )
-            }
-            ExpressionKind::EnumAccess { enum_expr, variant } => {
-                format!("{}::{}", enum_expr.pretty_print(), variant.name)
-            }
-            ExpressionKind::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => {
-                let else_str = format!(" else {}", else_branch.pretty_print());
-                format!(
-                    "if {} then {}{}",
-                    condition.pretty_print(),
-                    then_branch.pretty_print(),
-                    else_str
-                )
-            }
-            ExpressionKind::AttachImplementation {
-                type_expr,
-                implementation,
-                ..
-            } => {
-                let implementation_str = implementation.pretty_print();
-                let elipses = "...";
-                let max_len = 30;
-                let implementation_str = if implementation_str.len() > max_len {
-                    format!(
-                        "{}{}",
-                        &implementation_str[..max_len - elipses.len()],
-                        elipses
-                    )
-                } else {
-                    implementation_str
-                };
-                format!("{} @ {}", type_expr.pretty_print(), implementation_str)
-            }
-            ExpressionKind::Function {
-                parameter,
-                return_type,
-                body,
-            } => {
-                let return_str = return_type
-                    .as_ref()
-                    .map(|r| format!(" => {}", r.pretty_print()))
-                    .unwrap_or_default();
-                format!(
-                    "({}{}) => {}",
-                    parameter.pretty_print(),
-                    return_str,
-                    body.pretty_print()
-                )
-            }
-            ExpressionKind::FunctionType {
-                parameter,
-                return_type,
-            } => format!(
-                "({}) => {}",
-                parameter.pretty_print(),
-                return_type.pretty_print()
-            ),
-            ExpressionKind::Struct(fields) => {
-                let field_strs: Vec<String> = fields
-                    .iter()
-                    .map(|(name, value)| format!("{} = {}", name.name, value.pretty_print()))
-                    .collect();
-                format!("{{ {} }}", field_strs.join(", "))
-            }
-            ExpressionKind::Literal(lit) => match lit {
-                ExpressionLiteral::Number(n) => n.to_string(),
-                ExpressionLiteral::Boolean(b) => b.to_string(),
-                ExpressionLiteral::Target(t) => match t {
-                    TargetLiteral::JSTarget => "js".to_string(),
-                    TargetLiteral::WasmTarget => "wasm".to_string(),
-                },
-            },
-            ExpressionKind::Identifier(id) => id.name.clone(),
-            ExpressionKind::Operation {
-                operator,
-                left,
-                right,
-            } => format!(
-                "{} {} {}",
-                left.pretty_print(),
-                operator,
-                right.pretty_print()
-            ),
-            ExpressionKind::Assignment { target, expr } => {
-                format!("{} = {}", target.pretty_print(), expr.pretty_print())
-            }
-            ExpressionKind::FunctionCall { function, argument } => {
-                format!("{}({})", function.pretty_print(), argument.pretty_print())
-            }
-            ExpressionKind::PropertyAccess { object, property } => {
-                format!("{}.{}", object.pretty_print(), property)
-            }
-            ExpressionKind::Binding(binding) => {
-                format!(
-                    "{} := {}",
-                    binding.pattern.pretty_print(),
-                    binding.expr.pretty_print()
-                )
-            }
-            ExpressionKind::Block(exprs) => {
-                let expr_strs: Vec<String> = exprs.iter().map(|e| e.pretty_print()).collect();
-                format!("( {} )", expr_strs.join("; "))
-            }
-            ExpressionKind::Diverge {
-                value,
-                divergance_type,
-            } => {
-                let keyword = match divergance_type {
-                    DivergeExpressionType::Return => "return",
-                    DivergeExpressionType::Break => "break",
-                };
-                format!("{} {}", keyword, value.pretty_print())
-            }
-            ExpressionKind::Loop { body } => format!("loop {}", body.pretty_print()),
-        }
+        pretty_print_task(PrettyTask::Expr(self))
     }
 }
 
@@ -541,83 +306,1552 @@ pub enum BindingAnnotation {
     Mutable(SourceSpan),
 }
 
+enum PrettyTask<'a> {
+    Expr(&'a Expression),
+    Pattern(&'a BindingPattern),
+    WriteStatic(&'static str),
+    WriteOwned(String),
+    RenderImplementation {
+        expr: &'a Expression,
+        max_len: usize,
+    },
+}
+
+struct PrettyContext<'a> {
+    tasks: Vec<PrettyTask<'a>>,
+    output: String,
+    truncate_limit: Option<usize>,
+}
+
+fn pretty_print_task(task: PrettyTask<'_>) -> String {
+    fn literal_to_string(lit: &ExpressionLiteral) -> String {
+        match lit {
+            ExpressionLiteral::Number(n) => n.to_string(),
+            ExpressionLiteral::Boolean(b) => b.to_string(),
+            ExpressionLiteral::Target(t) => match t {
+                TargetLiteral::JSTarget => "js".to_string(),
+                TargetLiteral::WasmTarget => "wasm".to_string(),
+            },
+        }
+    }
+
+    let mut contexts: Vec<PrettyContext<'_>> = vec![PrettyContext {
+        tasks: vec![task],
+        output: String::new(),
+        truncate_limit: None,
+    }];
+
+    while let Some(context) = contexts.last_mut() {
+        let Some(task) = context.tasks.pop() else {
+            let finished = contexts.pop().expect("context stack should not be empty");
+            let mut output = finished.output;
+            if let Some(limit) = finished.truncate_limit {
+                let ellipses = "...";
+                if output.len() > limit {
+                    let keep = limit.saturating_sub(ellipses.len());
+                    output.truncate(keep);
+                    output.push_str(ellipses);
+                }
+            }
+            if let Some(parent) = contexts.last_mut() {
+                parent.output.push_str(&output);
+                continue;
+            }
+            return output;
+        };
+
+        match task {
+            PrettyTask::WriteStatic(text) => {
+                context.output.push_str(text);
+            }
+            PrettyTask::WriteOwned(text) => {
+                context.output.push_str(&text);
+            }
+            PrettyTask::RenderImplementation { expr, max_len } => {
+                contexts.push(PrettyContext {
+                    tasks: vec![PrettyTask::Expr(expr)],
+                    output: String::new(),
+                    truncate_limit: Some(max_len),
+                });
+            }
+            PrettyTask::Expr(expr) => match &expr.kind {
+                ExpressionKind::IntrinsicType(ty) => {
+                    let ty_str = match ty {
+                        IntrinsicType::I32 => "i32",
+                        IntrinsicType::Boolean => "boolean",
+                        IntrinsicType::Type => "type",
+                        IntrinsicType::Target => "target",
+                    };
+                    context.tasks.push(PrettyTask::WriteStatic(ty_str));
+                }
+                ExpressionKind::IntrinsicOperation(op) => match op {
+                    IntrinsicOperation::Binary(left, right, op) => {
+                        let op_str = match op {
+                            BinaryIntrinsicOperator::I32Add => "+",
+                            BinaryIntrinsicOperator::I32Subtract => "-",
+                            BinaryIntrinsicOperator::I32Multiply => "*",
+                            BinaryIntrinsicOperator::I32Divide => "/",
+                            BinaryIntrinsicOperator::I32Equal => "==",
+                            BinaryIntrinsicOperator::I32NotEqual => "!=",
+                            BinaryIntrinsicOperator::I32LessThan => "<",
+                            BinaryIntrinsicOperator::I32GreaterThan => ">",
+                            BinaryIntrinsicOperator::I32LessThanOrEqual => "<=",
+                            BinaryIntrinsicOperator::I32GreaterThanOrEqual => ">=",
+                            BinaryIntrinsicOperator::BooleanAnd => "&&",
+                            BinaryIntrinsicOperator::BooleanOr => "||",
+                            BinaryIntrinsicOperator::BooleanXor => "^",
+                        };
+                        context.tasks.push(PrettyTask::Expr(right));
+                        context.tasks.push(PrettyTask::WriteStatic(" "));
+                        context.tasks.push(PrettyTask::WriteStatic(op_str));
+                        context.tasks.push(PrettyTask::WriteStatic(" "));
+                        context.tasks.push(PrettyTask::Expr(left));
+                    }
+                    IntrinsicOperation::Unary(operand, op) => {
+                        let op_str = match op {
+                            UnaryIntrinsicOperator::BooleanNot => "!",
+                            UnaryIntrinsicOperator::EnumFromStruct => "enum",
+                            UnaryIntrinsicOperator::MatchFromStruct => "match",
+                        };
+                        context.tasks.push(PrettyTask::WriteStatic(")"));
+                        context.tasks.push(PrettyTask::Expr(operand));
+                        context.tasks.push(PrettyTask::WriteStatic("("));
+                        context.tasks.push(PrettyTask::WriteStatic(op_str));
+                    }
+                },
+                ExpressionKind::EnumType(variants) => {
+                    context.tasks.push(PrettyTask::WriteStatic(" }"));
+                    let mut first = true;
+                    for (name, ty) in variants.iter().rev() {
+                        if !first {
+                            context.tasks.push(PrettyTask::WriteStatic(", "));
+                        }
+                        first = false;
+                        context.tasks.push(PrettyTask::WriteStatic(")"));
+                        context.tasks.push(PrettyTask::Expr(ty));
+                        context.tasks.push(PrettyTask::WriteStatic("("));
+                        context
+                            .tasks
+                            .push(PrettyTask::WriteOwned(name.name.clone()));
+                    }
+                    context.tasks.push(PrettyTask::WriteStatic("enum { "));
+                }
+                ExpressionKind::Match { value, branches } => {
+                    context.tasks.push(PrettyTask::WriteStatic(")"));
+                    let mut first = true;
+                    for (pattern, body) in branches.iter().rev() {
+                        if !first {
+                            context.tasks.push(PrettyTask::WriteStatic(", "));
+                        }
+                        first = false;
+                        context.tasks.push(PrettyTask::Expr(body));
+                        context.tasks.push(PrettyTask::WriteStatic(" => "));
+                        context.tasks.push(PrettyTask::Pattern(pattern));
+                    }
+                    context.tasks.push(PrettyTask::WriteStatic("("));
+                    context.tasks.push(PrettyTask::WriteStatic(" with "));
+                    context.tasks.push(PrettyTask::Expr(value));
+                    context.tasks.push(PrettyTask::WriteStatic("match "));
+                }
+                ExpressionKind::EnumValue {
+                    enum_type,
+                    variant,
+                    payload,
+                    ..
+                } => {
+                    context.tasks.push(PrettyTask::WriteStatic(")"));
+                    context.tasks.push(PrettyTask::Expr(payload));
+                    context.tasks.push(PrettyTask::WriteStatic("("));
+                    context
+                        .tasks
+                        .push(PrettyTask::WriteOwned(variant.name.clone()));
+                    context.tasks.push(PrettyTask::WriteStatic("::"));
+                    context.tasks.push(PrettyTask::Expr(enum_type));
+                }
+                ExpressionKind::EnumConstructor {
+                    enum_type,
+                    variant,
+                    payload_type,
+                    ..
+                } => {
+                    context.tasks.push(PrettyTask::WriteStatic(")"));
+                    context.tasks.push(PrettyTask::Expr(payload_type));
+                    context.tasks.push(PrettyTask::WriteStatic("("));
+                    context
+                        .tasks
+                        .push(PrettyTask::WriteOwned(variant.name.clone()));
+                    context.tasks.push(PrettyTask::WriteStatic("::"));
+                    context.tasks.push(PrettyTask::Expr(enum_type));
+                }
+                ExpressionKind::EnumAccess { enum_expr, variant } => {
+                    context
+                        .tasks
+                        .push(PrettyTask::WriteOwned(variant.name.clone()));
+                    context.tasks.push(PrettyTask::WriteStatic("::"));
+                    context.tasks.push(PrettyTask::Expr(enum_expr));
+                }
+                ExpressionKind::If {
+                    condition,
+                    then_branch,
+                    else_branch,
+                } => {
+                    context.tasks.push(PrettyTask::Expr(else_branch));
+                    context.tasks.push(PrettyTask::WriteStatic(" else "));
+                    context.tasks.push(PrettyTask::Expr(then_branch));
+                    context.tasks.push(PrettyTask::WriteStatic(" then "));
+                    context.tasks.push(PrettyTask::Expr(condition));
+                    context.tasks.push(PrettyTask::WriteStatic("if "));
+                }
+                ExpressionKind::AttachImplementation {
+                    type_expr,
+                    implementation,
+                } => {
+                    context.tasks.push(PrettyTask::RenderImplementation {
+                        expr: implementation,
+                        max_len: 30,
+                    });
+                    context.tasks.push(PrettyTask::WriteStatic(" @ "));
+                    context.tasks.push(PrettyTask::Expr(type_expr));
+                }
+                ExpressionKind::Function {
+                    parameter,
+                    return_type,
+                    body,
+                } => {
+                    context.tasks.push(PrettyTask::Expr(body));
+                    context.tasks.push(PrettyTask::WriteStatic(") => "));
+                    if let Some(return_type) = return_type.as_ref() {
+                        context.tasks.push(PrettyTask::Expr(return_type));
+                        context.tasks.push(PrettyTask::WriteStatic(" => "));
+                    }
+                    context.tasks.push(PrettyTask::Pattern(parameter));
+                    context.tasks.push(PrettyTask::WriteStatic("("));
+                }
+                ExpressionKind::FunctionType {
+                    parameter,
+                    return_type,
+                } => {
+                    context.tasks.push(PrettyTask::Expr(return_type));
+                    context.tasks.push(PrettyTask::WriteStatic(") => "));
+                    context.tasks.push(PrettyTask::Expr(parameter));
+                    context.tasks.push(PrettyTask::WriteStatic("("));
+                }
+                ExpressionKind::Struct(fields) => {
+                    context.tasks.push(PrettyTask::WriteStatic(" }"));
+                    let mut first = true;
+                    for (name, value) in fields.iter().rev() {
+                        if !first {
+                            context.tasks.push(PrettyTask::WriteStatic(", "));
+                        }
+                        first = false;
+                        context.tasks.push(PrettyTask::Expr(value));
+                        context.tasks.push(PrettyTask::WriteStatic(" = "));
+                        context
+                            .tasks
+                            .push(PrettyTask::WriteOwned(name.name.clone()));
+                    }
+                    context.tasks.push(PrettyTask::WriteStatic("{ "));
+                }
+                ExpressionKind::Literal(lit) => {
+                    context
+                        .tasks
+                        .push(PrettyTask::WriteOwned(literal_to_string(lit)));
+                }
+                ExpressionKind::Identifier(id) => {
+                    context.tasks.push(PrettyTask::WriteOwned(id.name.clone()));
+                }
+                ExpressionKind::Operation {
+                    operator,
+                    left,
+                    right,
+                } => {
+                    context.tasks.push(PrettyTask::Expr(right));
+                    context.tasks.push(PrettyTask::WriteStatic(" "));
+                    context.tasks.push(PrettyTask::WriteOwned(operator.clone()));
+                    context.tasks.push(PrettyTask::WriteStatic(" "));
+                    context.tasks.push(PrettyTask::Expr(left));
+                }
+                ExpressionKind::Assignment { target, expr } => {
+                    context.tasks.push(PrettyTask::Expr(expr));
+                    context.tasks.push(PrettyTask::WriteStatic(" = "));
+                    context
+                        .tasks
+                        .push(PrettyTask::WriteOwned(target.pretty_print()));
+                }
+                ExpressionKind::FunctionCall { function, argument } => {
+                    context.tasks.push(PrettyTask::WriteStatic(")"));
+                    context.tasks.push(PrettyTask::Expr(argument));
+                    context.tasks.push(PrettyTask::WriteStatic("("));
+                    context.tasks.push(PrettyTask::Expr(function));
+                }
+                ExpressionKind::PropertyAccess { object, property } => {
+                    context.tasks.push(PrettyTask::WriteOwned(property.clone()));
+                    context.tasks.push(PrettyTask::WriteStatic("."));
+                    context.tasks.push(PrettyTask::Expr(object));
+                }
+                ExpressionKind::Binding(binding) => {
+                    context.tasks.push(PrettyTask::Expr(&binding.expr));
+                    context.tasks.push(PrettyTask::WriteStatic(" := "));
+                    context.tasks.push(PrettyTask::Pattern(&binding.pattern));
+                }
+                ExpressionKind::Block(exprs) => {
+                    context.tasks.push(PrettyTask::WriteStatic(" )"));
+                    let mut first = true;
+                    for expr in exprs.iter().rev() {
+                        if !first {
+                            context.tasks.push(PrettyTask::WriteStatic("; "));
+                        }
+                        first = false;
+                        context.tasks.push(PrettyTask::Expr(expr));
+                    }
+                    context.tasks.push(PrettyTask::WriteStatic("( "));
+                }
+                ExpressionKind::Diverge {
+                    value,
+                    divergance_type,
+                } => {
+                    let keyword = match divergance_type {
+                        DivergeExpressionType::Return => "return ",
+                        DivergeExpressionType::Break => "break ",
+                    };
+                    context.tasks.push(PrettyTask::Expr(value));
+                    context.tasks.push(PrettyTask::WriteStatic(keyword));
+                }
+                ExpressionKind::Loop { body } => {
+                    context.tasks.push(PrettyTask::Expr(body));
+                    context.tasks.push(PrettyTask::WriteStatic("loop "));
+                }
+            },
+            PrettyTask::Pattern(pattern) => match pattern {
+                BindingPattern::Identifier(id, _) => {
+                    context.tasks.push(PrettyTask::WriteOwned(id.name.clone()));
+                }
+                BindingPattern::Literal(lit, _) => {
+                    context
+                        .tasks
+                        .push(PrettyTask::WriteOwned(literal_to_string(lit)));
+                }
+                BindingPattern::Struct(fields, _) => {
+                    context.tasks.push(PrettyTask::WriteStatic(" }"));
+                    let mut first = true;
+                    for (name, pat) in fields.iter().rev() {
+                        if !first {
+                            context.tasks.push(PrettyTask::WriteStatic(", "));
+                        }
+                        first = false;
+                        context.tasks.push(PrettyTask::Pattern(pat));
+                        context.tasks.push(PrettyTask::WriteStatic(" = "));
+                        context
+                            .tasks
+                            .push(PrettyTask::WriteOwned(name.name.clone()));
+                    }
+                    context.tasks.push(PrettyTask::WriteStatic("{ "));
+                }
+                BindingPattern::EnumVariant {
+                    enum_type,
+                    variant,
+                    payload,
+                    ..
+                } => {
+                    if let Some(payload) = payload.as_ref() {
+                        context.tasks.push(PrettyTask::WriteStatic(")"));
+                        context.tasks.push(PrettyTask::Pattern(payload));
+                        context.tasks.push(PrettyTask::WriteStatic("("));
+                    }
+                    context
+                        .tasks
+                        .push(PrettyTask::WriteOwned(variant.name.clone()));
+                    context.tasks.push(PrettyTask::WriteStatic("::"));
+                    context.tasks.push(PrettyTask::Expr(enum_type));
+                }
+                BindingPattern::TypeHint(inner, type_expr, _) => {
+                    context.tasks.push(PrettyTask::Expr(type_expr));
+                    context.tasks.push(PrettyTask::WriteStatic(": "));
+                    context.tasks.push(PrettyTask::Pattern(inner));
+                }
+                BindingPattern::Annotated {
+                    annotations,
+                    pattern,
+                    ..
+                } => {
+                    context.tasks.push(PrettyTask::Pattern(pattern));
+                    for annotation in annotations.iter().rev() {
+                        context.tasks.push(PrettyTask::WriteStatic(") "));
+                        match annotation {
+                            BindingAnnotation::Export(expr, _) => {
+                                context.tasks.push(PrettyTask::Expr(expr));
+                                context.tasks.push(PrettyTask::WriteStatic("export "));
+                            }
+                            BindingAnnotation::Mutable(_) => {
+                                context.tasks.push(PrettyTask::WriteStatic("mut"));
+                            }
+                        }
+                        context.tasks.push(PrettyTask::WriteStatic("("));
+                    }
+                }
+            },
+        }
+    }
+
+    String::new()
+}
+
+const GROUP_TERMINATORS: [char; 1] = [')'];
+
+fn is_keyword_start(file: &str, keyword: &str) -> bool {
+    if !file.starts_with(keyword) {
+        return false;
+    }
+    let after_keyword = &file[keyword.len()..];
+    !after_keyword
+        .chars()
+        .next()
+        .map(|c| c.is_alphanumeric() || c == '_')
+        .unwrap_or(false)
+}
+
+enum Frame<'a> {
+    Expr(ExprFrame),
+    Block(BlockFrame<'a>),
+    Grouping(GroupingFrame),
+    Struct(StructFrame<'a>),
+    If(IfFrame<'a>),
+    Loop(LoopFrame<'a>),
+    While(WhileFrame<'a>),
+    Return(ReturnFrame<'a>),
+    Break(BreakFrame<'a>),
+}
+
+enum ExprState {
+    ExpectOperand,
+    ExpectOperator,
+}
+
+struct ExprFrame {
+    operand_stack: Vec<Expression>,
+    operator_stack: Vec<String>,
+    min_precedence: u8,
+    state: ExprState,
+}
+
+impl ExprFrame {
+    fn new(min_precedence: u8) -> Self {
+        Self {
+            operand_stack: Vec::new(),
+            operator_stack: Vec::new(),
+            min_precedence,
+            state: ExprState::ExpectOperand,
+        }
+    }
+}
+
+enum BlockState {
+    ExpectExpr,
+    AfterExpr,
+}
+
+struct BlockFrame<'a> {
+    terminators: &'a [char],
+    expressions: Vec<Expression>,
+    ended_with_semicolon: bool,
+    state: BlockState,
+}
+
+impl<'a> BlockFrame<'a> {
+    fn new(terminators: &'a [char]) -> Self {
+        Self {
+            terminators,
+            expressions: Vec::new(),
+            ended_with_semicolon: false,
+            state: BlockState::ExpectExpr,
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum GroupingState {
+    Start,
+    ExpectClose,
+}
+
+struct GroupingFrame {
+    state: GroupingState,
+}
+
+impl GroupingFrame {
+    fn new() -> Self {
+        Self {
+            state: GroupingState::Start,
+        }
+    }
+}
+
+enum StructState {
+    Start,
+    ExpectField,
+    ExpectCommaOrEnd,
+}
+
+struct StructFrame<'a> {
+    start_slice: &'a str,
+    items: Vec<(Identifier, Expression)>,
+    tuple_index: usize,
+    pending_field: Option<Identifier>,
+    state: StructState,
+}
+
+impl<'a> StructFrame<'a> {
+    fn new(start_slice: &'a str) -> Self {
+        Self {
+            start_slice,
+            items: Vec::new(),
+            tuple_index: 0,
+            pending_field: None,
+            state: StructState::Start,
+        }
+    }
+}
+
+enum IfState {
+    Start,
+    Condition,
+    ExpectThen,
+    ThenBranch,
+    MaybeElse,
+    ElseBranch,
+}
+
+struct IfFrame<'a> {
+    start_slice: &'a str,
+    state: IfState,
+    condition: Option<Expression>,
+    then_branch: Option<Expression>,
+}
+
+impl<'a> IfFrame<'a> {
+    fn new(start_slice: &'a str) -> Self {
+        Self {
+            start_slice,
+            state: IfState::Start,
+            condition: None,
+            then_branch: None,
+        }
+    }
+}
+
+enum LoopState {
+    Start,
+    Body,
+}
+
+struct LoopFrame<'a> {
+    start_slice: &'a str,
+    state: LoopState,
+}
+
+impl<'a> LoopFrame<'a> {
+    fn new(start_slice: &'a str) -> Self {
+        Self {
+            start_slice,
+            state: LoopState::Start,
+        }
+    }
+}
+
+enum WhileState {
+    Start,
+    Condition,
+    ExpectDo,
+    Body,
+}
+
+struct WhileFrame<'a> {
+    start_slice: &'a str,
+    state: WhileState,
+    condition: Option<Expression>,
+}
+
+impl<'a> WhileFrame<'a> {
+    fn new(start_slice: &'a str) -> Self {
+        Self {
+            start_slice,
+            state: WhileState::Start,
+            condition: None,
+        }
+    }
+}
+
+enum DivergeState {
+    Start,
+    AwaitValue,
+}
+
+struct ReturnFrame<'a> {
+    start_slice: &'a str,
+    state: DivergeState,
+}
+
+impl<'a> ReturnFrame<'a> {
+    fn new(start_slice: &'a str) -> Self {
+        Self {
+            start_slice,
+            state: DivergeState::Start,
+        }
+    }
+}
+
+struct BreakFrame<'a> {
+    start_slice: &'a str,
+    state: DivergeState,
+}
+
+impl<'a> BreakFrame<'a> {
+    fn new(start_slice: &'a str) -> Self {
+        Self {
+            start_slice,
+            state: DivergeState::Start,
+        }
+    }
+}
+
+struct Parser<'a> {
+    source: &'a str,
+    remaining: &'a str,
+}
+
+impl<'a> Parser<'a> {
+    fn new(source: &'a str, file: &'a str) -> Self {
+        Self {
+            source,
+            remaining: file,
+        }
+    }
+
+    #[cfg(test)]
+    fn parse_expression_with_min_precedence(
+        &mut self,
+        min_precedence: u8,
+    ) -> Result<Expression, Diagnostic> {
+        self.parse_with_frame(Frame::Expr(ExprFrame::new(min_precedence)))
+    }
+
+    fn parse_block_with_terminators(
+        &mut self,
+        terminators: &'a [char],
+    ) -> Result<Expression, Diagnostic> {
+        self.parse_with_frame(Frame::Block(BlockFrame::new(terminators)))
+    }
+
+    fn parse_with_frame(&mut self, frame: Frame<'a>) -> Result<Expression, Diagnostic> {
+        let mut frames = vec![frame];
+        let mut completed_expr: Option<Expression> = None;
+
+        'parse: loop {
+            if frames.is_empty() {
+                return completed_expr.ok_or_else(|| {
+                    diagnostic_at_eof(self.source, "Expected expression to start parsing")
+                });
+            }
+
+            let frame = frames.pop().expect("frame stack should not be empty");
+            match frame {
+                Frame::Expr(mut expr_frame) => {
+                    if let Some(expr) = completed_expr.take() {
+                        expr_frame.operand_stack.push(expr);
+                        expr_frame.state = ExprState::ExpectOperator;
+                    }
+
+                    loop {
+                        match expr_frame.state {
+                            ExprState::ExpectOperand => {
+                                self.remaining = parse_optional_whitespace(self.remaining);
+                                if self.remaining.is_empty() {
+                                    let len = self
+                                        .remaining
+                                        .chars()
+                                        .next()
+                                        .map(|c| c.len_utf8())
+                                        .unwrap_or(1);
+                                    return Err(diagnostic_here(
+                                        self.source,
+                                        self.remaining,
+                                        len,
+                                        "Expected expression",
+                                    ));
+                                }
+
+                                if is_keyword_start(self.remaining, "return") {
+                                    frames.push(Frame::Expr(expr_frame));
+                                    frames.push(Frame::Return(ReturnFrame::new(self.remaining)));
+                                    continue 'parse;
+                                }
+                                if is_keyword_start(self.remaining, "break") {
+                                    frames.push(Frame::Expr(expr_frame));
+                                    frames.push(Frame::Break(BreakFrame::new(self.remaining)));
+                                    continue 'parse;
+                                }
+                                if is_keyword_start(self.remaining, "while") {
+                                    frames.push(Frame::Expr(expr_frame));
+                                    frames.push(Frame::While(WhileFrame::new(self.remaining)));
+                                    continue 'parse;
+                                }
+                                if is_keyword_start(self.remaining, "loop") {
+                                    frames.push(Frame::Expr(expr_frame));
+                                    frames.push(Frame::Loop(LoopFrame::new(self.remaining)));
+                                    continue 'parse;
+                                }
+                                if is_keyword_start(self.remaining, "if") {
+                                    frames.push(Frame::Expr(expr_frame));
+                                    frames.push(Frame::If(IfFrame::new(self.remaining)));
+                                    continue 'parse;
+                                }
+                                if self.remaining.starts_with('(') {
+                                    frames.push(Frame::Expr(expr_frame));
+                                    frames.push(Frame::Grouping(GroupingFrame::new()));
+                                    continue 'parse;
+                                }
+                                if self.remaining.starts_with('{') {
+                                    frames.push(Frame::Expr(expr_frame));
+                                    frames.push(Frame::Struct(StructFrame::new(self.remaining)));
+                                    continue 'parse;
+                                }
+
+                                let start_slice = self.remaining;
+                                if let Some((identifier, rest)) = parse_identifier(self.remaining) {
+                                    let span = consumed_span(self.source, start_slice, rest);
+                                    self.remaining = rest;
+                                    expr_frame.operand_stack.push(
+                                        ExpressionKind::Identifier(identifier).with_span(span),
+                                    );
+                                    expr_frame.state = ExprState::ExpectOperator;
+                                    continue;
+                                }
+                                if let Some((literal, rest)) = parse_literal(self.remaining) {
+                                    let span = consumed_span(self.source, start_slice, rest);
+                                    self.remaining = rest;
+                                    expr_frame
+                                        .operand_stack
+                                        .push(ExpressionKind::Literal(literal).with_span(span));
+                                    expr_frame.state = ExprState::ExpectOperator;
+                                    continue;
+                                }
+
+                                let len = self
+                                    .remaining
+                                    .chars()
+                                    .next()
+                                    .map(|c| c.len_utf8())
+                                    .unwrap_or(1);
+                                return Err(diagnostic_here(
+                                    self.source,
+                                    self.remaining,
+                                    len,
+                                    "Expected expression",
+                                ));
+                            }
+                            ExprState::ExpectOperator => {
+                                self.remaining = parse_optional_whitespace(self.remaining);
+                                if let Some((operator, rest)) = parse_operator(self.remaining) {
+                                    if operator_precedence(&operator) < expr_frame.min_precedence {
+                                        while !expr_frame.operator_stack.is_empty() {
+                                            reduce_stacks(
+                                                &mut expr_frame.operand_stack,
+                                                &mut expr_frame.operator_stack,
+                                                self.source,
+                                            )?;
+                                        }
+                                        let expr =
+                                            expr_frame.operand_stack.pop().ok_or_else(|| {
+                                                diagnostic_at_eof(
+                                                    self.source,
+                                                    "Expected expression after parsing operations",
+                                                )
+                                            })?;
+                                        completed_expr = Some(expr);
+                                        continue 'parse;
+                                    }
+
+                                    while expr_frame.operator_stack.last().is_some_and(|existing| {
+                                        operator_precedence(existing)
+                                            >= operator_precedence(&operator)
+                                    }) {
+                                        reduce_stacks(
+                                            &mut expr_frame.operand_stack,
+                                            &mut expr_frame.operator_stack,
+                                            self.source,
+                                        )?;
+                                    }
+
+                                    expr_frame.operator_stack.push(operator);
+                                    self.remaining = rest;
+                                    expr_frame.state = ExprState::ExpectOperand;
+                                    continue;
+                                }
+
+                                while !expr_frame.operator_stack.is_empty() {
+                                    reduce_stacks(
+                                        &mut expr_frame.operand_stack,
+                                        &mut expr_frame.operator_stack,
+                                        self.source,
+                                    )?;
+                                }
+                                let expr = expr_frame.operand_stack.pop().ok_or_else(|| {
+                                    diagnostic_at_eof(
+                                        self.source,
+                                        "Expected expression after parsing operations",
+                                    )
+                                })?;
+                                completed_expr = Some(expr);
+                                continue 'parse;
+                            }
+                        }
+                    }
+                }
+                Frame::Block(mut block_frame) => {
+                    if let Some(expr) = completed_expr.take() {
+                        block_frame.expressions.push(expr);
+                        block_frame.ended_with_semicolon = false;
+                        block_frame.state = BlockState::AfterExpr;
+                    }
+
+                    loop {
+                        match block_frame.state {
+                            BlockState::ExpectExpr => {
+                                self.remaining = parse_optional_whitespace(self.remaining);
+                                if self.remaining.is_empty()
+                                    || self
+                                        .remaining
+                                        .chars()
+                                        .next()
+                                        .is_some_and(|ch| block_frame.terminators.contains(&ch))
+                                {
+                                    if block_frame.expressions.is_empty() {
+                                        let len = self
+                                            .remaining
+                                            .chars()
+                                            .next()
+                                            .map(|c| c.len_utf8())
+                                            .unwrap_or(0);
+                                        return Err(diagnostic_here(
+                                            self.source,
+                                            self.remaining,
+                                            len,
+                                            "Cannot parse empty block",
+                                        ));
+                                    }
+                                    let expr = finish_block(block_frame);
+                                    completed_expr = Some(expr);
+                                    continue 'parse;
+                                }
+
+                                frames.push(Frame::Block(block_frame));
+                                frames.push(Frame::Expr(ExprFrame::new(0)));
+                                continue 'parse;
+                            }
+                            BlockState::AfterExpr => {
+                                self.remaining = parse_optional_whitespace(self.remaining);
+                                if self.remaining.is_empty()
+                                    || self
+                                        .remaining
+                                        .chars()
+                                        .next()
+                                        .is_some_and(|ch| block_frame.terminators.contains(&ch))
+                                {
+                                    let expr = finish_block(block_frame);
+                                    completed_expr = Some(expr);
+                                    continue 'parse;
+                                }
+
+                                let rest = parse_semicolon(self.source, self.remaining)?;
+                                self.remaining = parse_optional_whitespace(rest);
+                                block_frame.ended_with_semicolon = true;
+                                block_frame.state = BlockState::ExpectExpr;
+                                continue;
+                            }
+                        }
+                    }
+                }
+                Frame::Grouping(mut grouping_frame) => {
+                    if let Some(expr) = completed_expr.take() {
+                        if grouping_frame.state != GroupingState::ExpectClose {
+                            return Err(diagnostic_at_eof(
+                                self.source,
+                                "Expected ) to close grouping expression",
+                            ));
+                        }
+                        let Some(after) = self.remaining.strip_prefix(')') else {
+                            return Err(diagnostic_here(
+                                self.source,
+                                self.remaining,
+                                1,
+                                "Expected ) to close grouping expression",
+                            ));
+                        };
+                        self.remaining = after;
+                        completed_expr = Some(expr);
+                        continue 'parse;
+                    }
+
+                    match grouping_frame.state {
+                        GroupingState::Start => {
+                            let Some(after) = self.remaining.strip_prefix('(') else {
+                                return Err(diagnostic_here(
+                                    self.source,
+                                    self.remaining,
+                                    1,
+                                    "Expected ( to start grouping expression",
+                                ));
+                            };
+                            self.remaining = after;
+                            grouping_frame.state = GroupingState::ExpectClose;
+                            frames.push(Frame::Grouping(grouping_frame));
+                            frames.push(Frame::Block(BlockFrame::new(&GROUP_TERMINATORS)));
+                            continue 'parse;
+                        }
+                        GroupingState::ExpectClose => {
+                            return Err(diagnostic_here(
+                                self.source,
+                                self.remaining,
+                                1,
+                                "Expected ) to close grouping expression",
+                            ));
+                        }
+                    }
+                }
+                Frame::Struct(mut struct_frame) => {
+                    if let Some(expr) = completed_expr.take() {
+                        let Some(identifier) = struct_frame.pending_field.take() else {
+                            return Err(diagnostic_here(
+                                self.source,
+                                self.remaining,
+                                1,
+                                "Expected struct field value",
+                            ));
+                        };
+                        struct_frame.items.push((identifier, expr));
+                        struct_frame.state = StructState::ExpectCommaOrEnd;
+                    }
+
+                    loop {
+                        match struct_frame.state {
+                            StructState::Start => {
+                                let Some(after) = self.remaining.strip_prefix('{') else {
+                                    return Err(diagnostic_here(
+                                        self.source,
+                                        self.remaining,
+                                        1,
+                                        "Expected { to start struct literal",
+                                    ));
+                                };
+                                self.remaining = after;
+                                struct_frame.state = StructState::ExpectField;
+                            }
+                            StructState::ExpectField => {
+                                self.remaining = parse_optional_whitespace(self.remaining);
+                                if let Some(rest) = self.remaining.strip_prefix('}') {
+                                    self.remaining = rest;
+                                    let span =
+                                        consumed_span(self.source, struct_frame.start_slice, rest);
+                                    completed_expr = Some(
+                                        ExpressionKind::Struct(struct_frame.items).with_span(span),
+                                    );
+                                    continue 'parse;
+                                }
+
+                                let mut has_named_field = false;
+                                if let Some((identifier, after_identifier)) =
+                                    parse_identifier(self.remaining)
+                                {
+                                    let after_ws = parse_optional_whitespace(after_identifier);
+                                    if let Some((operator, after_equals)) = parse_operator(after_ws)
+                                    {
+                                        if operator == "=" {
+                                            self.remaining =
+                                                parse_optional_whitespace(after_equals);
+                                            struct_frame.pending_field = Some(identifier);
+                                            has_named_field = true;
+                                        }
+                                    }
+                                }
+
+                                if !has_named_field {
+                                    let tuple_identifier =
+                                        Identifier::new(struct_frame.tuple_index.to_string());
+                                    struct_frame.tuple_index += 1;
+                                    struct_frame.pending_field = Some(tuple_identifier);
+                                }
+
+                                frames.push(Frame::Struct(struct_frame));
+                                frames.push(Frame::Expr(ExprFrame::new(0)));
+                                continue 'parse;
+                            }
+                            StructState::ExpectCommaOrEnd => {
+                                self.remaining = parse_optional_whitespace(self.remaining);
+                                if let Some(rest) = self.remaining.strip_prefix('}') {
+                                    self.remaining = rest;
+                                    let span =
+                                        consumed_span(self.source, struct_frame.start_slice, rest);
+                                    completed_expr = Some(
+                                        ExpressionKind::Struct(struct_frame.items).with_span(span),
+                                    );
+                                    continue 'parse;
+                                }
+
+                                let Some(rest) = self.remaining.strip_prefix(',') else {
+                                    return Err(diagnostic_here(
+                                        self.source,
+                                        self.remaining,
+                                        1,
+                                        "Expected , or } in struct literal",
+                                    ));
+                                };
+                                self.remaining = rest;
+                                struct_frame.state = StructState::ExpectField;
+                                continue;
+                            }
+                        }
+                    }
+                }
+                Frame::If(mut if_frame) => {
+                    if let Some(expr) = completed_expr.take() {
+                        match if_frame.state {
+                            IfState::Condition => {
+                                if_frame.condition = Some(expr);
+                                if_frame.state = IfState::ExpectThen;
+                            }
+                            IfState::ThenBranch => {
+                                if_frame.then_branch = Some(expr);
+                                if_frame.state = IfState::MaybeElse;
+                            }
+                            IfState::ElseBranch => {
+                                let condition = if_frame.condition.take().ok_or_else(|| {
+                                    diagnostic_at_eof(
+                                        self.source,
+                                        "Expected if condition while parsing",
+                                    )
+                                })?;
+                                let then_branch = if_frame.then_branch.take().ok_or_else(|| {
+                                    diagnostic_at_eof(
+                                        self.source,
+                                        "Expected then branch while parsing",
+                                    )
+                                })?;
+                                let span = consumed_span(
+                                    self.source,
+                                    if_frame.start_slice,
+                                    self.remaining,
+                                );
+                                completed_expr = Some(
+                                    ExpressionKind::If {
+                                        condition: Box::new(condition),
+                                        then_branch: Box::new(then_branch),
+                                        else_branch: Box::new(expr),
+                                    }
+                                    .with_span(span),
+                                );
+                                continue 'parse;
+                            }
+                            _ => {
+                                return Err(diagnostic_at_eof(
+                                    self.source,
+                                    "Unexpected expression in if parsing",
+                                ));
+                            }
+                        }
+                    }
+
+                    match if_frame.state {
+                        IfState::Start => {
+                            if !is_keyword_start(self.remaining, "if") {
+                                return Err(diagnostic_here(
+                                    self.source,
+                                    self.remaining,
+                                    2,
+                                    "Expected if",
+                                ));
+                            }
+                            let after_keyword = &self.remaining[2..];
+                            self.remaining = parse_optional_whitespace(after_keyword);
+                            if_frame.state = IfState::Condition;
+                            frames.push(Frame::If(if_frame));
+                            frames.push(Frame::Expr(ExprFrame::new(0)));
+                            continue 'parse;
+                        }
+                        IfState::ExpectThen => {
+                            self.remaining = parse_optional_whitespace(self.remaining);
+                            let Some(after_then) = self.remaining.strip_prefix("then") else {
+                                return Err(diagnostic_here(
+                                    self.source,
+                                    self.remaining,
+                                    4,
+                                    "Expected then after if condition",
+                                ));
+                            };
+                            self.remaining = parse_optional_whitespace(after_then);
+                            if_frame.state = IfState::ThenBranch;
+                            frames.push(Frame::If(if_frame));
+                            frames.push(Frame::Expr(ExprFrame::new(0)));
+                            continue 'parse;
+                        }
+                        IfState::MaybeElse => {
+                            self.remaining = parse_optional_whitespace(self.remaining);
+                            if let Some(rest) = self.remaining.strip_prefix("else") {
+                                self.remaining = parse_optional_whitespace(rest);
+                                if_frame.state = IfState::ElseBranch;
+                                frames.push(Frame::If(if_frame));
+                                frames.push(Frame::Expr(ExprFrame::new(0)));
+                                continue 'parse;
+                            }
+
+                            let condition = if_frame.condition.take().ok_or_else(|| {
+                                diagnostic_at_eof(
+                                    self.source,
+                                    "Expected if condition while parsing",
+                                )
+                            })?;
+                            let then_branch = if_frame.then_branch.take().ok_or_else(|| {
+                                diagnostic_at_eof(self.source, "Expected then branch while parsing")
+                            })?;
+                            let span =
+                                consumed_span(self.source, if_frame.start_slice, self.remaining);
+                            let empty_else = ExpressionKind::Struct(vec![])
+                                .with_span(SourceSpan::new(span.end(), 0));
+                            completed_expr = Some(
+                                ExpressionKind::If {
+                                    condition: Box::new(condition),
+                                    then_branch: Box::new(then_branch),
+                                    else_branch: Box::new(empty_else),
+                                }
+                                .with_span(span),
+                            );
+                            continue 'parse;
+                        }
+                        _ => {
+                            return Err(diagnostic_at_eof(
+                                self.source,
+                                "Unexpected if parsing state",
+                            ));
+                        }
+                    }
+                }
+                Frame::Loop(mut loop_frame) => {
+                    if let Some(expr) = completed_expr.take() {
+                        let span =
+                            consumed_span(self.source, loop_frame.start_slice, self.remaining);
+                        completed_expr = Some(
+                            ExpressionKind::Loop {
+                                body: Box::new(expr),
+                            }
+                            .with_span(span),
+                        );
+                        continue 'parse;
+                    }
+
+                    match loop_frame.state {
+                        LoopState::Start => {
+                            if !is_keyword_start(self.remaining, "loop") {
+                                return Err(diagnostic_here(
+                                    self.source,
+                                    self.remaining,
+                                    4,
+                                    "Expected loop",
+                                ));
+                            }
+                            let after_keyword = &self.remaining[4..];
+                            self.remaining = parse_optional_whitespace(after_keyword);
+                            if !self.remaining.starts_with('(') {
+                                return Err(diagnostic_here(
+                                    self.source,
+                                    self.remaining,
+                                    1,
+                                    "Expected loop body expression",
+                                ));
+                            }
+                            loop_frame.state = LoopState::Body;
+                            frames.push(Frame::Loop(loop_frame));
+                            frames.push(Frame::Grouping(GroupingFrame::new()));
+                            continue 'parse;
+                        }
+                        LoopState::Body => {
+                            return Err(diagnostic_at_eof(
+                                self.source,
+                                "Expected loop body expression",
+                            ));
+                        }
+                    }
+                }
+                Frame::While(mut while_frame) => {
+                    if let Some(expr) = completed_expr.take() {
+                        match while_frame.state {
+                            WhileState::Condition => {
+                                while_frame.condition = Some(expr);
+                                while_frame.state = WhileState::ExpectDo;
+                            }
+                            WhileState::Body => {
+                                let condition = while_frame.condition.take().ok_or_else(|| {
+                                    diagnostic_at_eof(
+                                        self.source,
+                                        "Expected while condition while parsing",
+                                    )
+                                })?;
+                                let span = consumed_span(
+                                    self.source,
+                                    while_frame.start_slice,
+                                    self.remaining,
+                                );
+                                let condition_span = condition.span();
+                                let break_expr = ExpressionKind::Diverge {
+                                    value: Box::new(Expression::new(
+                                        ExpressionKind::Struct(vec![]),
+                                        span,
+                                    )),
+                                    divergance_type: DivergeExpressionType::Break,
+                                }
+                                .with_span(condition_span);
+                                let body_if = ExpressionKind::If {
+                                    condition: Box::new(condition),
+                                    then_branch: Box::new(expr),
+                                    else_branch: Box::new(break_expr),
+                                }
+                                .with_span(condition_span);
+                                completed_expr = Some(
+                                    ExpressionKind::Loop {
+                                        body: Box::new(body_if),
+                                    }
+                                    .with_span(span),
+                                );
+                                continue 'parse;
+                            }
+                            _ => {
+                                return Err(diagnostic_at_eof(
+                                    self.source,
+                                    "Unexpected expression in while parsing",
+                                ));
+                            }
+                        }
+                    }
+
+                    match while_frame.state {
+                        WhileState::Start => {
+                            if !is_keyword_start(self.remaining, "while") {
+                                return Err(diagnostic_here(
+                                    self.source,
+                                    self.remaining,
+                                    5,
+                                    "Expected while",
+                                ));
+                            }
+                            let after_keyword = &self.remaining[5..];
+                            self.remaining = parse_optional_whitespace(after_keyword);
+                            while_frame.state = WhileState::Condition;
+                            frames.push(Frame::While(while_frame));
+                            frames.push(Frame::Expr(ExprFrame::new(0)));
+                            continue 'parse;
+                        }
+                        WhileState::ExpectDo => {
+                            self.remaining = parse_optional_whitespace(self.remaining);
+                            let Some(after_do) = self.remaining.strip_prefix("do") else {
+                                return Err(diagnostic_here(
+                                    self.source,
+                                    self.remaining,
+                                    2,
+                                    "Expected do after while condition",
+                                ));
+                            };
+                            self.remaining = parse_optional_whitespace(after_do);
+                            if !self.remaining.starts_with('(') {
+                                return Err(diagnostic_here(
+                                    self.source,
+                                    self.remaining,
+                                    1,
+                                    "Expected while body expression",
+                                ));
+                            }
+                            while_frame.state = WhileState::Body;
+                            frames.push(Frame::While(while_frame));
+                            frames.push(Frame::Grouping(GroupingFrame::new()));
+                            continue 'parse;
+                        }
+                        WhileState::Body => {
+                            return Err(diagnostic_at_eof(
+                                self.source,
+                                "Expected while body expression",
+                            ));
+                        }
+                        WhileState::Condition => {
+                            return Err(diagnostic_at_eof(
+                                self.source,
+                                "Expected while condition expression",
+                            ));
+                        }
+                    }
+                }
+                Frame::Return(mut return_frame) => {
+                    if let Some(expr) = completed_expr.take() {
+                        let span =
+                            consumed_span(self.source, return_frame.start_slice, self.remaining);
+                        completed_expr = Some(
+                            ExpressionKind::Diverge {
+                                value: Box::new(expr),
+                                divergance_type: DivergeExpressionType::Return,
+                            }
+                            .with_span(span),
+                        );
+                        continue 'parse;
+                    }
+
+                    match return_frame.state {
+                        DivergeState::Start => {
+                            if !is_keyword_start(self.remaining, "return") {
+                                return Err(diagnostic_here(
+                                    self.source,
+                                    self.remaining,
+                                    6,
+                                    "Expected return",
+                                ));
+                            }
+                            let after_keyword = &self.remaining[6..];
+                            self.remaining = parse_optional_whitespace(after_keyword);
+                            let value_start = self.remaining.chars().next();
+                            if self.remaining.is_empty()
+                                || matches!(
+                                    value_start,
+                                    Some(';') | Some(')') | Some(']') | Some('}') | Some(',')
+                                )
+                            {
+                                let span = consumed_span(
+                                    self.source,
+                                    return_frame.start_slice,
+                                    self.remaining,
+                                );
+                                let empty = Expression::new(ExpressionKind::Struct(vec![]), span);
+                                completed_expr = Some(
+                                    ExpressionKind::Diverge {
+                                        value: Box::new(empty),
+                                        divergance_type: DivergeExpressionType::Return,
+                                    }
+                                    .with_span(span),
+                                );
+                                continue 'parse;
+                            }
+                            return_frame.state = DivergeState::AwaitValue;
+                            frames.push(Frame::Return(return_frame));
+                            frames.push(Frame::Expr(ExprFrame::new(0)));
+                            continue 'parse;
+                        }
+                        DivergeState::AwaitValue => {
+                            return Err(diagnostic_at_eof(
+                                self.source,
+                                "Expected return expression",
+                            ));
+                        }
+                    }
+                }
+                Frame::Break(mut break_frame) => {
+                    if let Some(expr) = completed_expr.take() {
+                        let span =
+                            consumed_span(self.source, break_frame.start_slice, self.remaining);
+                        completed_expr = Some(
+                            ExpressionKind::Diverge {
+                                value: Box::new(expr),
+                                divergance_type: DivergeExpressionType::Break,
+                            }
+                            .with_span(span),
+                        );
+                        continue 'parse;
+                    }
+
+                    match break_frame.state {
+                        DivergeState::Start => {
+                            if !is_keyword_start(self.remaining, "break") {
+                                return Err(diagnostic_here(
+                                    self.source,
+                                    self.remaining,
+                                    5,
+                                    "Expected break",
+                                ));
+                            }
+                            let after_keyword = &self.remaining[5..];
+                            self.remaining = parse_optional_whitespace(after_keyword);
+                            let value_start = self.remaining.chars().next();
+                            if self.remaining.is_empty()
+                                || matches!(
+                                    value_start,
+                                    Some(';') | Some(')') | Some(']') | Some('}') | Some(',')
+                                )
+                            {
+                                let span = consumed_span(
+                                    self.source,
+                                    break_frame.start_slice,
+                                    self.remaining,
+                                );
+                                let empty = Expression::new(ExpressionKind::Struct(vec![]), span);
+                                completed_expr = Some(
+                                    ExpressionKind::Diverge {
+                                        value: Box::new(empty),
+                                        divergance_type: DivergeExpressionType::Break,
+                                    }
+                                    .with_span(span),
+                                );
+                                continue 'parse;
+                            }
+                            break_frame.state = DivergeState::AwaitValue;
+                            frames.push(Frame::Break(break_frame));
+                            frames.push(Frame::Expr(ExprFrame::new(0)));
+                            continue 'parse;
+                        }
+                        DivergeState::AwaitValue => {
+                            return Err(diagnostic_at_eof(
+                                self.source,
+                                "Expected break expression",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn finish_block(block_frame: BlockFrame<'_>) -> Expression {
+    let mut expressions = block_frame.expressions;
+    if block_frame.ended_with_semicolon {
+        if let Some(last_span) = expressions.last().map(|expr| expr.span()) {
+            expressions.push(
+                ExpressionKind::Struct(vec![]).with_span(SourceSpan::new(last_span.end(), 0)),
+            );
+        }
+    }
+
+    if expressions.len() == 1 {
+        expressions.into_iter().next().unwrap()
+    } else {
+        let span = expressions
+            .iter()
+            .skip(1)
+            .fold(expressions[0].span(), |acc, expr| acc.merge(&expr.span()));
+        Expression::new(ExpressionKind::Block(expressions), span)
+    }
+}
+
+fn reduce_stacks(
+    operand_stack: &mut Vec<Expression>,
+    operator_stack: &mut Vec<String>,
+    source: &str,
+) -> Result<(), Diagnostic> {
+    let operator = operator_stack
+        .pop()
+        .ok_or_else(|| diagnostic_at_eof(source, "Expected operator when reducing operation"))?;
+    let right = operand_stack.pop().ok_or_else(|| {
+        diagnostic_at_eof(source, "Expected right operand when reducing operation")
+    })?;
+    let left = operand_stack.pop().ok_or_else(|| {
+        diagnostic_at_eof(source, "Expected left operand when reducing operation")
+    })?;
+    let span = left.span().merge(&right.span());
+    let processed_operation = match operator.as_str() {
+        "=" => {
+            let target = expression_to_lvalue(left)?;
+            ExpressionKind::Assignment {
+                target,
+                expr: Box::new(right),
+            }
+        }
+        ":=" => {
+            let pattern = pattern_expression_to_binding_pattern(left)?;
+            ExpressionKind::Binding(Box::new(Binding {
+                pattern,
+                expr: right,
+            }))
+        }
+        "=>" => {
+            let pattern = pattern_expression_to_binding_pattern(left)?;
+            ExpressionKind::Function {
+                parameter: pattern,
+                return_type: None,
+                body: Box::new(right),
+            }
+        }
+        "->" => ExpressionKind::FunctionType {
+            parameter: Box::new(left),
+            return_type: Box::new(right),
+        },
+        "::" => {
+            let ExpressionKind::Identifier(variant) = right.kind else {
+                return Err(diagnostic_here(
+                    source,
+                    "",
+                    1,
+                    "Expected identifier as enum variant in enum access",
+                ));
+            };
+            ExpressionKind::EnumAccess {
+                enum_expr: Box::new(left),
+                variant,
+            }
+        }
+        "." => match right.kind {
+            ExpressionKind::Identifier(property) => ExpressionKind::PropertyAccess {
+                object: Box::new(left),
+                property: property.name,
+            },
+            ExpressionKind::Literal(ExpressionLiteral::Number(num)) => {
+                ExpressionKind::PropertyAccess {
+                    object: Box::new(left),
+                    property: num.to_string(),
+                }
+            }
+            _ => {
+                return Err(diagnostic_here(
+                    source,
+                    "",
+                    1,
+                    "Expected identifier as property name in property access",
+                ));
+            }
+        },
+        "" => ExpressionKind::FunctionCall {
+            function: Box::new(left),
+            argument: Box::new(right),
+        },
+        "|>" => ExpressionKind::FunctionCall {
+            function: Box::new(right),
+            argument: Box::new(left),
+        },
+        "@" => ExpressionKind::AttachImplementation {
+            type_expr: Box::new(left),
+            implementation: Box::new(right),
+        },
+        operator => ExpressionKind::Operation {
+            operator: operator.to_string(),
+            left: Box::new(left),
+            right: Box::new(right),
+        },
+    };
+    operand_stack.push(Expression::new(processed_operation, span));
+    Ok(())
+}
+
+#[cfg(test)]
 fn parse_if_expression<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Option<Result<(Expression, &'a str), Diagnostic>> {
-    if !file.starts_with("if") {
-        return None;
-    }
-
-    let after_keyword = &file[2..];
-    if after_keyword
-        .chars()
-        .next()
-        .filter(|c| c.is_alphanumeric() || *c == '_')
-        .is_some()
-    {
+    if !is_keyword_start(file, "if") {
         return None;
     }
 
     Some(parse_if_expression_with_source(source, file))
 }
 
+#[cfg(test)]
 fn parse_if_expression_with_source<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Result<(Expression, &'a str), Diagnostic> {
-    let start_slice = file;
-    let mut remaining = file
-        .strip_prefix("if")
-        .ok_or_else(|| diagnostic_here(source, file, 2, "Expected if"))?;
-
-    remaining = parse_optional_whitespace(remaining);
-    let (condition, mut after_condition) =
-        parse_assignment_expression_with_source(source, remaining)?;
-    after_condition = parse_optional_whitespace(after_condition);
-    let remaining = after_condition.strip_prefix("then").ok_or_else(|| {
-        diagnostic_here(
-            source,
-            after_condition,
-            4,
-            "Expected then after if condition",
-        )
-    })?;
-
-    let remaining = parse_optional_whitespace(remaining);
-
-    let (then_branch, remaining) = parse_operation_expression_with_source(source, remaining)?;
-
-    let remaining = parse_optional_whitespace(remaining);
-
-    let else_branch = if let Some(rest) = remaining.strip_prefix("else") {
-        let rest = parse_optional_whitespace(rest);
-        if let Some(if_parse) = parse_if_expression(source, rest) {
-            let (else_expr, remaining) = if_parse?;
-            Some((Some(else_expr), remaining))
-        } else {
-            let (else_expr, remaining) = parse_operation_expression_with_source(source, rest)?;
-            Some((Some(else_expr), remaining))
-        }
-    } else {
-        None
-    };
-
-    let (else_branch, remaining) = else_branch.unwrap_or((None, remaining));
-
-    let span = consumed_span(source, start_slice, remaining);
-    Ok((
-        ExpressionKind::If {
-            condition: Box::new(condition),
-            then_branch: Box::new(then_branch),
-            else_branch: Box::new(else_branch.unwrap_or(Expression {
-                kind: ExpressionKind::Struct(vec![]),
-                span: SourceSpan::new(span.end(), 0),
-            })),
-        }
-        .with_span(span),
-        remaining,
-    ))
+    let mut parser = Parser::new(source, file);
+    let expr = parser.parse_with_frame(Frame::If(IfFrame::new(file)))?;
+    Ok((expr, parser.remaining))
 }
 
 fn remainder_span(source: &str, remaining: &str, len: usize) -> SourceSpan {
@@ -756,19 +1990,28 @@ fn test_enum_pattern_parse2() {
 }
 
 fn expression_to_lvalue(expression: Expression) -> Result<LValue, Diagnostic> {
-    let span = expression.span;
-    match expression.kind {
-        ExpressionKind::Identifier(identifier) => Ok(LValue::Identifier(identifier, span)),
-        ExpressionKind::PropertyAccess { object, property } => {
-            let object_lvalue = expression_to_lvalue(*object)?;
-            Ok(LValue::PropertyAccess {
-                object: Box::new(object_lvalue),
-                property,
-                span,
-            })
-        }
-        _ => {
-            Err(Diagnostic::new("Invalid binding pattern expression").with_span(expression.span()))
+    let mut properties: Vec<(String, SourceSpan)> = Vec::new();
+    let mut current = expression;
+
+    loop {
+        let Expression { kind, span } = current;
+        match kind {
+            ExpressionKind::Identifier(identifier) => {
+                let mut lvalue = LValue::Identifier(identifier, span);
+                for (property, access_span) in properties.into_iter().rev() {
+                    lvalue = LValue::PropertyAccess {
+                        object: Box::new(lvalue),
+                        property,
+                        span: access_span,
+                    };
+                }
+                return Ok(lvalue);
+            }
+            ExpressionKind::PropertyAccess { object, property } => {
+                properties.push((property, span));
+                current = *object;
+            }
+            _ => return Err(Diagnostic::new("Invalid binding pattern expression").with_span(span)),
         }
     }
 }
@@ -776,105 +2019,222 @@ fn expression_to_lvalue(expression: Expression) -> Result<LValue, Diagnostic> {
 fn pattern_expression_to_binding_pattern(
     pattern_expression: Expression,
 ) -> Result<BindingPattern, Diagnostic> {
-    let span = pattern_expression.span;
-    match pattern_expression.kind {
-        ExpressionKind::Literal(expression_literal) => {
-            Ok(BindingPattern::Literal(expression_literal, span))
-        }
-        ExpressionKind::Identifier(identifier) => Ok(BindingPattern::Identifier(identifier, span)),
-        ExpressionKind::Struct(items) => {
-            let mut field_patterns = Vec::new();
-            for (identifier, expr) in items {
-                let field_pattern = pattern_expression_to_binding_pattern(expr)?;
-                field_patterns.push((identifier, field_pattern));
-            }
-            Ok(BindingPattern::Struct(field_patterns, span))
-        }
-        ExpressionKind::Operation {
-            operator,
-            left,
-            right,
-        } if operator == ":" => {
-            let left_pattern = pattern_expression_to_binding_pattern(*left)?;
-            Ok(BindingPattern::TypeHint(
-                Box::new(left_pattern),
-                right,
-                span,
-            ))
-        }
-        ExpressionKind::FunctionCall { function, argument } => match *function {
-            Expression {
-                kind:
+    enum PatternBuildFrame {
+        Expr(Expression),
+        StructFinish {
+            span: SourceSpan,
+            field_ids: Vec<Identifier>,
+            field_count: usize,
+        },
+        TypeHintFinish {
+            span: SourceSpan,
+            type_expr: Expression,
+        },
+        EnumVariantFinish {
+            span: SourceSpan,
+            enum_type: Expression,
+            variant: Identifier,
+            has_payload: bool,
+        },
+        AnnotatedFinish {
+            span: SourceSpan,
+            annotations: Vec<BindingAnnotation>,
+        },
+    }
+
+    let root_span = pattern_expression.span();
+    let mut stack = vec![PatternBuildFrame::Expr(pattern_expression)];
+    let mut pattern_stack: Vec<BindingPattern> = Vec::new();
+
+    while let Some(frame) = stack.pop() {
+        match frame {
+            PatternBuildFrame::Expr(expression) => {
+                let span = expression.span;
+                match expression.kind {
+                    ExpressionKind::Literal(expression_literal) => {
+                        pattern_stack.push(BindingPattern::Literal(expression_literal, span));
+                    }
+                    ExpressionKind::Identifier(identifier) => {
+                        pattern_stack.push(BindingPattern::Identifier(identifier, span));
+                    }
+                    ExpressionKind::Struct(items) => {
+                        let mut field_ids = Vec::with_capacity(items.len());
+                        let mut field_exprs = Vec::with_capacity(items.len());
+                        for (identifier, expr) in items {
+                            field_ids.push(identifier);
+                            field_exprs.push(expr);
+                        }
+                        stack.push(PatternBuildFrame::StructFinish {
+                            span,
+                            field_ids,
+                            field_count: field_exprs.len(),
+                        });
+                        for expr in field_exprs.into_iter().rev() {
+                            stack.push(PatternBuildFrame::Expr(expr));
+                        }
+                    }
+                    ExpressionKind::Operation {
+                        operator,
+                        left,
+                        right,
+                    } if operator == ":" => {
+                        stack.push(PatternBuildFrame::TypeHintFinish {
+                            span,
+                            type_expr: *right,
+                        });
+                        stack.push(PatternBuildFrame::Expr(*left));
+                    }
+                    ExpressionKind::FunctionCall { function, argument } => match *function {
+                        Expression {
+                            kind:
+                                ExpressionKind::EnumAccess {
+                                    enum_expr, variant, ..
+                                },
+                            ..
+                        } => {
+                            stack.push(PatternBuildFrame::EnumVariantFinish {
+                                span,
+                                enum_type: *enum_expr,
+                                variant,
+                                has_payload: true,
+                            });
+                            stack.push(PatternBuildFrame::Expr(*argument));
+                        }
+                        other => {
+                            let annotations = extract_binding_annotations_from_expression(other)?;
+                            stack.push(PatternBuildFrame::AnnotatedFinish { span, annotations });
+                            stack.push(PatternBuildFrame::Expr(*argument));
+                        }
+                    },
                     ExpressionKind::EnumAccess {
                         enum_expr, variant, ..
-                    },
-                ..
-            } => Ok(BindingPattern::EnumVariant {
-                enum_type: enum_expr,
+                    } => {
+                        pattern_stack.push(BindingPattern::EnumVariant {
+                            enum_type: enum_expr,
+                            variant,
+                            payload: None,
+                            span,
+                        });
+                    }
+                    _ => {
+                        return Err(
+                            Diagnostic::new("Invalid binding pattern expression").with_span(span)
+                        );
+                    }
+                }
+            }
+            PatternBuildFrame::StructFinish {
+                span,
+                field_ids,
+                field_count,
+            } => {
+                let mut field_patterns = Vec::with_capacity(field_count);
+                for _ in 0..field_count {
+                    field_patterns.push(pattern_stack.pop().ok_or_else(|| {
+                        Diagnostic::new("Invalid binding pattern expression").with_span(span)
+                    })?);
+                }
+                field_patterns.reverse();
+                let fields = field_ids
+                    .into_iter()
+                    .zip(field_patterns)
+                    .collect::<Vec<_>>();
+                pattern_stack.push(BindingPattern::Struct(fields, span));
+            }
+            PatternBuildFrame::TypeHintFinish { span, type_expr } => {
+                let inner = pattern_stack.pop().ok_or_else(|| {
+                    Diagnostic::new("Invalid binding pattern expression").with_span(span)
+                })?;
+                pattern_stack.push(BindingPattern::TypeHint(
+                    Box::new(inner),
+                    Box::new(type_expr),
+                    span,
+                ));
+            }
+            PatternBuildFrame::EnumVariantFinish {
+                span,
+                enum_type,
                 variant,
-                payload: Some(Box::new(pattern_expression_to_binding_pattern(*argument)?)),
-                span,
-            }),
-            other => Ok(BindingPattern::Annotated {
-                annotations: extract_binding_annotations_from_expression(other)?,
-                pattern: Box::new(pattern_expression_to_binding_pattern(*argument)?),
-                span,
-            }),
-        },
-        ExpressionKind::EnumAccess {
-            enum_expr, variant, ..
-        } => Ok(BindingPattern::EnumVariant {
-            enum_type: enum_expr,
-            variant,
-            payload: None,
-            span,
-        }),
-
-        _ => Err(Diagnostic::new("Invalid binding pattern expression").with_span(span)),
+                has_payload,
+            } => {
+                let payload = if has_payload {
+                    Some(Box::new(pattern_stack.pop().ok_or_else(|| {
+                        Diagnostic::new("Invalid binding pattern expression").with_span(span)
+                    })?))
+                } else {
+                    None
+                };
+                pattern_stack.push(BindingPattern::EnumVariant {
+                    enum_type: Box::new(enum_type),
+                    variant,
+                    payload,
+                    span,
+                });
+            }
+            PatternBuildFrame::AnnotatedFinish { span, annotations } => {
+                let inner = pattern_stack.pop().ok_or_else(|| {
+                    Diagnostic::new("Invalid binding pattern expression").with_span(span)
+                })?;
+                pattern_stack.push(BindingPattern::Annotated {
+                    annotations,
+                    pattern: Box::new(inner),
+                    span,
+                });
+            }
+        }
     }
+
+    pattern_stack
+        .pop()
+        .ok_or_else(|| Diagnostic::new("Invalid binding pattern expression").with_span(root_span))
 }
 
 fn extract_binding_annotations_from_expression(
     expression: Expression,
 ) -> Result<Vec<BindingAnnotation>, Diagnostic> {
-    let span = expression.span();
-    match expression.kind {
-        ExpressionKind::Identifier(Identifier { name: id, .. }) if id == "mut" => {
-            Ok(vec![BindingAnnotation::Mutable(span)])
-        }
-        ExpressionKind::FunctionCall { function, argument } => match *function {
-            Expression {
-                kind: ExpressionKind::Identifier(Identifier { name: id, .. }),
-                span: ann_span,
-            } if id == "export" => Ok(vec![BindingAnnotation::Export(*argument, ann_span)]),
-            other => {
-                let mut annotations = extract_binding_annotations_from_expression(other)?;
-                annotations.extend(extract_binding_annotations_from_expression(*argument)?);
-                Ok(annotations)
+    let mut annotations = Vec::new();
+    let mut stack = vec![expression];
+
+    while let Some(expr) = stack.pop() {
+        let span = expr.span();
+        match expr.kind {
+            ExpressionKind::Identifier(Identifier { name: id, .. }) if id == "mut" => {
+                annotations.push(BindingAnnotation::Mutable(span));
             }
-        },
-        _ => Err(Diagnostic::new("Invalid binding annotation").with_span(span)),
+            ExpressionKind::FunctionCall { function, argument } => match *function {
+                Expression {
+                    kind: ExpressionKind::Identifier(Identifier { name: id, .. }),
+                    span: ann_span,
+                } if id == "export" => {
+                    annotations.push(BindingAnnotation::Export(*argument, ann_span));
+                }
+                other => {
+                    stack.push(*argument);
+                    stack.push(other);
+                }
+            },
+            _ => return Err(Diagnostic::new("Invalid binding annotation").with_span(span)),
+        }
     }
+
+    Ok(annotations)
 }
 
+#[cfg(test)]
 fn parse_grouping_expression_with_source<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Option<Result<(Expression, &'a str), Diagnostic>> {
-    let file = file.strip_prefix("(")?;
-    let (expr, file) = match parse_block_with_terminators(source, file, &[')']) {
-        Ok(result) => result,
+    if !file.starts_with('(') {
+        return None;
+    }
+
+    let mut parser = Parser::new(source, file);
+    let expr = match parser.parse_with_frame(Frame::Grouping(GroupingFrame::new())) {
+        Ok(expr) => expr,
         Err(err) => return Some(Err(err)),
     };
-    let Some(file) = file.strip_prefix(")") else {
-        return Some(Err(diagnostic_here(
-            source,
-            file,
-            1,
-            "Expected ) to close grouping expression",
-        )));
-    };
-    Some(Ok((expr, file)))
+    Some(Ok((expr, parser.remaining)))
 }
 
 pub fn parse_operator(file: &str) -> Option<(String, &str)> {
@@ -928,292 +2288,89 @@ fn operator_precedence(operator: &str) -> u8 {
     }
 }
 
+#[cfg(test)]
 fn parse_struct_expression<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Option<Result<(Expression, &'a str), Diagnostic>> {
-    fn parse_struct_expression_inner<'a>(
-        source: &'a str,
-        file: &'a str,
-    ) -> Result<(Expression, &'a str), Diagnostic> {
-        let start_slice = file;
-        let mut remaining = file.strip_prefix("{").ok_or_else(|| {
-            diagnostic_here(source, file, 1, "Expected { to start struct literal")
-        })?;
-        let mut items = Vec::new();
-        let mut tuple_index = 0usize;
-
-        loop {
-            remaining = parse_optional_whitespace(remaining);
-
-            if let Some(rest) = remaining.strip_prefix("}") {
-                let span = consumed_span(source, start_slice, rest);
-                return Ok((ExpressionKind::Struct(items).with_span(span), rest));
-            }
-
-            if let Some((identifier, after_identifier)) = parse_identifier(remaining) {
-                let after_ws = parse_optional_whitespace(after_identifier);
-
-                if let Some((operator, after_equals)) = parse_operator(after_ws)
-                    && operator == "="
-                {
-                    let after_ws = parse_optional_whitespace(after_equals);
-                    let (value_expr, rest) =
-                        parse_operation_expression_with_source(source, after_ws)?;
-                    items.push((identifier, value_expr));
-                    remaining = rest;
-                    remaining = parse_optional_whitespace(remaining);
-
-                    if let Some(rest) = remaining.strip_prefix("}") {
-                        let span = consumed_span(source, start_slice, rest);
-                        return Ok((ExpressionKind::Struct(items).with_span(span), rest));
-                    }
-
-                    remaining = remaining.strip_prefix(",").ok_or_else(|| {
-                        diagnostic_here(source, remaining, 1, "Expected , or } in struct literal")
-                    })?;
-                    continue;
-                }
-            }
-
-            let (value_expr, rest) = parse_operation_expression_with_source(source, remaining)?;
-            items.push((Identifier::new(tuple_index.to_string()), value_expr));
-            tuple_index += 1;
-            remaining = rest;
-            remaining = parse_optional_whitespace(remaining);
-
-            if let Some(rest) = remaining.strip_prefix("}") {
-                let span = consumed_span(source, start_slice, rest);
-                return Ok((ExpressionKind::Struct(items).with_span(span), rest));
-            }
-
-            remaining = remaining.strip_prefix(",").ok_or_else(|| {
-                diagnostic_here(source, remaining, 1, "Expected , or } in struct literal")
-            })?;
-        }
-    }
-
-    if !file.starts_with("{") {
+    if !file.starts_with('{') {
         return None;
     }
-    Some(parse_struct_expression_inner(source, file))
+
+    let mut parser = Parser::new(source, file);
+    let expr = match parser.parse_with_frame(Frame::Struct(StructFrame::new(file))) {
+        Ok(expr) => expr,
+        Err(err) => return Some(Err(err)),
+    };
+    Some(Ok((expr, parser.remaining)))
 }
 
+#[cfg(test)]
 fn parse_return_expression_with_source<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Option<Result<(Expression, &'a str), Diagnostic>> {
-    const KEYWORD: &str = "return";
-    if !file.starts_with(KEYWORD) {
+    if !is_keyword_start(file, "return") {
         return None;
     }
 
-    let after_keyword = &file[KEYWORD.len()..];
-    if after_keyword
-        .chars()
-        .next()
-        .map(|c| c.is_alphanumeric() || c == '_')
-        .unwrap_or(false)
-    {
-        return None;
-    }
-
-    let start_slice = file;
-    let remaining = parse_optional_whitespace(after_keyword);
-
-    let value_start = remaining.chars().next();
-    let (value, rest) = if remaining.is_empty()
-        || matches!(
-            value_start,
-            Some(';') | Some(')') | Some(']') | Some('}') | Some(',')
-        ) {
-        (None, remaining)
-    } else {
-        match parse_operation_expression_with_guard(source, remaining) {
-            Ok((expr, rest)) => (Some(expr), rest),
-            Err(err) => return Some(Err(err)),
-        }
+    let mut parser = Parser::new(source, file);
+    let expr = match parser.parse_with_frame(Frame::Return(ReturnFrame::new(file))) {
+        Ok(expr) => expr,
+        Err(err) => return Some(Err(err)),
     };
-
-    let span = consumed_span(source, start_slice, rest);
-    Some(Ok((
-        ExpressionKind::Diverge {
-            divergance_type: DivergeExpressionType::Return,
-            value: Box::new(value.unwrap_or(Expression::new(ExpressionKind::Struct(vec![]), span))),
-        }
-        .with_span(span),
-        rest,
-    )))
+    Some(Ok((expr, parser.remaining)))
 }
 
+#[cfg(test)]
 fn parse_break_expression_with_source<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Option<Result<(Expression, &'a str), Diagnostic>> {
-    const KEYWORD: &str = "break";
-    if !file.starts_with(KEYWORD) {
+    if !is_keyword_start(file, "break") {
         return None;
     }
 
-    let after_keyword = &file[KEYWORD.len()..];
-    if after_keyword
-        .chars()
-        .next()
-        .map(|c| c.is_alphanumeric() || c == '_')
-        .unwrap_or(false)
-    {
-        return None;
-    }
-
-    let start_slice = file;
-    let remaining = parse_optional_whitespace(after_keyword);
-    let value_start = remaining.chars().next();
-
-    let (value, rest) = if remaining.is_empty()
-        || matches!(
-            value_start,
-            Some(';') | Some(')') | Some(']') | Some('}') | Some(',')
-        ) {
-        (None, remaining)
-    } else {
-        match parse_operation_expression_with_guard(source, remaining) {
-            Ok((expr, rest)) => (Some(expr), rest),
-            Err(err) => return Some(Err(err)),
-        }
+    let mut parser = Parser::new(source, file);
+    let expr = match parser.parse_with_frame(Frame::Break(BreakFrame::new(file))) {
+        Ok(expr) => expr,
+        Err(err) => return Some(Err(err)),
     };
-
-    let span = consumed_span(source, start_slice, rest);
-    Some(Ok((
-        ExpressionKind::Diverge {
-            divergance_type: DivergeExpressionType::Break,
-            value: Box::new(value.unwrap_or(Expression::new(ExpressionKind::Struct(vec![]), span))),
-        }
-        .with_span(span),
-        rest,
-    )))
+    Some(Ok((expr, parser.remaining)))
 }
 
+#[cfg(test)]
 fn parse_loop_expression_with_source<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Option<Result<(Expression, &'a str), Diagnostic>> {
-    const KEYWORD: &str = "loop";
-    if !file.starts_with(KEYWORD) {
+    if !is_keyword_start(file, "loop") {
         return None;
     }
 
-    let after_keyword = &file[KEYWORD.len()..];
-    if after_keyword
-        .chars()
-        .next()
-        .map(|c| c.is_alphanumeric() || c == '_')
-        .unwrap_or(false)
-    {
-        return None;
-    }
-
-    let start_slice = file;
-    let remaining = parse_optional_whitespace(after_keyword);
-    let Some(group_parsed) = parse_grouping_expression_with_source(source, remaining) else {
-        return Some(Err(diagnostic_here(
-            source,
-            remaining,
-            1,
-            "Expected loop body expression",
-        )));
+    let mut parser = Parser::new(source, file);
+    let expr = match parser.parse_with_frame(Frame::Loop(LoopFrame::new(file))) {
+        Ok(expr) => expr,
+        Err(err) => return Some(Err(err)),
     };
-
-    match group_parsed {
-        Ok((body, rest)) => {
-            let span = consumed_span(source, start_slice, rest);
-            Some(Ok((
-                ExpressionKind::Loop {
-                    body: Box::new(body),
-                }
-                .with_span(span),
-                rest,
-            )))
-        }
-        Err(err) => Some(Err(err)),
-    }
+    Some(Ok((expr, parser.remaining)))
 }
 
+#[cfg(test)]
 fn parse_while_expression_with_source<'a>(
     source: &'a str,
     file: &'a str,
 ) -> Option<Result<(Expression, &'a str), Diagnostic>> {
-    const KEYWORD: &str = "while";
-    if !file.starts_with(KEYWORD) {
+    if !is_keyword_start(file, "while") {
         return None;
     }
 
-    let after_keyword = &file[KEYWORD.len()..];
-    if after_keyword
-        .chars()
-        .next()
-        .map(|c| c.is_alphanumeric() || c == '_')
-        .unwrap_or(false)
-    {
-        return None;
-    }
-
-    let start_slice = file;
-    let remaining = parse_optional_whitespace(after_keyword);
-    let (condition, after_condition) =
-        match parse_operation_expression_with_source(source, remaining) {
-            Ok(parsed) => parsed,
-            Err(err) => return Some(Err(err)),
-        };
-
-    let remaining = parse_optional_whitespace(after_condition);
-    let Some(remaining) = remaining.strip_prefix("do") else {
-        return Some(Err(diagnostic_here(
-            source,
-            remaining,
-            2,
-            "Expected do after while condition",
-        )));
+    let mut parser = Parser::new(source, file);
+    let expr = match parser.parse_with_frame(Frame::While(WhileFrame::new(file))) {
+        Ok(expr) => expr,
+        Err(err) => return Some(Err(err)),
     };
-    let remaining = parse_optional_whitespace(remaining);
-    let Some(group_parsed) = parse_grouping_expression_with_source(source, remaining) else {
-        return Some(Err(diagnostic_here(
-            source,
-            remaining,
-            1,
-            "Expected while body expression",
-        )));
-    };
-
-    match group_parsed {
-        Ok((body, rest)) => {
-            let span = consumed_span(source, start_slice, rest);
-            let condition_span = condition.span();
-            Some(Ok((
-                ExpressionKind::Loop {
-                    body: Box::new(
-                        ExpressionKind::If {
-                            condition: Box::new(condition),
-                            then_branch: Box::new(body),
-                            else_branch: Box::new(
-                                ExpressionKind::Diverge {
-                                    value: Box::new(Expression::new(
-                                        ExpressionKind::Struct(vec![]),
-                                        span,
-                                    )),
-                                    divergance_type: DivergeExpressionType::Break,
-                                }
-                                .with_span(condition_span),
-                            ),
-                        }
-                        .with_span(condition_span),
-                    ),
-                }
-                .with_span(span),
-                rest,
-            )))
-        }
-        Err(err) => Some(Err(err)),
-    }
+    Some(Ok((expr, parser.remaining)))
 }
 
 #[cfg(test)]
@@ -1221,6 +2378,7 @@ pub fn parse_isolated_expression(file: &str) -> Result<(Expression, &str), Diagn
     parse_isolated_expression_with_source(file, file)
 }
 
+#[cfg(test)]
 fn parse_isolated_expression_with_source<'a>(
     source: &'a str,
     file: &'a str,
@@ -1228,6 +2386,7 @@ fn parse_isolated_expression_with_source<'a>(
     parse_isolated_expression_with_source_with_guard(source, file)
 }
 
+#[cfg(test)]
 fn parse_isolated_expression_with_source_with_guard<'a>(
     source: &'a str,
     file: &'a str,
@@ -1277,6 +2436,7 @@ pub fn parse_operation_expression(file: &str) -> Result<(Expression, &str), Diag
     parse_operation_expression_with_source(file, file)
 }
 
+#[cfg(test)]
 fn parse_operation_expression_with_source<'a>(
     source: &'a str,
     file: &'a str,
@@ -1284,6 +2444,7 @@ fn parse_operation_expression_with_source<'a>(
     parse_operation_expression_with_guard(source, file)
 }
 
+#[cfg(test)]
 fn parse_operation_expression_with_guard<'a>(
     source: &'a str,
     file: &'a str,
@@ -1291,253 +2452,15 @@ fn parse_operation_expression_with_guard<'a>(
     parse_operation_expression_with_min_precedence(source, file, 0)
 }
 
-fn parse_assignment_expression_with_source<'a>(
-    source: &'a str,
-    file: &'a str,
-) -> Result<(Expression, &'a str), Diagnostic> {
-    parse_assignment_expression_with_guard(source, file)
-}
-
-fn parse_assignment_expression_with_guard<'a>(
-    source: &'a str,
-    file: &'a str,
-) -> Result<(Expression, &'a str), Diagnostic> {
-    let trimmed = parse_optional_whitespace(file);
-    let start_slice = trimmed;
-    if let Some(Ok((target, after_target))) = parse_lvalue(source, trimmed) {
-        let after_target = parse_optional_whitespace(after_target);
-        if let Some(after_equals) = after_target.strip_prefix('=')
-            && !after_equals.starts_with('=')
-        {
-            let after_equals = parse_optional_whitespace(after_equals);
-            let (expr, remaining) = parse_operation_expression_with_guard(source, after_equals)?;
-            let span = consumed_span(source, start_slice, remaining);
-            return Ok((
-                ExpressionKind::Assignment {
-                    target,
-                    expr: Box::new(expr),
-                }
-                .with_span(span),
-                remaining,
-            ));
-        }
-    }
-
-    parse_operation_expression_with_guard(source, file)
-}
-
-fn parse_lvalue<'a>(
-    source: &'a str,
-    file: &'a str,
-) -> Option<Result<(LValue, &'a str), Diagnostic>> {
-    let trimmed = parse_optional_whitespace(file);
-    let start_slice = trimmed;
-    let (identifier, mut remaining) = parse_identifier(trimmed)?;
-    let mut current_span = consumed_span(source, start_slice, remaining);
-    let mut lvalue = LValue::Identifier(identifier, current_span);
-
-    loop {
-        let lookahead = parse_optional_whitespace(remaining);
-        let Some(after_dot) = lookahead.strip_prefix('.') else {
-            break;
-        };
-
-        let after_dot = parse_optional_whitespace(after_dot);
-        let (property_identifier, rest) =
-            if let Some((identifier, rest)) = parse_identifier(after_dot) {
-                (identifier, rest)
-            } else {
-                let tuple_index = after_dot
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect::<String>();
-
-                if tuple_index.is_empty() {
-                    return Some(Err(diagnostic_here(
-                        source,
-                        after_dot,
-                        after_dot.chars().next().map(|c| c.len_utf8()).unwrap_or(1),
-                        "Expected identifier after . in assignment target",
-                    )));
-                }
-
-                let rest = &after_dot[tuple_index.len()..];
-                (Identifier::new(tuple_index), rest)
-            };
-
-        current_span = consumed_span(source, start_slice, rest);
-        lvalue = LValue::PropertyAccess {
-            object: Box::new(lvalue),
-            property: property_identifier.name,
-            span: current_span,
-        };
-        remaining = rest;
-    }
-
-    Some(Ok((lvalue, remaining)))
-}
-
+#[cfg(test)]
 fn parse_operation_expression_with_min_precedence<'a>(
     source: &'a str,
     file: &'a str,
     min_precedence: u8,
 ) -> Result<(Expression, &'a str), Diagnostic> {
-    fn parse_operations<'a>(
-        source: &'a str,
-        file: &'a str,
-        min_precedence: u8,
-    ) -> Result<(Vec<Expression>, Vec<String>, &'a str), Diagnostic> {
-        let mut expressions: Vec<Expression> = Vec::new();
-        let mut operators: Vec<String> = Vec::new();
-        let (expression, mut remaining) = parse_isolated_expression_with_source(source, file)?;
-        remaining = parse_optional_whitespace(remaining);
-        expressions.push(expression);
-        while let Some((operator, rest)) = parse_operator(remaining) {
-            // Stop if operator precedence is below minimum
-            if operator_precedence(&operator) < min_precedence {
-                break;
-            }
-            let rest = parse_optional_whitespace(rest);
-            let (next_expression, rest) = parse_isolated_expression_with_source(source, rest)?;
-            let rest = parse_optional_whitespace(rest);
-            operators.push(operator);
-            expressions.push(next_expression);
-            remaining = rest;
-        }
-        Ok((expressions, operators, remaining))
-    }
-
-    let (expressions, operators, remaining) = parse_operations(source, file, min_precedence)?;
-
-    fn reduce_stacks(
-        operand_stack: &mut Vec<Expression>,
-        operator_stack: &mut Vec<String>,
-        source: &str,
-    ) -> Result<(), Diagnostic> {
-        let operator = operator_stack.pop().ok_or_else(|| {
-            diagnostic_at_eof(source, "Expected operator when reducing operation")
-        })?;
-        let right = operand_stack.pop().ok_or_else(|| {
-            diagnostic_at_eof(source, "Expected right operand when reducing operation")
-        })?;
-        let left = operand_stack.pop().ok_or_else(|| {
-            diagnostic_at_eof(source, "Expected left operand when reducing operation")
-        })?;
-        let span = left.span().merge(&right.span());
-        let processed_operation = match operator.as_str() {
-            "=" => {
-                let target = expression_to_lvalue(left)?;
-                ExpressionKind::Assignment {
-                    target,
-                    expr: Box::new(right),
-                }
-            }
-            ":=" => {
-                let pattern = pattern_expression_to_binding_pattern(left)?;
-                ExpressionKind::Binding(Box::new(Binding {
-                    pattern,
-                    expr: right,
-                }))
-            }
-            "=>" => {
-                let pattern = pattern_expression_to_binding_pattern(left)?;
-                ExpressionKind::Function {
-                    parameter: pattern,
-                    return_type: None,
-                    body: Box::new(right),
-                }
-            }
-            "->" => ExpressionKind::FunctionType {
-                parameter: Box::new(left),
-                return_type: Box::new(right),
-            },
-            "::" => {
-                let ExpressionKind::Identifier(variant) = right.kind else {
-                    return Err(diagnostic_here(
-                        source,
-                        "",
-                        1,
-                        "Expected identifier as enum variant in enum access",
-                    ));
-                };
-                ExpressionKind::EnumAccess {
-                    enum_expr: Box::new(left),
-                    variant,
-                }
-            }
-            "." => match right.kind {
-                ExpressionKind::Identifier(property) => ExpressionKind::PropertyAccess {
-                    object: Box::new(left),
-                    property: property.name,
-                },
-                ExpressionKind::Literal(ExpressionLiteral::Number(num)) => {
-                    ExpressionKind::PropertyAccess {
-                        object: Box::new(left),
-                        property: num.to_string(),
-                    }
-                }
-                _ => {
-                    return Err(diagnostic_here(
-                        source,
-                        "",
-                        1,
-                        "Expected identifier as property name in property access",
-                    ));
-                }
-            },
-            "" => ExpressionKind::FunctionCall {
-                function: Box::new(left),
-                argument: Box::new(right),
-            },
-            "|>" => ExpressionKind::FunctionCall {
-                function: Box::new(right),
-                argument: Box::new(left),
-            },
-            "@" => ExpressionKind::AttachImplementation {
-                type_expr: Box::new(left),
-                implementation: Box::new(right),
-            },
-            operator => ExpressionKind::Operation {
-                operator: operator.to_string(),
-                left: Box::new(left),
-                right: Box::new(right),
-            },
-        };
-        operand_stack.push(Expression::new(processed_operation, span));
-        Ok(())
-    }
-
-    let mut operand_stack: Vec<Expression> = Vec::new();
-    let mut operator_stack: Vec<String> = Vec::new();
-
-    let mut expression_iter = expressions.into_iter();
-    let first_expression = expression_iter.next().ok_or_else(|| {
-        diagnostic_at_eof(source, "Expected expression to start parsing operation")
-    })?;
-    operand_stack.push(first_expression);
-
-    for operator in operators {
-        let next_expression = expression_iter
-            .next()
-            .ok_or_else(|| diagnostic_at_eof(source, "Expected expression after operator"))?;
-        while operator_stack
-            .last()
-            .is_some_and(|existing| operator_precedence(existing) >= operator_precedence(&operator))
-        {
-            reduce_stacks(&mut operand_stack, &mut operator_stack, source)?;
-        }
-        operator_stack.push(operator);
-        operand_stack.push(next_expression);
-    }
-
-    while !operator_stack.is_empty() {
-        reduce_stacks(&mut operand_stack, &mut operator_stack, source)?;
-    }
-
-    let final_expression = operand_stack
-        .pop()
-        .ok_or_else(|| diagnostic_at_eof(source, "Expected expression after parsing operations"))?;
-    Ok((final_expression, remaining))
+    let mut parser = Parser::new(source, file);
+    let expr = parser.parse_expression_with_min_precedence(min_precedence)?;
+    Ok((expr, parser.remaining))
 }
 
 pub fn parse_block(file: &str) -> Result<(Expression, &str), Diagnostic> {
@@ -1547,69 +2470,11 @@ pub fn parse_block(file: &str) -> Result<(Expression, &str), Diagnostic> {
 fn parse_block_with_terminators<'a>(
     source: &'a str,
     file: &'a str,
-    terminators: &[char],
+    terminators: &'a [char],
 ) -> Result<(Expression, &'a str), Diagnostic> {
-    let mut expressions = Vec::new();
-    let mut remaining = parse_optional_whitespace(file);
-    let mut ended_with_semicolon = false;
-
-    loop {
-        if remaining.is_empty() {
-            break;
-        }
-
-        if let Some(ch) = remaining.chars().next()
-            && terminators.contains(&ch)
-        {
-            break;
-        }
-
-        let (expression, rest) = parse_operation_expression_with_guard(source, remaining)?;
-        expressions.push(expression);
-        remaining = parse_optional_whitespace(rest);
-        ended_with_semicolon = false;
-
-        if remaining.is_empty() {
-            break;
-        }
-
-        if let Some(ch) = remaining.chars().next()
-            && terminators.contains(&ch)
-        {
-            break;
-        }
-
-        let rest = parse_semicolon(source, remaining)?;
-        remaining = parse_optional_whitespace(rest);
-        ended_with_semicolon = true;
-    }
-
-    if expressions.is_empty() {
-        return Err(diagnostic_here(
-            source,
-            remaining,
-            remaining.chars().next().map(|c| c.len_utf8()).unwrap_or(0),
-            "Cannot parse empty block",
-        ));
-    }
-
-    if ended_with_semicolon && let Some(last_span) = expressions.last().map(|expr| expr.span()) {
-        expressions
-            .push(ExpressionKind::Struct(vec![]).with_span(SourceSpan::new(last_span.end(), 0)));
-    }
-
-    if expressions.len() == 1 {
-        Ok((expressions.into_iter().next().unwrap(), remaining))
-    } else {
-        let span = expressions
-            .iter()
-            .skip(1)
-            .fold(expressions[0].span(), |acc, expr| acc.merge(&expr.span()));
-        Ok((
-            Expression::new(ExpressionKind::Block(expressions), span),
-            remaining,
-        ))
-    }
+    let mut parser = Parser::new(source, file);
+    let expr = parser.parse_block_with_terminators(terminators)?;
+    Ok((expr, parser.remaining))
 }
 
 #[test]

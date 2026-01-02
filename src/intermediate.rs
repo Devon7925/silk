@@ -120,220 +120,380 @@ pub fn expression_to_intermediate(
     expr: Expression,
     builder: &mut IntermediateBuilder,
 ) -> IntermediateKind {
-    let span = &expr.span;
-    match expr.kind {
-        ExpressionKind::IntrinsicOperation(op) => IntermediateKind::IntrinsicOperation(match op {
-            crate::parsing::IntrinsicOperation::Binary(left, right, operator) => {
-                IntermediateIntrinsicOperation::Binary(
-                    Box::new(expression_to_intermediate(*left, builder)),
-                    Box::new(expression_to_intermediate(*right, builder)),
-                    operator,
-                )
-            }
-            crate::parsing::IntrinsicOperation::Unary(operand, operator) => {
-                IntermediateIntrinsicOperation::Unary(
-                    Box::new(expression_to_intermediate(*operand, builder)),
-                    operator,
-                )
-            }
-        }),
-        ExpressionKind::Match { value, branches } => {
-            let match_value = *value;
-            let match_value_type = builder.expression_value_type(&match_value);
-            let lowered_value = expression_to_intermediate(match_value, builder);
-            let temp_identifier = builder.next_match_temp_identifier();
-
-            let match_binding = IntermediateKind::Binding(Box::new(IntermediateBinding {
-                identifier: temp_identifier.clone(),
-                binding_type: match_value_type.clone(),
-                expr: lowered_value,
-            }));
-
-            let lowered_branches = branches
-                .into_iter()
-                .map(|(pattern, body)| (pattern, expression_to_intermediate(body, builder)))
-                .collect::<Vec<_>>();
-
-            let mut match_expr = IntermediateKind::Unreachable;
-            for (pattern, branch) in lowered_branches.into_iter().rev() {
-                let condition = builder.lower_binding_pattern_match(
-                    pattern,
-                    IntermediateKind::Identifier(temp_identifier.clone()),
-                    match_value_type.clone(),
-                );
-
-                match_expr = IntermediateKind::If {
-                    condition: Box::new(condition),
-                    then_branch: Box::new(branch),
-                    else_branch: Box::new(match_expr),
-                };
-            }
-
-            IntermediateKind::Block(vec![match_binding, match_expr])
-        }
-        ExpressionKind::If {
-            condition,
-            then_branch,
-            else_branch,
-        } => IntermediateKind::If {
-            condition: Box::new(expression_to_intermediate(*condition, builder)),
-            then_branch: Box::new(expression_to_intermediate(*then_branch, builder)),
-            else_branch: Box::new(expression_to_intermediate(*else_branch, builder)),
+    enum Frame {
+        Enter(Expression),
+        FinishIntrinsicBinary(BinaryIntrinsicOperator),
+        FinishIntrinsicUnary(UnaryIntrinsicOperator),
+        FinishIf,
+        FinishStruct(Vec<Identifier>),
+        FinishAssignment(LValue),
+        FinishFunctionCall(usize),
+        FinishPropertyAccess(String),
+        FinishBinding {
+            pattern: BindingPattern,
+            binding_type: IntermediateType,
+            is_complex: bool,
         },
-        ExpressionKind::Struct(fields) => IntermediateKind::Struct(
-            fields
-                .into_iter()
-                .map(|(id, value)| (id, expression_to_intermediate(value, builder)))
-                .collect(),
-        ),
-        ExpressionKind::Literal(lit) => IntermediateKind::Literal(lit),
-        ExpressionKind::Identifier(identifier) => {
-            if let Some(inlined) = builder.inline_bindings.get(&identifier) {
-                return expression_to_intermediate(inlined.clone(), builder);
-            }
-            IntermediateKind::Identifier(identifier)
-        }
-        ExpressionKind::Assignment { target, expr } => IntermediateKind::Assignment {
-            target,
-            expr: Box::new(expression_to_intermediate(*expr, builder)),
+        FinishBlock(usize),
+        FinishMatch {
+            match_value_type: IntermediateType,
+            temp_identifier: Identifier,
+            branch_patterns: Vec<BindingPattern>,
         },
-        ExpressionKind::FunctionCall { function, argument } => {
-            if let ExpressionKind::EnumConstructor {
-                enum_type,
-                variant,
-                variant_index,
-                ..
-            } = &function.kind
-            {
-                let enum_value = ExpressionKind::EnumValue {
-                    enum_type: enum_type.clone(),
-                    variant: variant.clone(),
-                    variant_index: *variant_index,
-                    payload: argument.clone(),
-                }
-                .with_span(*span);
-                return expression_to_intermediate(enum_value, builder);
-            }
-            if let ExpressionKind::EnumAccess { enum_expr, variant } = &function.kind
-                && let Some(enum_type) = builder.resolve_enum_type_expression(enum_expr)
-                && let Some((variant_index, _)) = enum_variant_info(&enum_type, variant)
-            {
-                let enum_value = ExpressionKind::EnumValue {
-                    enum_type: Box::new(enum_type),
-                    variant: variant.clone(),
-                    variant_index,
-                    payload: argument.clone(),
-                }
-                .with_span(*span);
-                return expression_to_intermediate(enum_value, builder);
-            }
-            let function_index = match *function {
-                Expression {
-                    kind: ExpressionKind::Identifier(identifier),
-                    ..
-                } => builder
-                    .resolve_function_index(&identifier)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "Function `{}` was not lowered to an intermediate function",
-                            identifier.name
-                        )
-                    }),
-                function_expr @ Expression {
-                    kind: ExpressionKind::Function { .. },
-                    ..
-                } => builder.register_function(None, function_expr),
-                other => panic!(
-                    "Unsupported function call target in intermediate lowering: {:?}",
-                    other.kind
-                ),
-            };
-
-            IntermediateKind::FunctionCall {
-                function: function_index,
-                argument: Box::new(expression_to_intermediate(*argument, builder)),
-            }
-        }
-        ExpressionKind::PropertyAccess { object, property } => IntermediateKind::PropertyAccess {
-            object: Box::new(expression_to_intermediate(*object, builder)),
-            property,
-        },
-        ExpressionKind::Binding(binding) => {
-            let Binding { pattern, expr } = *binding;
-            let binding_type = builder.infer_binding_type(&pattern, &expr);
-            let stripped_pattern = builder.strip_binding_pattern(pattern.clone());
-            let lowered_expr = expression_to_intermediate(expr, builder);
-
-            if matches!(
-                stripped_pattern,
-                BindingPattern::EnumVariant { .. } | BindingPattern::Struct { .. }
-            ) {
-                let temp_identifier = builder.next_match_temp_identifier();
-                let temp_binding = IntermediateKind::Binding(Box::new(IntermediateBinding {
-                    identifier: temp_identifier.clone(),
-                    binding_type: binding_type.clone(),
-                    expr: lowered_expr,
-                }));
-                let condition = builder.lower_binding_pattern_match(
-                    pattern,
-                    IntermediateKind::Identifier(temp_identifier.clone()),
-                    binding_type,
-                );
-                IntermediateKind::Block(vec![temp_binding, condition])
-            } else {
-                builder.lower_binding_pattern_match(pattern, lowered_expr, binding_type)
-            }
-        }
-        ExpressionKind::Block(expressions) => IntermediateKind::Block(
-            expressions
-                .into_iter()
-                .map(|expr| expression_to_intermediate(expr, builder))
-                .collect(),
-        ),
-        ExpressionKind::Diverge {
-            value,
-            divergance_type,
-        } => IntermediateKind::Diverge {
-            value: Box::new(expression_to_intermediate(*value, builder)),
-            divergance_type,
-        },
-        ExpressionKind::Loop { body } => IntermediateKind::Loop {
-            body: Box::new(expression_to_intermediate(*body, builder)),
-        },
-        ExpressionKind::EnumAccess { enum_expr, variant } => {
-            if let Some(enum_type) = builder.resolve_enum_type_expression(&enum_expr)
-                && let Some((variant_index, payload_type)) = enum_variant_info(&enum_type, &variant)
-                && let ExpressionKind::Struct(fields) = &payload_type.kind
-                && fields.is_empty()
-            {
-                let enum_value = ExpressionKind::EnumValue {
-                    enum_type: Box::new(enum_type),
-                    variant,
-                    variant_index,
-                    payload: Box::new(ExpressionKind::Struct(Vec::new()).with_span(*span)),
-                }
-                .with_span(*span);
-                return expression_to_intermediate(enum_value, builder);
-            }
-            panic!("Unsupported enum constructor reference in intermediate lowering");
-        }
-        enum_expr @ ExpressionKind::EnumValue { .. } => {
-            if let Some(lowered) = materialize_enum_value(&enum_expr, span) {
-                expression_to_intermediate(lowered, builder)
-            } else {
-                IntermediateKind::Literal(ExpressionLiteral::Number(0))
-            }
-        }
-        ExpressionKind::AttachImplementation { type_expr, .. } => {
-            expression_to_intermediate(*type_expr, builder)
-        }
-        ExpressionKind::IntrinsicType(..)
-        | ExpressionKind::EnumType(..)
-        | ExpressionKind::EnumConstructor { .. }
-        | ExpressionKind::Function { .. }
-        | ExpressionKind::FunctionType { .. }
-        | ExpressionKind::Operation { .. } => panic!("Unsupported type to intermediate lowering"),
+        FinishDiverge(DivergeExpressionType),
+        FinishLoop,
     }
+
+    let mut stack = Vec::new();
+    let mut values = Vec::new();
+    stack.push(Frame::Enter(expr));
+
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Enter(expr) => {
+                let span = expr.span;
+                match expr.kind {
+                    ExpressionKind::IntrinsicOperation(op) => match op {
+                        crate::parsing::IntrinsicOperation::Binary(left, right, operator) => {
+                            stack.push(Frame::FinishIntrinsicBinary(operator));
+                            stack.push(Frame::Enter(*right));
+                            stack.push(Frame::Enter(*left));
+                        }
+                        crate::parsing::IntrinsicOperation::Unary(operand, operator) => {
+                            stack.push(Frame::FinishIntrinsicUnary(operator));
+                            stack.push(Frame::Enter(*operand));
+                        }
+                    },
+                    ExpressionKind::Match { value, branches } => {
+                        let match_value = *value;
+                        let match_value_type = builder.expression_value_type(&match_value);
+                        let temp_identifier = builder.next_match_temp_identifier();
+                        let branch_patterns = branches
+                            .iter()
+                            .map(|(pattern, _)| pattern.clone())
+                            .collect();
+                        stack.push(Frame::FinishMatch {
+                            match_value_type,
+                            temp_identifier,
+                            branch_patterns,
+                        });
+                        for (_, branch_expr) in branches.into_iter().rev() {
+                            stack.push(Frame::Enter(branch_expr));
+                        }
+                        stack.push(Frame::Enter(match_value));
+                    }
+                    ExpressionKind::If {
+                        condition,
+                        then_branch,
+                        else_branch,
+                    } => {
+                        stack.push(Frame::FinishIf);
+                        stack.push(Frame::Enter(*else_branch));
+                        stack.push(Frame::Enter(*then_branch));
+                        stack.push(Frame::Enter(*condition));
+                    }
+                    ExpressionKind::Struct(fields) => {
+                        let field_ids = fields.iter().map(|(id, _)| id.clone()).collect();
+                        stack.push(Frame::FinishStruct(field_ids));
+                        for (_, field_expr) in fields.into_iter().rev() {
+                            stack.push(Frame::Enter(field_expr));
+                        }
+                    }
+                    ExpressionKind::Literal(lit) => values.push(IntermediateKind::Literal(lit)),
+                    ExpressionKind::Identifier(identifier) => {
+                        if let Some(inlined) = builder.inline_bindings.get(&identifier).cloned() {
+                            stack.push(Frame::Enter(inlined));
+                        } else {
+                            values.push(IntermediateKind::Identifier(identifier));
+                        }
+                    }
+                    ExpressionKind::Assignment { target, expr } => {
+                        stack.push(Frame::FinishAssignment(target));
+                        stack.push(Frame::Enter(*expr));
+                    }
+                    ExpressionKind::FunctionCall { function, argument } => {
+                        if let ExpressionKind::EnumConstructor {
+                            enum_type,
+                            variant,
+                            variant_index,
+                            ..
+                        } = &function.kind
+                        {
+                            let enum_value = ExpressionKind::EnumValue {
+                                enum_type: enum_type.clone(),
+                                variant: variant.clone(),
+                                variant_index: *variant_index,
+                                payload: argument.clone(),
+                            }
+                            .with_span(span);
+                            stack.push(Frame::Enter(enum_value));
+                            continue;
+                        }
+                        if let ExpressionKind::EnumAccess { enum_expr, variant } = &function.kind
+                            && let Some(enum_type) = builder.resolve_enum_type_expression(enum_expr)
+                            && let Some((variant_index, _)) = enum_variant_info(&enum_type, variant)
+                        {
+                            let enum_value = ExpressionKind::EnumValue {
+                                enum_type: Box::new(enum_type),
+                                variant: variant.clone(),
+                                variant_index,
+                                payload: argument.clone(),
+                            }
+                            .with_span(span);
+                            stack.push(Frame::Enter(enum_value));
+                            continue;
+                        }
+                        let function_index = match *function {
+                            Expression {
+                                kind: ExpressionKind::Identifier(identifier),
+                                ..
+                            } => builder
+                                .resolve_function_index(&identifier)
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "Function `{}` was not lowered to an intermediate function",
+                                        identifier.name
+                                    )
+                                }),
+                            function_expr @ Expression {
+                                kind: ExpressionKind::Function { .. },
+                                ..
+                            } => builder.register_function(None, function_expr),
+                            other => panic!(
+                                "Unsupported function call target in intermediate lowering: {:?}",
+                                other.kind
+                            ),
+                        };
+
+                        stack.push(Frame::FinishFunctionCall(function_index));
+                        stack.push(Frame::Enter(*argument));
+                    }
+                    ExpressionKind::PropertyAccess { object, property } => {
+                        stack.push(Frame::FinishPropertyAccess(property));
+                        stack.push(Frame::Enter(*object));
+                    }
+                    ExpressionKind::Binding(binding) => {
+                        let Binding { pattern, expr } = *binding;
+                        let binding_type = builder.infer_binding_type(&pattern, &expr);
+                        let stripped_pattern = builder.strip_binding_pattern(pattern.clone());
+                        let is_complex = matches!(
+                            stripped_pattern,
+                            BindingPattern::EnumVariant { .. } | BindingPattern::Struct { .. }
+                        );
+                        stack.push(Frame::FinishBinding {
+                            pattern,
+                            binding_type,
+                            is_complex,
+                        });
+                        stack.push(Frame::Enter(expr));
+                    }
+                    ExpressionKind::Block(expressions) => {
+                        stack.push(Frame::FinishBlock(expressions.len()));
+                        for expr in expressions.into_iter().rev() {
+                            stack.push(Frame::Enter(expr));
+                        }
+                    }
+                    ExpressionKind::Diverge {
+                        value,
+                        divergance_type,
+                    } => {
+                        stack.push(Frame::FinishDiverge(divergance_type));
+                        stack.push(Frame::Enter(*value));
+                    }
+                    ExpressionKind::Loop { body } => {
+                        stack.push(Frame::FinishLoop);
+                        stack.push(Frame::Enter(*body));
+                    }
+                    ExpressionKind::EnumAccess { enum_expr, variant } => {
+                        if let Some(enum_type) = builder.resolve_enum_type_expression(&enum_expr)
+                            && let Some((variant_index, payload_type)) =
+                                enum_variant_info(&enum_type, &variant)
+                            && let ExpressionKind::Struct(fields) = &payload_type.kind
+                            && fields.is_empty()
+                        {
+                            let enum_value = ExpressionKind::EnumValue {
+                                enum_type: Box::new(enum_type),
+                                variant,
+                                variant_index,
+                                payload: Box::new(
+                                    ExpressionKind::Struct(Vec::new()).with_span(span),
+                                ),
+                            }
+                            .with_span(span);
+                            stack.push(Frame::Enter(enum_value));
+                            continue;
+                        }
+                        panic!("Unsupported enum constructor reference in intermediate lowering");
+                    }
+                    enum_expr @ ExpressionKind::EnumValue { .. } => {
+                        if let Some(lowered) = materialize_enum_value(&enum_expr, &span) {
+                            stack.push(Frame::Enter(lowered));
+                        } else {
+                            values.push(IntermediateKind::Literal(ExpressionLiteral::Number(0)));
+                        }
+                    }
+                    ExpressionKind::AttachImplementation { type_expr, .. } => {
+                        stack.push(Frame::Enter(*type_expr));
+                    }
+                    ExpressionKind::IntrinsicType(..)
+                    | ExpressionKind::EnumType(..)
+                    | ExpressionKind::EnumConstructor { .. }
+                    | ExpressionKind::Function { .. }
+                    | ExpressionKind::FunctionType { .. }
+                    | ExpressionKind::Operation { .. } => {
+                        panic!("Unsupported type to intermediate lowering")
+                    }
+                }
+            }
+            Frame::FinishIntrinsicBinary(operator) => {
+                let right = values.pop().expect("Missing binary operand");
+                let left = values.pop().expect("Missing binary operand");
+                values.push(IntermediateKind::IntrinsicOperation(
+                    IntermediateIntrinsicOperation::Binary(
+                        Box::new(left),
+                        Box::new(right),
+                        operator,
+                    ),
+                ));
+            }
+            Frame::FinishIntrinsicUnary(operator) => {
+                let operand = values.pop().expect("Missing unary operand");
+                values.push(IntermediateKind::IntrinsicOperation(
+                    IntermediateIntrinsicOperation::Unary(Box::new(operand), operator),
+                ));
+            }
+            Frame::FinishIf => {
+                let else_branch = values.pop().expect("Missing if else branch");
+                let then_branch = values.pop().expect("Missing if then branch");
+                let condition = values.pop().expect("Missing if condition");
+                values.push(IntermediateKind::If {
+                    condition: Box::new(condition),
+                    then_branch: Box::new(then_branch),
+                    else_branch: Box::new(else_branch),
+                });
+            }
+            Frame::FinishStruct(field_ids) => {
+                let mut field_values = Vec::with_capacity(field_ids.len());
+                for _ in 0..field_ids.len() {
+                    field_values.push(values.pop().expect("Missing struct field value"));
+                }
+                field_values.reverse();
+                let fields = field_ids
+                    .into_iter()
+                    .zip(field_values.into_iter())
+                    .collect();
+                values.push(IntermediateKind::Struct(fields));
+            }
+            Frame::FinishAssignment(target) => {
+                let expr = values.pop().expect("Missing assignment value");
+                values.push(IntermediateKind::Assignment {
+                    target,
+                    expr: Box::new(expr),
+                });
+            }
+            Frame::FinishFunctionCall(function) => {
+                let argument = values.pop().expect("Missing function call argument");
+                values.push(IntermediateKind::FunctionCall {
+                    function,
+                    argument: Box::new(argument),
+                });
+            }
+            Frame::FinishPropertyAccess(property) => {
+                let object = values.pop().expect("Missing property access object");
+                values.push(IntermediateKind::PropertyAccess {
+                    object: Box::new(object),
+                    property,
+                });
+            }
+            Frame::FinishBinding {
+                pattern,
+                binding_type,
+                is_complex,
+            } => {
+                let lowered_expr = values.pop().expect("Missing binding expression");
+                if is_complex {
+                    let temp_identifier = builder.next_match_temp_identifier();
+                    let temp_binding = IntermediateKind::Binding(Box::new(IntermediateBinding {
+                        identifier: temp_identifier.clone(),
+                        binding_type: binding_type.clone(),
+                        expr: lowered_expr,
+                    }));
+                    let condition = builder.lower_binding_pattern_match(
+                        pattern,
+                        IntermediateKind::Identifier(temp_identifier),
+                        binding_type,
+                    );
+                    values.push(IntermediateKind::Block(vec![temp_binding, condition]));
+                } else {
+                    let lowered =
+                        builder.lower_binding_pattern_match(pattern, lowered_expr, binding_type);
+                    values.push(lowered);
+                }
+            }
+            Frame::FinishBlock(count) => {
+                let mut items = Vec::with_capacity(count);
+                for _ in 0..count {
+                    items.push(values.pop().expect("Missing block expression"));
+                }
+                items.reverse();
+                values.push(IntermediateKind::Block(items));
+            }
+            Frame::FinishMatch {
+                match_value_type,
+                temp_identifier,
+                branch_patterns,
+            } => {
+                let mut lowered_branches = Vec::with_capacity(branch_patterns.len());
+                for _ in 0..branch_patterns.len() {
+                    lowered_branches.push(values.pop().expect("Missing match branch"));
+                }
+                lowered_branches.reverse();
+                let lowered_value = values.pop().expect("Missing match value");
+
+                let match_binding = IntermediateKind::Binding(Box::new(IntermediateBinding {
+                    identifier: temp_identifier.clone(),
+                    binding_type: match_value_type.clone(),
+                    expr: lowered_value,
+                }));
+
+                let mut match_expr = IntermediateKind::Unreachable;
+                for (pattern, branch) in branch_patterns
+                    .into_iter()
+                    .zip(lowered_branches.into_iter())
+                    .rev()
+                {
+                    let condition = builder.lower_binding_pattern_match(
+                        pattern,
+                        IntermediateKind::Identifier(temp_identifier.clone()),
+                        match_value_type.clone(),
+                    );
+
+                    match_expr = IntermediateKind::If {
+                        condition: Box::new(condition),
+                        then_branch: Box::new(branch),
+                        else_branch: Box::new(match_expr),
+                    };
+                }
+
+                values.push(IntermediateKind::Block(vec![match_binding, match_expr]));
+            }
+            Frame::FinishDiverge(divergance_type) => {
+                let value = values.pop().expect("Missing diverge value");
+                values.push(IntermediateKind::Diverge {
+                    value: Box::new(value),
+                    divergance_type,
+                });
+            }
+            Frame::FinishLoop => {
+                let body = values.pop().expect("Missing loop body");
+                values.push(IntermediateKind::Loop {
+                    body: Box::new(body),
+                });
+            }
+        }
+    }
+
+    values.pop().expect("Missing lowered expression")
 }
 
 pub struct IntermediateBuilder {
@@ -518,21 +678,54 @@ impl IntermediateBuilder {
     }
 
     fn binding_pattern_type(&self, pattern: &BindingPattern) -> IntermediateType {
-        match pattern {
-            BindingPattern::Identifier(..) => IntermediateType::I32,
-            BindingPattern::Literal(..) => IntermediateType::I32,
-            BindingPattern::Struct(fields, _) => IntermediateType::Struct(
-                fields
-                    .iter()
-                    .map(|(id, pat)| (id.name.clone(), self.binding_pattern_type(pat)))
-                    .collect(),
-            ),
-            BindingPattern::EnumVariant { enum_type, .. } => {
-                self.type_expr_to_intermediate(enum_type)
-            }
-            BindingPattern::TypeHint(_, type_expr, _) => self.type_expr_to_intermediate(type_expr),
-            BindingPattern::Annotated { pattern, .. } => self.binding_pattern_type(pattern),
+        enum Frame {
+            Enter(BindingPattern),
+            FinishStruct(Vec<String>),
         }
+
+        let mut stack = Vec::new();
+        let mut values = Vec::new();
+        stack.push(Frame::Enter(pattern.clone()));
+
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Enter(pattern) => match pattern {
+                    BindingPattern::Identifier(..) | BindingPattern::Literal(..) => {
+                        values.push(IntermediateType::I32);
+                    }
+                    BindingPattern::Struct(fields, _) => {
+                        let field_names = fields.iter().map(|(id, _)| id.name.clone()).collect();
+                        stack.push(Frame::FinishStruct(field_names));
+                        for (_, pat) in fields.into_iter().rev() {
+                            stack.push(Frame::Enter(pat));
+                        }
+                    }
+                    BindingPattern::EnumVariant { enum_type, .. } => {
+                        values.push(self.type_expr_to_intermediate(&enum_type));
+                    }
+                    BindingPattern::TypeHint(_, type_expr, _) => {
+                        values.push(self.type_expr_to_intermediate(&type_expr));
+                    }
+                    BindingPattern::Annotated { pattern, .. } => {
+                        stack.push(Frame::Enter(*pattern));
+                    }
+                },
+                Frame::FinishStruct(field_names) => {
+                    let mut field_types = Vec::with_capacity(field_names.len());
+                    for _ in 0..field_names.len() {
+                        field_types.push(values.pop().expect("Missing struct field type"));
+                    }
+                    field_types.reverse();
+                    let fields = field_names
+                        .into_iter()
+                        .zip(field_types.into_iter())
+                        .collect();
+                    values.push(IntermediateType::Struct(fields));
+                }
+            }
+        }
+
+        values.pop().unwrap_or(IntermediateType::I32)
     }
 
     fn infer_binding_type(
@@ -540,92 +733,172 @@ impl IntermediateBuilder {
         pattern: &BindingPattern,
         expr: &Expression,
     ) -> IntermediateType {
-        match pattern {
-            BindingPattern::EnumVariant { enum_type, .. } => {
-                let enum_type = self
-                    .resolve_enum_type_expression(enum_type)
-                    .unwrap_or_else(|| *enum_type.clone());
-                self.type_expr_to_intermediate(&enum_type)
+        let mut current = pattern;
+        loop {
+            match current {
+                BindingPattern::EnumVariant { enum_type, .. } => {
+                    let enum_type = self
+                        .resolve_enum_type_expression(enum_type)
+                        .unwrap_or_else(|| *enum_type.clone());
+                    return self.type_expr_to_intermediate(&enum_type);
+                }
+                BindingPattern::TypeHint(_, type_expr, _) => {
+                    return self.type_expr_to_intermediate(type_expr);
+                }
+                BindingPattern::Annotated { pattern, .. } => {
+                    current = pattern;
+                }
+                _ => return self.expression_value_type(expr),
             }
-            BindingPattern::TypeHint(_, type_expr, _) => self.type_expr_to_intermediate(type_expr),
-            BindingPattern::Annotated { pattern, .. } => self.infer_binding_type(pattern, expr),
-            _ => self.expression_value_type(expr),
         }
     }
 
     fn expression_value_type(&mut self, expr: &Expression) -> IntermediateType {
-        match &expr.kind {
-            ExpressionKind::Literal(_) => IntermediateType::I32,
-            ExpressionKind::IntrinsicOperation(_) => IntermediateType::I32,
-            ExpressionKind::Struct(fields) => IntermediateType::Struct(
-                fields
-                    .iter()
-                    .map(|(id, field_expr)| {
-                        (id.name.clone(), self.expression_value_type(field_expr))
-                    })
-                    .collect(),
-            ),
-            ExpressionKind::If { then_branch, .. } => self.expression_value_type(then_branch),
-            ExpressionKind::Block(exprs) => exprs
-                .last()
-                .map(|expr| self.expression_value_type(expr))
-                .unwrap_or(IntermediateType::I32),
-            ExpressionKind::Match { branches, .. } => branches
-                .first()
-                .map(|(_, expr)| self.expression_value_type(expr))
-                .unwrap_or(IntermediateType::I32),
-            ExpressionKind::EnumValue { enum_type, .. } => {
-                let enum_type = self
-                    .resolve_enum_type_expression(enum_type)
-                    .unwrap_or_else(|| *enum_type.clone());
-                self.type_expr_to_intermediate(&enum_type)
-            }
-            ExpressionKind::EnumConstructor { enum_type, .. } => {
-                let enum_type = self
-                    .resolve_enum_type_expression(enum_type)
-                    .unwrap_or_else(|| *enum_type.clone());
-                self.type_expr_to_intermediate(&enum_type)
-            }
-            _ => IntermediateType::I32,
+        enum Frame {
+            Enter(Expression),
+            FinishStruct(Vec<String>),
         }
+
+        let mut stack = Vec::new();
+        let mut values = Vec::new();
+        stack.push(Frame::Enter(expr.clone()));
+
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Enter(expr) => match expr.kind {
+                    ExpressionKind::Literal(_) | ExpressionKind::IntrinsicOperation(_) => {
+                        values.push(IntermediateType::I32);
+                    }
+                    ExpressionKind::Struct(fields) => {
+                        let field_names = fields.iter().map(|(id, _)| id.name.clone()).collect();
+                        stack.push(Frame::FinishStruct(field_names));
+                        for (_, field_expr) in fields.into_iter().rev() {
+                            stack.push(Frame::Enter(field_expr));
+                        }
+                    }
+                    ExpressionKind::If { then_branch, .. } => {
+                        stack.push(Frame::Enter(*then_branch));
+                    }
+                    ExpressionKind::Block(exprs) => {
+                        if let Some(last) = exprs.last() {
+                            stack.push(Frame::Enter(last.clone()));
+                        } else {
+                            values.push(IntermediateType::I32);
+                        }
+                    }
+                    ExpressionKind::Match { branches, .. } => {
+                        if let Some((_, first_expr)) = branches.first() {
+                            stack.push(Frame::Enter(first_expr.clone()));
+                        } else {
+                            values.push(IntermediateType::I32);
+                        }
+                    }
+                    ExpressionKind::EnumValue { enum_type, .. }
+                    | ExpressionKind::EnumConstructor { enum_type, .. } => {
+                        let enum_type = self
+                            .resolve_enum_type_expression(&enum_type)
+                            .unwrap_or_else(|| *enum_type);
+                        values.push(self.type_expr_to_intermediate(&enum_type));
+                    }
+                    _ => values.push(IntermediateType::I32),
+                },
+                Frame::FinishStruct(field_names) => {
+                    let mut field_types = Vec::with_capacity(field_names.len());
+                    for _ in 0..field_names.len() {
+                        field_types.push(values.pop().expect("Missing struct field type"));
+                    }
+                    field_types.reverse();
+                    let fields = field_names
+                        .into_iter()
+                        .zip(field_types.into_iter())
+                        .collect();
+                    values.push(IntermediateType::Struct(fields));
+                }
+            }
+        }
+
+        values.pop().unwrap_or(IntermediateType::I32)
     }
 
     fn type_expr_to_intermediate(&self, expr: &Expression) -> IntermediateType {
-        match &expr.kind {
-            ExpressionKind::IntrinsicType(IntrinsicType::I32)
-            | ExpressionKind::IntrinsicType(IntrinsicType::Boolean)
-            | ExpressionKind::IntrinsicType(IntrinsicType::Target)
-            | ExpressionKind::IntrinsicType(IntrinsicType::Type) => IntermediateType::I32,
-            ExpressionKind::Struct(fields) => IntermediateType::Struct(
-                fields
-                    .iter()
-                    .map(|(id, field_expr)| {
-                        (id.name.clone(), self.type_expr_to_intermediate(field_expr))
-                    })
-                    .collect(),
-            ),
-            ExpressionKind::Identifier(identifier) => self
-                .type_aliases
-                .get(identifier)
-                .map(|ty| self.type_expr_to_intermediate(ty))
-                .unwrap_or(IntermediateType::I32),
-            ExpressionKind::AttachImplementation { type_expr, .. } => {
-                self.type_expr_to_intermediate(type_expr)
-            }
-            ExpressionKind::EnumType(variants) => {
-                let payload = IntermediateType::Struct(
-                    variants
-                        .iter()
-                        .map(|(name, ty)| (name.name.clone(), self.type_expr_to_intermediate(ty)))
-                        .collect(),
-                );
-                IntermediateType::Struct(vec![
-                    ("payload".to_string(), payload),
-                    ("tag".to_string(), IntermediateType::I32),
-                ])
-            }
-            _ => IntermediateType::I32,
+        enum Frame {
+            Enter(Expression),
+            FinishStruct(Vec<String>),
+            FinishEnumType(Vec<String>),
         }
+
+        let mut stack = Vec::new();
+        let mut values = Vec::new();
+        stack.push(Frame::Enter(expr.clone()));
+
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Enter(expr) => match expr.kind {
+                    ExpressionKind::IntrinsicType(IntrinsicType::I32)
+                    | ExpressionKind::IntrinsicType(IntrinsicType::Boolean)
+                    | ExpressionKind::IntrinsicType(IntrinsicType::Target)
+                    | ExpressionKind::IntrinsicType(IntrinsicType::Type) => {
+                        values.push(IntermediateType::I32);
+                    }
+                    ExpressionKind::Struct(fields) => {
+                        let field_names = fields.iter().map(|(id, _)| id.name.clone()).collect();
+                        stack.push(Frame::FinishStruct(field_names));
+                        for (_, field_expr) in fields.into_iter().rev() {
+                            stack.push(Frame::Enter(field_expr));
+                        }
+                    }
+                    ExpressionKind::Identifier(identifier) => {
+                        if let Some(ty) = self.type_aliases.get(&identifier).cloned() {
+                            stack.push(Frame::Enter(ty));
+                        } else {
+                            values.push(IntermediateType::I32);
+                        }
+                    }
+                    ExpressionKind::AttachImplementation { type_expr, .. } => {
+                        stack.push(Frame::Enter(*type_expr));
+                    }
+                    ExpressionKind::EnumType(variants) => {
+                        let variant_names =
+                            variants.iter().map(|(name, _)| name.name.clone()).collect();
+                        stack.push(Frame::FinishEnumType(variant_names));
+                        for (_, ty) in variants.into_iter().rev() {
+                            stack.push(Frame::Enter(ty));
+                        }
+                    }
+                    _ => values.push(IntermediateType::I32),
+                },
+                Frame::FinishStruct(field_names) => {
+                    let mut field_types = Vec::with_capacity(field_names.len());
+                    for _ in 0..field_names.len() {
+                        field_types.push(values.pop().expect("Missing struct field type"));
+                    }
+                    field_types.reverse();
+                    let fields = field_names
+                        .into_iter()
+                        .zip(field_types.into_iter())
+                        .collect();
+                    values.push(IntermediateType::Struct(fields));
+                }
+                Frame::FinishEnumType(variant_names) => {
+                    let mut variant_types = Vec::with_capacity(variant_names.len());
+                    for _ in 0..variant_names.len() {
+                        variant_types.push(values.pop().expect("Missing enum variant type"));
+                    }
+                    variant_types.reverse();
+                    let payload_fields = variant_names
+                        .into_iter()
+                        .zip(variant_types.into_iter())
+                        .collect();
+                    let payload = IntermediateType::Struct(payload_fields);
+                    values.push(IntermediateType::Struct(vec![
+                        ("payload".to_string(), payload),
+                        ("tag".to_string(), IntermediateType::I32),
+                    ]));
+                }
+            }
+        }
+
+        values.pop().unwrap_or(IntermediateType::I32)
     }
 
     fn resolve_enum_type_expression(&mut self, enum_expr: &Expression) -> Option<Expression> {
@@ -633,10 +906,13 @@ impl IntermediateBuilder {
     }
 
     fn strip_binding_pattern(&self, pattern: BindingPattern) -> BindingPattern {
-        match pattern {
-            BindingPattern::TypeHint(pattern, _, _) => self.strip_binding_pattern(*pattern),
-            BindingPattern::Annotated { pattern, .. } => self.strip_binding_pattern(*pattern),
-            other => other,
+        let mut current = pattern;
+        loop {
+            match current {
+                BindingPattern::TypeHint(pattern, _, _) => current = *pattern,
+                BindingPattern::Annotated { pattern, .. } => current = *pattern,
+                other => return other,
+            }
         }
     }
 
@@ -646,143 +922,203 @@ impl IntermediateBuilder {
         value_expr: IntermediateKind,
         value_type: IntermediateType,
     ) -> IntermediateKind {
-        match pattern {
-            BindingPattern::TypeHint(pattern, _, _) => {
-                self.lower_binding_pattern_match(*pattern, value_expr, value_type)
-            }
-            BindingPattern::Annotated { pattern, .. } => {
-                self.lower_binding_pattern_match(*pattern, value_expr, value_type)
-            }
-            BindingPattern::Struct(fields, span) => {
-                let field_types = if let IntermediateType::Struct(fields) = value_type {
-                    fields
-                } else {
-                    panic!("Struct pattern used on non-struct type at {:?}", span);
-                };
+        enum Frame {
+            Enter {
+                pattern: BindingPattern,
+                value_expr: IntermediateKind,
+                value_type: IntermediateType,
+            },
+            FinishStruct(usize),
+            FinishEnumPayload(IntermediateKind),
+        }
 
-                let mut combined_condition: Option<IntermediateKind> = None;
-                for (field_identifier, field_pattern) in fields {
-                    let field_type = field_types
-                        .iter()
-                        .find(|(name, _)| name == &field_identifier.name)
-                        .map(|(_, ty)| ty.clone())
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "Missing field {} in struct pattern at {:?}",
-                                field_identifier.name, span
-                            )
+        let mut stack = Vec::new();
+        let mut values = Vec::new();
+        stack.push(Frame::Enter {
+            pattern,
+            value_expr,
+            value_type,
+        });
+
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Enter {
+                    pattern,
+                    value_expr,
+                    value_type,
+                } => match pattern {
+                    BindingPattern::TypeHint(pattern, _, _)
+                    | BindingPattern::Annotated { pattern, .. } => {
+                        stack.push(Frame::Enter {
+                            pattern: *pattern,
+                            value_expr,
+                            value_type,
                         });
-                    let field_expr = IntermediateKind::PropertyAccess {
-                        object: Box::new(value_expr.clone()),
-                        property: field_identifier.name.clone(),
-                    };
-                    let field_condition =
-                        self.lower_binding_pattern_match(field_pattern, field_expr, field_type);
-                    combined_condition = Some(if let Some(current) = combined_condition {
-                        IntermediateKind::IntrinsicOperation(
+                    }
+                    BindingPattern::Struct(fields, span) => {
+                        let field_types = if let IntermediateType::Struct(fields) = value_type {
+                            fields
+                        } else {
+                            panic!("Struct pattern used on non-struct type at {:?}", span);
+                        };
+
+                        stack.push(Frame::FinishStruct(fields.len()));
+                        for (field_identifier, field_pattern) in fields.into_iter().rev() {
+                            let field_type = field_types
+                                .iter()
+                                .find(|(name, _)| name == &field_identifier.name)
+                                .map(|(_, ty)| ty.clone())
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "Missing field {} in struct pattern at {:?}",
+                                        field_identifier.name, span
+                                    )
+                                });
+                            let field_expr = IntermediateKind::PropertyAccess {
+                                object: Box::new(value_expr.clone()),
+                                property: field_identifier.name.clone(),
+                            };
+                            stack.push(Frame::Enter {
+                                pattern: field_pattern,
+                                value_expr: field_expr,
+                                value_type: field_type,
+                            });
+                        }
+                    }
+                    BindingPattern::EnumVariant {
+                        enum_type,
+                        variant,
+                        payload,
+                        span: _,
+                    } => {
+                        let enum_type = self
+                            .resolve_enum_type_expression(&enum_type)
+                            .unwrap_or(*enum_type.clone());
+                        let (variant_index, payload_type_expr) =
+                            enum_variant_info(&enum_type, &variant).unwrap_or_else(|| {
+                                panic!("Unknown enum variant `{}`", variant.name)
+                            });
+                        let payload_type = self.type_expr_to_intermediate(&payload_type_expr);
+
+                        let tag_expr = IntermediateKind::PropertyAccess {
+                            object: Box::new(value_expr.clone()),
+                            property: "tag".to_string(),
+                        };
+                        let tag_condition = IntermediateKind::IntrinsicOperation(
                             IntermediateIntrinsicOperation::Binary(
-                                Box::new(current),
-                                Box::new(field_condition),
+                                Box::new(tag_expr),
+                                Box::new(IntermediateKind::Literal(ExpressionLiteral::Number(
+                                    variant_index as i32,
+                                ))),
+                                BinaryIntrinsicOperator::I32Equal,
+                            ),
+                        );
+
+                        if let Some(payload_pattern) = payload {
+                            let payload_access = IntermediateKind::PropertyAccess {
+                                object: Box::new(IntermediateKind::PropertyAccess {
+                                    object: Box::new(value_expr),
+                                    property: "payload".to_string(),
+                                }),
+                                property: variant.name.clone(),
+                            };
+                            stack.push(Frame::FinishEnumPayload(tag_condition));
+                            stack.push(Frame::Enter {
+                                pattern: *payload_pattern,
+                                value_expr: payload_access,
+                                value_type: payload_type,
+                            });
+                        } else {
+                            values.push(tag_condition);
+                        }
+                    }
+                    BindingPattern::Literal(literal, span) => {
+                        let literal = match literal {
+                            ExpressionLiteral::Number(_) => literal,
+                            ExpressionLiteral::Boolean(_) => literal,
+                            other => panic!(
+                                "Unsupported literal pattern in binding lowering: {:?} at {:?}",
+                                other, span
+                            ),
+                        };
+                        values.push(IntermediateKind::IntrinsicOperation(
+                            IntermediateIntrinsicOperation::Binary(
+                                Box::new(value_expr),
+                                Box::new(IntermediateKind::Literal(literal)),
+                                BinaryIntrinsicOperator::I32Equal,
+                            ),
+                        ));
+                    }
+                    other => {
+                        let identifier = self.lower_binding_pattern(other);
+                        values.push(IntermediateKind::Binding(Box::new(IntermediateBinding {
+                            identifier,
+                            binding_type: value_type,
+                            expr: value_expr,
+                        })));
+                    }
+                },
+                Frame::FinishStruct(count) => {
+                    if count == 0 {
+                        values.push(IntermediateKind::Literal(ExpressionLiteral::Boolean(true)));
+                        continue;
+                    }
+                    let mut conditions = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        conditions.push(values.pop().expect("Missing struct condition"));
+                    }
+                    conditions.reverse();
+                    let mut iter = conditions.into_iter();
+                    let mut combined = iter.next().expect("Missing struct condition");
+                    for condition in iter {
+                        combined = IntermediateKind::IntrinsicOperation(
+                            IntermediateIntrinsicOperation::Binary(
+                                Box::new(combined),
+                                Box::new(condition),
                                 BinaryIntrinsicOperator::BooleanAnd,
                             ),
-                        )
-                    } else {
-                        field_condition
-                    });
+                        );
+                    }
+                    values.push(combined);
                 }
-
-                combined_condition
-                    .unwrap_or(IntermediateKind::Literal(ExpressionLiteral::Boolean(true)))
-            }
-            BindingPattern::EnumVariant {
-                enum_type,
-                variant,
-                payload,
-                span: _,
-            } => {
-                let enum_type = self
-                    .resolve_enum_type_expression(&enum_type)
-                    .unwrap_or(*enum_type.clone());
-                let (variant_index, payload_type_expr) = enum_variant_info(&enum_type, &variant)
-                    .unwrap_or_else(|| panic!("Unknown enum variant `{}`", variant.name));
-                let payload_type = self.type_expr_to_intermediate(&payload_type_expr);
-
-                let tag_expr = IntermediateKind::PropertyAccess {
-                    object: Box::new(value_expr.clone()),
-                    property: "tag".to_string(),
-                };
-                let tag_condition =
-                    IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
-                        Box::new(tag_expr),
-                        Box::new(IntermediateKind::Literal(ExpressionLiteral::Number(
-                            variant_index as i32,
-                        ))),
-                        BinaryIntrinsicOperator::I32Equal,
+                Frame::FinishEnumPayload(tag_condition) => {
+                    let payload_condition = values.pop().expect("Missing enum payload condition");
+                    values.push(IntermediateKind::IntrinsicOperation(
+                        IntermediateIntrinsicOperation::Binary(
+                            Box::new(tag_condition),
+                            Box::new(payload_condition),
+                            BinaryIntrinsicOperator::BooleanAnd,
+                        ),
                     ));
-
-                if let Some(payload_pattern) = payload {
-                    let payload_access = IntermediateKind::PropertyAccess {
-                        object: Box::new(IntermediateKind::PropertyAccess {
-                            object: Box::new(value_expr),
-                            property: "payload".to_string(),
-                        }),
-                        property: variant.name.clone(),
-                    };
-                    let payload_condition = self.lower_binding_pattern_match(
-                        *payload_pattern,
-                        payload_access,
-                        payload_type,
-                    );
-                    IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
-                        Box::new(tag_condition),
-                        Box::new(payload_condition),
-                        BinaryIntrinsicOperator::BooleanAnd,
-                    ))
-                } else {
-                    tag_condition
                 }
-            }
-            BindingPattern::Literal(literal, span) => {
-                let literal = match literal {
-                    ExpressionLiteral::Number(_) => literal,
-                    ExpressionLiteral::Boolean(_) => literal,
-                    other => panic!(
-                        "Unsupported literal pattern in binding lowering: {:?} at {:?}",
-                        other, span
-                    ),
-                };
-                IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
-                    Box::new(value_expr),
-                    Box::new(IntermediateKind::Literal(literal)),
-                    BinaryIntrinsicOperator::I32Equal,
-                ))
-            }
-            other => {
-                let identifier = self.lower_binding_pattern(other);
-                IntermediateKind::Binding(Box::new(IntermediateBinding {
-                    identifier,
-                    binding_type: value_type,
-                    expr: value_expr,
-                }))
             }
         }
+
+        values.pop().expect("Missing lowered binding pattern match")
     }
 
     fn lower_binding_pattern(&mut self, pattern: BindingPattern) -> Identifier {
-        match pattern {
-            BindingPattern::Identifier(identifier, _) => identifier,
-            BindingPattern::Struct { .. } => {
-                panic!(
-                    "Struct binding patterns should be lowered via `lower_binding_pattern_match`"
-                )
-            }
-            BindingPattern::EnumVariant { .. } => {
-                panic!("Enum binding patterns should be lowered via `lower_binding_pattern_match`")
-            }
-            BindingPattern::TypeHint(pattern, _, _) => self.lower_binding_pattern(*pattern),
-            BindingPattern::Annotated { pattern, .. } => self.lower_binding_pattern(*pattern),
-            other @ BindingPattern::Literal(..) => {
-                panic!("Unexpected pattern {:?} for identifier binding", other)
+        let mut current = pattern;
+        loop {
+            match current {
+                BindingPattern::Identifier(identifier, _) => return identifier,
+                BindingPattern::Struct { .. } => {
+                    panic!(
+                        "Struct binding patterns should be lowered via `lower_binding_pattern_match`"
+                    )
+                }
+                BindingPattern::EnumVariant { .. } => {
+                    panic!(
+                        "Enum binding patterns should be lowered via `lower_binding_pattern_match`"
+                    )
+                }
+                BindingPattern::TypeHint(pattern, _, _)
+                | BindingPattern::Annotated { pattern, .. } => {
+                    current = *pattern;
+                }
+                other @ BindingPattern::Literal(..) => {
+                    panic!("Unexpected pattern {:?} for identifier binding", other)
+                }
             }
         }
     }
@@ -814,37 +1150,102 @@ fn export_targets(annotations: &[BindingAnnotation]) -> Vec<TargetLiteral> {
 }
 
 fn default_value_for_type(ty: &Expression) -> Option<Expression> {
-    match &ty.kind {
-        ExpressionKind::IntrinsicType(IntrinsicType::I32 | IntrinsicType::Boolean) => {
-            Some(ExpressionKind::Literal(ExpressionLiteral::Number(0)).with_span(ty.span))
-        }
-        ExpressionKind::Struct(fields) => {
-            let mut values = Vec::new();
-            for (id, field_ty) in fields {
-                values.push((id.clone(), default_value_for_type(field_ty)?));
-            }
-            Some(Expression::new(ExpressionKind::Struct(values), ty.span))
-        }
-        ExpressionKind::AttachImplementation { type_expr, .. } => default_value_for_type(type_expr),
-        ExpressionKind::EnumType(variants) => {
-            if variants.is_empty() {
-                return None;
-            }
-            let (first_variant, first_ty) = &variants[0];
-            Some(
-                ExpressionKind::EnumValue {
-                    enum_type: Box::new(
-                        ExpressionKind::EnumType(variants.clone()).with_span(ty.span),
-                    ),
-                    variant: first_variant.clone(),
-                    variant_index: 0,
-                    payload: Box::new(default_value_for_type(first_ty)?),
-                }
-                .with_span(ty.span),
-            )
-        }
-        _ => None,
+    enum Frame {
+        Enter(Expression),
+        FinishStruct(Vec<Identifier>, SourceSpan),
+        FinishEnumType {
+            enum_type: Expression,
+            first_variant: Identifier,
+            span: SourceSpan,
+        },
     }
+
+    let mut stack = Vec::new();
+    let mut values: Vec<Option<Expression>> = Vec::new();
+    stack.push(Frame::Enter(ty.clone()));
+
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Enter(expr) => match expr.kind {
+                ExpressionKind::IntrinsicType(IntrinsicType::I32 | IntrinsicType::Boolean) => {
+                    values.push(Some(
+                        ExpressionKind::Literal(ExpressionLiteral::Number(0)).with_span(expr.span),
+                    ));
+                }
+                ExpressionKind::Struct(fields) => {
+                    let field_ids = fields.iter().map(|(id, _)| id.clone()).collect();
+                    stack.push(Frame::FinishStruct(field_ids, expr.span));
+                    for (_, field_ty) in fields.into_iter().rev() {
+                        stack.push(Frame::Enter(field_ty));
+                    }
+                }
+                ExpressionKind::AttachImplementation { type_expr, .. } => {
+                    stack.push(Frame::Enter(*type_expr));
+                }
+                ExpressionKind::EnumType(variants) => {
+                    if variants.is_empty() {
+                        values.push(None);
+                    } else {
+                        let (first_variant, first_ty) = &variants[0];
+                        let first_variant = first_variant.clone();
+                        let first_ty = first_ty.clone();
+                        let enum_type_expr =
+                            ExpressionKind::EnumType(variants).with_span(expr.span);
+                        stack.push(Frame::FinishEnumType {
+                            enum_type: enum_type_expr,
+                            first_variant,
+                            span: expr.span,
+                        });
+                        stack.push(Frame::Enter(first_ty));
+                    }
+                }
+                _ => values.push(None),
+            },
+            Frame::FinishStruct(field_ids, span) => {
+                let mut field_values = Vec::with_capacity(field_ids.len());
+                let mut ok = true;
+                for _ in 0..field_ids.len() {
+                    let value = values.pop().unwrap_or(None);
+                    if value.is_none() {
+                        ok = false;
+                    }
+                    field_values.push(value);
+                }
+                field_values.reverse();
+                if ok {
+                    let fields = field_ids
+                        .into_iter()
+                        .zip(field_values.into_iter().map(|value| value.unwrap()))
+                        .collect();
+                    values.push(Some(Expression::new(ExpressionKind::Struct(fields), span)));
+                } else {
+                    values.push(None);
+                }
+            }
+            Frame::FinishEnumType {
+                enum_type,
+                first_variant,
+                span,
+            } => {
+                let payload = values.pop().unwrap_or(None);
+                if let Some(payload) = payload {
+                    values.push(Some(
+                        ExpressionKind::EnumValue {
+                            enum_type: Box::new(enum_type),
+                            variant: first_variant,
+                            variant_index: 0,
+                            payload: Box::new(payload),
+                        }
+                        .with_span(span),
+                    ));
+                } else {
+                    values.push(None);
+                }
+            }
+        }
+    }
+
+    values.pop().unwrap_or(None)
 }
 
 fn materialize_enum_value(enum_value: &ExpressionKind, span: &SourceSpan) -> Option<Expression> {

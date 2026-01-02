@@ -66,43 +66,101 @@ impl WasmType {
 }
 
 fn format_wasm_type(ty: &WasmType) -> String {
-    match ty {
-        WasmType::I32 => "i32".to_string(),
-        WasmType::Struct(fields) => {
-            let inner = fields
-                .iter()
-                .map(|(name, ty)| format!("{}: {}", name, format_wasm_type(ty)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("struct {{{}}}", inner)
+    let mut stack = vec![(ty, false)];
+    let mut results: Vec<String> = Vec::new();
+
+    while let Some((node, visited)) = stack.pop() {
+        if !visited {
+            stack.push((node, true));
+            if let WasmType::Struct(fields) = node {
+                for (_, field_ty) in fields.iter().rev() {
+                    stack.push((field_ty, false));
+                }
+            }
+            continue;
+        }
+
+        match node {
+            WasmType::I32 => results.push("i32".to_string()),
+            WasmType::Struct(fields) => {
+                let mut parts = Vec::with_capacity(fields.len());
+                for (name, _) in fields.iter().rev() {
+                    let ty_str = results
+                        .pop()
+                        .expect("format_wasm_type should have field types");
+                    parts.push(format!("{}: {}", name, ty_str));
+                }
+                parts.reverse();
+                results.push(format!("struct {{{}}}", parts.join(", ")));
+            }
         }
     }
+
+    results
+        .pop()
+        .expect("format_wasm_type should produce one result")
 }
 
 fn intermediate_type_to_wasm(ty: &IntermediateType) -> WasmType {
-    match ty {
-        IntermediateType::I32 => WasmType::I32,
-        IntermediateType::Struct(fields) => {
-            let mut wasm_fields = fields
-                .iter()
-                .map(|(name, ty)| (name.clone(), intermediate_type_to_wasm(ty)))
-                .collect::<Vec<_>>();
-            wasm_fields.sort_by(|a, b| a.0.cmp(&b.0));
-            WasmType::Struct(wasm_fields)
+    let mut stack = vec![(ty, false)];
+    let mut results: Vec<WasmType> = Vec::new();
+
+    while let Some((node, visited)) = stack.pop() {
+        if !visited {
+            stack.push((node, true));
+            if let IntermediateType::Struct(fields) = node {
+                for (_, field_ty) in fields.iter().rev() {
+                    stack.push((field_ty, false));
+                }
+            }
+            continue;
+        }
+
+        match node {
+            IntermediateType::I32 => results.push(WasmType::I32),
+            IntermediateType::Struct(fields) => {
+                let mut wasm_fields = Vec::with_capacity(fields.len());
+                for (name, _) in fields.iter().rev() {
+                    let field_ty = results
+                        .pop()
+                        .expect("intermediate_type_to_wasm should have field types");
+                    wasm_fields.push((name.clone(), field_ty));
+                }
+                wasm_fields.reverse();
+                wasm_fields.sort_by(|a, b| a.0.cmp(&b.0));
+                results.push(WasmType::Struct(wasm_fields));
+            }
         }
     }
+
+    results
+        .pop()
+        .expect("intermediate_type_to_wasm should produce one result")
 }
 
 fn lvalue_to_intermediate(target: &LValue) -> IntermediateKind {
-    match target {
-        LValue::Identifier(identifier, _) => IntermediateKind::Identifier(identifier.clone()),
-        LValue::PropertyAccess {
-            object, property, ..
-        } => IntermediateKind::PropertyAccess {
-            object: Box::new(lvalue_to_intermediate(object)),
+    let mut current = target;
+    let mut properties = Vec::new();
+    let base_identifier = loop {
+        match current {
+            LValue::Identifier(identifier, _) => break identifier.clone(),
+            LValue::PropertyAccess {
+                object, property, ..
+            } => {
+                properties.push(property.clone());
+                current = object;
+            }
+        }
+    };
+
+    let mut expr = IntermediateKind::Identifier(base_identifier);
+    for property in properties.iter().rev() {
+        expr = IntermediateKind::PropertyAccess {
+            object: Box::new(expr),
             property: property.clone(),
-        },
+        };
     }
+    expr
 }
 
 fn ensure_lvalue_local(
@@ -110,19 +168,24 @@ fn ensure_lvalue_local(
     locals_types: &std::collections::HashMap<String, WasmType>,
     span: SourceSpan,
 ) -> Result<(), Diagnostic> {
-    match target {
-        LValue::Identifier(identifier, _) => {
-            if locals_types.contains_key(&identifier.name) {
-                Ok(())
-            } else {
-                Err(Diagnostic::new(format!(
-                    "Identifier `{}` is not a local variable or parameter",
-                    identifier.name
-                ))
-                .with_span(span))
+    let mut current = target;
+    loop {
+        match current {
+            LValue::Identifier(identifier, _) => {
+                return if locals_types.contains_key(&identifier.name) {
+                    Ok(())
+                } else {
+                    Err(Diagnostic::new(format!(
+                        "Identifier `{}` is not a local variable or parameter",
+                        identifier.name
+                    ))
+                    .with_span(span))
+                };
+            }
+            LValue::PropertyAccess { object, .. } => {
+                current = object;
             }
         }
-        LValue::PropertyAccess { object, .. } => ensure_lvalue_local(object, locals_types, span),
     }
 }
 
@@ -140,20 +203,39 @@ impl TypeContext {
     }
 
     fn get_or_register_type(&mut self, fields: Vec<(String, WasmType)>) -> u32 {
-        if let Some(&index) = self.type_map.get(&fields) {
-            return index;
-        }
+        let mut stack = vec![(fields, false)];
+        let mut last_index = None;
 
-        for (_, field_type) in &fields {
-            if let WasmType::Struct(inner_fields) = field_type {
-                self.get_or_register_type(inner_fields.clone());
+        while let Some((current, visited)) = stack.pop() {
+            if let Some(&index) = self.type_map.get(&current) {
+                last_index = Some(index);
+                continue;
             }
+
+            if !visited {
+                stack.push((current.clone(), true));
+                for (_, field_type) in current.iter().rev() {
+                    if let WasmType::Struct(inner_fields) = field_type {
+                        if !self.type_map.contains_key(inner_fields) {
+                            stack.push((inner_fields.clone(), false));
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if let Some(&index) = self.type_map.get(&current) {
+                last_index = Some(index);
+                continue;
+            }
+
+            let index = self.struct_types.len() as u32;
+            self.struct_types.push(current.clone());
+            self.type_map.insert(current, index);
+            last_index = Some(index);
         }
 
-        let index = self.struct_types.len() as u32;
-        self.struct_types.push(fields.clone());
-        self.type_map.insert(fields, index);
-        index
+        last_index.expect("Type should be registered")
     }
 
     fn get_type_index(&self, fields: &Vec<(String, WasmType)>) -> Option<u32> {
@@ -438,59 +520,80 @@ fn collect_types(
     locals_types: &mut std::collections::HashMap<String, WasmType>,
     function_return_types: &[WasmType],
 ) -> Result<(), Diagnostic> {
-    match expr {
-        IntermediateKind::Struct(fields) => {
-            let mut field_types = Vec::new();
-            for (name, value) in fields {
-                collect_types(value, ctx, locals_types, function_return_types)?;
-                let ty = infer_type(value, locals_types, function_return_types)?;
-                field_types.push((name.name.clone(), ty));
+    let mut stack = vec![(expr, false)];
+
+    while let Some((node, visited)) = stack.pop() {
+        if !visited {
+            stack.push((node, true));
+            match node {
+                IntermediateKind::Struct(fields) => {
+                    for (_, value) in fields.iter().rev() {
+                        stack.push((value, false));
+                    }
+                }
+                IntermediateKind::Block(exprs) => {
+                    for e in exprs.iter().rev() {
+                        stack.push((e, false));
+                    }
+                }
+                IntermediateKind::Binding(binding) => {
+                    stack.push((&binding.expr, false));
+                }
+                IntermediateKind::FunctionCall { argument, .. } => {
+                    stack.push((argument, false));
+                }
+                IntermediateKind::If {
+                    condition,
+                    then_branch,
+                    else_branch,
+                } => {
+                    stack.push((else_branch, false));
+                    stack.push((then_branch, false));
+                    stack.push((condition, false));
+                }
+                IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
+                    left,
+                    right,
+                    _,
+                )) => {
+                    stack.push((right, false));
+                    stack.push((left, false));
+                }
+                IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(
+                    operand,
+                    _,
+                )) => {
+                    stack.push((operand, false));
+                }
+                IntermediateKind::Loop { body } => {
+                    stack.push((body, false));
+                }
+                IntermediateKind::PropertyAccess { object, .. } => {
+                    stack.push((object, false));
+                }
+                _ => {}
             }
-            field_types.sort_by(|a, b| a.0.cmp(&b.0));
-            ctx.get_or_register_type(field_types);
+            continue;
         }
-        IntermediateKind::Block(exprs) => {
-            for e in exprs {
-                collect_types(e, ctx, locals_types, function_return_types)?;
+
+        match node {
+            IntermediateKind::Struct(fields) => {
+                let mut field_types = Vec::new();
+                for (name, value) in fields {
+                    let ty = infer_type(value, locals_types, function_return_types)?;
+                    field_types.push((name.name.clone(), ty));
+                }
+                field_types.sort_by(|a, b| a.0.cmp(&b.0));
+                ctx.get_or_register_type(field_types);
             }
+            IntermediateKind::Binding(binding) => {
+                let binding = binding.as_ref();
+                let ty = infer_type(&binding.expr, locals_types, function_return_types)?;
+                let mut locals = Vec::new();
+                collect_locals_for_pattern(binding, ty, locals_types, &mut locals)?;
+            }
+            _ => {}
         }
-        IntermediateKind::Binding(binding) => {
-            let binding = binding.as_ref();
-            collect_types(&binding.expr, ctx, locals_types, function_return_types)?;
-            let ty = infer_type(&binding.expr, locals_types, function_return_types)?;
-            let mut locals = Vec::new();
-            collect_locals_for_pattern(binding, ty, locals_types, &mut locals)?;
-        }
-        IntermediateKind::FunctionCall { argument, .. } => {
-            collect_types(argument, ctx, locals_types, function_return_types)?;
-        }
-        IntermediateKind::If {
-            condition,
-            then_branch,
-            else_branch,
-        } => {
-            collect_types(condition, ctx, locals_types, function_return_types)?;
-            collect_types(then_branch, ctx, locals_types, function_return_types)?;
-            collect_types(else_branch, ctx, locals_types, function_return_types)?;
-        }
-        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
-            left,
-            right,
-            _,
-        )) => {
-            collect_types(left, ctx, locals_types, function_return_types)?;
-            collect_types(right, ctx, locals_types, function_return_types)?;
-        }
-        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(operand, _)) => {
-            collect_types(operand, ctx, locals_types, function_return_types)?;
-        }
-        IntermediateKind::Loop { body } => {
-            collect_types(body, ctx, locals_types, function_return_types)?;
-        }
-        IntermediateKind::PropertyAccess { object, .. } => {
-            collect_types(object, ctx, locals_types, function_return_types)?;
-        }
-        _ => {}
     }
     Ok(())
 }
@@ -504,7 +607,7 @@ fn determine_loop_result_type(
     let mut break_types = Vec::new();
 
     for val in break_values {
-        let ty = infer_type(&val, locals_types, function_return_types)?;
+        let ty = infer_type_basic(&val, locals_types, function_return_types)?;
         break_types.push(ty);
     }
 
@@ -536,49 +639,85 @@ fn expression_produces_value(
     expr: &IntermediateKind,
     locals_types: &std::collections::HashMap<String, WasmType>,
     function_return_types: &[WasmType],
-    type_ctx: &TypeContext,
+    _type_ctx: &TypeContext,
 ) -> Result<bool, Diagnostic> {
-    match expr {
-        IntermediateKind::Diverge { .. } => Ok(false),
-        IntermediateKind::Unreachable => Ok(false),
-        IntermediateKind::If {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            let then_produces_value = expression_produces_value(
-                then_branch,
-                locals_types,
-                function_return_types,
-                type_ctx,
-            )?;
-            let else_produces_value = expression_produces_value(
-                else_branch,
-                locals_types,
-                function_return_types,
-                type_ctx,
-            )?;
-            let then_diverges = expression_does_diverge(then_branch, false, false);
-            let else_diverges = expression_does_diverge(else_branch, false, false);
-            Ok(then_produces_value && else_produces_value
-                || ((then_diverges || else_diverges)
-                    && (then_produces_value || else_produces_value)))
-        }
-        IntermediateKind::Block(exprs) => {
-            let Some(last) = exprs.last() else {
-                panic!("Empty block shouldn't exist")
-            };
-            let diverges = exprs
-                .iter()
-                .any(|e| expression_does_diverge(e, false, false));
-            Ok(!diverges
-                && expression_produces_value(last, locals_types, function_return_types, type_ctx)?)
-        }
-        IntermediateKind::Loop { body } => {
-            Ok(determine_loop_result_type(body, locals_types, function_return_types)?.is_some())
-        }
-        _ => Ok(true),
+    enum ValueFrame<'a> {
+        Start(&'a IntermediateKind),
+        FinishIf {
+            then_branch: &'a IntermediateKind,
+            else_branch: &'a IntermediateKind,
+        },
+        FinishBlock(&'a Vec<IntermediateKind>),
     }
+
+    let mut stack = vec![ValueFrame::Start(expr)];
+    let mut results: Vec<bool> = Vec::new();
+
+    while let Some(frame) = stack.pop() {
+        match frame {
+            ValueFrame::Start(node) => match node {
+                IntermediateKind::Diverge { .. } | IntermediateKind::Unreachable => {
+                    results.push(false);
+                }
+                IntermediateKind::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    stack.push(ValueFrame::FinishIf {
+                        then_branch,
+                        else_branch,
+                    });
+                    stack.push(ValueFrame::Start(else_branch));
+                    stack.push(ValueFrame::Start(then_branch));
+                }
+                IntermediateKind::Block(exprs) => {
+                    let Some(last) = exprs.last() else {
+                        panic!("Empty block shouldn't exist")
+                    };
+                    stack.push(ValueFrame::FinishBlock(exprs));
+                    stack.push(ValueFrame::Start(last));
+                }
+                IntermediateKind::Loop { body } => {
+                    results.push(
+                        determine_loop_result_type(body, locals_types, function_return_types)?
+                            .is_some(),
+                    );
+                }
+                _ => results.push(true),
+            },
+            ValueFrame::FinishIf {
+                then_branch,
+                else_branch,
+            } => {
+                let else_produces = results
+                    .pop()
+                    .expect("expression_produces_value should have else value");
+                let then_produces = results
+                    .pop()
+                    .expect("expression_produces_value should have then value");
+                let then_diverges = expression_does_diverge(then_branch, false, false);
+                let else_diverges = expression_does_diverge(else_branch, false, false);
+                results.push(
+                    then_produces && else_produces
+                        || ((then_diverges || else_diverges) && (then_produces || else_produces)),
+                );
+            }
+            ValueFrame::FinishBlock(exprs) => {
+                let last_produces = results
+                    .pop()
+                    .expect("expression_produces_value should have block value");
+                let diverges = exprs
+                    .iter()
+                    .any(|e| expression_does_diverge(e, false, false));
+                results.push(!diverges && last_produces);
+            }
+        }
+    }
+
+    results
+        .pop()
+        .ok_or_else(|| Diagnostic::new("Failed to compute expression value".to_string()))
 }
 
 fn infer_type(
@@ -586,147 +725,369 @@ fn infer_type(
     locals_types: &std::collections::HashMap<String, WasmType>,
     function_return_types: &[WasmType],
 ) -> Result<WasmType, Diagnostic> {
-    match expr {
-        IntermediateKind::Literal(ExpressionLiteral::Number(_)) => Ok(WasmType::I32),
-        IntermediateKind::Literal(ExpressionLiteral::Boolean(_)) => Ok(WasmType::I32),
-        IntermediateKind::Struct(fields) => {
-            let mut field_types = Vec::new();
-            for (name, value) in fields {
-                let ty = infer_type(value, locals_types, function_return_types)?;
-                field_types.push((name.name.clone(), ty));
-            }
-            field_types.sort_by(|a, b| a.0.cmp(&b.0));
-            Ok(WasmType::Struct(field_types))
-        }
-        IntermediateKind::Identifier(identifier) => {
-            locals_types.get(&identifier.name).cloned().ok_or_else(|| {
-                Diagnostic::new(format!("Unknown identifier `{}`", identifier.name))
-                    .with_span(SourceSpan::default())
-            })
-        }
-        IntermediateKind::Assignment { target, expr: rhs } => {
-            let value_type = infer_type(rhs, locals_types, function_return_types)?;
-            let target_expr = lvalue_to_intermediate(target);
-            let existing_type = infer_type(&target_expr, locals_types, function_return_types)?;
+    infer_type_impl(expr, locals_types, function_return_types)
+}
 
-            if value_type != existing_type {
-                return Err(Diagnostic::new(
-                    "Cannot assign value of different type to target".to_string(),
-                )
-                .with_span(SourceSpan::default()));
-            }
-
-            Ok(value_type)
-        }
-        IntermediateKind::Diverge { value, .. } => {
-            infer_type(value, locals_types, function_return_types)
-        }
-        IntermediateKind::Loop { body } => {
-            if let Some(result_type) =
-                determine_loop_result_type(body, locals_types, function_return_types)?
-            {
-                return Ok(result_type);
-            }
-
-            infer_type(body, locals_types, function_return_types)
-        }
-        IntermediateKind::FunctionCall { function, .. } => function_return_types
-            .get(*function)
-            .cloned()
-            .ok_or_else(|| {
-                Diagnostic::new("Unknown function call target".to_string())
-                    .with_span(SourceSpan::default())
-            }),
-        IntermediateKind::PropertyAccess { object, property } => {
-            let object_type = infer_type(object, locals_types, function_return_types)?;
-            if let WasmType::Struct(fields) = object_type {
-                if let Some((_, field_type)) = fields.iter().find(|(n, _)| n == property) {
-                    Ok(field_type.clone())
-                } else {
-                    Err(
-                        Diagnostic::new(format!("Field `{}` not found in struct", property))
-                            .with_span(SourceSpan::default()),
-                    )
-                }
-            } else {
-                Err(Diagnostic::new("Property access on non-struct type")
-                    .with_span(SourceSpan::default()))
-            }
-        }
-        IntermediateKind::IntrinsicOperation(..) => Ok(WasmType::I32),
-        IntermediateKind::If { then_branch, .. } => {
-            infer_type(then_branch, locals_types, function_return_types)
-        }
-        IntermediateKind::Block(exprs) => {
-            if let Some(last) = exprs.last() {
-                infer_type(last, locals_types, function_return_types)
-            } else {
-                Ok(WasmType::I32)
-            }
-        }
-        IntermediateKind::Binding(..) => Ok(WasmType::I32),
-        IntermediateKind::Unreachable => Ok(WasmType::I32),
-        _ => Ok(WasmType::I32),
+fn infer_type_basic(
+    expr: &IntermediateKind,
+    locals_types: &std::collections::HashMap<String, WasmType>,
+    function_return_types: &[WasmType],
+) -> Result<WasmType, Diagnostic> {
+    enum InferTask {
+        Eval(IntermediateKind),
+        FinishStruct { field_names: Vec<String> },
+        FinishAssignment,
+        FinishPropertyAccess { property: String },
     }
+
+    let mut stack: Vec<InferTask> = Vec::new();
+    stack.push(InferTask::Eval(expr.clone()));
+    let mut results: Vec<WasmType> = Vec::new();
+
+    while let Some(task) = stack.pop() {
+        match task {
+            InferTask::Eval(node) => match node {
+                IntermediateKind::Literal(ExpressionLiteral::Number(_))
+                | IntermediateKind::Literal(ExpressionLiteral::Boolean(_)) => {
+                    results.push(WasmType::I32);
+                }
+                IntermediateKind::Struct(fields) => {
+                    let field_names = fields.iter().map(|(name, _)| name.name.clone()).collect();
+                    stack.push(InferTask::FinishStruct { field_names });
+                    for (_, value) in fields.into_iter().rev() {
+                        stack.push(InferTask::Eval(value));
+                    }
+                }
+                IntermediateKind::Identifier(identifier) => {
+                    let ty = locals_types.get(&identifier.name).cloned().ok_or_else(|| {
+                        Diagnostic::new(format!("Unknown identifier `{}`", identifier.name))
+                            .with_span(SourceSpan::default())
+                    })?;
+                    results.push(ty);
+                }
+                IntermediateKind::Assignment { target, expr: rhs } => {
+                    let target_expr = lvalue_to_intermediate(&target);
+                    stack.push(InferTask::FinishAssignment);
+                    stack.push(InferTask::Eval(target_expr));
+                    stack.push(InferTask::Eval((*rhs).clone()));
+                }
+                IntermediateKind::Diverge { value, .. } => {
+                    stack.push(InferTask::Eval((*value).clone()));
+                }
+                IntermediateKind::Loop { body } => {
+                    stack.push(InferTask::Eval((*body).clone()));
+                }
+                IntermediateKind::FunctionCall { function, .. } => {
+                    let ty = function_return_types
+                        .get(function)
+                        .cloned()
+                        .ok_or_else(|| {
+                            Diagnostic::new("Unknown function call target".to_string())
+                                .with_span(SourceSpan::default())
+                        })?;
+                    results.push(ty);
+                }
+                IntermediateKind::PropertyAccess { object, property } => {
+                    stack.push(InferTask::FinishPropertyAccess { property });
+                    stack.push(InferTask::Eval((*object).clone()));
+                }
+                IntermediateKind::IntrinsicOperation(..)
+                | IntermediateKind::Binding(..)
+                | IntermediateKind::Unreachable => {
+                    results.push(WasmType::I32);
+                }
+                IntermediateKind::If { then_branch, .. } => {
+                    stack.push(InferTask::Eval((*then_branch).clone()));
+                }
+                IntermediateKind::Block(exprs) => {
+                    if let Some(last) = exprs.last() {
+                        stack.push(InferTask::Eval(last.clone()));
+                    } else {
+                        results.push(WasmType::I32);
+                    }
+                }
+                _ => results.push(WasmType::I32),
+            },
+            InferTask::FinishStruct { field_names } => {
+                let mut field_types = Vec::with_capacity(field_names.len());
+                for name in field_names.into_iter().rev() {
+                    let ty = results
+                        .pop()
+                        .expect("infer_type_basic should have field types");
+                    field_types.push((name, ty));
+                }
+                field_types.reverse();
+                field_types.sort_by(|a, b| a.0.cmp(&b.0));
+                results.push(WasmType::Struct(field_types));
+            }
+            InferTask::FinishAssignment => {
+                let existing_type = results
+                    .pop()
+                    .expect("infer_type_basic should have assignment target type");
+                let value_type = results
+                    .pop()
+                    .expect("infer_type_basic should have assignment value type");
+
+                if value_type != existing_type {
+                    return Err(Diagnostic::new(
+                        "Cannot assign value of different type to target".to_string(),
+                    )
+                    .with_span(SourceSpan::default()));
+                }
+                results.push(value_type);
+            }
+            InferTask::FinishPropertyAccess { property } => {
+                let object_type = results
+                    .pop()
+                    .expect("infer_type_basic should have object type");
+                if let WasmType::Struct(fields) = object_type {
+                    if let Some((_, field_type)) = fields.iter().find(|(n, _)| n == &property) {
+                        results.push(field_type.clone());
+                    } else {
+                        return Err(Diagnostic::new(format!(
+                            "Field `{}` not found in struct",
+                            property
+                        ))
+                        .with_span(SourceSpan::default()));
+                    }
+                } else {
+                    return Err(Diagnostic::new("Property access on non-struct type")
+                        .with_span(SourceSpan::default()));
+                }
+            }
+        }
+    }
+
+    results
+        .pop()
+        .ok_or_else(|| Diagnostic::new("Failed to infer type".to_string()))
+}
+
+fn infer_type_impl(
+    expr: &IntermediateKind,
+    locals_types: &std::collections::HashMap<String, WasmType>,
+    function_return_types: &[WasmType],
+) -> Result<WasmType, Diagnostic> {
+    enum InferTask {
+        Eval(IntermediateKind),
+        FinishStruct { field_names: Vec<String> },
+        FinishAssignment,
+        FinishPropertyAccess { property: String },
+        FinishLoop { body: IntermediateKind },
+    }
+
+    let mut stack: Vec<InferTask> = Vec::new();
+    stack.push(InferTask::Eval(expr.clone()));
+    let mut results: Vec<WasmType> = Vec::new();
+
+    while let Some(task) = stack.pop() {
+        match task {
+            InferTask::Eval(node) => match node {
+                IntermediateKind::Literal(ExpressionLiteral::Number(_))
+                | IntermediateKind::Literal(ExpressionLiteral::Boolean(_)) => {
+                    results.push(WasmType::I32);
+                }
+                IntermediateKind::Struct(fields) => {
+                    let field_names = fields.iter().map(|(name, _)| name.name.clone()).collect();
+                    stack.push(InferTask::FinishStruct { field_names });
+                    for (_, value) in fields.into_iter().rev() {
+                        stack.push(InferTask::Eval(value));
+                    }
+                }
+                IntermediateKind::Identifier(identifier) => {
+                    let ty = locals_types.get(&identifier.name).cloned().ok_or_else(|| {
+                        Diagnostic::new(format!("Unknown identifier `{}`", identifier.name))
+                            .with_span(SourceSpan::default())
+                    })?;
+                    results.push(ty);
+                }
+                IntermediateKind::Assignment { target, expr: rhs } => {
+                    let target_expr = lvalue_to_intermediate(&target);
+                    stack.push(InferTask::FinishAssignment);
+                    stack.push(InferTask::Eval(target_expr));
+                    stack.push(InferTask::Eval((*rhs).clone()));
+                }
+                IntermediateKind::Diverge { value, .. } => {
+                    stack.push(InferTask::Eval((*value).clone()));
+                }
+                IntermediateKind::Loop { body } => {
+                    stack.push(InferTask::FinishLoop {
+                        body: (*body).clone(),
+                    });
+                    stack.push(InferTask::Eval((*body).clone()));
+                }
+                IntermediateKind::FunctionCall { function, .. } => {
+                    let ty = function_return_types
+                        .get(function)
+                        .cloned()
+                        .ok_or_else(|| {
+                            Diagnostic::new("Unknown function call target".to_string())
+                                .with_span(SourceSpan::default())
+                        })?;
+                    results.push(ty);
+                }
+                IntermediateKind::PropertyAccess { object, property } => {
+                    stack.push(InferTask::FinishPropertyAccess { property });
+                    stack.push(InferTask::Eval((*object).clone()));
+                }
+                IntermediateKind::IntrinsicOperation(..)
+                | IntermediateKind::Binding(..)
+                | IntermediateKind::Unreachable => {
+                    results.push(WasmType::I32);
+                }
+                IntermediateKind::If { then_branch, .. } => {
+                    stack.push(InferTask::Eval((*then_branch).clone()));
+                }
+                IntermediateKind::Block(exprs) => {
+                    if let Some(last) = exprs.last() {
+                        stack.push(InferTask::Eval(last.clone()));
+                    } else {
+                        results.push(WasmType::I32);
+                    }
+                }
+                _ => results.push(WasmType::I32),
+            },
+            InferTask::FinishStruct { field_names } => {
+                let mut field_types = Vec::with_capacity(field_names.len());
+                for name in field_names.into_iter().rev() {
+                    let ty = results
+                        .pop()
+                        .expect("infer_type_impl should have field types");
+                    field_types.push((name, ty));
+                }
+                field_types.reverse();
+                field_types.sort_by(|a, b| a.0.cmp(&b.0));
+                results.push(WasmType::Struct(field_types));
+            }
+            InferTask::FinishAssignment => {
+                let existing_type = results
+                    .pop()
+                    .expect("infer_type_impl should have assignment target type");
+                let value_type = results
+                    .pop()
+                    .expect("infer_type_impl should have assignment value type");
+
+                if value_type != existing_type {
+                    return Err(Diagnostic::new(
+                        "Cannot assign value of different type to target".to_string(),
+                    )
+                    .with_span(SourceSpan::default()));
+                }
+                results.push(value_type);
+            }
+            InferTask::FinishPropertyAccess { property } => {
+                let object_type = results
+                    .pop()
+                    .expect("infer_type_impl should have object type");
+                if let WasmType::Struct(fields) = object_type {
+                    if let Some((_, field_type)) = fields.iter().find(|(n, _)| n == &property) {
+                        results.push(field_type.clone());
+                    } else {
+                        return Err(Diagnostic::new(format!(
+                            "Field `{}` not found in struct",
+                            property
+                        ))
+                        .with_span(SourceSpan::default()));
+                    }
+                } else {
+                    return Err(Diagnostic::new("Property access on non-struct type")
+                        .with_span(SourceSpan::default()));
+                }
+            }
+            InferTask::FinishLoop { body } => {
+                let body_type = results
+                    .pop()
+                    .ok_or_else(|| Diagnostic::new("Failed to infer type".to_string()))?;
+                if let Some(result_type) =
+                    determine_loop_result_type(&body, locals_types, function_return_types)?
+                {
+                    results.push(result_type);
+                } else {
+                    results.push(body_type);
+                }
+            }
+        }
+    }
+
+    results
+        .pop()
+        .ok_or_else(|| Diagnostic::new("Failed to infer type".to_string()))
 }
 
 fn extract_function_params(
     pattern: &BindingPattern,
     ty: &IntermediateType,
 ) -> Result<Vec<WasmFunctionParam>, Diagnostic> {
-    match stripped_binding_pattern(pattern) {
-        BindingPattern::Struct(fields, span) => {
-            let field_types = if let IntermediateType::Struct(field_types) = ty {
-                field_types
-            } else {
+    let mut params = Vec::new();
+    let mut stack = vec![(pattern, ty)];
+
+    while let Some((current_pattern, current_type)) = stack.pop() {
+        match stripped_binding_pattern(current_pattern) {
+            BindingPattern::Struct(fields, span) => {
+                let field_types = if let IntermediateType::Struct(field_types) = current_type {
+                    field_types
+                } else {
+                    return Err(
+                        Diagnostic::new("Struct pattern requires struct parameter type")
+                            .with_span(*span),
+                    );
+                };
+
+                for (field_id, sub_pattern) in fields.iter().rev() {
+                    let field_ty = field_types
+                        .iter()
+                        .find(|(name, _)| name == &field_id.name)
+                        .map(|(_, ty)| ty)
+                        .ok_or_else(|| {
+                            Diagnostic::new(format!(
+                                "Missing field {} in struct parameter type",
+                                field_id.name
+                            ))
+                            .with_span(sub_pattern.span())
+                        })?;
+                    stack.push((sub_pattern, field_ty));
+                }
+            }
+            BindingPattern::Identifier(identifier, _) => params.push(WasmFunctionParam {
+                name: identifier.name.clone(),
+                ty: intermediate_type_to_wasm(current_type),
+            }),
+            BindingPattern::Literal(_, span) => {
+                return Err(Diagnostic::new(
+                    "Literal patterns cannot be used in function parameters",
+                )
+                .with_span(*span));
+            }
+            BindingPattern::EnumVariant { span, .. } => {
                 return Err(
-                    Diagnostic::new("Struct pattern requires struct parameter type")
+                    Diagnostic::new("Enum patterns cannot be used in function parameters")
                         .with_span(*span),
                 );
-            };
-            let mut params = Vec::new();
-            for (field_id, sub_pattern) in fields {
-                let field_ty = field_types
-                    .iter()
-                    .find(|(name, _)| name == &field_id.name)
-                    .map(|(_, ty)| ty)
-                    .ok_or_else(|| {
-                        Diagnostic::new(format!(
-                            "Missing field {} in struct parameter type",
-                            field_id.name
-                        ))
-                        .with_span(sub_pattern.span())
-                    })?;
-                params.extend(extract_function_params(sub_pattern, field_ty)?);
             }
-            Ok(params)
-        }
-        BindingPattern::Identifier(identifier, _) => Ok(vec![WasmFunctionParam {
-            name: identifier.name.clone(),
-            ty: intermediate_type_to_wasm(ty),
-        }]),
-        BindingPattern::Literal(_, span) => Err(Diagnostic::new(
-            "Literal patterns cannot be used in function parameters",
-        )
-        .with_span(*span)),
-        BindingPattern::EnumVariant { span, .. } => Err(Diagnostic::new(
-            "Enum patterns cannot be used in function parameters",
-        )
-        .with_span(*span)),
-        BindingPattern::TypeHint(_, _, span) => {
-            Err(Diagnostic::new("Unsupported pattern in function parameter").with_span(*span))
-        }
-        BindingPattern::Annotated { span, .. } => {
-            Err(Diagnostic::new("Unsupported pattern in function parameter").with_span(*span))
+            BindingPattern::TypeHint(_, _, span) => {
+                return Err(
+                    Diagnostic::new("Unsupported pattern in function parameter").with_span(*span)
+                );
+            }
+            BindingPattern::Annotated { span, .. } => {
+                return Err(
+                    Diagnostic::new("Unsupported pattern in function parameter").with_span(*span)
+                );
+            }
         }
     }
+
+    Ok(params)
 }
 
 fn stripped_binding_pattern(pattern: &BindingPattern) -> &BindingPattern {
-    match pattern {
-        BindingPattern::TypeHint(inner, _, _) => stripped_binding_pattern(inner),
-        BindingPattern::Annotated { pattern: inner, .. } => stripped_binding_pattern(inner),
-        other => other,
+    let mut current = pattern;
+    loop {
+        match current {
+            BindingPattern::TypeHint(inner, _, _) => current = inner,
+            BindingPattern::Annotated { pattern: inner, .. } => current = inner,
+            other => return other,
+        }
     }
 }
 
@@ -737,109 +1098,60 @@ fn collect_locals(
     match_counter: &mut MatchCounter,
 ) -> Result<Vec<(String, WasmType)>, Diagnostic> {
     let mut locals = Vec::new();
-    match expr {
-        IntermediateKind::Binding(binding) => {
-            let binding = binding.as_ref();
-            let expr_type = infer_type(&binding.expr, locals_types, function_return_types)?;
-            collect_locals_for_pattern(binding, expr_type, locals_types, &mut locals)?;
+    let mut stack = vec![expr];
 
-            locals.extend(collect_locals(
-                &binding.expr,
-                locals_types,
-                function_return_types,
-                match_counter,
-            )?);
-        }
-        IntermediateKind::Assignment { target, expr } => {
-            ensure_lvalue_local(target, locals_types, SourceSpan::default())?;
-            locals.extend(collect_locals(
-                expr,
-                locals_types,
-                function_return_types,
-                match_counter,
-            )?);
-        }
-        IntermediateKind::Block(exprs) => {
-            for e in exprs {
-                locals.extend(collect_locals(
-                    e,
-                    locals_types,
-                    function_return_types,
-                    match_counter,
-                )?);
+    while let Some(node) = stack.pop() {
+        match node {
+            IntermediateKind::Binding(binding) => {
+                let binding = binding.as_ref();
+                let expr_type = infer_type(&binding.expr, locals_types, function_return_types)?;
+                collect_locals_for_pattern(binding, expr_type, locals_types, &mut locals)?;
+                stack.push(&binding.expr);
             }
-        }
-        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
-            left,
-            right,
-            _,
-        )) => {
-            locals.extend(collect_locals(
+            IntermediateKind::Assignment { target, expr } => {
+                ensure_lvalue_local(target, locals_types, SourceSpan::default())?;
+                stack.push(expr);
+            }
+            IntermediateKind::Block(exprs) => {
+                for e in exprs.iter().rev() {
+                    stack.push(e);
+                }
+            }
+            IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
                 left,
-                locals_types,
-                function_return_types,
-                match_counter,
-            )?);
-            locals.extend(collect_locals(
                 right,
-                locals_types,
-                function_return_types,
-                match_counter,
-            )?);
-        }
-        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(operand, _)) => {
-            locals.extend(collect_locals(
+                _,
+            )) => {
+                stack.push(right);
+                stack.push(left);
+            }
+            IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(
                 operand,
-                locals_types,
-                function_return_types,
-                match_counter,
-            )?);
-        }
-        IntermediateKind::FunctionCall { argument, .. } => {
-            let arg_type = infer_type(argument, locals_types, function_return_types)?;
-            let temp_local_name = match_counter.next_name();
-            locals.push((temp_local_name.clone(), arg_type.clone()));
-            locals_types.insert(temp_local_name, arg_type);
-            locals.extend(collect_locals(
-                argument,
-                locals_types,
-                function_return_types,
-                match_counter,
-            )?);
-        }
-        IntermediateKind::If {
-            condition,
-            then_branch,
-            else_branch,
-        } => {
-            locals.extend(collect_locals(
+                _,
+            )) => {
+                stack.push(operand);
+            }
+            IntermediateKind::FunctionCall { argument, .. } => {
+                let arg_type = infer_type(argument, locals_types, function_return_types)?;
+                let temp_local_name = match_counter.next_name();
+                locals.push((temp_local_name.clone(), arg_type.clone()));
+                locals_types.insert(temp_local_name, arg_type);
+                stack.push(argument);
+            }
+            IntermediateKind::If {
                 condition,
-                locals_types,
-                function_return_types,
-                match_counter,
-            )?);
-            locals.extend(collect_locals(
                 then_branch,
-                locals_types,
-                function_return_types,
-                match_counter,
-            )?);
-            locals.extend(collect_locals(
                 else_branch,
-                locals_types,
-                function_return_types,
-                match_counter,
-            )?);
+            } => {
+                stack.push(else_branch);
+                stack.push(then_branch);
+                stack.push(condition);
+            }
+            IntermediateKind::Loop { body } => {
+                stack.push(body);
+            }
+            _ => {}
         }
-        IntermediateKind::Loop { body } => {
-            locals.extend(collect_locals(
-                body,
-                locals_types,
-                function_return_types,
-                match_counter,
-            )?);
-        }
-        _ => {}
     }
     Ok(locals)
 }
@@ -856,91 +1168,72 @@ fn collect_locals_for_pattern(
     Ok(())
 }
 
-fn emit_call_arguments(
+fn flatten_call_arguments(
     pattern: &BindingPattern,
     input_type: &IntermediateType,
     argument_expr: IntermediateKind,
-    locals: &std::collections::HashMap<String, u32>,
-    locals_types: &std::collections::HashMap<String, WasmType>,
-    func: &mut Function,
-    type_ctx: &TypeContext,
-    function_return_types: &[WasmType],
-    functions: &[IntermediateFunction],
-    control_stack: &mut Vec<ControlFrame>,
-    loop_stack: &mut Vec<LoopContext>,
-    match_counter: &mut MatchCounter,
-) -> Result<(), Diagnostic> {
-    match stripped_binding_pattern(pattern) {
-        BindingPattern::Identifier(_, _) => emit_expression(
-            &argument_expr,
-            locals,
-            locals_types,
-            func,
-            type_ctx,
-            function_return_types,
-            functions,
-            control_stack,
-            loop_stack,
-            match_counter,
-        ),
-        BindingPattern::Struct(fields, span) => {
-            let field_types = if let IntermediateType::Struct(field_types) = input_type {
-                field_types
-            } else {
+) -> Result<Vec<IntermediateKind>, Diagnostic> {
+    let mut results = Vec::new();
+    let mut stack = vec![(pattern, input_type, argument_expr)];
+
+    while let Some((current_pattern, current_type, current_expr)) = stack.pop() {
+        match stripped_binding_pattern(current_pattern) {
+            BindingPattern::Identifier(_, _) => results.push(current_expr),
+            BindingPattern::Struct(fields, span) => {
+                let field_types = if let IntermediateType::Struct(field_types) = current_type {
+                    field_types
+                } else {
+                    return Err(
+                        Diagnostic::new("Struct pattern requires struct parameter type")
+                            .with_span(*span),
+                    );
+                };
+
+                for (field_id, sub_pattern) in fields.iter().rev() {
+                    let field_ty = field_types
+                        .iter()
+                        .find(|(name, _)| name == &field_id.name)
+                        .map(|(_, ty)| ty)
+                        .ok_or_else(|| {
+                            Diagnostic::new(format!(
+                                "Missing field {} in struct parameter type",
+                                field_id.name
+                            ))
+                            .with_span(sub_pattern.span())
+                        })?;
+                    let field_expr = IntermediateKind::PropertyAccess {
+                        object: Box::new(current_expr.clone()),
+                        property: field_id.name.clone(),
+                    };
+                    stack.push((sub_pattern, field_ty, field_expr));
+                }
+            }
+            BindingPattern::Literal(_, span) => {
+                return Err(Diagnostic::new(
+                    "Literal patterns cannot be used in function parameters",
+                )
+                .with_span(*span));
+            }
+            BindingPattern::EnumVariant { span, .. } => {
                 return Err(
-                    Diagnostic::new("Struct pattern requires struct parameter type")
+                    Diagnostic::new("Enum patterns cannot be used in function parameters")
                         .with_span(*span),
                 );
-            };
-
-            for (field_id, sub_pattern) in fields {
-                let field_ty = field_types
-                    .iter()
-                    .find(|(name, _)| name == &field_id.name)
-                    .map(|(_, ty)| ty)
-                    .ok_or_else(|| {
-                        Diagnostic::new(format!(
-                            "Missing field {} in struct parameter type",
-                            field_id.name
-                        ))
-                        .with_span(sub_pattern.span())
-                    })?;
-                let field_expr = IntermediateKind::PropertyAccess {
-                    object: Box::new(argument_expr.clone()),
-                    property: field_id.name.clone(),
-                };
-                emit_call_arguments(
-                    sub_pattern,
-                    field_ty,
-                    field_expr,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    function_return_types,
-                    functions,
-                    control_stack,
-                    loop_stack,
-                    match_counter,
-                )?;
             }
-            Ok(())
-        }
-        BindingPattern::Literal(_, span) => Err(Diagnostic::new(
-            "Literal patterns cannot be used in function parameters",
-        )
-        .with_span(*span)),
-        BindingPattern::EnumVariant { span, .. } => Err(Diagnostic::new(
-            "Enum patterns cannot be used in function parameters",
-        )
-        .with_span(*span)),
-        BindingPattern::TypeHint(_, _, span) => {
-            Err(Diagnostic::new("Unsupported pattern in function parameter").with_span(*span))
-        }
-        BindingPattern::Annotated { span, .. } => {
-            Err(Diagnostic::new("Unsupported pattern in function parameter").with_span(*span))
+            BindingPattern::TypeHint(_, _, span) => {
+                return Err(
+                    Diagnostic::new("Unsupported pattern in function parameter").with_span(*span)
+                );
+            }
+            BindingPattern::Annotated { span, .. } => {
+                return Err(
+                    Diagnostic::new("Unsupported pattern in function parameter").with_span(*span)
+                );
+            }
         }
     }
+
+    Ok(results)
 }
 
 fn emit_expression(
@@ -955,799 +1248,727 @@ fn emit_expression(
     loop_stack: &mut Vec<LoopContext>,
     match_counter: &mut MatchCounter,
 ) -> Result<(), Diagnostic> {
-    match expr {
-        IntermediateKind::Literal(ExpressionLiteral::Number(value)) => {
-            func.instruction(&Instruction::I32Const(*value));
-            Ok(())
-        }
-        IntermediateKind::Literal(ExpressionLiteral::Boolean(value)) => {
-            func.instruction(&Instruction::I32Const(if *value { 1 } else { 0 }));
-            Ok(())
-        }
-        IntermediateKind::Identifier(identifier) => {
-            let local_index = locals.get(&identifier.name).copied().ok_or_else(|| {
-                Diagnostic::new(format!(
-                    "Identifier `{}` is not a local variable or parameter",
-                    identifier.name
-                ))
-                .with_span(SourceSpan::default())
-            })?;
-            func.instruction(&Instruction::LocalGet(local_index));
-            Ok(())
-        }
-        IntermediateKind::Assignment {
-            target,
-            expr: value,
-        } => match target {
-            LValue::Identifier(identifier, _) => {
-                let local_index = locals.get(&identifier.name).copied().ok_or_else(|| {
-                    Diagnostic::new(format!(
-                        "Identifier `{}` is not a local variable or parameter",
-                        identifier.name
-                    ))
-                    .with_span(SourceSpan::default())
-                })?;
-
-                emit_expression(
-                    value,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    function_return_types,
-                    functions,
-                    control_stack,
-                    loop_stack,
-                    match_counter,
-                )?;
-                func.instruction(&Instruction::LocalTee(local_index));
-                Ok(())
-            }
-            LValue::PropertyAccess {
-                object, property, ..
-            } => {
-                let object_expr = lvalue_to_intermediate(object);
-                let object_type = infer_type(&object_expr, locals_types, function_return_types)?;
-                let WasmType::Struct(fields) = object_type else {
-                    return Err(Diagnostic::new("Property assignment on non-struct type")
-                        .with_span(SourceSpan::default()));
-                };
-
-                let field_index = fields
-                    .iter()
-                    .position(|(name, _)| name == property)
-                    .ok_or_else(|| {
-                        Diagnostic::new(format!("Field `{}` not found in struct", property))
-                            .with_span(SourceSpan::default())
-                    })? as u32;
-
-                let type_index = type_ctx
-                    .get_type_index(&fields)
-                    .expect("Type should be registered");
-
-                emit_expression(
-                    &object_expr,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    function_return_types,
-                    functions,
-                    control_stack,
-                    loop_stack,
-                    match_counter,
-                )?;
-                emit_expression(
-                    value,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    function_return_types,
-                    functions,
-                    control_stack,
-                    loop_stack,
-                    match_counter,
-                )?;
-                func.instruction(&Instruction::StructSet {
-                    struct_type_index: type_index,
-                    field_index,
-                });
-
-                let full_target_expr = lvalue_to_intermediate(target);
-                emit_expression(
-                    &full_target_expr,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    function_return_types,
-                    functions,
-                    control_stack,
-                    loop_stack,
-                    match_counter,
-                )
-            }
+    enum EmitTask<'a> {
+        Eval(IntermediateKind),
+        Instr(Instruction<'a>),
+        PushControl(ControlFrame),
+        PopControl,
+        PushLoopContext {
+            result_type: Option<WasmType>,
         },
-        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
-            left,
-            right,
-            op,
-        )) => {
-            match op {
-                BinaryIntrinsicOperator::BooleanAnd => {
-                    emit_expression(
-                        left,
-                        locals,
-                        locals_types,
-                        func,
-                        type_ctx,
-                        function_return_types,
-                        functions,
-                        control_stack,
-                        loop_stack,
-                        match_counter,
-                    )?;
-                    control_stack.push(ControlFrame::If);
-                    func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
-                        ValType::I32,
-                    )));
-                    emit_expression(
-                        right,
-                        locals,
-                        locals_types,
-                        func,
-                        type_ctx,
-                        function_return_types,
-                        functions,
-                        control_stack,
-                        loop_stack,
-                        match_counter,
-                    )?;
-                    func.instruction(&Instruction::Else);
-                    func.instruction(&Instruction::I32Const(0));
-                    func.instruction(&Instruction::End);
-                    control_stack.pop();
+        PopLoopContext,
+        CheckCallArgType {
+            arg_type: WasmType,
+            expected_type: WasmType,
+        },
+    }
+
+    let mut tasks = vec![EmitTask::Eval(expr.clone())];
+
+    while let Some(task) = tasks.pop() {
+        match task {
+            EmitTask::Instr(instr) => {
+                func.instruction(&instr);
+            }
+            EmitTask::PushControl(frame) => control_stack.push(frame),
+            EmitTask::PopControl => {
+                control_stack.pop();
+            }
+            EmitTask::PushLoopContext { result_type } => {
+                let break_target_index = control_stack.len().saturating_sub(2);
+                loop_stack.push(LoopContext {
+                    break_target_index,
+                    result_type,
+                });
+            }
+            EmitTask::PopLoopContext => {
+                loop_stack.pop();
+            }
+            EmitTask::CheckCallArgType {
+                arg_type,
+                expected_type,
+            } => {
+                if arg_type != expected_type {
+                    return Err(Diagnostic::new(
+                        "Function call argument does not match function input type".to_string(),
+                    )
+                    .with_span(SourceSpan::default()));
                 }
-                BinaryIntrinsicOperator::BooleanOr => {
-                    emit_expression(
-                        left,
-                        locals,
-                        locals_types,
-                        func,
-                        type_ctx,
-                        function_return_types,
-                        functions,
-                        control_stack,
-                        loop_stack,
-                        match_counter,
+            }
+            EmitTask::Eval(node) => match node {
+                IntermediateKind::Literal(ExpressionLiteral::Number(value)) => {
+                    tasks.push(EmitTask::Instr(Instruction::I32Const(value)));
+                }
+                IntermediateKind::Literal(ExpressionLiteral::Boolean(value)) => {
+                    tasks.push(EmitTask::Instr(Instruction::I32Const(if value {
+                        1
+                    } else {
+                        0
+                    })));
+                }
+                IntermediateKind::Identifier(identifier) => {
+                    let local_index = locals.get(&identifier.name).copied().ok_or_else(|| {
+                        Diagnostic::new(format!(
+                            "Identifier `{}` is not a local variable or parameter",
+                            identifier.name
+                        ))
+                        .with_span(SourceSpan::default())
+                    })?;
+                    tasks.push(EmitTask::Instr(Instruction::LocalGet(local_index)));
+                }
+                IntermediateKind::Assignment {
+                    target,
+                    expr: value,
+                } => match target {
+                    LValue::Identifier(identifier, _) => {
+                        let local_index =
+                            locals.get(&identifier.name).copied().ok_or_else(|| {
+                                Diagnostic::new(format!(
+                                    "Identifier `{}` is not a local variable or parameter",
+                                    identifier.name
+                                ))
+                                .with_span(SourceSpan::default())
+                            })?;
+                        tasks.push(EmitTask::Instr(Instruction::LocalTee(local_index)));
+                        tasks.push(EmitTask::Eval((*value).clone()));
+                    }
+                    LValue::PropertyAccess {
+                        ref object,
+                        ref property,
+                        ..
+                    } => {
+                        let object_expr = lvalue_to_intermediate(object);
+                        let object_type =
+                            infer_type(&object_expr, locals_types, function_return_types)?;
+                        let WasmType::Struct(fields) = object_type else {
+                            return Err(Diagnostic::new("Property assignment on non-struct type")
+                                .with_span(SourceSpan::default()));
+                        };
+
+                        let field_index = fields
+                            .iter()
+                            .position(|(name, _)| name == property)
+                            .ok_or_else(|| {
+                                Diagnostic::new(format!("Field `{}` not found in struct", property))
+                                    .with_span(SourceSpan::default())
+                            })? as u32;
+
+                        let type_index = type_ctx
+                            .get_type_index(&fields)
+                            .expect("Type should be registered");
+
+                        let full_target_expr = lvalue_to_intermediate(&target);
+
+                        tasks.push(EmitTask::Eval(full_target_expr));
+                        tasks.push(EmitTask::Instr(Instruction::StructSet {
+                            struct_type_index: type_index,
+                            field_index,
+                        }));
+                        tasks.push(EmitTask::Eval((*value).clone()));
+                        tasks.push(EmitTask::Eval(object_expr));
+                    }
+                },
+                IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
+                    left,
+                    right,
+                    op,
+                )) => match op {
+                    BinaryIntrinsicOperator::BooleanAnd => {
+                        tasks.push(EmitTask::PopControl);
+                        tasks.push(EmitTask::Instr(Instruction::End));
+                        tasks.push(EmitTask::Instr(Instruction::I32Const(0)));
+                        tasks.push(EmitTask::Instr(Instruction::Else));
+                        tasks.push(EmitTask::Eval((*right).clone()));
+                        tasks.push(EmitTask::Instr(Instruction::If(
+                            wasm_encoder::BlockType::Result(ValType::I32),
+                        )));
+                        tasks.push(EmitTask::PushControl(ControlFrame::If));
+                        tasks.push(EmitTask::Eval((*left).clone()));
+                    }
+                    BinaryIntrinsicOperator::BooleanOr => {
+                        tasks.push(EmitTask::PopControl);
+                        tasks.push(EmitTask::Instr(Instruction::End));
+                        tasks.push(EmitTask::Eval((*right).clone()));
+                        tasks.push(EmitTask::Instr(Instruction::Else));
+                        tasks.push(EmitTask::Instr(Instruction::I32Const(1)));
+                        tasks.push(EmitTask::Instr(Instruction::If(
+                            wasm_encoder::BlockType::Result(ValType::I32),
+                        )));
+                        tasks.push(EmitTask::PushControl(ControlFrame::If));
+                        tasks.push(EmitTask::Eval((*left).clone()));
+                    }
+                    _ => {
+                        let op_instr = match op {
+                            BinaryIntrinsicOperator::I32Add => Instruction::I32Add,
+                            BinaryIntrinsicOperator::I32Subtract => Instruction::I32Sub,
+                            BinaryIntrinsicOperator::I32Multiply => Instruction::I32Mul,
+                            BinaryIntrinsicOperator::I32Divide => Instruction::I32DivS,
+                            BinaryIntrinsicOperator::I32Equal => Instruction::I32Eq,
+                            BinaryIntrinsicOperator::I32NotEqual => Instruction::I32Ne,
+                            BinaryIntrinsicOperator::I32LessThan => Instruction::I32LtS,
+                            BinaryIntrinsicOperator::I32GreaterThan => Instruction::I32GtS,
+                            BinaryIntrinsicOperator::I32LessThanOrEqual => Instruction::I32LeS,
+                            BinaryIntrinsicOperator::I32GreaterThanOrEqual => Instruction::I32GeS,
+                            BinaryIntrinsicOperator::BooleanXor => Instruction::I32Xor,
+                            BinaryIntrinsicOperator::BooleanAnd
+                            | BinaryIntrinsicOperator::BooleanOr => {
+                                unreachable!("boolean ops handled before op_instr")
+                            }
+                        };
+                        tasks.push(EmitTask::Instr(op_instr));
+                        tasks.push(EmitTask::Eval((*right).clone()));
+                        tasks.push(EmitTask::Eval((*left).clone()));
+                    }
+                },
+                IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(
+                    _,
+                    UnaryIntrinsicOperator::MatchFromStruct,
+                )) => {
+                    return Err(Diagnostic::new(
+                        "match intrinsic should be resolved before wasm lowering",
+                    )
+                    .with_span(SourceSpan::default()));
+                }
+                IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(
+                    operand,
+                    UnaryIntrinsicOperator::BooleanNot,
+                )) => {
+                    tasks.push(EmitTask::Instr(Instruction::I32Eqz));
+                    tasks.push(EmitTask::Eval((*operand).clone()));
+                }
+                IntermediateKind::Diverge {
+                    value,
+                    divergance_type: DivergeExpressionType::Break,
+                } => {
+                    let loop_ctx = loop_stack.last().cloned().ok_or_else(|| {
+                        Diagnostic::new("`break` used outside of a loop")
+                            .with_span(SourceSpan::default())
+                    })?;
+
+                    let expected_type = loop_ctx.result_type.as_ref().ok_or_else(|| {
+                        Diagnostic::new("`break` cannot be used in a loop without a break value")
+                            .with_span(SourceSpan::default())
+                    })?;
+
+                    let value_type = infer_type(&value, locals_types, function_return_types)?;
+                    if &value_type != expected_type {
+                        return Err(
+                            Diagnostic::new("break value does not match loop result type")
+                                .with_span(SourceSpan::default()),
+                        );
+                    }
+
+                    let break_depth = control_stack
+                        .len()
+                        .saturating_sub(loop_ctx.break_target_index + 1)
+                        as u32;
+
+                    tasks.push(EmitTask::Instr(Instruction::Br(break_depth)));
+                    tasks.push(EmitTask::Eval((*value).clone()));
+                }
+                IntermediateKind::Loop { body } => {
+                    let loop_result_type =
+                        determine_loop_result_type(&body, locals_types, function_return_types)?;
+                    if let Some(result_type) = loop_result_type {
+                        let block_type =
+                            wasm_encoder::BlockType::Result(result_type.to_val_type(type_ctx));
+                        let body_produces_value = expression_produces_value(
+                            &body,
+                            locals_types,
+                            function_return_types,
+                            type_ctx,
+                        )?;
+
+                        tasks.push(EmitTask::Instr(Instruction::End));
+                        tasks.push(EmitTask::Instr(Instruction::Unreachable));
+                        tasks.push(EmitTask::PopControl);
+                        tasks.push(EmitTask::PopLoopContext);
+                        tasks.push(EmitTask::Instr(Instruction::End));
+                        tasks.push(EmitTask::PopControl);
+                        tasks.push(EmitTask::Instr(Instruction::Br(0)));
+                        if body_produces_value {
+                            tasks.push(EmitTask::Instr(Instruction::Drop));
+                        }
+                        tasks.push(EmitTask::Eval((*body).clone()));
+                        tasks.push(EmitTask::Instr(Instruction::Loop(
+                            wasm_encoder::BlockType::Empty,
+                        )));
+                        tasks.push(EmitTask::PushLoopContext {
+                            result_type: Some(result_type.clone()),
+                        });
+                        tasks.push(EmitTask::PushControl(ControlFrame::Loop));
+                        tasks.push(EmitTask::Instr(Instruction::Block(block_type)));
+                        tasks.push(EmitTask::PushControl(ControlFrame::Block));
+                    } else {
+                        let body_produces_value = expression_produces_value(
+                            &body,
+                            locals_types,
+                            function_return_types,
+                            type_ctx,
+                        )?;
+
+                        tasks.push(EmitTask::Instr(Instruction::End));
+                        tasks.push(EmitTask::PopControl);
+                        tasks.push(EmitTask::Instr(Instruction::Br(0)));
+                        if body_produces_value {
+                            tasks.push(EmitTask::Instr(Instruction::Drop));
+                        }
+                        tasks.push(EmitTask::Eval((*body).clone()));
+                        tasks.push(EmitTask::Instr(Instruction::Loop(
+                            wasm_encoder::BlockType::Empty,
+                        )));
+                        tasks.push(EmitTask::PushControl(ControlFrame::Loop));
+                    }
+                }
+                IntermediateKind::FunctionCall { function, argument } => {
+                    let callee = functions.get(function).ok_or_else(|| {
+                        Diagnostic::new("Unknown function call target".to_string())
+                            .with_span(SourceSpan::default())
+                    })?;
+
+                    let arg_type = infer_type(&argument, locals_types, function_return_types)?;
+                    let temp_local_name = match_counter.next_name();
+                    let temp_local_index = locals
+                        .get(&temp_local_name)
+                        .copied()
+                        .expect("Temp local should exist");
+
+                    let temp_identifier =
+                        IntermediateKind::Identifier(Identifier::new(temp_local_name));
+                    let argument_exprs = flatten_call_arguments(
+                        &callee.parameter,
+                        &callee.input_type,
+                        temp_identifier,
                     )?;
-                    control_stack.push(ControlFrame::If);
-                    func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(
-                        ValType::I32,
-                    )));
-                    func.instruction(&Instruction::I32Const(1));
-                    func.instruction(&Instruction::Else);
-                    emit_expression(
-                        right,
-                        locals,
+
+                    let expected_type = intermediate_type_to_wasm(&callee.input_type);
+
+                    tasks.push(EmitTask::Instr(Instruction::Call(function as u32)));
+                    tasks.push(EmitTask::CheckCallArgType {
+                        arg_type,
+                        expected_type,
+                    });
+
+                    for expr in argument_exprs.into_iter().rev() {
+                        tasks.push(EmitTask::Eval(expr));
+                    }
+
+                    tasks.push(EmitTask::Instr(Instruction::LocalSet(temp_local_index)));
+                    tasks.push(EmitTask::Eval((*argument).clone()));
+                }
+                IntermediateKind::If {
+                    condition,
+                    then_branch,
+                    else_branch,
+                } => {
+                    let then_produces_value = expression_produces_value(
+                        &then_branch,
                         locals_types,
-                        func,
-                        type_ctx,
                         function_return_types,
-                        functions,
-                        control_stack,
-                        loop_stack,
-                        match_counter,
+                        type_ctx,
                     )?;
-                    func.instruction(&Instruction::End);
-                    control_stack.pop();
+                    let else_produces_value = expression_produces_value(
+                        &else_branch,
+                        locals_types,
+                        function_return_types,
+                        type_ctx,
+                    )?;
+
+                    let then_diverges = expression_does_diverge(&then_branch, false, false);
+                    let else_diverges = expression_does_diverge(&else_branch, false, false);
+
+                    let block_type = if (then_produces_value && else_produces_value)
+                        || ((then_diverges || else_diverges)
+                            && (then_produces_value || else_produces_value))
+                    {
+                        let result_type = if then_produces_value {
+                            infer_type(&then_branch, locals_types, function_return_types)?
+                        } else {
+                            infer_type(&else_branch, locals_types, function_return_types)?
+                        };
+                        let wasm_result_type = result_type.to_val_type(type_ctx);
+                        wasm_encoder::BlockType::Result(wasm_result_type)
+                    } else {
+                        wasm_encoder::BlockType::Empty
+                    };
+
+                    tasks.push(EmitTask::PopControl);
+                    tasks.push(EmitTask::Instr(Instruction::End));
+                    if else_produces_value && matches!(block_type, wasm_encoder::BlockType::Empty) {
+                        tasks.push(EmitTask::Instr(Instruction::Drop));
+                    }
+                    tasks.push(EmitTask::Eval((*else_branch).clone()));
+                    tasks.push(EmitTask::Instr(Instruction::Else));
+                    if then_produces_value && matches!(block_type, wasm_encoder::BlockType::Empty) {
+                        tasks.push(EmitTask::Instr(Instruction::Drop));
+                    }
+                    tasks.push(EmitTask::Eval((*then_branch).clone()));
+                    tasks.push(EmitTask::Instr(Instruction::If(block_type)));
+                    tasks.push(EmitTask::PushControl(ControlFrame::If));
+                    tasks.push(EmitTask::Eval((*condition).clone()));
+                }
+                IntermediateKind::Binding(binding) => {
+                    let binding = binding.as_ref();
+                    let name = binding.identifier.name.clone();
+                    let local_index = locals
+                        .get(&name)
+                        .copied()
+                        .unwrap_or_else(|| panic!("Local '{}' should have been collected", name));
+                    tasks.push(EmitTask::Instr(Instruction::I32Const(1)));
+                    tasks.push(EmitTask::Instr(Instruction::LocalSet(local_index)));
+                    tasks.push(EmitTask::Eval(binding.expr.clone()));
+                }
+                IntermediateKind::Block(exprs) => {
+                    let mut end_index = exprs.len();
+                    for (i, e) in exprs.iter().enumerate() {
+                        if expression_does_diverge(e, false, false) {
+                            end_index = i + 1;
+                            break;
+                        }
+                    }
+
+                    for (i, e) in exprs.iter().take(end_index).enumerate().rev() {
+                        if i < end_index - 1
+                            && expression_produces_value(
+                                e,
+                                locals_types,
+                                function_return_types,
+                                type_ctx,
+                            )?
+                        {
+                            tasks.push(EmitTask::Instr(Instruction::Drop));
+                        }
+                        tasks.push(EmitTask::Eval(e.clone()));
+                    }
+                }
+                IntermediateKind::Diverge {
+                    value,
+                    divergance_type: DivergeExpressionType::Return,
+                } => {
+                    tasks.push(EmitTask::Instr(Instruction::Return));
+                    tasks.push(EmitTask::Eval((*value).clone()));
+                }
+                IntermediateKind::Struct(items) => {
+                    let mut sorted_items = items.clone();
+                    sorted_items.sort_by(|(a_name, _), (b_name, _)| a_name.name.cmp(&b_name.name));
+
+                    let mut field_types = Vec::new();
+                    for (name, value) in &sorted_items {
+                        let ty = infer_type(value, locals_types, function_return_types)?;
+                        field_types.push((name.name.clone(), ty));
+                    }
+
+                    let type_index = type_ctx.get_type_index(&field_types).ok_or_else(|| {
+                        Diagnostic::new("Struct type not found in context")
+                            .with_span(SourceSpan::default())
+                    })?;
+
+                    tasks.push(EmitTask::Instr(Instruction::StructNew(type_index)));
+
+                    for (_, value) in sorted_items.into_iter().rev() {
+                        tasks.push(EmitTask::Eval(value));
+                    }
+                }
+                IntermediateKind::PropertyAccess { object, property } => {
+                    let object_type = infer_type(&object, locals_types, function_return_types)?;
+                    if let WasmType::Struct(fields) = object_type {
+                        let field_index = fields
+                            .iter()
+                            .position(|(n, _)| n == &property)
+                            .ok_or_else(|| {
+                                Diagnostic::new(format!("Field `{}` not found in struct", property))
+                                    .with_span(SourceSpan::default())
+                            })?;
+
+                        let type_index = type_ctx
+                            .get_type_index(&fields)
+                            .expect("Type should be registered");
+
+                        tasks.push(EmitTask::Instr(Instruction::StructGet {
+                            struct_type_index: type_index,
+                            field_index: field_index as u32,
+                        }));
+                        tasks.push(EmitTask::Eval((*object).clone()));
+                    } else {
+                        return Err(Diagnostic::new("Property access on non-struct type")
+                            .with_span(SourceSpan::default()));
+                    }
+                }
+                IntermediateKind::Unreachable => {
+                    tasks.push(EmitTask::Instr(Instruction::Unreachable));
                 }
                 _ => {
-                    emit_expression(
-                        left,
-                        locals,
-                        locals_types,
-                        func,
-                        type_ctx,
-                        function_return_types,
-                        functions,
-                        control_stack,
-                        loop_stack,
-                        match_counter,
-                    )?;
-                    emit_expression(
-                        right,
-                        locals,
-                        locals_types,
-                        func,
-                        type_ctx,
-                        function_return_types,
-                        functions,
-                        control_stack,
-                        loop_stack,
-                        match_counter,
-                    )?;
-                    match op {
-                        BinaryIntrinsicOperator::I32Add => {
-                            func.instruction(&Instruction::I32Add);
-                        }
-                        BinaryIntrinsicOperator::I32Subtract => {
-                            func.instruction(&Instruction::I32Sub);
-                        }
-                        BinaryIntrinsicOperator::I32Multiply => {
-                            func.instruction(&Instruction::I32Mul);
-                        }
-                        BinaryIntrinsicOperator::I32Divide => {
-                            func.instruction(&Instruction::I32DivS);
-                        }
-                        BinaryIntrinsicOperator::I32Equal => {
-                            func.instruction(&Instruction::I32Eq);
-                        }
-                        BinaryIntrinsicOperator::I32NotEqual => {
-                            func.instruction(&Instruction::I32Ne);
-                        }
-                        BinaryIntrinsicOperator::I32LessThan => {
-                            func.instruction(&Instruction::I32LtS);
-                        }
-                        BinaryIntrinsicOperator::I32GreaterThan => {
-                            func.instruction(&Instruction::I32GtS);
-                        }
-                        BinaryIntrinsicOperator::I32LessThanOrEqual => {
-                            func.instruction(&Instruction::I32LeS);
-                        }
-                        BinaryIntrinsicOperator::I32GreaterThanOrEqual => {
-                            func.instruction(&Instruction::I32GeS);
-                        }
-                        BinaryIntrinsicOperator::BooleanXor => {
-                            func.instruction(&Instruction::I32Xor);
-                        }
-                        _ => unreachable!(),
-                    }
+                    return Err(
+                        Diagnostic::new("Expression is not supported in wasm exports yet")
+                            .with_span(SourceSpan::default()),
+                    );
                 }
-            }
-            Ok(())
+            },
         }
-        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(
-            _,
-            UnaryIntrinsicOperator::EnumFromStruct,
-        )) => Err(
-            Diagnostic::new("enum intrinsic should be resolved before wasm lowering")
-                .with_span(SourceSpan::default()),
-        ),
-        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(
-            _,
-            UnaryIntrinsicOperator::MatchFromStruct,
-        )) => Err(
-            Diagnostic::new("match intrinsic should be resolved before wasm lowering")
-                .with_span(SourceSpan::default()),
-        ),
-        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(
-            operand,
-            UnaryIntrinsicOperator::BooleanNot,
-        )) => {
-            emit_expression(
-                operand,
-                locals,
-                locals_types,
-                func,
-                type_ctx,
-                function_return_types,
-                functions,
-                control_stack,
-                loop_stack,
-                match_counter,
-            )?;
-            func.instruction(&Instruction::I32Eqz);
-            Ok(())
-        }
-        IntermediateKind::Diverge {
-            value,
-            divergance_type: DivergeExpressionType::Break,
-        } => {
-            let loop_ctx = loop_stack.last().cloned().ok_or_else(|| {
-                Diagnostic::new("`break` used outside of a loop").with_span(SourceSpan::default())
-            })?;
-
-            let expected_type = loop_ctx.result_type.as_ref().ok_or_else(|| {
-                Diagnostic::new("`break` cannot be used in a loop without a break value")
-                    .with_span(SourceSpan::default())
-            })?;
-
-            let value_type = infer_type(value, locals_types, function_return_types)?;
-            if &value_type != expected_type {
-                return Err(
-                    Diagnostic::new("break value does not match loop result type")
-                        .with_span(SourceSpan::default()),
-                );
-            }
-
-            emit_expression(
-                value,
-                locals,
-                locals_types,
-                func,
-                type_ctx,
-                function_return_types,
-                functions,
-                control_stack,
-                loop_stack,
-                match_counter,
-            )?;
-
-            let break_depth = control_stack
-                .len()
-                .saturating_sub(loop_ctx.break_target_index + 1)
-                as u32;
-            func.instruction(&Instruction::Br(break_depth));
-            Ok(())
-        }
-        IntermediateKind::Loop { body } => {
-            let loop_result_type =
-                determine_loop_result_type(body, locals_types, function_return_types)?;
-            if let Some(result_type) = loop_result_type {
-                let block_type = wasm_encoder::BlockType::Result(result_type.to_val_type(type_ctx));
-
-                control_stack.push(ControlFrame::Block);
-                func.instruction(&Instruction::Block(block_type));
-
-                control_stack.push(ControlFrame::Loop);
-                loop_stack.push(LoopContext {
-                    break_target_index: control_stack.len() - 2,
-                    result_type: Some(result_type.clone()),
-                });
-                func.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
-
-                emit_expression(
-                    body,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    function_return_types,
-                    functions,
-                    control_stack,
-                    loop_stack,
-                    match_counter,
-                )?;
-                if expression_produces_value(body, locals_types, function_return_types, type_ctx)? {
-                    func.instruction(&Instruction::Drop);
-                }
-                func.instruction(&Instruction::Br(0));
-
-                control_stack.pop();
-                func.instruction(&Instruction::End);
-
-                loop_stack.pop();
-                control_stack.pop();
-                func.instruction(&Instruction::Unreachable);
-                func.instruction(&Instruction::End);
-            } else {
-                control_stack.push(ControlFrame::Loop);
-                func.instruction(&Instruction::Loop(wasm_encoder::BlockType::Empty));
-                emit_expression(
-                    body,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    function_return_types,
-                    functions,
-                    control_stack,
-                    loop_stack,
-                    match_counter,
-                )?;
-                if expression_produces_value(body, locals_types, function_return_types, type_ctx)? {
-                    func.instruction(&Instruction::Drop);
-                }
-                func.instruction(&Instruction::Br(0));
-                control_stack.pop();
-                func.instruction(&Instruction::End);
-            }
-            Ok(())
-        }
-        IntermediateKind::FunctionCall { function, argument } => {
-            let callee = functions.get(*function).ok_or_else(|| {
-                Diagnostic::new("Unknown function call target".to_string())
-                    .with_span(SourceSpan::default())
-            })?;
-
-            let arg_type = infer_type(argument, locals_types, function_return_types)?;
-            let temp_local_name = match_counter.next_name();
-            let temp_local_index = locals
-                .get(&temp_local_name)
-                .copied()
-                .expect("Temp local should exist");
-
-            emit_expression(
-                argument,
-                locals,
-                locals_types,
-                func,
-                type_ctx,
-                function_return_types,
-                functions,
-                control_stack,
-                loop_stack,
-                match_counter,
-            )?;
-            func.instruction(&Instruction::LocalSet(temp_local_index));
-
-            let temp_identifier = IntermediateKind::Identifier(Identifier::new(temp_local_name));
-            emit_call_arguments(
-                &callee.parameter,
-                &callee.input_type,
-                temp_identifier,
-                locals,
-                locals_types,
-                func,
-                type_ctx,
-                function_return_types,
-                functions,
-                control_stack,
-                loop_stack,
-                match_counter,
-            )?;
-
-            let expected_type = intermediate_type_to_wasm(&callee.input_type);
-            if arg_type != expected_type {
-                return Err(Diagnostic::new(
-                    "Function call argument does not match function input type".to_string(),
-                )
-                .with_span(SourceSpan::default()));
-            }
-
-            func.instruction(&Instruction::Call(*function as u32));
-            Ok(())
-        }
-        IntermediateKind::If {
-            condition,
-            then_branch,
-            else_branch,
-        } => {
-            emit_expression(
-                condition,
-                locals,
-                locals_types,
-                func,
-                type_ctx,
-                function_return_types,
-                functions,
-                control_stack,
-                loop_stack,
-                match_counter,
-            )?;
-            let then_produces_value = expression_produces_value(
-                then_branch,
-                locals_types,
-                function_return_types,
-                type_ctx,
-            )?;
-            let else_produces_value = expression_produces_value(
-                else_branch,
-                locals_types,
-                function_return_types,
-                type_ctx,
-            )?;
-
-            let then_diverges = expression_does_diverge(then_branch, false, false);
-            let else_diverges = expression_does_diverge(else_branch, false, false);
-
-            control_stack.push(ControlFrame::If);
-            let block_type = if (then_produces_value && else_produces_value)
-                || ((then_diverges || else_diverges)
-                    && (then_produces_value || else_produces_value))
-            {
-                let result_type = if then_produces_value {
-                    infer_type(then_branch, locals_types, function_return_types)?
-                } else {
-                    infer_type(else_branch, locals_types, function_return_types)?
-                };
-                let wasm_result_type = result_type.to_val_type(type_ctx);
-                wasm_encoder::BlockType::Result(wasm_result_type)
-            } else {
-                wasm_encoder::BlockType::Empty
-            };
-            func.instruction(&Instruction::If(block_type));
-            emit_expression(
-                then_branch,
-                locals,
-                locals_types,
-                func,
-                type_ctx,
-                function_return_types,
-                functions,
-                control_stack,
-                loop_stack,
-                match_counter,
-            )?;
-            if then_produces_value && matches!(block_type, wasm_encoder::BlockType::Empty) {
-                func.instruction(&Instruction::Drop);
-            }
-            func.instruction(&Instruction::Else);
-            emit_expression(
-                else_branch,
-                locals,
-                locals_types,
-                func,
-                type_ctx,
-                function_return_types,
-                functions,
-                control_stack,
-                loop_stack,
-                match_counter,
-            )?;
-            if else_produces_value && matches!(block_type, wasm_encoder::BlockType::Empty) {
-                func.instruction(&Instruction::Drop);
-            }
-            func.instruction(&Instruction::End);
-            control_stack.pop();
-            Ok(())
-        }
-        IntermediateKind::Binding(binding) => {
-            let binding = binding.as_ref();
-            emit_expression(
-                &binding.expr,
-                locals,
-                locals_types,
-                func,
-                type_ctx,
-                function_return_types,
-                functions,
-                control_stack,
-                loop_stack,
-                match_counter,
-            )?;
-            let name = binding.identifier.name.clone();
-            let local_index = locals
-                .get(&name)
-                .copied()
-                .unwrap_or_else(|| panic!("Local '{}' should have been collected", name));
-            func.instruction(&Instruction::LocalSet(local_index));
-            func.instruction(&Instruction::I32Const(1));
-            Ok(())
-        }
-        IntermediateKind::Block(exprs) => {
-            for (i, e) in exprs.iter().enumerate() {
-                emit_expression(
-                    e,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    function_return_types,
-                    functions,
-                    control_stack,
-                    loop_stack,
-                    match_counter,
-                )?;
-                if i < exprs.len() - 1 {
-                    if expression_does_diverge(e, false, false) {
-                        break;
-                    }
-
-                    if expression_produces_value(e, locals_types, function_return_types, type_ctx)?
-                    {
-                        func.instruction(&Instruction::Drop);
-                    }
-                }
-            }
-            Ok(())
-        }
-        IntermediateKind::Diverge {
-            value,
-            divergance_type: DivergeExpressionType::Return,
-        } => {
-            emit_expression(
-                value,
-                locals,
-                locals_types,
-                func,
-                type_ctx,
-                function_return_types,
-                functions,
-                control_stack,
-                loop_stack,
-                match_counter,
-            )?;
-            func.instruction(&Instruction::Return);
-            Ok(())
-        }
-        IntermediateKind::Struct(items) => {
-            let mut sorted_items = items.clone();
-            sorted_items.sort_by(|(a_name, _), (b_name, _)| a_name.name.cmp(&b_name.name));
-
-            let mut field_types = Vec::new();
-            for (name, value) in &sorted_items {
-                let ty = infer_type(value, locals_types, function_return_types)?;
-                field_types.push((name.name.clone(), ty));
-            }
-
-            let type_index = type_ctx.get_type_index(&field_types).ok_or_else(|| {
-                Diagnostic::new("Struct type not found in context").with_span(SourceSpan::default())
-            })?;
-
-            for (_, value) in sorted_items {
-                emit_expression(
-                    &value,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    function_return_types,
-                    functions,
-                    control_stack,
-                    loop_stack,
-                    match_counter,
-                )?;
-            }
-
-            func.instruction(&Instruction::StructNew(type_index));
-            Ok(())
-        }
-        IntermediateKind::PropertyAccess { object, property } => {
-            let object_type = infer_type(object, locals_types, function_return_types)?;
-            if let WasmType::Struct(fields) = object_type {
-                let field_index =
-                    fields
-                        .iter()
-                        .position(|(n, _)| n == property)
-                        .ok_or_else(|| {
-                            Diagnostic::new(format!("Field `{}` not found in struct", property))
-                                .with_span(SourceSpan::default())
-                        })?;
-
-                let type_index = type_ctx
-                    .get_type_index(&fields)
-                    .expect("Type should be registered");
-
-                emit_expression(
-                    object,
-                    locals,
-                    locals_types,
-                    func,
-                    type_ctx,
-                    function_return_types,
-                    functions,
-                    control_stack,
-                    loop_stack,
-                    match_counter,
-                )?;
-                func.instruction(&Instruction::StructGet {
-                    struct_type_index: type_index,
-                    field_index: field_index as u32,
-                });
-                Ok(())
-            } else {
-                Err(Diagnostic::new("Property access on non-struct type")
-                    .with_span(SourceSpan::default()))
-            }
-        }
-        IntermediateKind::Unreachable => {
-            func.instruction(&Instruction::Unreachable);
-            Ok(())
-        }
-        _ => Err(
-            Diagnostic::new("Expression is not supported in wasm exports yet")
-                .with_span(SourceSpan::default()),
-        ),
     }
-}
 
+    Ok(())
+}
 fn expression_does_diverge(
     expr: &IntermediateKind,
     possibility: bool,
     in_inner_loop: bool,
 ) -> bool {
-    match expr {
-        IntermediateKind::Diverge {
-            divergance_type: DivergeExpressionType::Break,
-            ..
-        } => !in_inner_loop,
-        IntermediateKind::Unreachable => true,
-        IntermediateKind::Diverge {
-            divergance_type: DivergeExpressionType::Return,
-            ..
-        } => true,
-        IntermediateKind::Block(exprs) => exprs
-            .iter()
-            .any(|expr| expression_does_diverge(expr, possibility, in_inner_loop)),
-        IntermediateKind::If {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            let then_diverges = expression_does_diverge(then_branch, possibility, in_inner_loop);
-            let else_diverges = expression_does_diverge(else_branch, possibility, in_inner_loop);
-            if possibility {
-                then_diverges || else_diverges
-            } else {
-                then_diverges && else_diverges
-            }
-        }
-        IntermediateKind::Binding(binding) => {
-            expression_does_diverge(&binding.expr, possibility, in_inner_loop)
-        }
-        IntermediateKind::Assignment { expr, .. } => {
-            expression_does_diverge(expr, possibility, in_inner_loop)
-        }
-        IntermediateKind::FunctionCall { argument, .. } => {
-            expression_does_diverge(argument, possibility, in_inner_loop)
-        }
-        IntermediateKind::Loop { body } => expression_does_diverge(body, possibility, true),
-        IntermediateKind::PropertyAccess { object, .. } => {
-            expression_does_diverge(object, possibility, in_inner_loop)
-        }
-        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
-            left,
-            right,
-            _,
-        )) => {
-            expression_does_diverge(left, possibility, in_inner_loop)
-                || expression_does_diverge(right, possibility, in_inner_loop)
-        }
-        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(operand, _)) => {
-            expression_does_diverge(operand, possibility, in_inner_loop)
-        }
-        IntermediateKind::Struct(fields) => fields
-            .iter()
-            .any(|(_, expr)| expression_does_diverge(expr, possibility, in_inner_loop)),
-        IntermediateKind::Literal(_) | IntermediateKind::Identifier(_) => false,
+    struct Frame<'a> {
+        expr: &'a IntermediateKind,
+        possibility: bool,
+        in_inner_loop: bool,
+        visited: bool,
     }
+
+    let mut stack = vec![Frame {
+        expr,
+        possibility,
+        in_inner_loop,
+        visited: false,
+    }];
+    let mut results: Vec<bool> = Vec::new();
+
+    while let Some(frame) = stack.pop() {
+        if !frame.visited {
+            stack.push(Frame {
+                visited: true,
+                ..frame
+            });
+            match frame.expr {
+                IntermediateKind::Block(exprs) => {
+                    for child in exprs.iter().rev() {
+                        stack.push(Frame {
+                            expr: child,
+                            possibility: frame.possibility,
+                            in_inner_loop: frame.in_inner_loop,
+                            visited: false,
+                        });
+                    }
+                }
+                IntermediateKind::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    stack.push(Frame {
+                        expr: else_branch,
+                        possibility: frame.possibility,
+                        in_inner_loop: frame.in_inner_loop,
+                        visited: false,
+                    });
+                    stack.push(Frame {
+                        expr: then_branch,
+                        possibility: frame.possibility,
+                        in_inner_loop: frame.in_inner_loop,
+                        visited: false,
+                    });
+                }
+                IntermediateKind::Binding(binding) => {
+                    stack.push(Frame {
+                        expr: &binding.expr,
+                        possibility: frame.possibility,
+                        in_inner_loop: frame.in_inner_loop,
+                        visited: false,
+                    });
+                }
+                IntermediateKind::Assignment { expr, .. } => {
+                    stack.push(Frame {
+                        expr,
+                        possibility: frame.possibility,
+                        in_inner_loop: frame.in_inner_loop,
+                        visited: false,
+                    });
+                }
+                IntermediateKind::FunctionCall { argument, .. } => {
+                    stack.push(Frame {
+                        expr: argument,
+                        possibility: frame.possibility,
+                        in_inner_loop: frame.in_inner_loop,
+                        visited: false,
+                    });
+                }
+                IntermediateKind::Loop { body } => {
+                    stack.push(Frame {
+                        expr: body,
+                        possibility: frame.possibility,
+                        in_inner_loop: true,
+                        visited: false,
+                    });
+                }
+                IntermediateKind::PropertyAccess { object, .. } => {
+                    stack.push(Frame {
+                        expr: object,
+                        possibility: frame.possibility,
+                        in_inner_loop: frame.in_inner_loop,
+                        visited: false,
+                    });
+                }
+                IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
+                    left,
+                    right,
+                    _,
+                )) => {
+                    stack.push(Frame {
+                        expr: right,
+                        possibility: frame.possibility,
+                        in_inner_loop: frame.in_inner_loop,
+                        visited: false,
+                    });
+                    stack.push(Frame {
+                        expr: left,
+                        possibility: frame.possibility,
+                        in_inner_loop: frame.in_inner_loop,
+                        visited: false,
+                    });
+                }
+                IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(
+                    operand,
+                    _,
+                )) => {
+                    stack.push(Frame {
+                        expr: operand,
+                        possibility: frame.possibility,
+                        in_inner_loop: frame.in_inner_loop,
+                        visited: false,
+                    });
+                }
+                IntermediateKind::Struct(fields) => {
+                    for (_, child) in fields.iter().rev() {
+                        stack.push(Frame {
+                            expr: child,
+                            possibility: frame.possibility,
+                            in_inner_loop: frame.in_inner_loop,
+                            visited: false,
+                        });
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        let result = match frame.expr {
+            IntermediateKind::Diverge {
+                divergance_type: DivergeExpressionType::Break,
+                ..
+            } => !frame.in_inner_loop,
+            IntermediateKind::Unreachable => true,
+            IntermediateKind::Diverge {
+                divergance_type: DivergeExpressionType::Return,
+                ..
+            } => true,
+            IntermediateKind::Block(exprs) => {
+                let mut diverges = false;
+                for _ in 0..exprs.len() {
+                    if results.pop().unwrap_or(false) {
+                        diverges = true;
+                    }
+                }
+                diverges
+            }
+            IntermediateKind::If { .. } => {
+                let else_diverges = results.pop().unwrap_or(false);
+                let then_diverges = results.pop().unwrap_or(false);
+                if frame.possibility {
+                    then_diverges || else_diverges
+                } else {
+                    then_diverges && else_diverges
+                }
+            }
+            IntermediateKind::Binding(..)
+            | IntermediateKind::Assignment { .. }
+            | IntermediateKind::FunctionCall { .. }
+            | IntermediateKind::Loop { .. }
+            | IntermediateKind::PropertyAccess { .. }
+            | IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(..)) => {
+                results.pop().unwrap_or(false)
+            }
+            IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(..)) => {
+                let right_diverges = results.pop().unwrap_or(false);
+                let left_diverges = results.pop().unwrap_or(false);
+                left_diverges || right_diverges
+            }
+            IntermediateKind::Struct(fields) => {
+                let mut diverges = false;
+                for _ in 0..fields.len() {
+                    if results.pop().unwrap_or(false) {
+                        diverges = true;
+                    }
+                }
+                diverges
+            }
+            IntermediateKind::Literal(_) | IntermediateKind::Identifier(_) => false,
+        };
+
+        results.push(result);
+    }
+
+    results.pop().unwrap_or(false)
 }
 
 fn collect_break_values(expr: &IntermediateKind) -> Vec<IntermediateKind> {
     let mut values = Vec::new();
-    collect_break_values_inner(expr, &mut values);
-    values
-}
+    let mut stack = vec![expr];
 
-fn collect_break_values_inner(expr: &IntermediateKind, values: &mut Vec<IntermediateKind>) {
-    match expr {
-        IntermediateKind::Diverge {
-            value,
-            divergance_type: DivergeExpressionType::Break,
-        } => {
-            values.push((**value).clone());
-        }
-        IntermediateKind::Block(exprs) => {
-            for expr in exprs {
-                collect_break_values_inner(expr, values);
+    while let Some(node) = stack.pop() {
+        match node {
+            IntermediateKind::Diverge {
+                value,
+                divergance_type: DivergeExpressionType::Break,
+            } => {
+                values.push((**value).clone());
             }
-        }
-        IntermediateKind::If {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            collect_break_values_inner(then_branch, values);
-            collect_break_values_inner(else_branch, values);
-        }
-        IntermediateKind::Binding(binding) => collect_break_values_inner(&binding.expr, values),
-        IntermediateKind::Assignment { expr, .. } => collect_break_values_inner(expr, values),
-        IntermediateKind::FunctionCall { argument, .. } => {
-            collect_break_values_inner(argument, values);
-        }
-        IntermediateKind::Loop { body } => collect_break_values_inner(body, values),
-        IntermediateKind::PropertyAccess { object, .. } => {
-            collect_break_values_inner(object, values);
-        }
-        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
-            left,
-            right,
-            _,
-        )) => {
-            collect_break_values_inner(left, values);
-            collect_break_values_inner(right, values);
-        }
-        IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(operand, _)) => {
-            collect_break_values_inner(operand, values);
-        }
-        IntermediateKind::Struct(fields) => {
-            for (_, expr) in fields {
-                collect_break_values_inner(expr, values);
+            IntermediateKind::Block(exprs) => {
+                for expr in exprs.iter().rev() {
+                    stack.push(expr);
+                }
             }
+            IntermediateKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                stack.push(else_branch);
+                stack.push(then_branch);
+            }
+            IntermediateKind::Binding(binding) => {
+                stack.push(&binding.expr);
+            }
+            IntermediateKind::Assignment { expr, .. } => {
+                stack.push(expr);
+            }
+            IntermediateKind::FunctionCall { argument, .. } => {
+                stack.push(argument);
+            }
+            IntermediateKind::Loop { body } => {
+                stack.push(body);
+            }
+            IntermediateKind::PropertyAccess { object, .. } => {
+                stack.push(object);
+            }
+            IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
+                left,
+                right,
+                _,
+            )) => {
+                stack.push(right);
+                stack.push(left);
+            }
+            IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(
+                operand,
+                _,
+            )) => {
+                stack.push(operand);
+            }
+            IntermediateKind::Struct(fields) => {
+                for (_, expr) in fields.iter().rev() {
+                    stack.push(expr);
+                }
+            }
+            _ => {}
         }
-        _ => {}
     }
+
+    values
 }
