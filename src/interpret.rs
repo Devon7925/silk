@@ -172,6 +172,16 @@ fn types_equivalent(left: &ExpressionKind, right: &ExpressionKind) -> bool {
     while let Some((left, right)) = stack.pop() {
         match (left, right) {
             (ExpressionKind::IntrinsicType(a), ExpressionKind::IntrinsicType(b)) => {
+                if a == b {
+                    continue;
+                }
+                if matches!(
+                    (a, b),
+                    (IntrinsicType::I32, IntrinsicType::U8)
+                        | (IntrinsicType::U8, IntrinsicType::I32)
+                ) {
+                    continue;
+                }
                 if a != b {
                     return false;
                 }
@@ -2358,6 +2368,7 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
                     }
                     ExpressionKind::IntrinsicType(intrinsic_type) => match intrinsic_type {
                         IntrinsicType::I32
+                        | IntrinsicType::U8
                         | IntrinsicType::Boolean
                         | IntrinsicType::Target
                         | IntrinsicType::Type => {
@@ -2698,6 +2709,7 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
                     if let ExpressionKind::IntrinsicType(intrinsic) = &element_type.kind {
                         element_type = match intrinsic {
                             IntrinsicType::I32 => resolve_intrinsic_type("i32", span, &context)?,
+                            IntrinsicType::U8 => resolve_intrinsic_type("u8", span, &context)?,
                             IntrinsicType::Boolean => {
                                 resolve_intrinsic_type("bool", span, &context)?
                             }
@@ -2759,6 +2771,7 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
                 if let ExpressionKind::IntrinsicType(intrinsic) = &return_value.kind {
                     return_value = match intrinsic {
                         IntrinsicType::I32 => resolve_intrinsic_type("i32", span, &context)?,
+                        IntrinsicType::U8 => resolve_intrinsic_type("u8", span, &context)?,
                         IntrinsicType::Boolean => resolve_intrinsic_type("bool", span, &context)?,
                         IntrinsicType::Target => resolve_intrinsic_type("target", span, &context)?,
                         IntrinsicType::Type => resolve_intrinsic_type("type", span, &context)?,
@@ -2782,6 +2795,7 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
                 if let ExpressionKind::IntrinsicType(intrinsic) = &element_type.kind {
                     element_type = match intrinsic {
                         IntrinsicType::I32 => resolve_intrinsic_type("i32", span, &context)?,
+                        IntrinsicType::U8 => resolve_intrinsic_type("u8", span, &context)?,
                         IntrinsicType::Boolean => resolve_intrinsic_type("bool", span, &context)?,
                         IntrinsicType::Target => resolve_intrinsic_type("target", span, &context)?,
                         IntrinsicType::Type => resolve_intrinsic_type("type", span, &context)?,
@@ -3298,7 +3312,9 @@ fn type_expression_contains_compile_time_data(expr: &Expression) -> bool {
             ExpressionKind::IntrinsicType(IntrinsicType::Target | IntrinsicType::Type) => {
                 return true;
             }
-            ExpressionKind::IntrinsicType(IntrinsicType::Boolean | IntrinsicType::I32) => {}
+            ExpressionKind::IntrinsicType(
+                IntrinsicType::Boolean | IntrinsicType::I32 | IntrinsicType::U8,
+            ) => {}
             ExpressionKind::Identifier(_) => return true,
             other => panic!("Unsupported expression {:?} for resolved type", other),
         }
@@ -5249,9 +5265,10 @@ pub fn intrinsic_context() -> Context {
         ),
     );
 
-    fn i32_binary_intrinsic(
+    fn numeric_binary_intrinsic(
         symbol: &str,
         operator: BinaryIntrinsicOperator,
+        intrinsic: IntrinsicType,
     ) -> (Identifier, Expression) {
         let typed_pattern = |name: &str| {
             BindingPattern::TypeHint(
@@ -5259,7 +5276,7 @@ pub fn intrinsic_context() -> Context {
                     Identifier::new(name.to_string()),
                     dummy_span(),
                 )),
-                Box::new(intrinsic_type_expr(IntrinsicType::I32)),
+                Box::new(intrinsic_type_expr(intrinsic.clone())),
                 dummy_span(),
             )
         };
@@ -5270,15 +5287,15 @@ pub fn intrinsic_context() -> Context {
                 parameter: typed_pattern("self"),
                 return_type: Some(Box::new(
                     ExpressionKind::FunctionType {
-                        parameter: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
-                        return_type: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
+                        parameter: Box::new(intrinsic_type_expr(intrinsic.clone())),
+                        return_type: Box::new(intrinsic_type_expr(intrinsic.clone())),
                     }
                     .with_span(dummy_span()),
                 )),
                 body: Box::new(
                     ExpressionKind::Function {
                         parameter: typed_pattern("other"),
-                        return_type: Some(Box::new(intrinsic_type_expr(IntrinsicType::I32))),
+                        return_type: Some(Box::new(intrinsic_type_expr(intrinsic.clone()))),
                         body: Box::new(
                             ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(
                                 Box::new(identifier_expr("self")),
@@ -5303,18 +5320,125 @@ pub fn intrinsic_context() -> Context {
                     type_expr: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
                     implementation: Box::new(
                         ExpressionKind::Struct(vec![
-                            i32_binary_intrinsic("+", BinaryIntrinsicOperator::I32Add),
-                            i32_binary_intrinsic("-", BinaryIntrinsicOperator::I32Subtract),
-                            i32_binary_intrinsic("*", BinaryIntrinsicOperator::I32Multiply),
-                            i32_binary_intrinsic("/", BinaryIntrinsicOperator::I32Divide),
-                            i32_binary_intrinsic("==", BinaryIntrinsicOperator::I32Equal),
-                            i32_binary_intrinsic("!=", BinaryIntrinsicOperator::I32NotEqual),
-                            i32_binary_intrinsic("<", BinaryIntrinsicOperator::I32LessThan),
-                            i32_binary_intrinsic(">", BinaryIntrinsicOperator::I32GreaterThan),
-                            i32_binary_intrinsic("<=", BinaryIntrinsicOperator::I32LessThanOrEqual),
-                            i32_binary_intrinsic(
+                            numeric_binary_intrinsic(
+                                "+",
+                                BinaryIntrinsicOperator::I32Add,
+                                IntrinsicType::I32,
+                            ),
+                            numeric_binary_intrinsic(
+                                "-",
+                                BinaryIntrinsicOperator::I32Subtract,
+                                IntrinsicType::I32,
+                            ),
+                            numeric_binary_intrinsic(
+                                "*",
+                                BinaryIntrinsicOperator::I32Multiply,
+                                IntrinsicType::I32,
+                            ),
+                            numeric_binary_intrinsic(
+                                "/",
+                                BinaryIntrinsicOperator::I32Divide,
+                                IntrinsicType::I32,
+                            ),
+                            numeric_binary_intrinsic(
+                                "==",
+                                BinaryIntrinsicOperator::I32Equal,
+                                IntrinsicType::I32,
+                            ),
+                            numeric_binary_intrinsic(
+                                "!=",
+                                BinaryIntrinsicOperator::I32NotEqual,
+                                IntrinsicType::I32,
+                            ),
+                            numeric_binary_intrinsic(
+                                "<",
+                                BinaryIntrinsicOperator::I32LessThan,
+                                IntrinsicType::I32,
+                            ),
+                            numeric_binary_intrinsic(
+                                ">",
+                                BinaryIntrinsicOperator::I32GreaterThan,
+                                IntrinsicType::I32,
+                            ),
+                            numeric_binary_intrinsic(
+                                "<=",
+                                BinaryIntrinsicOperator::I32LessThanOrEqual,
+                                IntrinsicType::I32,
+                            ),
+                            numeric_binary_intrinsic(
                                 ">=",
                                 BinaryIntrinsicOperator::I32GreaterThanOrEqual,
+                                IntrinsicType::I32,
+                            ),
+                        ])
+                        .with_span(dummy_span()),
+                    ),
+                }
+                .with_span(dummy_span()),
+                PreserveBehavior::Inline,
+                None,
+            ),
+            Vec::new(),
+        ),
+    );
+
+    context.bindings.last_mut().unwrap().insert(
+        Identifier::new("u8"),
+        (
+            BindingContext::Bound(
+                ExpressionKind::AttachImplementation {
+                    type_expr: Box::new(intrinsic_type_expr(IntrinsicType::U8)),
+                    implementation: Box::new(
+                        ExpressionKind::Struct(vec![
+                            numeric_binary_intrinsic(
+                                "+",
+                                BinaryIntrinsicOperator::I32Add,
+                                IntrinsicType::U8,
+                            ),
+                            numeric_binary_intrinsic(
+                                "-",
+                                BinaryIntrinsicOperator::I32Subtract,
+                                IntrinsicType::U8,
+                            ),
+                            numeric_binary_intrinsic(
+                                "*",
+                                BinaryIntrinsicOperator::I32Multiply,
+                                IntrinsicType::U8,
+                            ),
+                            numeric_binary_intrinsic(
+                                "/",
+                                BinaryIntrinsicOperator::I32Divide,
+                                IntrinsicType::U8,
+                            ),
+                            numeric_binary_intrinsic(
+                                "==",
+                                BinaryIntrinsicOperator::I32Equal,
+                                IntrinsicType::U8,
+                            ),
+                            numeric_binary_intrinsic(
+                                "!=",
+                                BinaryIntrinsicOperator::I32NotEqual,
+                                IntrinsicType::U8,
+                            ),
+                            numeric_binary_intrinsic(
+                                "<",
+                                BinaryIntrinsicOperator::I32LessThan,
+                                IntrinsicType::U8,
+                            ),
+                            numeric_binary_intrinsic(
+                                ">",
+                                BinaryIntrinsicOperator::I32GreaterThan,
+                                IntrinsicType::U8,
+                            ),
+                            numeric_binary_intrinsic(
+                                "<=",
+                                BinaryIntrinsicOperator::I32LessThanOrEqual,
+                                IntrinsicType::U8,
+                            ),
+                            numeric_binary_intrinsic(
+                                ">=",
+                                BinaryIntrinsicOperator::I32GreaterThanOrEqual,
+                                IntrinsicType::U8,
                             ),
                         ])
                         .with_span(dummy_span()),

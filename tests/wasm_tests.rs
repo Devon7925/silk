@@ -147,6 +147,46 @@ fn compiles_array_indexing_to_wasm_arrays() {
 }
 
 #[test]
+fn compiles_u8_struct_and_array_access_with_unsigned_loads() {
+    let program = r#"
+(export wasm) read_struct := (value: {a = u8, b = i32}) => (
+    value.a
+);
+(export wasm) read_array := (value: {a = u8, b = u8}) => (
+    value.b
+);
+{}
+"#;
+    let wasm = compile(program.to_string()).expect("compilation should succeed");
+    assert!(
+        !wasm.is_empty(),
+        "expected wasm module bytes for wasm export"
+    );
+
+    let mut saw_struct_get_u = false;
+    let mut saw_array_get_u = false;
+
+    for payload in Parser::new(0).parse_all(&wasm) {
+        match payload.expect("failed to parse wasm payload") {
+            Payload::CodeSectionEntry(body) => {
+                let mut reader = body.get_operators_reader().expect("operators");
+                while let Ok(operator) = reader.read() {
+                    match operator {
+                        Operator::StructGetU { .. } => saw_struct_get_u = true,
+                        Operator::ArrayGetU { .. } => saw_array_get_u = true,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert!(saw_struct_get_u, "expected struct.get_u for u8 field");
+    assert!(saw_array_get_u, "expected array.get_u for u8 array element");
+}
+
+#[test]
 fn compile_without_wasm_exports_returns_empty() {
     let program = r#"
 answer := 5;
