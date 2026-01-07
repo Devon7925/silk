@@ -139,6 +139,8 @@ pub enum TargetLiteral {
 pub enum ExpressionLiteral {
     Number(i32),
     Boolean(bool),
+    Char(u8),
+    String(Vec<u8>),
     Target(TargetLiteral),
 }
 
@@ -326,6 +328,16 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
         match lit {
             ExpressionLiteral::Number(n) => n.to_string(),
             ExpressionLiteral::Boolean(b) => b.to_string(),
+            ExpressionLiteral::Char(value) => format!("'{}'", escape_literal_byte(*value, '\'')),
+            ExpressionLiteral::String(bytes) => {
+                let mut output = String::with_capacity(bytes.len() + 2);
+                output.push('"');
+                for byte in bytes {
+                    output.push_str(&escape_literal_byte(*byte, '"'));
+                }
+                output.push('"');
+                output
+            }
             ExpressionLiteral::Target(t) => match t {
                 TargetLiteral::JSTarget => "js".to_string(),
                 TargetLiteral::WasmTarget => "wasm".to_string(),
@@ -1937,6 +1949,18 @@ pub fn parse_identifier(file: &str) -> Option<(Identifier, &str)> {
 }
 
 pub fn parse_literal(file: &str) -> Option<(ExpressionLiteral, &str)> {
+    if let Some(rest) = file.strip_prefix('\'') {
+        return parse_char_literal(rest).map(|(value, remaining)| {
+            (ExpressionLiteral::Char(value), remaining)
+        });
+    }
+
+    if let Some(rest) = file.strip_prefix('"') {
+        return parse_string_literal(rest).map(|(bytes, remaining)| {
+            (ExpressionLiteral::String(bytes), remaining)
+        });
+    }
+
     let mut consumed = 0;
     let is_negative = matches!(file.chars().next(), Some('-'));
 
@@ -1961,6 +1985,82 @@ pub fn parse_literal(file: &str) -> Option<(ExpressionLiteral, &str)> {
         ExpressionLiteral::Number(if is_negative { -number } else { number }),
         remaining,
     ))
+}
+
+fn parse_char_literal(file: &str) -> Option<(u8, &str)> {
+    let mut chars = file.chars();
+    let (value, consumed) = match chars.next()? {
+        '\\' => {
+            let next = chars.next()?;
+            let value = match next {
+                'n' => b'\n',
+                'r' => b'\r',
+                't' => b'\t',
+                '0' => b'\0',
+                '\'' => b'\'',
+                '"' => b'"',
+                '\\' => b'\\',
+                _ => return None,
+            };
+            (value, 1 + next.len_utf8())
+        }
+        ch if ch.is_ascii() => (ch as u8, ch.len_utf8()),
+        _ => return None,
+    };
+
+    let remaining = &file[consumed..];
+    let Some(after_quote) = remaining.strip_prefix('\'') else {
+        return None;
+    };
+    Some((value, after_quote))
+}
+
+fn parse_string_literal(file: &str) -> Option<(Vec<u8>, &str)> {
+    let mut bytes = Vec::new();
+    let mut idx = 0;
+    while idx < file.len() {
+        let ch = file[idx..].chars().next()?;
+        if ch == '"' {
+            let remaining = &file[idx + ch.len_utf8()..];
+            return Some((bytes, remaining));
+        }
+        if ch == '\\' {
+            let next_idx = idx + ch.len_utf8();
+            let next = file[next_idx..].chars().next()?;
+            let value = match next {
+                'n' => b'\n',
+                'r' => b'\r',
+                't' => b'\t',
+                '0' => b'\0',
+                '\'' => b'\'',
+                '"' => b'"',
+                '\\' => b'\\',
+                _ => return None,
+            };
+            bytes.push(value);
+            idx = next_idx + next.len_utf8();
+            continue;
+        }
+        let mut buf = [0u8; 4];
+        let encoded = ch.encode_utf8(&mut buf);
+        bytes.extend_from_slice(encoded.as_bytes());
+        idx += ch.len_utf8();
+    }
+    None
+}
+
+fn escape_literal_byte(byte: u8, quote: char) -> String {
+    match byte {
+        b'\n' => "\\n".to_string(),
+        b'\r' => "\\r".to_string(),
+        b'\t' => "\\t".to_string(),
+        b'\0' => "\\0".to_string(),
+        b'\\' => "\\\\".to_string(),
+        b'\'' if quote == '\'' => "\\'".to_string(),
+        b'"' if quote == '"' => "\\\"".to_string(),
+        byte if byte.is_ascii_graphic() || byte == b' ' => (byte as char).to_string(),
+        other => format!("\\x{:02x}", other),
+    }
 }
 
 #[test]

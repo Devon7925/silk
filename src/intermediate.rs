@@ -266,7 +266,26 @@ pub fn expression_to_intermediate(
                             stack.push(Frame::Enter(field_expr));
                         }
                     }
-                    ExpressionKind::Literal(lit) => values.push(IntermediateKind::Literal(lit)),
+                    ExpressionKind::Literal(lit) => match lit {
+                        ExpressionLiteral::String(bytes) => {
+                            let items = bytes
+                                .iter()
+                                .copied()
+                                .map(|value| {
+                                    IntermediateKind::Literal(ExpressionLiteral::Char(value))
+                                })
+                                .collect();
+                            let field_names = (0..bytes.len())
+                                .map(|index| index.to_string())
+                                .collect();
+                            values.push(IntermediateKind::ArrayLiteral {
+                                items,
+                                element_type: IntermediateType::U8,
+                                field_names,
+                            });
+                        }
+                        _ => values.push(IntermediateKind::Literal(lit)),
+                    },
                     ExpressionKind::Identifier(identifier) => {
                         if let Some(inlined) = builder.inline_bindings.get(&identifier).cloned() {
                             stack.push(Frame::Enter(inlined));
@@ -880,7 +899,23 @@ impl IntermediateBuilder {
         while let Some(frame) = stack.pop() {
             match frame {
                 Frame::Enter(expr) => match expr.kind {
-                    ExpressionKind::Literal(_) | ExpressionKind::IntrinsicOperation(_) => {
+                    ExpressionKind::Literal(lit) => {
+                        let value = match lit {
+                            ExpressionLiteral::Char(_) => IntermediateType::U8,
+                            ExpressionLiteral::String(bytes) => IntermediateType::Array {
+                                element: Box::new(IntermediateType::U8),
+                                length: bytes.len(),
+                                field_names: (0..bytes.len())
+                                    .map(|index| index.to_string())
+                                    .collect(),
+                            },
+                            ExpressionLiteral::Number(_)
+                            | ExpressionLiteral::Boolean(_)
+                            | ExpressionLiteral::Target(_) => IntermediateType::I32,
+                        };
+                        values.push(value);
+                    }
+                    ExpressionKind::IntrinsicOperation(_) => {
                         values.push(IntermediateType::I32);
                     }
                     ExpressionKind::Struct(fields) => {
@@ -1217,6 +1252,7 @@ impl IntermediateBuilder {
                         let literal = match literal {
                             ExpressionLiteral::Number(_) => literal,
                             ExpressionLiteral::Boolean(_) => literal,
+                            ExpressionLiteral::Char(_) => literal,
                             other => panic!(
                                 "Unsupported literal pattern in binding lowering: {:?} at {:?}",
                                 other, span

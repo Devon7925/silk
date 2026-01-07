@@ -612,6 +612,12 @@ fn const_expr_for_global(expr: &IntermediateKind, ty: &WasmType) -> Result<Const
         (WasmType::U8, IntermediateKind::Literal(ExpressionLiteral::Number(value))) => {
             Ok(ConstExpr::i32_const(value & 0xFF))
         }
+        (WasmType::I32, IntermediateKind::Literal(ExpressionLiteral::Char(value))) => {
+            Ok(ConstExpr::i32_const(i32::from(*value)))
+        }
+        (WasmType::U8, IntermediateKind::Literal(ExpressionLiteral::Char(value))) => {
+            Ok(ConstExpr::i32_const(i32::from(*value)))
+        }
         (WasmType::I32, IntermediateKind::Literal(ExpressionLiteral::Boolean(value))) => {
             Ok(ConstExpr::i32_const(if *value { 1 } else { 0 }))
         }
@@ -909,6 +915,9 @@ fn infer_type_basic(
                 | IntermediateKind::Literal(ExpressionLiteral::Boolean(_)) => {
                     results.push(WasmType::I32);
                 }
+                IntermediateKind::Literal(ExpressionLiteral::Char(_)) => {
+                    results.push(WasmType::U8);
+                }
                 IntermediateKind::Struct(fields) => {
                     let field_names = fields.iter().map(|(name, _)| name.name.clone()).collect();
                     stack.push(InferTask::FinishStruct { field_names });
@@ -1111,6 +1120,9 @@ fn infer_type_impl(
                 IntermediateKind::Literal(ExpressionLiteral::Number(_))
                 | IntermediateKind::Literal(ExpressionLiteral::Boolean(_)) => {
                     results.push(WasmType::I32);
+                }
+                IntermediateKind::Literal(ExpressionLiteral::Char(_)) => {
+                    results.push(WasmType::U8);
                 }
                 IntermediateKind::Struct(fields) => {
                     let field_names = fields.iter().map(|(name, _)| name.name.clone()).collect();
@@ -1618,6 +1630,9 @@ fn emit_expression(
             EmitTask::Eval(node) => match node {
                 IntermediateKind::Literal(ExpressionLiteral::Number(value)) => {
                     tasks.push(EmitTask::Instr(Instruction::I32Const(value)));
+                }
+                IntermediateKind::Literal(ExpressionLiteral::Char(value)) => {
+                    tasks.push(EmitTask::Instr(Instruction::I32Const(i32::from(value))));
                 }
                 IntermediateKind::Literal(ExpressionLiteral::Boolean(value)) => {
                     tasks.push(EmitTask::Instr(Instruction::I32Const(if value {
