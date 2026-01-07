@@ -1624,6 +1624,8 @@ fn emit_expression(
                                 let type_index = type_ctx
                                     .get_type_index(&object_type)
                                     .expect("Type should be registered");
+                                let full_target_expr = lvalue_to_intermediate(&target);
+                                tasks.push(EmitTask::Eval(full_target_expr));
                                 tasks.push(EmitTask::Instr(Instruction::ArraySet(type_index)));
                                 tasks.push(EmitTask::Eval((*value).clone()));
                                 tasks.push(EmitTask::Instr(Instruction::I32Const(field_index as i32)));
