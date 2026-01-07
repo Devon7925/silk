@@ -1828,6 +1828,9 @@ fn emit_expression(
                                 unreachable!("boolean ops handled before op_instr")
                             }
                         };
+                        tasks.push(EmitTask::Instr(op_instr));
+                        tasks.push(EmitTask::Eval((*right).clone()));
+                        tasks.push(EmitTask::Eval((*left).clone()));
                         if is_u8
                             && matches!(
                                 op,
@@ -1837,12 +1840,9 @@ fn emit_expression(
                                     | BinaryIntrinsicOperator::I32Divide
                             )
                         {
-                            tasks.push(EmitTask::Instr(Instruction::I32And));
                             tasks.push(EmitTask::Instr(Instruction::I32Const(0xFF)));
+                            tasks.push(EmitTask::Instr(Instruction::I32And));
                         }
-                        tasks.push(EmitTask::Instr(op_instr));
-                        tasks.push(EmitTask::Eval((*right).clone()));
-                        tasks.push(EmitTask::Eval((*left).clone()));
                     }
                 },
                 IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(
