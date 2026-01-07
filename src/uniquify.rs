@@ -123,6 +123,9 @@ enum Task {
     BuildFunctionCall {
         span: SourceSpan,
     },
+    BuildArrayIndex {
+        span: SourceSpan,
+    },
     BuildPropertyAccess {
         span: SourceSpan,
         property: String,
@@ -137,6 +140,9 @@ enum Task {
     BuildLValueProperty {
         span: SourceSpan,
         property: String,
+    },
+    BuildLValueArrayIndex {
+        span: SourceSpan,
     },
     ContinueFunctionParam {
         span: SourceSpan,
@@ -441,6 +447,11 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                         tasks.push(Task::Expr(*argument, scope.clone()));
                         tasks.push(Task::Expr(*function, scope));
                     }
+                    ExpressionKind::ArrayIndex { array, index } => {
+                        tasks.push(Task::BuildArrayIndex { span });
+                        tasks.push(Task::Expr(*index, scope.clone()));
+                        tasks.push(Task::Expr(*array, scope));
+                    }
                     ExpressionKind::PropertyAccess { object, property } => {
                         tasks.push(Task::BuildPropertyAccess { span, property });
                         tasks.push(Task::Expr(*object, scope));
@@ -556,6 +567,11 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 } => {
                     tasks.push(Task::BuildLValueProperty { span, property });
                     tasks.push(Task::LValue(*object, scope));
+                }
+                LValue::ArrayIndex { array, index, span } => {
+                    tasks.push(Task::BuildLValueArrayIndex { span });
+                    tasks.push(Task::Expr(*index, scope.clone()));
+                    tasks.push(Task::LValue(*array, scope));
                 }
             },
             Task::Annotations(annotations, scope) => {
@@ -713,6 +729,17 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                     .with_span(span),
                 ));
             }
+            Task::BuildArrayIndex { span } => {
+                let index = pop_expr(&mut results);
+                let array = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::ArrayIndex {
+                        array: Box::new(array),
+                        index: Box::new(index),
+                    }
+                    .with_span(span),
+                ));
+            }
             Task::BuildPropertyAccess { span, property } => {
                 let object = pop_expr(&mut results);
                 results.push(Value::Expr(
@@ -750,6 +777,15 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 results.push(Value::LValue(LValue::PropertyAccess {
                     object: Box::new(object),
                     property,
+                    span,
+                }));
+            }
+            Task::BuildLValueArrayIndex { span } => {
+                let index = pop_expr(&mut results);
+                let array = pop_lvalue(&mut results);
+                results.push(Value::LValue(LValue::ArrayIndex {
+                    array: Box::new(array),
+                    index: Box::new(index),
                     span,
                 }));
             }

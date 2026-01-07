@@ -105,6 +105,48 @@ fn compiles_parameterized_wasm_export() {
 }
 
 #[test]
+fn compiles_array_indexing_to_wasm_arrays() {
+    let program = r#"
+(export wasm) update_at := (idx: i32) => (
+    mut nums := {1, 2, 3};
+    nums(idx) = nums(idx) + 5;
+    nums(idx)
+);
+{}
+"#;
+    let wasm = compile(program.to_string()).expect("compilation should succeed");
+    assert!(
+        !wasm.is_empty(),
+        "expected wasm module bytes for wasm export"
+    );
+
+    let mut saw_array_new = false;
+    let mut saw_array_get = false;
+    let mut saw_array_set = false;
+
+    for payload in Parser::new(0).parse_all(&wasm) {
+        match payload.expect("failed to parse wasm payload") {
+            Payload::CodeSectionEntry(body) => {
+                let mut reader = body.get_operators_reader().expect("operators");
+                while let Ok(operator) = reader.read() {
+                    match operator {
+                        Operator::ArrayNewFixed { .. } => saw_array_new = true,
+                        Operator::ArrayGet { .. } => saw_array_get = true,
+                        Operator::ArraySet { .. } => saw_array_set = true,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert!(saw_array_new, "expected array.new_fixed in wasm output");
+    assert!(saw_array_get, "expected array.get in wasm output");
+    assert!(saw_array_set, "expected array.set in wasm output");
+}
+
+#[test]
 fn compile_without_wasm_exports_returns_empty() {
     let program = r#"
 answer := 5;
