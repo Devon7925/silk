@@ -1722,8 +1722,29 @@ pub fn interpret_expression(
                         return Err(diagnostic("Array index must be an i32 value", span));
                     }
 
-                    if let (ExpressionKind::Struct(fields), ExpressionKind::Literal(ExpressionLiteral::Number(index))) =
-                        (&function_value.kind, &argument_value.kind)
+                    if let (
+                        ExpressionKind::Literal(ExpressionLiteral::String(bytes)),
+                        ExpressionKind::Literal(ExpressionLiteral::Number(index)),
+                    ) = (&function_value.kind, &argument_value.kind)
+                    {
+                        if *index < 0 {
+                            return Err(diagnostic("Array index out of range", span));
+                        }
+                        let index = *index as usize;
+                        if let Some(value) = bytes.get(index) {
+                            values.push(
+                                ExpressionKind::Literal(ExpressionLiteral::Char(*value))
+                                    .with_span(span),
+                            );
+                            continue;
+                        }
+                        return Err(diagnostic("Array index out of range", span));
+                    }
+
+                    if let (
+                        ExpressionKind::Struct(fields),
+                        ExpressionKind::Literal(ExpressionLiteral::Number(index)),
+                    ) = (&function_value.kind, &argument_value.kind)
                     {
                         if *index < 0 {
                             return Err(diagnostic("Array index out of range", span));
@@ -1985,6 +2006,14 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
                 )),
             }
         };
+    let string_literal_type =
+        |bytes: &[u8], span: SourceSpan, context: &Context| -> Result<Expression, Diagnostic> {
+            let element_type = resolve_intrinsic_type("u8", span, context)?;
+            let items = (0..bytes.len())
+                .map(|index| (Identifier::new(index.to_string()), element_type.clone()))
+                .collect();
+            Ok(Expression::new(ExpressionKind::Struct(items), span))
+        };
 
     let pattern_type_expr = |pattern: &BindingPattern,
                              context: &Context|
@@ -2016,6 +2045,12 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
                             }
                             ExpressionLiteral::Boolean(_) => {
                                 resolve_intrinsic_type("bool", *span, context)?
+                            }
+                            ExpressionLiteral::Char(_) => {
+                                resolve_intrinsic_type("u8", *span, context)?
+                            }
+                            ExpressionLiteral::String(bytes) => {
+                                string_literal_type(&bytes, *span, context)?
                             }
                             ExpressionLiteral::Target(_) => {
                                 resolve_intrinsic_type("target", *span, context)?
@@ -2146,6 +2181,12 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
                             }
                             ExpressionLiteral::Boolean(_) => {
                                 resolve_intrinsic_type("bool", span, &context)?
+                            }
+                            ExpressionLiteral::Char(_) => {
+                                resolve_intrinsic_type("u8", span, &context)?
+                            }
+                            ExpressionLiteral::String(bytes) => {
+                                string_literal_type(&bytes, span, &context)?
                             }
                             ExpressionLiteral::Target(_) => {
                                 resolve_intrinsic_type("target", span, &context)?
@@ -3352,6 +3393,14 @@ fn collect_pattern_value_bindings(
                         ExpressionKind::Literal(ExpressionLiteral::Boolean(value)),
                         ExpressionLiteral::Boolean(pattern_value),
                     ) => *value == *pattern_value,
+                    (
+                        ExpressionKind::Literal(ExpressionLiteral::Char(value)),
+                        ExpressionLiteral::Char(pattern_value),
+                    ) => *value == *pattern_value,
+                    (
+                        ExpressionKind::Literal(ExpressionLiteral::String(value)),
+                        ExpressionLiteral::String(pattern_value),
+                    ) => value == pattern_value,
                     _ => false,
                 };
                 if !matched {
@@ -4228,6 +4277,18 @@ fn get_lvalue_value(
                 return Err(diagnostic("Array index out of range", *span));
             }
             let index = index as usize;
+            if let ExpressionKind::Literal(ExpressionLiteral::String(bytes)) = array_value.kind {
+                return bytes
+                    .get(index)
+                    .copied()
+                    .map(|value| {
+                        Some(
+                            ExpressionKind::Literal(ExpressionLiteral::Char(value))
+                                .with_span(array_value.span),
+                        )
+                    })
+                    .ok_or_else(|| diagnostic("Array index out of range", array_value.span));
+            }
             let Expression {
                 kind: ExpressionKind::Struct(fields),
                 span: struct_span,
@@ -4707,6 +4768,14 @@ fn bind_pattern_from_value(
                             ExpressionLiteral::Boolean(pattern_value),
                             ExpressionKind::Literal(ExpressionLiteral::Boolean(value)),
                         ) => pattern_value == *value,
+                        (
+                            ExpressionLiteral::Char(pattern_value),
+                            ExpressionKind::Literal(ExpressionLiteral::Char(value)),
+                        ) => pattern_value == *value,
+                        (
+                            ExpressionLiteral::String(pattern_value),
+                            ExpressionKind::Literal(ExpressionLiteral::String(value)),
+                        ) => pattern_value == *value,
                         _ => false,
                     };
                     results.push((matched, preserve_behavior));
@@ -4976,6 +5045,10 @@ fn evaluate_numeric_operand(expr: Expression) -> Result<i32, Diagnostic> {
             kind: ExpressionKind::Literal(ExpressionLiteral::Number(value)),
             ..
         } => Ok(value),
+        Expression {
+            kind: ExpressionKind::Literal(ExpressionLiteral::Char(value)),
+            ..
+        } => Ok(i32::from(value)),
         _ => Err(diagnostic(
             "Expected numeric literal during intrinsic operation",
             expr.span(),
