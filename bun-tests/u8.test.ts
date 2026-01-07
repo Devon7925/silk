@@ -29,14 +29,14 @@ async function compileAndRun(code: string, callback: (instance: WebAssembly.Inst
 test("u8 values", async () => {
     const code = `
     (export wasm) add_one := (value: u8) => ( value + 1 );
-    (export wasm) add_pair := (left: u8) => ( (right: u8) => left + right );
+    (export wasm) add_pair := ({left: u8, right: u8}) => ( left + right );
     {}
     `;
 
     await compileAndRun(code, async (instance) => {
         const exports = instance.exports as any;
         expect(exports.add_one(41)).toBe(42);
-        expect(exports.add_pair(12)(34)).toBe(46);
+        expect(exports.add_pair(12, 34)).toBe(46);
     });
 
     try { unlinkSync(TEMP_SILK); unlinkSync(TEMP_WASM); } catch (e) { }
