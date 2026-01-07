@@ -89,6 +89,7 @@ pub enum IntermediateLValue {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntermediateType {
     I32,
+    U8,
     Struct(Vec<(String, IntermediateType)>),
     Array {
         element: Box<IntermediateType>,
@@ -986,6 +987,9 @@ impl IntermediateBuilder {
                     | ExpressionKind::IntrinsicType(IntrinsicType::Type) => {
                         values.push(IntermediateType::I32);
                     }
+                    ExpressionKind::IntrinsicType(IntrinsicType::U8) => {
+                        values.push(IntermediateType::U8);
+                    }
                     ExpressionKind::Struct(fields) => {
                         let field_names = fields.iter().map(|(id, _)| id.name.clone()).collect();
                         stack.push(Frame::FinishStruct(field_names));
@@ -1344,7 +1348,9 @@ fn default_value_for_type(ty: &Expression) -> Option<Expression> {
     while let Some(frame) = stack.pop() {
         match frame {
             Frame::Enter(expr) => match expr.kind {
-                ExpressionKind::IntrinsicType(IntrinsicType::I32 | IntrinsicType::Boolean) => {
+                ExpressionKind::IntrinsicType(
+                    IntrinsicType::I32 | IntrinsicType::U8 | IntrinsicType::Boolean,
+                ) => {
                     values.push(Some(
                         ExpressionKind::Literal(ExpressionLiteral::Number(0)).with_span(expr.span),
                     ));

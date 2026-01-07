@@ -20,6 +20,7 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum WasmType {
     I32,
+    U8,
     Struct(Vec<(String, WasmType)>),
     Array {
         element: Box<WasmType>,
@@ -58,6 +59,7 @@ impl WasmType {
     fn to_val_type(&self, ctx: &TypeContext) -> ValType {
         match self {
             WasmType::I32 => ValType::I32,
+            WasmType::U8 => ValType::I32,
             WasmType::Struct(_fields) => {
                 let type_index = ctx
                     .get_type_index(self)
@@ -103,6 +105,7 @@ fn format_wasm_type(ty: &WasmType) -> String {
 
         match node {
             WasmType::I32 => results.push("i32".to_string()),
+            WasmType::U8 => results.push("u8".to_string()),
             WasmType::Struct(fields) => {
                 let mut parts = Vec::with_capacity(fields.len());
                 for (name, _) in fields.iter().rev() {
@@ -162,13 +165,14 @@ fn intermediate_type_to_wasm(ty: &IntermediateType) -> WasmType {
                 IntermediateType::Array { element, .. } => {
                     stack.push((element, false));
                 }
-                IntermediateType::I32 => {}
+                IntermediateType::I32 | IntermediateType::U8 => {}
             }
             continue;
         }
 
         match node {
             IntermediateType::I32 => results.push(WasmType::I32),
+            IntermediateType::U8 => results.push(WasmType::U8),
             IntermediateType::Struct(fields) => {
                 let mut field_types = Vec::with_capacity(fields.len());
                 let mut field_names = Vec::with_capacity(fields.len());
@@ -280,7 +284,7 @@ impl TypeContext {
                 match &current {
                     WasmType::Struct(fields) => {
                         for (_, field_type) in fields.iter().rev() {
-                            if !matches!(field_type, WasmType::I32)
+                            if !matches!(field_type, WasmType::I32 | WasmType::U8)
                                 && !self.type_map.contains_key(field_type)
                             {
                                 stack.push((field_type.clone(), false));
@@ -288,13 +292,13 @@ impl TypeContext {
                         }
                     }
                     WasmType::Array { element, .. } => {
-                        if !matches!(element.as_ref(), WasmType::I32)
+                        if !matches!(element.as_ref(), WasmType::I32 | WasmType::U8)
                             && !self.type_map.contains_key(element.as_ref())
                         {
                             stack.push((element.as_ref().clone(), false));
                         }
                     }
-                    WasmType::I32 => {
+                    WasmType::I32 | WasmType::U8 => {
                         continue;
                     }
                 }
@@ -306,7 +310,7 @@ impl TypeContext {
                 continue;
             }
 
-            if matches!(current, WasmType::I32) {
+            if matches!(current, WasmType::I32 | WasmType::U8) {
                 continue;
             }
             let index = self.types.len() as u32;
@@ -387,12 +391,12 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
     for function in &all_functions {
         let mut locals_types = std::collections::HashMap::new();
         for param in &function.params {
-            if !matches!(param.ty, WasmType::I32) {
+            if !matches!(param.ty, WasmType::I32 | WasmType::U8) {
                 type_ctx.get_or_register_type(param.ty.clone());
             }
             locals_types.insert(param.name.clone(), param.ty.clone());
         }
-        if !matches!(function.return_type, WasmType::I32) {
+        if !matches!(function.return_type, WasmType::I32 | WasmType::U8) {
             type_ctx.get_or_register_type(function.return_type.clone());
         }
         collect_types(
@@ -404,7 +408,7 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
     }
 
     for global in &exports.globals {
-        if !matches!(global.ty, WasmType::I32) {
+        if !matches!(global.ty, WasmType::I32 | WasmType::U8) {
             type_ctx.get_or_register_type(global.ty.clone());
         }
     }
@@ -413,9 +417,12 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
         let composite_type = match ty {
             WasmType::Struct(fields) => {
                 let wasm_fields = fields.iter().map(|(_, ty)| {
-                    let val_type = ty.to_val_type(&type_ctx);
+                    let storage_type = match ty {
+                        WasmType::U8 => StorageType::I8,
+                        _ => StorageType::Val(ty.to_val_type(&type_ctx)),
+                    };
                     FieldType {
-                        element_type: StorageType::Val(val_type),
+                        element_type: storage_type,
                         mutable: true,
                     }
                 });
@@ -424,13 +431,16 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
                 })
             }
             WasmType::Array { element, .. } => {
-                let val_type = element.to_val_type(&type_ctx);
+                let storage_type = match element.as_ref() {
+                    WasmType::U8 => StorageType::I8,
+                    _ => StorageType::Val(element.to_val_type(&type_ctx)),
+                };
                 wasm_encoder::CompositeInnerType::Array(wasm_encoder::ArrayType(FieldType {
-                    element_type: StorageType::Val(val_type),
+                    element_type: storage_type,
                     mutable: true,
                 }))
             }
-            WasmType::I32 => {
+            WasmType::I32 | WasmType::U8 => {
                 continue;
             }
         };
@@ -599,6 +609,9 @@ fn const_expr_for_global(expr: &IntermediateKind, ty: &WasmType) -> Result<Const
         (WasmType::I32, IntermediateKind::Literal(ExpressionLiteral::Number(value))) => {
             Ok(ConstExpr::i32_const(*value))
         }
+        (WasmType::U8, IntermediateKind::Literal(ExpressionLiteral::Number(value))) => {
+            Ok(ConstExpr::i32_const(value & 0xFF))
+        }
         (WasmType::I32, IntermediateKind::Literal(ExpressionLiteral::Boolean(value))) => {
             Ok(ConstExpr::i32_const(if *value { 1 } else { 0 }))
         }
@@ -683,7 +696,7 @@ fn collect_types(
         match node {
             IntermediateKind::Struct(_fields) => {
                 let ty = infer_type(node, locals_types, function_return_types)?;
-                if !matches!(ty, WasmType::I32) {
+                if !matches!(ty, WasmType::I32 | WasmType::U8) {
                     ctx.get_or_register_type(ty);
                 }
             }
@@ -842,6 +855,35 @@ fn infer_type(
     infer_type_impl(expr, locals_types, function_return_types)
 }
 
+fn intrinsic_binary_result_type(
+    op: &BinaryIntrinsicOperator,
+    left: &WasmType,
+    right: &WasmType,
+) -> WasmType {
+    let is_u8 = matches!(left, WasmType::U8) && matches!(right, WasmType::U8);
+    match op {
+        BinaryIntrinsicOperator::I32Add
+        | BinaryIntrinsicOperator::I32Subtract
+        | BinaryIntrinsicOperator::I32Multiply
+        | BinaryIntrinsicOperator::I32Divide => {
+            if is_u8 {
+                WasmType::U8
+            } else {
+                WasmType::I32
+            }
+        }
+        BinaryIntrinsicOperator::I32Equal
+        | BinaryIntrinsicOperator::I32NotEqual
+        | BinaryIntrinsicOperator::I32LessThan
+        | BinaryIntrinsicOperator::I32GreaterThan
+        | BinaryIntrinsicOperator::I32LessThanOrEqual
+        | BinaryIntrinsicOperator::I32GreaterThanOrEqual
+        | BinaryIntrinsicOperator::BooleanAnd
+        | BinaryIntrinsicOperator::BooleanOr
+        | BinaryIntrinsicOperator::BooleanXor => WasmType::I32,
+    }
+}
+
 fn infer_type_basic(
     expr: &IntermediateKind,
     locals_types: &std::collections::HashMap<String, WasmType>,
@@ -853,6 +895,7 @@ fn infer_type_basic(
         FinishAssignment,
         FinishPropertyAccess { property: String },
         FinishArrayIndex,
+        FinishIntrinsicBinary { op: BinaryIntrinsicOperator },
     }
 
     let mut stack: Vec<InferTask> = Vec::new();
@@ -923,7 +966,16 @@ fn infer_type_basic(
                     stack.push(InferTask::Eval((*index).clone()));
                     stack.push(InferTask::Eval((*array).clone()));
                 }
-                IntermediateKind::IntrinsicOperation(..)
+                IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
+                    left,
+                    right,
+                    op,
+                )) => {
+                    stack.push(InferTask::FinishIntrinsicBinary { op });
+                    stack.push(InferTask::Eval((*right).clone()));
+                    stack.push(InferTask::Eval((*left).clone()));
+                }
+                IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(..))
                 | IntermediateKind::Binding(..)
                 | IntermediateKind::Unreachable => {
                     results.push(WasmType::I32);
@@ -997,7 +1049,7 @@ fn infer_type_basic(
                             .with_span(SourceSpan::default()));
                         }
                     }
-                    WasmType::I32 => {
+                    WasmType::I32 | WasmType::U8 => {
                         return Err(Diagnostic::new("Property access on non-struct type")
                             .with_span(SourceSpan::default()));
                     }
@@ -1016,6 +1068,15 @@ fn infer_type_basic(
                     return Err(Diagnostic::new("Indexing on non-array type")
                         .with_span(SourceSpan::default()));
                 }
+            }
+            InferTask::FinishIntrinsicBinary { op } => {
+                let right_type = results
+                    .pop()
+                    .expect("infer_type_basic should have intrinsic right type");
+                let left_type = results
+                    .pop()
+                    .expect("infer_type_basic should have intrinsic left type");
+                results.push(intrinsic_binary_result_type(&op, &left_type, &right_type));
             }
         }
     }
@@ -1037,6 +1098,7 @@ fn infer_type_impl(
         FinishPropertyAccess { property: String },
         FinishArrayIndex,
         FinishLoop { body: IntermediateKind },
+        FinishIntrinsicBinary { op: BinaryIntrinsicOperator },
     }
 
     let mut stack: Vec<InferTask> = Vec::new();
@@ -1110,7 +1172,16 @@ fn infer_type_impl(
                     stack.push(InferTask::Eval((*index).clone()));
                     stack.push(InferTask::Eval((*array).clone()));
                 }
-                IntermediateKind::IntrinsicOperation(..)
+                IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
+                    left,
+                    right,
+                    op,
+                )) => {
+                    stack.push(InferTask::FinishIntrinsicBinary { op });
+                    stack.push(InferTask::Eval((*right).clone()));
+                    stack.push(InferTask::Eval((*left).clone()));
+                }
+                IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(..))
                 | IntermediateKind::Binding(..)
                 | IntermediateKind::Unreachable => {
                     results.push(WasmType::I32);
@@ -1184,7 +1255,7 @@ fn infer_type_impl(
                             .with_span(SourceSpan::default()));
                         }
                     }
-                    WasmType::I32 => {
+                    WasmType::I32 | WasmType::U8 => {
                         return Err(Diagnostic::new("Property access on non-struct type")
                             .with_span(SourceSpan::default()));
                     }
@@ -1203,6 +1274,15 @@ fn infer_type_impl(
                     return Err(Diagnostic::new("Indexing on non-array type")
                         .with_span(SourceSpan::default()));
                 }
+            }
+            InferTask::FinishIntrinsicBinary { op } => {
+                let right_type = results
+                    .pop()
+                    .expect("infer_type_impl should have intrinsic right type");
+                let left_type = results
+                    .pop()
+                    .expect("infer_type_impl should have intrinsic left type");
+                results.push(intrinsic_binary_result_type(&op, &left_type, &right_type));
             }
             InferTask::FinishLoop { body } => {
                 let body_type = results
@@ -1631,7 +1711,7 @@ fn emit_expression(
                                 tasks.push(EmitTask::Instr(Instruction::I32Const(field_index as i32)));
                                 tasks.push(EmitTask::Eval(object_expr));
                             }
-                            WasmType::I32 => {
+                            WasmType::I32 | WasmType::U8 => {
                                 return Err(Diagnostic::new(
                                     "Property assignment on non-struct type".to_string(),
                                 )
@@ -1695,23 +1775,71 @@ fn emit_expression(
                         tasks.push(EmitTask::Eval((*left).clone()));
                     }
                     _ => {
+                        let left_type =
+                            infer_type(left.as_ref(), locals_types, function_return_types)?;
+                        let right_type =
+                            infer_type(right.as_ref(), locals_types, function_return_types)?;
+                        let is_u8 = matches!(left_type, WasmType::U8)
+                            && matches!(right_type, WasmType::U8);
                         let op_instr = match op {
                             BinaryIntrinsicOperator::I32Add => Instruction::I32Add,
                             BinaryIntrinsicOperator::I32Subtract => Instruction::I32Sub,
                             BinaryIntrinsicOperator::I32Multiply => Instruction::I32Mul,
-                            BinaryIntrinsicOperator::I32Divide => Instruction::I32DivS,
+                            BinaryIntrinsicOperator::I32Divide => {
+                                if is_u8 {
+                                    Instruction::I32DivU
+                                } else {
+                                    Instruction::I32DivS
+                                }
+                            }
                             BinaryIntrinsicOperator::I32Equal => Instruction::I32Eq,
                             BinaryIntrinsicOperator::I32NotEqual => Instruction::I32Ne,
-                            BinaryIntrinsicOperator::I32LessThan => Instruction::I32LtS,
-                            BinaryIntrinsicOperator::I32GreaterThan => Instruction::I32GtS,
-                            BinaryIntrinsicOperator::I32LessThanOrEqual => Instruction::I32LeS,
-                            BinaryIntrinsicOperator::I32GreaterThanOrEqual => Instruction::I32GeS,
+                            BinaryIntrinsicOperator::I32LessThan => {
+                                if is_u8 {
+                                    Instruction::I32LtU
+                                } else {
+                                    Instruction::I32LtS
+                                }
+                            }
+                            BinaryIntrinsicOperator::I32GreaterThan => {
+                                if is_u8 {
+                                    Instruction::I32GtU
+                                } else {
+                                    Instruction::I32GtS
+                                }
+                            }
+                            BinaryIntrinsicOperator::I32LessThanOrEqual => {
+                                if is_u8 {
+                                    Instruction::I32LeU
+                                } else {
+                                    Instruction::I32LeS
+                                }
+                            }
+                            BinaryIntrinsicOperator::I32GreaterThanOrEqual => {
+                                if is_u8 {
+                                    Instruction::I32GeU
+                                } else {
+                                    Instruction::I32GeS
+                                }
+                            }
                             BinaryIntrinsicOperator::BooleanXor => Instruction::I32Xor,
                             BinaryIntrinsicOperator::BooleanAnd
                             | BinaryIntrinsicOperator::BooleanOr => {
                                 unreachable!("boolean ops handled before op_instr")
                             }
                         };
+                        if is_u8
+                            && matches!(
+                                op,
+                                BinaryIntrinsicOperator::I32Add
+                                    | BinaryIntrinsicOperator::I32Subtract
+                                    | BinaryIntrinsicOperator::I32Multiply
+                                    | BinaryIntrinsicOperator::I32Divide
+                            )
+                        {
+                            tasks.push(EmitTask::Instr(Instruction::I32And));
+                            tasks.push(EmitTask::Instr(Instruction::I32Const(0xFF)));
+                        }
                         tasks.push(EmitTask::Instr(op_instr));
                         tasks.push(EmitTask::Eval((*right).clone()));
                         tasks.push(EmitTask::Eval((*left).clone()));
@@ -1997,9 +2125,10 @@ fn emit_expression(
                     let object_type = infer_type(&object, locals_types, function_return_types)?;
                     match &object_type {
                         WasmType::Struct(fields) => {
-                            let field_index = fields
+                            let (field_index, field_type) = fields
                                 .iter()
                                 .position(|(n, _)| n == &property)
+                                .and_then(|index| fields.get(index).map(|(_, ty)| (index, ty)))
                                 .ok_or_else(|| {
                                     Diagnostic::new(format!("Field `{}` not found in struct", property))
                                         .with_span(SourceSpan::default())
@@ -2009,13 +2138,20 @@ fn emit_expression(
                                 .get_type_index(&WasmType::Struct(fields.clone()))
                                 .expect("Type should be registered");
 
-                            tasks.push(EmitTask::Instr(Instruction::StructGet {
-                                struct_type_index: type_index,
-                                field_index: field_index as u32,
-                            }));
+                            let instr = match field_type {
+                                WasmType::U8 => Instruction::StructGetU {
+                                    struct_type_index: type_index,
+                                    field_index: field_index as u32,
+                                },
+                                _ => Instruction::StructGet {
+                                    struct_type_index: type_index,
+                                    field_index: field_index as u32,
+                                },
+                            };
+                            tasks.push(EmitTask::Instr(instr));
                             tasks.push(EmitTask::Eval((*object).clone()));
                         }
-                        WasmType::Array { field_names, .. } => {
+                        WasmType::Array { element, field_names, .. } => {
                             let field_index = field_names
                                 .iter()
                                 .position(|name| name == &property)
@@ -2028,11 +2164,15 @@ fn emit_expression(
                                 .get_type_index(&object_type)
                                 .expect("Type should be registered");
 
-                            tasks.push(EmitTask::Instr(Instruction::ArrayGet(type_index)));
+                            let instr = match element.as_ref() {
+                                WasmType::U8 => Instruction::ArrayGetU(type_index),
+                                _ => Instruction::ArrayGet(type_index),
+                            };
+                            tasks.push(EmitTask::Instr(instr));
                             tasks.push(EmitTask::Instr(Instruction::I32Const(field_index as i32)));
                             tasks.push(EmitTask::Eval((*object).clone()));
                         }
-                        WasmType::I32 => {
+                        WasmType::I32 | WasmType::U8 => {
                             return Err(Diagnostic::new("Property access on non-struct type")
                                 .with_span(SourceSpan::default()));
                         }
@@ -2040,7 +2180,7 @@ fn emit_expression(
                 }
                 IntermediateKind::ArrayIndex { array, index } => {
                     let array_type = infer_type(&array, locals_types, function_return_types)?;
-                    let WasmType::Array { .. } = array_type else {
+                    let WasmType::Array { element, .. } = &array_type else {
                         return Err(Diagnostic::new("Indexing on non-array type")
                             .with_span(SourceSpan::default()));
                     };
@@ -2052,7 +2192,11 @@ fn emit_expression(
                     let type_index = type_ctx
                         .get_type_index(&array_type)
                         .expect("Type should be registered");
-                    tasks.push(EmitTask::Instr(Instruction::ArrayGet(type_index)));
+                    let instr = match element.as_ref() {
+                        WasmType::U8 => Instruction::ArrayGetU(type_index),
+                        _ => Instruction::ArrayGet(type_index),
+                    };
+                    tasks.push(EmitTask::Instr(instr));
                     tasks.push(EmitTask::Eval((*index).clone()));
                     tasks.push(EmitTask::Eval((*array).clone()));
                 }

@@ -145,6 +145,7 @@ pub enum ExpressionLiteral {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntrinsicType {
     I32,
+    U8,
     Boolean,
     Type,
     Target,
@@ -375,6 +376,7 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
                 ExpressionKind::IntrinsicType(ty) => {
                     let ty_str = match ty {
                         IntrinsicType::I32 => "i32",
+                        IntrinsicType::U8 => "u8",
                         IntrinsicType::Boolean => "boolean",
                         IntrinsicType::Type => "type",
                         IntrinsicType::Target => "target",
