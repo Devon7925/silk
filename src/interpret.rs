@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     diagnostics::{Diagnostic, SourceSpan},
+    loader,
     parsing::{
         BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, DivergeExpressionType,
         Expression, ExpressionKind, ExpressionLiteral, Identifier, IntrinsicOperation,
@@ -66,6 +67,8 @@ impl BindingContext {
 pub struct Context {
     pub bindings: Vec<HashMap<Identifier, (BindingContext, Vec<BindingAnnotation>)>>,
     pub in_loop: bool,
+    pub files: HashMap<String, Expression>,
+    pub import_cache: HashMap<String, Expression>,
 }
 
 #[derive(Clone, Debug)]
@@ -98,6 +101,8 @@ impl Context {
         Context {
             bindings: vec![],
             in_loop: false,
+            files: HashMap::new(),
+            import_cache: HashMap::new(),
         }
     }
 
@@ -1372,6 +1377,7 @@ pub fn interpret_expression(
                     UnaryIntrinsicOperator::BooleanNot => true,
                     UnaryIntrinsicOperator::EnumFromStruct => true,
                     UnaryIntrinsicOperator::MatchFromStruct => false,
+                    UnaryIntrinsicOperator::UseFromString => true,
                 };
                 if !is_resolved_constant(&evaluated_operand) && op_requires_const_argument {
                     values.push(Expression::new(
@@ -1470,6 +1476,30 @@ pub fn interpret_expression(
                         }
 
                         ExpressionKind::EnumType(evaluated_variants).with_span(span)
+                    }
+                    UnaryIntrinsicOperator::UseFromString => {
+                        let ExpressionKind::Literal(ExpressionLiteral::String(bytes)) =
+                            evaluated_operand.kind
+                        else {
+                            return Err(diagnostic(
+                                "use expects a string literal path",
+                                evaluated_operand.span(),
+                            ));
+                        };
+                        let path = String::from_utf8(bytes)
+                            .map_err(|_| diagnostic("use path must be valid UTF-8", span))?;
+                        let normalized = loader::normalize_path(&path);
+                        if let Some(cached) = context.import_cache.get(&normalized) {
+                            return Ok(cached.clone());
+                        }
+                        let expression = context.files.get(&normalized).ok_or_else(|| {
+                            diagnostic(format!("Unknown file path: {path}"), span)
+                        })?;
+                        let mut import_context =
+                            intrinsic_context_with_files(context.files.clone());
+                        let (value, _) = interpret_program(expression.clone(), &mut import_context)?;
+                        context.import_cache.insert(normalized, value.clone());
+                        value
                     }
                 };
                 values.push(result);
@@ -1788,8 +1818,9 @@ pub fn interpret_expression(
                 }) = effective_function
                 {
                     let is_direct = matches!(function_value.kind, ExpressionKind::Function { .. });
-                    let returns_compile_time_type =
-                        type_expression_contains_compile_time_data(&return_type.unwrap());
+                    let returns_compile_time_type = return_type
+                        .as_ref()
+                        .is_some_and(|ty| type_expression_contains_compile_time_data(ty.as_ref()));
                     let pattern_is_compile_time = pattern_contains_compile_time_data(&parameter);
                     let argument_is_const = is_resolved_constant(&argument_value);
 
@@ -2495,6 +2526,15 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
                     )) => {
                         return Err(diagnostic(
                             "match intrinsic should be resolved before type checking",
+                            span,
+                        ));
+                    }
+                    ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
+                        _,
+                        UnaryIntrinsicOperator::UseFromString,
+                    )) => {
+                        return Err(diagnostic(
+                            "use intrinsic should be resolved before type checking",
                             span,
                         ));
                     }
@@ -4255,7 +4295,10 @@ fn get_lvalue_value(
                 span: struct_span,
             } = object_value
             else {
-                return Err(diagnostic("Property access on non-struct value", *prop_span));
+                return Err(diagnostic(
+                    "Property access on non-struct value",
+                    *prop_span,
+                ));
             };
 
             fields
@@ -4401,7 +4444,10 @@ fn apply_lvalue_update(
                 }
             };
 
-            if steps.iter().any(|step| matches!(step, AccessStep::DynamicIndex(_))) {
+            if steps
+                .iter()
+                .any(|step| matches!(step, AccessStep::DynamicIndex(_)))
+            {
                 for invalidated_identifier in target.get_used_identifiers() {
                     let binding_to_invalidate =
                         context.get_identifier(&invalidated_identifier).unwrap();
@@ -5315,9 +5361,15 @@ fn is_resolved_const_function_expression(expr: &Expression, function_context: &C
 }
 
 pub fn intrinsic_context() -> Context {
+    intrinsic_context_with_files(HashMap::new())
+}
+
+pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Context {
     let mut context = Context {
         bindings: vec![HashMap::new()],
         in_loop: false,
+        files,
+        import_cache: HashMap::new(),
     };
 
     context.bindings.last_mut().unwrap().insert(
@@ -5680,6 +5732,32 @@ pub fn intrinsic_context() -> Context {
     );
 
     context.bindings.last_mut().unwrap().insert(
+        Identifier::new("use"),
+        (
+            BindingContext::Bound(
+                ExpressionKind::Function {
+                    parameter: BindingPattern::Identifier(Identifier::new("path"), dummy_span()),
+                    return_type: None,
+                    body: Box::new(Expression::new(
+                        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
+                            Box::new(Expression::new(
+                                ExpressionKind::Identifier(Identifier::new("path")),
+                                dummy_span(),
+                            )),
+                            UnaryIntrinsicOperator::UseFromString,
+                        )),
+                        dummy_span(),
+                    )),
+                }
+                .with_span(dummy_span()),
+                PreserveBehavior::Inline,
+                None,
+            ),
+            Vec::new(),
+        ),
+    );
+
+    context.bindings.last_mut().unwrap().insert(
         Identifier::new("match"),
         (
             BindingContext::Bound(
@@ -5748,6 +5826,20 @@ pub fn evaluate_text_to_expression(program: &str) -> Result<(Expression, Context
     }
 
     Ok((value, context))
+}
+
+pub fn evaluate_files_to_expression(
+    files: Vec<(&str, &str)>,
+    root: &str,
+) -> Result<(Expression, Context), Diagnostic> {
+    let file_map = loader::build_parsed_files(files)?;
+    let root = loader::normalize_path(root);
+    let expression = file_map
+        .get(&root)
+        .ok_or_else(|| Diagnostic::new(format!("Missing root source for {root}")))?
+        .clone();
+    let mut context = intrinsic_context_with_files(file_map);
+    interpret_program(expression, &mut context)
 }
 
 #[cfg(test)]

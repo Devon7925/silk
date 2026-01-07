@@ -1,4 +1,8 @@
 use silk::compile;
+
+fn compile_program(program: &str) -> Vec<u8> {
+    compile(vec![("main.silk", program)], "main.silk").expect("compilation should succeed")
+}
 use wasmparser::{Parser, Validator, WasmFeatures};
 
 fn validate_wasm(bytes: &[u8]) {
@@ -40,7 +44,7 @@ fn wasm_loop_with_internal_return_validates() {
 {};
 "#;
 
-    let wasm = compile(program.to_string()).expect("compilation should succeed");
+    let wasm = compile_program(program);
     validate_wasm(&wasm);
 }
 
@@ -59,6 +63,6 @@ fn wasm_loop_with_break_value_validates() {
 {};
 "#;
 
-    let wasm = compile(program.to_string()).expect("compilation should succeed");
+    let wasm = compile_program(program);
     validate_wasm(&wasm);
 }
