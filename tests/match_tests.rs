@@ -4,15 +4,14 @@ use silk::test_support::evaluate_text_to_expression;
 #[test]
 fn match_selects_correct_branch() {
     let program = "
-        Option := enum { Some = i32, None = {} };
-        choose := (option: Option) => (
+        choose := (option: Option(i32)) => (
             option |> match {
-                Option::Some(value) => value,
-                Option::None => 0
+                Option(i32)::Some(value) => value,
+                Option(i32)::None => 0
             }
         );
 
-        choose(Option::Some(5))
+        choose(Option(i32)::Some(5))
     ";
 
     let (expr, _) = evaluate_text_to_expression(program).unwrap_or_else(|err| {
@@ -31,15 +30,14 @@ fn match_selects_correct_branch() {
 #[test]
 fn match_allows_literal_branch() {
     let program = "
-        Option := enum { Some = i32, None = {} };
-        choose := (option: Option) => (
+        choose := (option: Option(i32)) => (
             option |> match {
-                Option::Some(value) => value,
+                Option(i32)::Some(value) => value,
                 else => 0
             }
         );
 
-        choose(Option::Some(5))
+        choose(Option(i32)::Some(5))
     ";
 
     let (expr, _) = evaluate_text_to_expression(program).unwrap_or_else(|err| {
@@ -58,9 +56,8 @@ fn match_allows_literal_branch() {
 #[test]
 fn match_requires_exhaustive_or_else() {
     let program = "
-        Option := enum { Some = i32, None = {} };
-        Option::None |> match {
-            Option::Some(_) => 1
+        Option(i32)::None |> match {
+            Option(i32)::Some(_) => 1
         }
     ";
 

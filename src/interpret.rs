@@ -5791,7 +5791,45 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
             Vec::new(),
         ),
     );
+    add_builtin_library(&mut context);
     context
+}
+
+const BUILTIN_LIBRARY: &str = r#"
+Option := (T: type) => (
+    enum { Some = T, None = {} }
+);
+"#;
+
+fn add_builtin_library(context: &mut Context) {
+    let (expression, remaining) =
+        crate::parsing::parse_block(BUILTIN_LIBRARY).expect("Failed to parse builtin library");
+    assert!(
+        remaining.trim().is_empty(),
+        "Parser did not consume entire builtin library"
+    );
+    let expression = uniquify::uniquify_program(expression);
+    context.bindings.push(HashMap::new());
+    interpret_library_expression(expression, context)
+        .expect("Failed to interpret builtin library");
+}
+
+fn interpret_library_expression(expr: Expression, context: &mut Context) -> Result<(), Diagnostic> {
+    match expr {
+        Expression {
+            kind: ExpressionKind::Block(expressions),
+            ..
+        } => {
+            for expression in expressions {
+                interpret_expression(expression, context)?;
+            }
+            Ok(())
+        }
+        other => {
+            interpret_expression(other, context)?;
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
