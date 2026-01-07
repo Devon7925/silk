@@ -543,6 +543,22 @@ pub fn resolve_enum_type_expression(
         ExpressionKind::AttachImplementation { type_expr, .. } => {
             resolve_enum_type_expression(type_expr, context)
         }
+        ExpressionKind::FunctionCall { function, argument } => {
+            let mut eval_context = context.clone();
+            let evaluated = interpret_expression(
+                ExpressionKind::FunctionCall {
+                    function: function.clone(),
+                    argument: argument.clone(),
+                }
+                .with_span(enum_expr.span()),
+                &mut eval_context,
+            )
+            .ok()?;
+            match evaluated.kind {
+                ExpressionKind::EnumType(_) => Some(evaluated),
+                _ => None,
+            }
+        }
         ExpressionKind::Identifier(identifier) => {
             context
                 .get_identifier(identifier)
@@ -1644,11 +1660,12 @@ pub fn interpret_expression(
                     .with_span(span);
                     let possibly_mutated_values = get_possibly_mutated_values(&interpreted);
                     for possibly_mutated_value in possibly_mutated_values {
-                        let binding = context.get_identifier(&possibly_mutated_value).unwrap();
-                        if let Some(binding_ty) = binding.0.get_bound_type(context)? {
-                            let binding =
-                                context.get_mut_identifier(&possibly_mutated_value).unwrap();
-                            binding.0 = BindingContext::UnboundWithType(binding_ty)
+                        if let Some(binding) = context.get_identifier(&possibly_mutated_value) {
+                            if let Some(binding_ty) = binding.0.get_bound_type(context)? {
+                                let binding =
+                                    context.get_mut_identifier(&possibly_mutated_value).unwrap();
+                                binding.0 = BindingContext::UnboundWithType(binding_ty)
+                            }
                         }
                     }
                     values.push(interpreted);
@@ -1817,18 +1834,11 @@ pub fn interpret_expression(
                     ..
                 }) = effective_function
                 {
-                    let is_direct = matches!(function_value.kind, ExpressionKind::Function { .. });
-                    let returns_compile_time_type = return_type
-                        .as_ref()
-                        .is_some_and(|ty| type_expression_contains_compile_time_data(ty.as_ref()));
                     let pattern_is_compile_time = pattern_contains_compile_time_data(&parameter);
-                    let argument_is_const = is_resolved_constant(&argument_value);
+                    let returns_function_value =
+                        matches!(body.kind, ExpressionKind::Function { .. });
 
-                    if is_direct
-                        || returns_compile_time_type
-                        || pattern_is_compile_time
-                        || argument_is_const
-                    {
+                    if pattern_is_compile_time || returns_function_value {
                         let mut call_context = context.clone();
                         bind_pattern_from_value(
                             parameter,
@@ -1980,25 +1990,16 @@ pub fn interpret_expression(
                     object_type = get_type_of_expression(&evaluated_object, context)?;
                 }
                 let trait_prop = get_trait_prop_of_type(&object_type, &property, span, context)?;
-                match trait_prop.kind {
-                    ExpressionKind::Function { .. } => {
-                        stack.push(Frame::Eval(
-                            ExpressionKind::FunctionCall {
-                                function: Box::new(trait_prop),
-                                argument: Box::new(evaluated_object),
-                            }
-                            .with_span(span),
-                        ));
-                    }
-                    _other => {
-                        values.push(
-                            ExpressionKind::PropertyAccess {
-                                object: Box::new(evaluated_object),
-                                property,
-                            }
-                            .with_span(span),
-                        );
-                    }
+                if matches!(&trait_prop.kind, ExpressionKind::Function { .. }) {
+                    stack.push(Frame::Eval(
+                        ExpressionKind::FunctionCall {
+                            function: Box::new(trait_prop),
+                            argument: Box::new(evaluated_object),
+                        }
+                        .with_span(span),
+                    ));
+                } else {
+                    values.push(trait_prop);
                 }
             }
         }
@@ -5798,6 +5799,10 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
 const BUILTIN_LIBRARY: &str = r#"
 Option := (T: type) => (
     enum { Some = T, None = {} }
+);
+
+Iterator := (T: type) => (
+    { iter_ty = type, next = (T) -> Option(type) }
 );
 "#;
 

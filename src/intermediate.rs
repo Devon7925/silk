@@ -54,6 +54,15 @@ pub enum IntermediateKind {
     Unreachable,
 }
 
+fn binding_identifier(pattern: &BindingPattern) -> Option<Identifier> {
+    match pattern {
+        BindingPattern::Identifier(identifier, _) => Some(identifier.clone()),
+        BindingPattern::TypeHint(inner, _, _) => binding_identifier(inner),
+        BindingPattern::Annotated { pattern, .. } => binding_identifier(pattern),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntermediateIntrinsicOperation {
     Binary(
@@ -366,6 +375,21 @@ pub fn expression_to_intermediate(
                     }
                     ExpressionKind::Binding(binding) => {
                         let Binding { pattern, expr } = *binding;
+                        if let Some(identifier) = binding_identifier(&pattern) {
+                            if let Some(scope) = builder.enum_context.bindings.last_mut() {
+                                scope.insert(
+                                    identifier,
+                                    (
+                                        BindingContext::Bound(
+                                            expr.clone(),
+                                            PreserveBehavior::Inline,
+                                            None,
+                                        ),
+                                        Vec::new(),
+                                    ),
+                                );
+                            }
+                        }
                         let binding_type = builder.infer_binding_type(&pattern, &expr);
                         let stripped_pattern = builder.strip_binding_pattern(pattern.clone());
                         let is_complex = matches!(
