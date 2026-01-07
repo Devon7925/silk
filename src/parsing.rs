@@ -47,6 +47,11 @@ pub enum LValue {
         property: String,
         span: SourceSpan,
     },
+    ArrayIndex {
+        array: Box<LValue>,
+        index: Box<Expression>,
+        span: SourceSpan,
+    },
 }
 
 impl LValue {
@@ -54,35 +59,20 @@ impl LValue {
         match self {
             LValue::Identifier(_, span) => *span,
             LValue::PropertyAccess { span, .. } => *span,
+            LValue::ArrayIndex { span, .. } => *span,
         }
     }
 
     pub fn pretty_print(&self) -> String {
-        let mut properties: Vec<&str> = Vec::new();
-        let mut current = self;
-        let base_name;
-
-        loop {
-            match current {
-                LValue::Identifier(id, _) => {
-                    base_name = id.name.clone();
-                    break;
-                }
-                LValue::PropertyAccess {
-                    object, property, ..
-                } => {
-                    properties.push(property.as_str());
-                    current = object;
-                }
+        match self {
+            LValue::Identifier(id, _) => id.name.clone(),
+            LValue::PropertyAccess { object, property, .. } => {
+                format!("{}.{}", object.pretty_print(), property)
+            }
+            LValue::ArrayIndex { array, index, .. } => {
+                format!("{}({})", array.pretty_print(), index.pretty_print())
             }
         }
-
-        let mut result = base_name;
-        for property in properties.into_iter().rev() {
-            result.push('.');
-            result.push_str(property);
-        }
-        result
     }
 
     pub fn get_used_identifiers(&self) -> HashSet<Identifier> {
@@ -94,6 +84,9 @@ impl LValue {
                 }
                 LValue::PropertyAccess { object, .. } => {
                     current = object;
+                }
+                LValue::ArrayIndex { array, .. } => {
+                    current = array;
                 }
             }
         }
@@ -251,6 +244,10 @@ pub enum ExpressionKind {
     FunctionCall {
         function: Box<Expression>,
         argument: Box<Expression>,
+    },
+    ArrayIndex {
+        array: Box<Expression>,
+        index: Box<Expression>,
     },
     PropertyAccess {
         object: Box<Expression>,
@@ -583,6 +580,12 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
                     context.tasks.push(PrettyTask::Expr(argument));
                     context.tasks.push(PrettyTask::WriteStatic("("));
                     context.tasks.push(PrettyTask::Expr(function));
+                }
+                ExpressionKind::ArrayIndex { array, index } => {
+                    context.tasks.push(PrettyTask::WriteStatic(")"));
+                    context.tasks.push(PrettyTask::Expr(index));
+                    context.tasks.push(PrettyTask::WriteStatic("("));
+                    context.tasks.push(PrettyTask::Expr(array));
                 }
                 ExpressionKind::PropertyAccess { object, property } => {
                     context.tasks.push(PrettyTask::WriteOwned(property.clone()));
@@ -2010,6 +2013,14 @@ fn expression_to_lvalue(expression: Expression) -> Result<LValue, Diagnostic> {
             ExpressionKind::PropertyAccess { object, property } => {
                 properties.push((property, span));
                 current = *object;
+            }
+            ExpressionKind::FunctionCall { function, argument } => {
+                let array = expression_to_lvalue(*function)?;
+                return Ok(LValue::ArrayIndex {
+                    array: Box::new(array),
+                    index: argument,
+                    span,
+                });
             }
             _ => return Err(Diagnostic::new("Invalid binding pattern expression").with_span(span)),
         }

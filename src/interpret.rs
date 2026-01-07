@@ -238,6 +238,28 @@ fn types_equivalent(left: &ExpressionKind, right: &ExpressionKind) -> bool {
     true
 }
 
+fn homogeneous_struct_element_type(ty: &Expression, context: &Context) -> Option<Expression> {
+    let ExpressionKind::Struct(fields) = &ty.kind else {
+        return None;
+    };
+    let (_, first_type) = fields.first()?;
+    let mut base_type = resolve_type_alias_expression(first_type, context);
+    if let ExpressionKind::IntrinsicType(intrinsic) = &base_type.kind {
+        base_type = intrinsic_type_expr(intrinsic.clone());
+    }
+
+    for (_, field_type) in fields.iter().skip(1) {
+        let mut resolved = resolve_type_alias_expression(field_type, context);
+        if let ExpressionKind::IntrinsicType(intrinsic) = &resolved.kind {
+            resolved = intrinsic_type_expr(intrinsic.clone());
+        }
+        if !types_equivalent(&base_type.kind, &resolved.kind) {
+            return None;
+        }
+    }
+    Some(base_type)
+}
+
 fn collect_type_bindings(
     pattern_type: &Expression,
     value_type: &Expression,
@@ -332,6 +354,9 @@ fn apply_type_bindings(expr: &Expression, bindings: &HashMap<String, Expression>
         FunctionType {
             span: SourceSpan,
         },
+        ArrayIndex {
+            span: SourceSpan,
+        },
         AttachImplementation {
             span: SourceSpan,
         },
@@ -381,6 +406,11 @@ fn apply_type_bindings(expr: &Expression, bindings: &HashMap<String, Expression>
                     stack.push(Frame::Enter(*return_type));
                     stack.push(Frame::Enter(*parameter));
                 }
+                ExpressionKind::ArrayIndex { array, index } => {
+                    stack.push(Frame::ArrayIndex { span: expr.span });
+                    stack.push(Frame::Enter(*index));
+                    stack.push(Frame::Enter(*array));
+                }
                 ExpressionKind::AttachImplementation {
                     type_expr,
                     implementation,
@@ -418,6 +448,17 @@ fn apply_type_bindings(expr: &Expression, bindings: &HashMap<String, Expression>
                     ExpressionKind::FunctionType {
                         parameter: Box::new(parameter),
                         return_type: Box::new(return_type),
+                    }
+                    .with_span(span),
+                );
+            }
+            Frame::ArrayIndex { span } => {
+                let index = results.pop().unwrap();
+                let array = results.pop().unwrap();
+                results.push(
+                    ExpressionKind::ArrayIndex {
+                        array: Box::new(array),
+                        index: Box::new(index),
                     }
                     .with_span(span),
                 );
@@ -604,6 +645,9 @@ pub fn interpret_expression(
             span: SourceSpan,
             property: String,
             original_object: Expression,
+        },
+        ArrayIndex {
+            span: SourceSpan,
         },
         Match {
             span: SourceSpan,
@@ -812,6 +856,11 @@ pub fn interpret_expression(
                         stack.push(Frame::FunctionCall { span });
                         stack.push(Frame::Eval(*argument));
                         stack.push(Frame::Eval(*function));
+                    }
+                    ExpressionKind::ArrayIndex { array, index } => {
+                        stack.push(Frame::ArrayIndex { span });
+                        stack.push(Frame::Eval(*index));
+                        stack.push(Frame::Eval(*array));
                     }
                     ExpressionKind::AttachImplementation {
                         type_expr,
@@ -1654,6 +1703,39 @@ pub fn interpret_expression(
                 let argument_value = values.pop().unwrap();
                 let function_value = values.pop().unwrap();
 
+                if let Ok(function_type) = get_type_of_expression(&function_value, context)
+                    && homogeneous_struct_element_type(&function_type, context).is_some()
+                {
+                    let index_type = get_type_of_expression(&argument_value, context)?;
+                    let expected_index = ExpressionKind::IntrinsicType(IntrinsicType::I32);
+                    if !types_equivalent(&index_type.kind, &expected_index) {
+                        return Err(diagnostic("Array index must be an i32 value", span));
+                    }
+
+                    if let (ExpressionKind::Struct(fields), ExpressionKind::Literal(ExpressionLiteral::Number(index))) =
+                        (&function_value.kind, &argument_value.kind)
+                    {
+                        if *index < 0 {
+                            return Err(diagnostic("Array index out of range", span));
+                        }
+                        let index = *index as usize;
+                        if let Some((_, value)) = fields.get(index) {
+                            values.push(value.clone());
+                            continue;
+                        }
+                        return Err(diagnostic("Array index out of range", span));
+                    }
+
+                    values.push(
+                        ExpressionKind::ArrayIndex {
+                            array: Box::new(function_value),
+                            index: Box::new(argument_value),
+                        }
+                        .with_span(span),
+                    );
+                    continue;
+                }
+
                 let effective_function =
                     if let ExpressionKind::Identifier(ident) = &function_value.kind {
                         context.get_identifier(ident).and_then(|b| match &b.0 {
@@ -1733,6 +1815,17 @@ pub fn interpret_expression(
                         .with_span(span),
                     );
                 }
+            }
+            Frame::ArrayIndex { span } => {
+                let index = values.pop().unwrap();
+                let array = values.pop().unwrap();
+                values.push(
+                    ExpressionKind::ArrayIndex {
+                        array: Box::new(array),
+                        index: Box::new(index),
+                    }
+                    .with_span(span),
+                );
             }
             Frame::InlineCall { saved_context } => {
                 let body_value = values.pop().unwrap();
@@ -2017,6 +2110,10 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
             argument_expr: Expression,
             context: Context,
         },
+        ArrayIndex {
+            span: SourceSpan,
+            context: Context,
+        },
         PropertyAccess {
             span: SourceSpan,
             property: String,
@@ -2241,6 +2338,15 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
                         });
                         stack.push(Frame::Enter(*argument, call_context.clone()));
                         stack.push(Frame::Enter(*function, call_context));
+                    }
+                    ExpressionKind::ArrayIndex { array, index } => {
+                        let call_context = context.clone();
+                        stack.push(Frame::ArrayIndex {
+                            span,
+                            context: call_context.clone(),
+                        });
+                        stack.push(Frame::Enter(*index, call_context.clone()));
+                        stack.push(Frame::Enter(*array, call_context));
                     }
                     ExpressionKind::PropertyAccess { object, property } => {
                         stack.push(Frame::PropertyAccess {
@@ -2581,6 +2687,29 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
             } => {
                 let argument_type = results.pop().unwrap();
                 let mut evaluated_function_type = results.pop().unwrap();
+                if let Some(mut element_type) =
+                    homogeneous_struct_element_type(&evaluated_function_type, &context)
+                {
+                    let expected_index = ExpressionKind::IntrinsicType(IntrinsicType::I32);
+                    if !types_equivalent(&argument_type.kind, &expected_index) {
+                        return Err(diagnostic("Array index must be an i32 value", span));
+                    }
+
+                    if let ExpressionKind::IntrinsicType(intrinsic) = &element_type.kind {
+                        element_type = match intrinsic {
+                            IntrinsicType::I32 => resolve_intrinsic_type("i32", span, &context)?,
+                            IntrinsicType::Boolean => {
+                                resolve_intrinsic_type("bool", span, &context)?
+                            }
+                            IntrinsicType::Target => {
+                                resolve_intrinsic_type("target", span, &context)?
+                            }
+                            IntrinsicType::Type => resolve_intrinsic_type("type", span, &context)?,
+                        };
+                    }
+                    results.push(element_type);
+                    continue;
+                }
                 if let ExpressionKind::Function {
                     parameter,
                     return_type,
@@ -2636,6 +2765,29 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
                     };
                 }
                 results.push(return_value);
+            }
+            Frame::ArrayIndex { span, context } => {
+                let index_type = results.pop().unwrap();
+                let array_type = results.pop().unwrap();
+                let expected_index = ExpressionKind::IntrinsicType(IntrinsicType::I32);
+                if !types_equivalent(&index_type.kind, &expected_index) {
+                    return Err(diagnostic("Array index must be an i32 value", span));
+                }
+
+                let Some(mut element_type) = homogeneous_struct_element_type(&array_type, &context)
+                else {
+                    return Err(diagnostic("Attempted to index a non-array value", span));
+                };
+
+                if let ExpressionKind::IntrinsicType(intrinsic) = &element_type.kind {
+                    element_type = match intrinsic {
+                        IntrinsicType::I32 => resolve_intrinsic_type("i32", span, &context)?,
+                        IntrinsicType::Boolean => resolve_intrinsic_type("bool", span, &context)?,
+                        IntrinsicType::Target => resolve_intrinsic_type("target", span, &context)?,
+                        IntrinsicType::Type => resolve_intrinsic_type("type", span, &context)?,
+                    };
+                }
+                results.push(element_type);
             }
             Frame::PropertyAccess {
                 span,
@@ -2734,6 +2886,11 @@ pub fn expression_does_diverge(expr: &Expression, possibility: bool, in_inner_lo
                     stack.push(Frame::Exit(Combine::Any(2)));
                     stack.push(Frame::Enter(argument, in_inner_loop));
                     stack.push(Frame::Enter(function, in_inner_loop));
+                }
+                ExpressionKind::ArrayIndex { array, index } => {
+                    stack.push(Frame::Exit(Combine::Any(2)));
+                    stack.push(Frame::Enter(index, in_inner_loop));
+                    stack.push(Frame::Enter(array, in_inner_loop));
                 }
                 ExpressionKind::Loop { body } => {
                     stack.push(Frame::Exit(Combine::Any(1)));
@@ -2894,6 +3051,11 @@ pub fn expression_exports(expr: &Expression) -> bool {
                     stack.push(Frame::ExitExpr(ExprCombine::Any(2)));
                     stack.push(Frame::EnterExpr(argument));
                     stack.push(Frame::EnterExpr(function));
+                }
+                ExpressionKind::ArrayIndex { array, index } => {
+                    stack.push(Frame::ExitExpr(ExprCombine::Any(2)));
+                    stack.push(Frame::EnterExpr(index));
+                    stack.push(Frame::EnterExpr(array));
                 }
                 ExpressionKind::Loop { body, .. } => {
                     stack.push(Frame::ExitExpr(ExprCombine::Any(1)));
@@ -3697,6 +3859,10 @@ fn fold_expression<T, U: Fn(&Expression, T) -> T>(
                 stack.push(argument);
                 stack.push(function);
             }
+            ExpressionKind::ArrayIndex { array, index } => {
+                stack.push(index);
+                stack.push(array);
+            }
             ExpressionKind::PropertyAccess { object, .. } => {
                 stack.push(object);
             }
@@ -3888,30 +4054,23 @@ fn ensure_lvalue_mutable(
             LValue::PropertyAccess { object, .. } => {
                 current = object;
             }
+            LValue::ArrayIndex { array, .. } => {
+                current = array;
+            }
         }
     }
 }
 
 fn lvalue_display_name(lvalue: &LValue) -> String {
-    let mut segments: Vec<String> = Vec::new();
-    let mut current = lvalue;
-    loop {
-        match current {
-            LValue::Identifier(Identifier { name, .. }, _) => {
-                segments.push(name.clone());
-                break;
-            }
-            LValue::PropertyAccess {
-                object, property, ..
-            } => {
-                segments.push(property.clone());
-                current = object;
-            }
+    match lvalue {
+        LValue::Identifier(Identifier { name, .. }, _) => name.clone(),
+        LValue::PropertyAccess {
+            object, property, ..
+        } => format!("{}.{}", lvalue_display_name(object), property),
+        LValue::ArrayIndex { array, index, .. } => {
+            format!("{}({})", lvalue_display_name(array), index.pretty_print())
         }
     }
-
-    segments.reverse();
-    segments.join(".")
 }
 
 fn get_lvalue_type(
@@ -3920,140 +4079,153 @@ fn get_lvalue_type(
     span: SourceSpan,
 ) -> Result<Expression, Diagnostic> {
     ensure_lvalue_mutable(target, context, span)?;
-    let mut properties: Vec<(String, SourceSpan)> = Vec::new();
-    let mut current = target;
-    let base_identifier = loop {
-        match current {
-            LValue::Identifier(identifier, target_span) => {
-                break (identifier.clone(), *target_span);
-            }
-            LValue::PropertyAccess {
-                object,
-                property,
-                span: prop_span,
-            } => {
-                properties.push((property.clone(), *prop_span));
-                current = object;
-            }
-        }
-    };
+    fn resolve_identifier_type(
+        identifier: &Identifier,
+        target_span: SourceSpan,
+        context: &Context,
+    ) -> Result<Expression, Diagnostic> {
+        let (binding_ctx, _) = context.get_identifier(identifier).ok_or_else(|| {
+            diagnostic(
+                format!("Cannot assign to unbound identifier: {}", identifier.name),
+                target_span,
+            )
+        })?;
 
-    let (identifier, target_span) = base_identifier;
-    let (binding_ctx, _) = context.get_identifier(&identifier).ok_or_else(|| {
-        diagnostic(
-            format!("Cannot assign to unbound identifier: {}", identifier.name),
-            target_span,
-        )
-    })?;
-
-    let mut current_type = match binding_ctx {
-        BindingContext::Bound(_, _, Some(bound_type)) => bound_type.clone(),
-        BindingContext::Bound(value, _, None) => get_type_of_expression(value, context)?,
-        BindingContext::UnboundWithType(type_expr) => type_expr.clone(),
-        BindingContext::UnboundWithoutType => {
-            return Err(diagnostic(
+        match binding_ctx {
+            BindingContext::Bound(_, _, Some(bound_type)) => Ok(bound_type.clone()),
+            BindingContext::Bound(value, _, None) => get_type_of_expression(value, context),
+            BindingContext::UnboundWithType(type_expr) => Ok(type_expr.clone()),
+            BindingContext::UnboundWithoutType => Err(diagnostic(
                 format!("Cannot determine type of {}", identifier.name),
                 target_span,
-            ));
+            )),
         }
-    };
-
-    for (property, prop_span) in properties.into_iter().rev() {
-        let Expression {
-            kind: ExpressionKind::Struct(fields),
-            ..
-        } = current_type
-        else {
-            return Err(diagnostic("Property access on non-struct type", prop_span));
-        };
-
-        current_type = fields
-            .iter()
-            .find(|(id, _)| id.name == property)
-            .map(|(_, ty)| ty.clone())
-            .ok_or_else(|| {
-                diagnostic(
-                    format!("Field {} not found in struct type", property),
-                    prop_span,
-                )
-            })?;
     }
 
-    Ok(current_type)
+    match target {
+        LValue::Identifier(identifier, target_span) => {
+            resolve_identifier_type(identifier, *target_span, context)
+        }
+        LValue::PropertyAccess {
+            object,
+            property,
+            span: prop_span,
+        } => {
+            let current_type = get_lvalue_type(object, context, *prop_span)?;
+            let Expression {
+                kind: ExpressionKind::Struct(fields),
+                ..
+            } = current_type
+            else {
+                return Err(diagnostic("Property access on non-struct type", *prop_span));
+            };
+
+            fields
+                .iter()
+                .find(|(id, _)| id.name == *property)
+                .map(|(_, ty)| ty.clone())
+                .ok_or_else(|| {
+                    diagnostic(
+                        format!("Field {} not found in struct type", property),
+                        *prop_span,
+                    )
+                })
+        }
+        LValue::ArrayIndex { array, index, span } => {
+            let array_type = get_lvalue_type(array, context, *span)?;
+            let Some(element_type) = homogeneous_struct_element_type(&array_type, context) else {
+                return Err(diagnostic("Indexing requires an array type", *span));
+            };
+            let index_type = get_type_of_expression(index, context)?;
+            let expected_index = ExpressionKind::IntrinsicType(IntrinsicType::I32);
+            if !types_equivalent(&index_type.kind, &expected_index) {
+                return Err(diagnostic("Array index must be an i32 value", *span));
+            }
+            Ok(element_type)
+        }
+    }
 }
 
 fn get_lvalue_value(
     target: &LValue,
     context: &mut Context,
 ) -> Result<Option<Expression>, Diagnostic> {
-    let mut properties: Vec<(String, SourceSpan)> = Vec::new();
-    let mut current = target;
-    let base_identifier = loop {
-        match current {
-            LValue::Identifier(identifier, target_span) => {
-                break (identifier.clone(), *target_span);
-            }
-            LValue::PropertyAccess {
-                object,
-                property,
-                span: prop_span,
-            } => {
-                properties.push((property.clone(), *prop_span));
-                current = object;
-            }
-        }
-    };
-
-    let (identifier, target_span) = base_identifier;
-    let (binding_ctx, _) = context.get_identifier(&identifier).ok_or_else(|| {
-        diagnostic(
-            format!("Cannot assign to unbound identifier: {}", identifier.name),
-            target_span,
-        )
-    })?;
-
-    let mut current_value = match binding_ctx {
-        BindingContext::Bound(value, _, _) => {
-            if is_resolved_constant(value) {
-                Some(value.clone())
-            } else {
-                None
-            }
-        }
-        BindingContext::UnboundWithType(_) => None,
-        BindingContext::UnboundWithoutType => {
-            return Err(diagnostic(
-                format!(
-                    "Cannot assign to uninitialized identifier: {}",
-                    identifier.name
-                ),
-                target_span,
-            ));
-        }
-    };
-
-    for (property, prop_span) in properties.into_iter().rev() {
-        let Some(object_value) = current_value else {
-            return Ok(None);
-        };
-        let Expression {
-            kind: ExpressionKind::Struct(fields),
-            span: struct_span,
-        } = object_value
-        else {
-            return Err(diagnostic("Property access on non-struct value", prop_span));
-        };
-
-        current_value = fields
-            .into_iter()
-            .find(|(id, _)| id.name == property)
-            .map(|(_, expr)| Some(expr))
-            .ok_or_else(|| {
-                diagnostic(format!("Missing field {} in struct", property), struct_span)
+    match target {
+        LValue::Identifier(identifier, target_span) => {
+            let (binding_ctx, _) = context.get_identifier(identifier).ok_or_else(|| {
+                diagnostic(
+                    format!("Cannot assign to unbound identifier: {}", identifier.name),
+                    *target_span,
+                )
             })?;
-    }
 
-    Ok(current_value)
+            match binding_ctx {
+                BindingContext::Bound(value, _, _) => {
+                    if is_resolved_constant(value) {
+                        Ok(Some(value.clone()))
+                    } else {
+                        Ok(None)
+                    }
+                }
+                BindingContext::UnboundWithType(_) => Ok(None),
+                BindingContext::UnboundWithoutType => Err(diagnostic(
+                    format!(
+                        "Cannot assign to uninitialized identifier: {}",
+                        identifier.name
+                    ),
+                    *target_span,
+                )),
+            }
+        }
+        LValue::PropertyAccess {
+            object,
+            property,
+            span: prop_span,
+        } => {
+            let Some(object_value) = get_lvalue_value(object, context)? else {
+                return Ok(None);
+            };
+            let Expression {
+                kind: ExpressionKind::Struct(fields),
+                span: struct_span,
+            } = object_value
+            else {
+                return Err(diagnostic("Property access on non-struct value", *prop_span));
+            };
+
+            fields
+                .into_iter()
+                .find(|(id, _)| id.name == *property)
+                .map(|(_, expr)| Some(expr))
+                .ok_or_else(|| {
+                    diagnostic(format!("Missing field {} in struct", property), struct_span)
+                })
+        }
+        LValue::ArrayIndex { array, index, span } => {
+            let Some(array_value) = get_lvalue_value(array, context)? else {
+                return Ok(None);
+            };
+            let ExpressionKind::Literal(ExpressionLiteral::Number(index)) = index.kind else {
+                return Ok(None);
+            };
+            if index < 0 {
+                return Err(diagnostic("Array index out of range", *span));
+            }
+            let index = index as usize;
+            let Expression {
+                kind: ExpressionKind::Struct(fields),
+                span: struct_span,
+            } = array_value
+            else {
+                return Err(diagnostic("Indexing requires an array value", *span));
+            };
+            fields
+                .into_iter()
+                .nth(index)
+                .map(|(_, expr)| Some(expr))
+                .ok_or_else(|| diagnostic("Array index out of range", struct_span))
+        }
+    }
 }
 
 fn apply_lvalue_update(
@@ -4118,8 +4290,14 @@ fn apply_lvalue_update(
             update_identifier(identifier, value, context, span)?;
             Ok(())
         }
-        LValue::PropertyAccess { .. } => {
-            let mut properties: Vec<(String, SourceSpan)> = Vec::new();
+        LValue::PropertyAccess { .. } | LValue::ArrayIndex { .. } => {
+            enum AccessStep {
+                Property(String, SourceSpan),
+                Index(usize, SourceSpan),
+                DynamicIndex(SourceSpan),
+            }
+
+            let mut steps: Vec<AccessStep> = Vec::new();
             let mut current = target;
             let (base_identifier, base_span) = loop {
                 match current {
@@ -4129,11 +4307,35 @@ fn apply_lvalue_update(
                         property,
                         span: prop_span,
                     } => {
-                        properties.push((property.clone(), *prop_span));
+                        steps.push(AccessStep::Property(property.clone(), *prop_span));
                         current = object;
+                    }
+                    LValue::ArrayIndex { array, index, span } => {
+                        match index.kind {
+                            ExpressionKind::Literal(ExpressionLiteral::Number(idx)) if idx >= 0 => {
+                                steps.push(AccessStep::Index(idx as usize, *span));
+                            }
+                            _ => {
+                                steps.push(AccessStep::DynamicIndex(*span));
+                            }
+                        }
+                        current = array;
                     }
                 }
             };
+
+            if steps.iter().any(|step| matches!(step, AccessStep::DynamicIndex(_))) {
+                for invalidated_identifier in target.get_used_identifiers() {
+                    let binding_to_invalidate =
+                        context.get_identifier(&invalidated_identifier).unwrap();
+                    if let Some(binding_ty) = binding_to_invalidate.0.get_bound_type(context)? {
+                        let binding_to_invalidate =
+                            context.get_mut_identifier(&invalidated_identifier).unwrap();
+                        binding_to_invalidate.0 = BindingContext::UnboundWithType(binding_ty)
+                    }
+                }
+                return Ok(());
+            }
 
             let base_target = LValue::Identifier(base_identifier.clone(), base_span);
             let Some(mut current_object) = get_lvalue_value(&base_target, context)? else {
@@ -4149,48 +4351,76 @@ fn apply_lvalue_update(
                 return Ok(());
             };
 
-            let mut struct_stack: Vec<(Vec<(Identifier, Expression)>, SourceSpan, String)> =
+            enum UpdateStep {
+                Property(String),
+                Index(usize),
+            }
+
+            let mut struct_stack: Vec<(Vec<(Identifier, Expression)>, SourceSpan, UpdateStep)> =
                 Vec::new();
-            for (property, prop_span) in properties.into_iter().rev() {
+            for step in steps.into_iter().rev() {
                 let Expression {
                     kind: ExpressionKind::Struct(fields),
                     span: struct_span,
                 } = current_object
                 else {
-                    return Err(diagnostic("Property access on non-struct value", prop_span));
+                    return Err(diagnostic("Property access on non-struct value", span));
                 };
 
-                let mut found = None;
-                for (field_id, field_expr) in fields.iter() {
-                    if field_id.name == property {
-                        found = Some(field_expr.clone());
-                        break;
+                let (field_value, update_step) = match step {
+                    AccessStep::Property(property, _prop_span) => {
+                        let mut found = None;
+                        for (field_id, field_expr) in fields.iter() {
+                            if field_id.name == property {
+                                found = Some(field_expr.clone());
+                                break;
+                            }
+                        }
+                        let field_value = found.ok_or_else(|| {
+                            diagnostic(format!("Missing field {} in struct", property), struct_span)
+                        })?;
+                        (field_value, UpdateStep::Property(property))
                     }
-                }
+                    AccessStep::Index(index, _) => {
+                        let field_value = fields
+                            .get(index)
+                            .map(|(_, expr)| expr.clone())
+                            .ok_or_else(|| diagnostic("Array index out of range", struct_span))?;
+                        (field_value, UpdateStep::Index(index))
+                    }
+                    AccessStep::DynamicIndex(_) => unreachable!("dynamic index handled earlier"),
+                };
 
-                let field_value = found.ok_or_else(|| {
-                    diagnostic(format!("Missing field {} in struct", property), struct_span)
-                })?;
-
-                struct_stack.push((fields, struct_span, property));
+                struct_stack.push((fields, struct_span, update_step));
                 current_object = field_value;
             }
 
             let mut updated_value = value;
-            while let Some((mut fields, struct_span, property)) = struct_stack.pop() {
-                let mut found = false;
-                for (field_id, field_expr) in fields.iter_mut() {
-                    if field_id.name == property {
-                        *field_expr = updated_value.clone();
-                        found = true;
-                        break;
+            while let Some((mut fields, struct_span, step)) = struct_stack.pop() {
+                match step {
+                    UpdateStep::Property(property) => {
+                        let mut found = false;
+                        for (field_id, field_expr) in fields.iter_mut() {
+                            if field_id.name == property {
+                                *field_expr = updated_value.clone();
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found {
+                            return Err(diagnostic(
+                                format!("Missing field {} in struct", property),
+                                struct_span,
+                            ));
+                        }
                     }
-                }
-                if !found {
-                    return Err(diagnostic(
-                        format!("Missing field {} in struct", property),
-                        struct_span,
-                    ));
+                    UpdateStep::Index(index) => {
+                        if let Some((_, field_expr)) = fields.get_mut(index) {
+                            *field_expr = updated_value.clone();
+                        } else {
+                            return Err(diagnostic("Array index out of range", struct_span));
+                        }
+                    }
                 }
                 updated_value = Expression::new(ExpressionKind::Struct(fields), struct_span);
             }
@@ -4975,6 +5205,16 @@ fn is_resolved_const_function_expression(expr: &Expression, function_context: &C
                 });
                 stack.push(Frame {
                     expr: function,
+                    context: frame.context,
+                });
+            }
+            ExpressionKind::ArrayIndex { array, index } => {
+                stack.push(Frame {
+                    expr: index,
+                    context: frame.context.clone(),
+                });
+                stack.push(Frame {
+                    expr: array,
                     context: frame.context,
                 });
             }

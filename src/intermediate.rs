@@ -19,15 +19,24 @@ pub enum IntermediateKind {
         else_branch: Box<IntermediateKind>,
     },
     Struct(Vec<(Identifier, IntermediateKind)>),
+    ArrayLiteral {
+        items: Vec<IntermediateKind>,
+        element_type: IntermediateType,
+        field_names: Vec<String>,
+    },
     Literal(ExpressionLiteral),
     Identifier(Identifier),
     Assignment {
-        target: LValue,
+        target: IntermediateLValue,
         expr: Box<IntermediateKind>,
     },
     FunctionCall {
         function: usize,
         argument: Box<IntermediateKind>,
+    },
+    ArrayIndex {
+        array: Box<IntermediateKind>,
+        index: Box<IntermediateKind>,
     },
     PropertyAccess {
         object: Box<IntermediateKind>,
@@ -63,9 +72,29 @@ pub struct IntermediateBinding {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IntermediateLValue {
+    Identifier(Identifier, SourceSpan),
+    PropertyAccess {
+        object: Box<IntermediateLValue>,
+        property: String,
+        span: SourceSpan,
+    },
+    ArrayIndex {
+        array: Box<IntermediateLValue>,
+        index: Box<IntermediateKind>,
+        span: SourceSpan,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntermediateType {
     I32,
     Struct(Vec<(String, IntermediateType)>),
+    Array {
+        element: Box<IntermediateType>,
+        length: usize,
+        field_names: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,6 +145,26 @@ pub fn context_to_intermediate(context: &Context) -> IntermediateResult {
     }
 }
 
+fn lower_lvalue(target: LValue, builder: &mut IntermediateBuilder) -> IntermediateLValue {
+    match target {
+        LValue::Identifier(identifier, span) => IntermediateLValue::Identifier(identifier, span),
+        LValue::PropertyAccess {
+            object,
+            property,
+            span,
+        } => IntermediateLValue::PropertyAccess {
+            object: Box::new(lower_lvalue(*object, builder)),
+            property,
+            span,
+        },
+        LValue::ArrayIndex { array, index, span } => IntermediateLValue::ArrayIndex {
+            array: Box::new(lower_lvalue(*array, builder)),
+            index: Box::new(expression_to_intermediate(*index, builder)),
+            span,
+        },
+    }
+}
+
 pub fn expression_to_intermediate(
     expr: Expression,
     builder: &mut IntermediateBuilder,
@@ -125,9 +174,13 @@ pub fn expression_to_intermediate(
         FinishIntrinsicBinary(BinaryIntrinsicOperator),
         FinishIntrinsicUnary(UnaryIntrinsicOperator),
         FinishIf,
-        FinishStruct(Vec<Identifier>),
-        FinishAssignment(LValue),
+        FinishStruct {
+            field_ids: Vec<Identifier>,
+            array_fields: Option<(Vec<String>, IntermediateType)>,
+        },
+        FinishAssignment(IntermediateLValue),
         FinishFunctionCall(usize),
+        FinishArrayIndex,
         FinishPropertyAccess(String),
         FinishBinding {
             pattern: BindingPattern,
@@ -194,7 +247,20 @@ pub fn expression_to_intermediate(
                     }
                     ExpressionKind::Struct(fields) => {
                         let field_ids = fields.iter().map(|(id, _)| id.clone()).collect();
-                        stack.push(Frame::FinishStruct(field_ids));
+                        let struct_expr =
+                            ExpressionKind::Struct(fields.clone()).with_span(span);
+                        let array_fields = match builder.expression_value_type(&struct_expr) {
+                            IntermediateType::Array {
+                                field_names,
+                                element,
+                                ..
+                            } => Some((field_names, *element)),
+                            _ => None,
+                        };
+                        stack.push(Frame::FinishStruct {
+                            field_ids,
+                            array_fields,
+                        });
                         for (_, field_expr) in fields.into_iter().rev() {
                             stack.push(Frame::Enter(field_expr));
                         }
@@ -208,7 +274,8 @@ pub fn expression_to_intermediate(
                         }
                     }
                     ExpressionKind::Assignment { target, expr } => {
-                        stack.push(Frame::FinishAssignment(target));
+                        let lowered_target = lower_lvalue(target, builder);
+                        stack.push(Frame::FinishAssignment(lowered_target));
                         stack.push(Frame::Enter(*expr));
                     }
                     ExpressionKind::FunctionCall { function, argument } => {
@@ -267,6 +334,11 @@ pub fn expression_to_intermediate(
 
                         stack.push(Frame::FinishFunctionCall(function_index));
                         stack.push(Frame::Enter(*argument));
+                    }
+                    ExpressionKind::ArrayIndex { array, index } => {
+                        stack.push(Frame::FinishArrayIndex);
+                        stack.push(Frame::Enter(*index));
+                        stack.push(Frame::Enter(*array));
                     }
                     ExpressionKind::PropertyAccess { object, property } => {
                         stack.push(Frame::FinishPropertyAccess(property));
@@ -372,17 +444,28 @@ pub fn expression_to_intermediate(
                     else_branch: Box::new(else_branch),
                 });
             }
-            Frame::FinishStruct(field_ids) => {
+            Frame::FinishStruct {
+                field_ids,
+                array_fields,
+            } => {
                 let mut field_values = Vec::with_capacity(field_ids.len());
                 for _ in 0..field_ids.len() {
                     field_values.push(values.pop().expect("Missing struct field value"));
                 }
                 field_values.reverse();
-                let fields = field_ids
-                    .into_iter()
-                    .zip(field_values.into_iter())
-                    .collect();
-                values.push(IntermediateKind::Struct(fields));
+                if let Some((field_names, element_type)) = array_fields {
+                    values.push(IntermediateKind::ArrayLiteral {
+                        items: field_values,
+                        element_type,
+                        field_names,
+                    });
+                } else {
+                    let fields = field_ids
+                        .into_iter()
+                        .zip(field_values.into_iter())
+                        .collect();
+                    values.push(IntermediateKind::Struct(fields));
+                }
             }
             Frame::FinishAssignment(target) => {
                 let expr = values.pop().expect("Missing assignment value");
@@ -396,6 +479,14 @@ pub fn expression_to_intermediate(
                 values.push(IntermediateKind::FunctionCall {
                     function,
                     argument: Box::new(argument),
+                });
+            }
+            Frame::FinishArrayIndex => {
+                let index = values.pop().expect("Missing array index");
+                let array = values.pop().expect("Missing array value");
+                values.push(IntermediateKind::ArrayIndex {
+                    array: Box::new(array),
+                    index: Box::new(index),
                 });
             }
             Frame::FinishPropertyAccess(property) => {
@@ -716,11 +807,32 @@ impl IntermediateBuilder {
                         field_types.push(values.pop().expect("Missing struct field type"));
                     }
                     field_types.reverse();
-                    let fields = field_names
-                        .into_iter()
-                        .zip(field_types.into_iter())
-                        .collect();
-                    values.push(IntermediateType::Struct(fields));
+                    let first_type = field_types.first().cloned();
+                    let mut homogeneous = true;
+                    if let Some(first) = &first_type {
+                        for ty in field_types.iter().skip(1) {
+                            if ty != first {
+                                homogeneous = false;
+                                break;
+                            }
+                        }
+                    } else {
+                        homogeneous = false;
+                    }
+
+                    if let Some(first) = first_type && homogeneous {
+                        values.push(IntermediateType::Array {
+                            element: Box::new(first),
+                            length: field_types.len(),
+                            field_names,
+                        });
+                    } else {
+                        let fields = field_names
+                            .into_iter()
+                            .zip(field_types.into_iter())
+                            .collect();
+                        values.push(IntermediateType::Struct(fields));
+                    }
                 }
             }
         }
@@ -757,6 +869,7 @@ impl IntermediateBuilder {
         enum Frame {
             Enter(Expression),
             FinishStruct(Vec<String>),
+            FinishArrayIndex,
         }
 
         let mut stack = Vec::new();
@@ -775,6 +888,10 @@ impl IntermediateBuilder {
                         for (_, field_expr) in fields.into_iter().rev() {
                             stack.push(Frame::Enter(field_expr));
                         }
+                    }
+                    ExpressionKind::ArrayIndex { array, .. } => {
+                        stack.push(Frame::FinishArrayIndex);
+                        stack.push(Frame::Enter(*array));
                     }
                     ExpressionKind::If { then_branch, .. } => {
                         stack.push(Frame::Enter(*then_branch));
@@ -808,11 +925,40 @@ impl IntermediateBuilder {
                         field_types.push(values.pop().expect("Missing struct field type"));
                     }
                     field_types.reverse();
-                    let fields = field_names
-                        .into_iter()
-                        .zip(field_types.into_iter())
-                        .collect();
-                    values.push(IntermediateType::Struct(fields));
+                    let first_type = field_types.first().cloned();
+                    let mut homogeneous = true;
+                    if let Some(first) = &first_type {
+                        for ty in field_types.iter().skip(1) {
+                            if ty != first {
+                                homogeneous = false;
+                                break;
+                            }
+                        }
+                    } else {
+                        homogeneous = false;
+                    }
+
+                    if let Some(first) = first_type && homogeneous {
+                        values.push(IntermediateType::Array {
+                            element: Box::new(first),
+                            length: field_types.len(),
+                            field_names,
+                        });
+                    } else {
+                        let fields = field_names
+                            .into_iter()
+                            .zip(field_types.into_iter())
+                            .collect();
+                        values.push(IntermediateType::Struct(fields));
+                    }
+                }
+                Frame::FinishArrayIndex => {
+                    let array_type = values.pop().expect("Missing array type");
+                    if let IntermediateType::Array { element, .. } = array_type {
+                        values.push(*element);
+                        continue;
+                    }
+                    values.push(IntermediateType::I32);
                 }
             }
         }
@@ -873,11 +1019,32 @@ impl IntermediateBuilder {
                         field_types.push(values.pop().expect("Missing struct field type"));
                     }
                     field_types.reverse();
-                    let fields = field_names
-                        .into_iter()
-                        .zip(field_types.into_iter())
-                        .collect();
-                    values.push(IntermediateType::Struct(fields));
+                    let first_type = field_types.first().cloned();
+                    let mut homogeneous = true;
+                    if let Some(first) = &first_type {
+                        for ty in field_types.iter().skip(1) {
+                            if ty != first {
+                                homogeneous = false;
+                                break;
+                            }
+                        }
+                    } else {
+                        homogeneous = false;
+                    }
+
+                    if let Some(first) = first_type && homogeneous {
+                        values.push(IntermediateType::Array {
+                            element: Box::new(first),
+                            length: field_types.len(),
+                            field_names,
+                        });
+                    } else {
+                        let fields = field_names
+                            .into_iter()
+                            .zip(field_types.into_iter())
+                            .collect();
+                        values.push(IntermediateType::Struct(fields));
+                    }
                 }
                 Frame::FinishEnumType(variant_names) => {
                     let mut variant_types = Vec::with_capacity(variant_names.len());
@@ -956,10 +1123,20 @@ impl IntermediateBuilder {
                         });
                     }
                     BindingPattern::Struct(fields, span) => {
-                        let field_types = if let IntermediateType::Struct(fields) = value_type {
-                            fields
-                        } else {
-                            panic!("Struct pattern used on non-struct type at {:?}", span);
+                        let field_types = match value_type {
+                            IntermediateType::Struct(fields) => fields,
+                            IntermediateType::Array {
+                                element,
+                                field_names,
+                                ..
+                            } => field_names
+                                .iter()
+                                .cloned()
+                                .map(|name| (name, (*element.clone())))
+                                .collect(),
+                            _ => {
+                                panic!("Struct pattern used on non-struct type at {:?}", span)
+                            }
                         };
 
                         stack.push(Frame::FinishStruct(fields.len()));

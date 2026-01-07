@@ -8,11 +8,12 @@ use crate::{
     diagnostics::{Diagnostic, SourceSpan},
     intermediate::{
         IntermediateBinding, IntermediateExportType, IntermediateFunction,
-        IntermediateIntrinsicOperation, IntermediateKind, IntermediateResult, IntermediateType,
+        IntermediateIntrinsicOperation, IntermediateKind, IntermediateLValue, IntermediateResult,
+        IntermediateType,
     },
     parsing::{
         BinaryIntrinsicOperator, BindingPattern, DivergeExpressionType, ExpressionLiteral,
-        Identifier, LValue, TargetLiteral, UnaryIntrinsicOperator,
+        Identifier, TargetLiteral, UnaryIntrinsicOperator,
     },
 };
 
@@ -20,6 +21,11 @@ use crate::{
 enum WasmType {
     I32,
     Struct(Vec<(String, WasmType)>),
+    Array {
+        element: Box<WasmType>,
+        length: usize,
+        field_names: Vec<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,9 +58,18 @@ impl WasmType {
     fn to_val_type(&self, ctx: &TypeContext) -> ValType {
         match self {
             WasmType::I32 => ValType::I32,
-            WasmType::Struct(fields) => {
+            WasmType::Struct(_fields) => {
                 let type_index = ctx
-                    .get_type_index(fields)
+                    .get_type_index(self)
+                    .expect("Type should be registered");
+                ValType::Ref(RefType {
+                    nullable: true,
+                    heap_type: HeapType::Concrete(type_index),
+                })
+            }
+            WasmType::Array { .. } => {
+                let type_index = ctx
+                    .get_type_index(self)
                     .expect("Type should be registered");
                 ValType::Ref(RefType {
                     nullable: true,
@@ -72,10 +87,16 @@ fn format_wasm_type(ty: &WasmType) -> String {
     while let Some((node, visited)) = stack.pop() {
         if !visited {
             stack.push((node, true));
-            if let WasmType::Struct(fields) = node {
-                for (_, field_ty) in fields.iter().rev() {
-                    stack.push((field_ty, false));
+            match node {
+                WasmType::Struct(fields) => {
+                    for (_, field_ty) in fields.iter().rev() {
+                        stack.push((field_ty, false));
+                    }
                 }
+                WasmType::Array { element, .. } => {
+                    stack.push((element, false));
+                }
+                _ => {}
             }
             continue;
         }
@@ -93,12 +114,36 @@ fn format_wasm_type(ty: &WasmType) -> String {
                 parts.reverse();
                 results.push(format!("struct {{{}}}", parts.join(", ")));
             }
+            WasmType::Array {
+                length,
+                field_names,
+                ..
+            } => {
+                let element = results
+                    .pop()
+                    .expect("format_wasm_type should have element type");
+                results.push(format!(
+                    "array[{}] {} {{{}}}",
+                    length,
+                    element,
+                    field_names.join(", ")
+                ));
+            }
         }
     }
 
     results
         .pop()
         .expect("format_wasm_type should produce one result")
+}
+
+fn struct_fields_to_wasm_type(field_names: Vec<String>, field_types: Vec<WasmType>) -> WasmType {
+    let mut wasm_fields: Vec<(String, WasmType)> = field_names
+        .into_iter()
+        .zip(field_types.into_iter())
+        .collect();
+    wasm_fields.sort_by(|a, b| a.0.cmp(&b.0));
+    WasmType::Struct(wasm_fields)
 }
 
 fn intermediate_type_to_wasm(ty: &IntermediateType) -> WasmType {
@@ -108,10 +153,16 @@ fn intermediate_type_to_wasm(ty: &IntermediateType) -> WasmType {
     while let Some((node, visited)) = stack.pop() {
         if !visited {
             stack.push((node, true));
-            if let IntermediateType::Struct(fields) = node {
-                for (_, field_ty) in fields.iter().rev() {
-                    stack.push((field_ty, false));
+            match node {
+                IntermediateType::Struct(fields) => {
+                    for (_, field_ty) in fields.iter().rev() {
+                        stack.push((field_ty, false));
+                    }
                 }
+                IntermediateType::Array { element, .. } => {
+                    stack.push((element, false));
+                }
+                IntermediateType::I32 => {}
             }
             continue;
         }
@@ -119,16 +170,32 @@ fn intermediate_type_to_wasm(ty: &IntermediateType) -> WasmType {
         match node {
             IntermediateType::I32 => results.push(WasmType::I32),
             IntermediateType::Struct(fields) => {
-                let mut wasm_fields = Vec::with_capacity(fields.len());
+                let mut field_types = Vec::with_capacity(fields.len());
+                let mut field_names = Vec::with_capacity(fields.len());
                 for (name, _) in fields.iter().rev() {
                     let field_ty = results
                         .pop()
                         .expect("intermediate_type_to_wasm should have field types");
-                    wasm_fields.push((name.clone(), field_ty));
+                    field_names.push(name.clone());
+                    field_types.push(field_ty);
                 }
-                wasm_fields.reverse();
-                wasm_fields.sort_by(|a, b| a.0.cmp(&b.0));
-                results.push(WasmType::Struct(wasm_fields));
+                field_types.reverse();
+                field_names.reverse();
+                results.push(struct_fields_to_wasm_type(field_names, field_types));
+            }
+            IntermediateType::Array {
+                element: _,
+                length,
+                field_names,
+            } => {
+                let element_type = results
+                    .pop()
+                    .expect("intermediate_type_to_wasm should have array element type");
+                results.push(WasmType::Array {
+                    element: Box::new(element_type),
+                    length: *length,
+                    field_names: field_names.clone(),
+                });
             }
         }
     }
@@ -138,40 +205,33 @@ fn intermediate_type_to_wasm(ty: &IntermediateType) -> WasmType {
         .expect("intermediate_type_to_wasm should produce one result")
 }
 
-fn lvalue_to_intermediate(target: &LValue) -> IntermediateKind {
-    let mut current = target;
-    let mut properties = Vec::new();
-    let base_identifier = loop {
-        match current {
-            LValue::Identifier(identifier, _) => break identifier.clone(),
-            LValue::PropertyAccess {
-                object, property, ..
-            } => {
-                properties.push(property.clone());
-                current = object;
+fn lvalue_to_intermediate(target: &IntermediateLValue) -> IntermediateKind {
+    match target {
+        IntermediateLValue::Identifier(identifier, _) => {
+            IntermediateKind::Identifier(identifier.clone())
+        }
+        IntermediateLValue::PropertyAccess { object, property, .. } => {
+            IntermediateKind::PropertyAccess {
+                object: Box::new(lvalue_to_intermediate(object)),
+                property: property.clone(),
             }
         }
-    };
-
-    let mut expr = IntermediateKind::Identifier(base_identifier);
-    for property in properties.iter().rev() {
-        expr = IntermediateKind::PropertyAccess {
-            object: Box::new(expr),
-            property: property.clone(),
-        };
+        IntermediateLValue::ArrayIndex { array, index, .. } => IntermediateKind::ArrayIndex {
+            array: Box::new(lvalue_to_intermediate(array)),
+            index: Box::new((**index).clone()),
+        },
     }
-    expr
 }
 
 fn ensure_lvalue_local(
-    target: &LValue,
+    target: &IntermediateLValue,
     locals_types: &std::collections::HashMap<String, WasmType>,
     span: SourceSpan,
 ) -> Result<(), Diagnostic> {
     let mut current = target;
     loop {
         match current {
-            LValue::Identifier(identifier, _) => {
+            IntermediateLValue::Identifier(identifier, _) => {
                 return if locals_types.contains_key(&identifier.name) {
                     Ok(())
                 } else {
@@ -182,28 +242,31 @@ fn ensure_lvalue_local(
                     .with_span(span))
                 };
             }
-            LValue::PropertyAccess { object, .. } => {
+            IntermediateLValue::PropertyAccess { object, .. } => {
                 current = object;
+            }
+            IntermediateLValue::ArrayIndex { array, .. } => {
+                current = array;
             }
         }
     }
 }
 
 struct TypeContext {
-    struct_types: Vec<Vec<(String, WasmType)>>,
-    type_map: std::collections::HashMap<Vec<(String, WasmType)>, u32>,
+    types: Vec<WasmType>,
+    type_map: std::collections::HashMap<WasmType, u32>,
 }
 
 impl TypeContext {
     fn new() -> Self {
         Self {
-            struct_types: Vec::new(),
+            types: Vec::new(),
             type_map: std::collections::HashMap::new(),
         }
     }
 
-    fn get_or_register_type(&mut self, fields: Vec<(String, WasmType)>) -> u32 {
-        let mut stack = vec![(fields, false)];
+    fn get_or_register_type(&mut self, ty: WasmType) -> u32 {
+        let mut stack = vec![(ty, false)];
         let mut last_index = None;
 
         while let Some((current, visited)) = stack.pop() {
@@ -214,11 +277,25 @@ impl TypeContext {
 
             if !visited {
                 stack.push((current.clone(), true));
-                for (_, field_type) in current.iter().rev() {
-                    if let WasmType::Struct(inner_fields) = field_type {
-                        if !self.type_map.contains_key(inner_fields) {
-                            stack.push((inner_fields.clone(), false));
+                match &current {
+                    WasmType::Struct(fields) => {
+                        for (_, field_type) in fields.iter().rev() {
+                            if !matches!(field_type, WasmType::I32)
+                                && !self.type_map.contains_key(field_type)
+                            {
+                                stack.push((field_type.clone(), false));
+                            }
                         }
+                    }
+                    WasmType::Array { element, .. } => {
+                        if !matches!(element.as_ref(), WasmType::I32)
+                            && !self.type_map.contains_key(element.as_ref())
+                        {
+                            stack.push((element.as_ref().clone(), false));
+                        }
+                    }
+                    WasmType::I32 => {
+                        continue;
                     }
                 }
                 continue;
@@ -229,8 +306,11 @@ impl TypeContext {
                 continue;
             }
 
-            let index = self.struct_types.len() as u32;
-            self.struct_types.push(current.clone());
+            if matches!(current, WasmType::I32) {
+                continue;
+            }
+            let index = self.types.len() as u32;
+            self.types.push(current.clone());
             self.type_map.insert(current, index);
             last_index = Some(index);
         }
@@ -238,8 +318,8 @@ impl TypeContext {
         last_index.expect("Type should be registered")
     }
 
-    fn get_type_index(&self, fields: &Vec<(String, WasmType)>) -> Option<u32> {
-        self.type_map.get(fields).copied()
+    fn get_type_index(&self, ty: &WasmType) -> Option<u32> {
+        self.type_map.get(ty).copied()
     }
 }
 
@@ -307,13 +387,13 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
     for function in &all_functions {
         let mut locals_types = std::collections::HashMap::new();
         for param in &function.params {
-            if let WasmType::Struct(fields) = &param.ty {
-                type_ctx.get_or_register_type(fields.clone());
+            if !matches!(param.ty, WasmType::I32) {
+                type_ctx.get_or_register_type(param.ty.clone());
             }
             locals_types.insert(param.name.clone(), param.ty.clone());
         }
-        if let WasmType::Struct(fields) = &function.return_type {
-            type_ctx.get_or_register_type(fields.clone());
+        if !matches!(function.return_type, WasmType::I32) {
+            type_ctx.get_or_register_type(function.return_type.clone());
         }
         collect_types(
             &function.body,
@@ -324,34 +404,49 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
     }
 
     for global in &exports.globals {
-        if let WasmType::Struct(fields) = &global.ty {
-            type_ctx.get_or_register_type(fields.clone());
+        if !matches!(global.ty, WasmType::I32) {
+            type_ctx.get_or_register_type(global.ty.clone());
         }
     }
 
-    for fields in &type_ctx.struct_types {
-        let wasm_fields = fields.iter().map(|(_, ty)| {
-            let val_type = ty.to_val_type(&type_ctx);
-            FieldType {
-                element_type: StorageType::Val(val_type),
-                mutable: true,
+    for ty in &type_ctx.types {
+        let composite_type = match ty {
+            WasmType::Struct(fields) => {
+                let wasm_fields = fields.iter().map(|(_, ty)| {
+                    let val_type = ty.to_val_type(&type_ctx);
+                    FieldType {
+                        element_type: StorageType::Val(val_type),
+                        mutable: true,
+                    }
+                });
+                wasm_encoder::CompositeInnerType::Struct(wasm_encoder::StructType {
+                    fields: wasm_fields.collect::<Vec<_>>().into_boxed_slice(),
+                })
             }
-        });
+            WasmType::Array { element, .. } => {
+                let val_type = element.to_val_type(&type_ctx);
+                wasm_encoder::CompositeInnerType::Array(wasm_encoder::ArrayType(FieldType {
+                    element_type: StorageType::Val(val_type),
+                    mutable: true,
+                }))
+            }
+            WasmType::I32 => {
+                continue;
+            }
+        };
 
         type_section.rec(vec![wasm_encoder::SubType {
             is_final: false,
             supertype_idx: None,
             composite_type: wasm_encoder::CompositeType {
-                inner: wasm_encoder::CompositeInnerType::Struct(wasm_encoder::StructType {
-                    fields: wasm_fields.collect::<Vec<_>>().into_boxed_slice(),
-                }),
+                inner: composite_type,
                 shared: false,
             },
         }]);
     }
 
-    let struct_type_count = type_ctx.struct_types.len() as u32;
-    let mut next_type_index = struct_type_count;
+    let composite_type_count = type_ctx.types.len() as u32;
+    let mut next_type_index = composite_type_count;
 
     for function in &all_functions {
         let param_types: Vec<ValType> = function
@@ -531,6 +626,11 @@ fn collect_types(
                         stack.push((value, false));
                     }
                 }
+                IntermediateKind::ArrayLiteral { items, .. } => {
+                    for value in items.iter().rev() {
+                        stack.push((value, false));
+                    }
+                }
                 IntermediateKind::Block(exprs) => {
                     for e in exprs.iter().rev() {
                         stack.push((e, false));
@@ -571,20 +671,34 @@ fn collect_types(
                 IntermediateKind::PropertyAccess { object, .. } => {
                     stack.push((object, false));
                 }
+                IntermediateKind::ArrayIndex { array, index } => {
+                    stack.push((index, false));
+                    stack.push((array, false));
+                }
                 _ => {}
             }
             continue;
         }
 
         match node {
-            IntermediateKind::Struct(fields) => {
-                let mut field_types = Vec::new();
-                for (name, value) in fields {
-                    let ty = infer_type(value, locals_types, function_return_types)?;
-                    field_types.push((name.name.clone(), ty));
+            IntermediateKind::Struct(_fields) => {
+                let ty = infer_type(node, locals_types, function_return_types)?;
+                if !matches!(ty, WasmType::I32) {
+                    ctx.get_or_register_type(ty);
                 }
-                field_types.sort_by(|a, b| a.0.cmp(&b.0));
-                ctx.get_or_register_type(field_types);
+            }
+            IntermediateKind::ArrayLiteral {
+                element_type,
+                field_names,
+                items,
+            } => {
+                let element_wasm = intermediate_type_to_wasm(element_type);
+                let ty = WasmType::Array {
+                    element: Box::new(element_wasm),
+                    length: items.len(),
+                    field_names: field_names.clone(),
+                };
+                ctx.get_or_register_type(ty);
             }
             IntermediateKind::Binding(binding) => {
                 let binding = binding.as_ref();
@@ -738,6 +852,7 @@ fn infer_type_basic(
         FinishStruct { field_names: Vec<String> },
         FinishAssignment,
         FinishPropertyAccess { property: String },
+        FinishArrayIndex,
     }
 
     let mut stack: Vec<InferTask> = Vec::new();
@@ -757,6 +872,18 @@ fn infer_type_basic(
                     for (_, value) in fields.into_iter().rev() {
                         stack.push(InferTask::Eval(value));
                     }
+                }
+                IntermediateKind::ArrayLiteral {
+                    items,
+                    element_type,
+                    field_names,
+                } => {
+                    let wasm_element = intermediate_type_to_wasm(&element_type);
+                    results.push(WasmType::Array {
+                        element: Box::new(wasm_element),
+                        length: items.len(),
+                        field_names,
+                    });
                 }
                 IntermediateKind::Identifier(identifier) => {
                     let ty = locals_types.get(&identifier.name).cloned().ok_or_else(|| {
@@ -791,6 +918,11 @@ fn infer_type_basic(
                     stack.push(InferTask::FinishPropertyAccess { property });
                     stack.push(InferTask::Eval((*object).clone()));
                 }
+                IntermediateKind::ArrayIndex { array, index } => {
+                    stack.push(InferTask::FinishArrayIndex);
+                    stack.push(InferTask::Eval((*index).clone()));
+                    stack.push(InferTask::Eval((*array).clone()));
+                }
                 IntermediateKind::IntrinsicOperation(..)
                 | IntermediateKind::Binding(..)
                 | IntermediateKind::Unreachable => {
@@ -810,15 +942,17 @@ fn infer_type_basic(
             },
             InferTask::FinishStruct { field_names } => {
                 let mut field_types = Vec::with_capacity(field_names.len());
+                let mut ordered_names = Vec::with_capacity(field_names.len());
                 for name in field_names.into_iter().rev() {
                     let ty = results
                         .pop()
                         .expect("infer_type_basic should have field types");
-                    field_types.push((name, ty));
+                    ordered_names.push(name);
+                    field_types.push(ty);
                 }
                 field_types.reverse();
-                field_types.sort_by(|a, b| a.0.cmp(&b.0));
-                results.push(WasmType::Struct(field_types));
+                ordered_names.reverse();
+                results.push(struct_fields_to_wasm_type(ordered_names, field_types));
             }
             InferTask::FinishAssignment => {
                 let existing_type = results
@@ -840,18 +974,46 @@ fn infer_type_basic(
                 let object_type = results
                     .pop()
                     .expect("infer_type_basic should have object type");
-                if let WasmType::Struct(fields) = object_type {
-                    if let Some((_, field_type)) = fields.iter().find(|(n, _)| n == &property) {
-                        results.push(field_type.clone());
-                    } else {
-                        return Err(Diagnostic::new(format!(
-                            "Field `{}` not found in struct",
-                            property
-                        ))
-                        .with_span(SourceSpan::default()));
+                match object_type {
+                    WasmType::Struct(fields) => {
+                        if let Some((_, field_type)) = fields.iter().find(|(n, _)| n == &property) {
+                            results.push(field_type.clone());
+                        } else {
+                            return Err(Diagnostic::new(format!(
+                                "Field `{}` not found in struct",
+                                property
+                            ))
+                            .with_span(SourceSpan::default()));
+                        }
                     }
+                    WasmType::Array { element, field_names, .. } => {
+                        if field_names.iter().any(|name| name == &property) {
+                            results.push(*element);
+                        } else {
+                            return Err(Diagnostic::new(format!(
+                                "Field `{}` not found in array",
+                                property
+                            ))
+                            .with_span(SourceSpan::default()));
+                        }
+                    }
+                    WasmType::I32 => {
+                        return Err(Diagnostic::new("Property access on non-struct type")
+                            .with_span(SourceSpan::default()));
+                    }
+                }
+            }
+            InferTask::FinishArrayIndex => {
+                let _index_type = results
+                    .pop()
+                    .expect("infer_type_basic should have index type");
+                let array_type = results
+                    .pop()
+                    .expect("infer_type_basic should have array type");
+                if let WasmType::Array { element, .. } = array_type {
+                    results.push(*element);
                 } else {
-                    return Err(Diagnostic::new("Property access on non-struct type")
+                    return Err(Diagnostic::new("Indexing on non-array type")
                         .with_span(SourceSpan::default()));
                 }
             }
@@ -873,6 +1035,7 @@ fn infer_type_impl(
         FinishStruct { field_names: Vec<String> },
         FinishAssignment,
         FinishPropertyAccess { property: String },
+        FinishArrayIndex,
         FinishLoop { body: IntermediateKind },
     }
 
@@ -893,6 +1056,18 @@ fn infer_type_impl(
                     for (_, value) in fields.into_iter().rev() {
                         stack.push(InferTask::Eval(value));
                     }
+                }
+                IntermediateKind::ArrayLiteral {
+                    items,
+                    element_type,
+                    field_names,
+                } => {
+                    let wasm_element = intermediate_type_to_wasm(&element_type);
+                    results.push(WasmType::Array {
+                        element: Box::new(wasm_element),
+                        length: items.len(),
+                        field_names,
+                    });
                 }
                 IntermediateKind::Identifier(identifier) => {
                     let ty = locals_types.get(&identifier.name).cloned().ok_or_else(|| {
@@ -930,6 +1105,11 @@ fn infer_type_impl(
                     stack.push(InferTask::FinishPropertyAccess { property });
                     stack.push(InferTask::Eval((*object).clone()));
                 }
+                IntermediateKind::ArrayIndex { array, index } => {
+                    stack.push(InferTask::FinishArrayIndex);
+                    stack.push(InferTask::Eval((*index).clone()));
+                    stack.push(InferTask::Eval((*array).clone()));
+                }
                 IntermediateKind::IntrinsicOperation(..)
                 | IntermediateKind::Binding(..)
                 | IntermediateKind::Unreachable => {
@@ -949,15 +1129,17 @@ fn infer_type_impl(
             },
             InferTask::FinishStruct { field_names } => {
                 let mut field_types = Vec::with_capacity(field_names.len());
+                let mut ordered_names = Vec::with_capacity(field_names.len());
                 for name in field_names.into_iter().rev() {
                     let ty = results
                         .pop()
                         .expect("infer_type_impl should have field types");
-                    field_types.push((name, ty));
+                    ordered_names.push(name);
+                    field_types.push(ty);
                 }
                 field_types.reverse();
-                field_types.sort_by(|a, b| a.0.cmp(&b.0));
-                results.push(WasmType::Struct(field_types));
+                ordered_names.reverse();
+                results.push(struct_fields_to_wasm_type(ordered_names, field_types));
             }
             InferTask::FinishAssignment => {
                 let existing_type = results
@@ -979,18 +1161,46 @@ fn infer_type_impl(
                 let object_type = results
                     .pop()
                     .expect("infer_type_impl should have object type");
-                if let WasmType::Struct(fields) = object_type {
-                    if let Some((_, field_type)) = fields.iter().find(|(n, _)| n == &property) {
-                        results.push(field_type.clone());
-                    } else {
-                        return Err(Diagnostic::new(format!(
-                            "Field `{}` not found in struct",
-                            property
-                        ))
-                        .with_span(SourceSpan::default()));
+                match object_type {
+                    WasmType::Struct(fields) => {
+                        if let Some((_, field_type)) = fields.iter().find(|(n, _)| n == &property) {
+                            results.push(field_type.clone());
+                        } else {
+                            return Err(Diagnostic::new(format!(
+                                "Field `{}` not found in struct",
+                                property
+                            ))
+                            .with_span(SourceSpan::default()));
+                        }
                     }
+                    WasmType::Array { element, field_names, .. } => {
+                        if field_names.iter().any(|name| name == &property) {
+                            results.push(*element);
+                        } else {
+                            return Err(Diagnostic::new(format!(
+                                "Field `{}` not found in array",
+                                property
+                            ))
+                            .with_span(SourceSpan::default()));
+                        }
+                    }
+                    WasmType::I32 => {
+                        return Err(Diagnostic::new("Property access on non-struct type")
+                            .with_span(SourceSpan::default()));
+                    }
+                }
+            }
+            InferTask::FinishArrayIndex => {
+                let _index_type = results
+                    .pop()
+                    .expect("infer_type_impl should have index type");
+                let array_type = results
+                    .pop()
+                    .expect("infer_type_impl should have array type");
+                if let WasmType::Array { element, .. } = array_type {
+                    results.push(*element);
                 } else {
-                    return Err(Diagnostic::new("Property access on non-struct type")
+                    return Err(Diagnostic::new("Indexing on non-array type")
                         .with_span(SourceSpan::default()));
                 }
             }
@@ -1018,26 +1228,41 @@ fn extract_function_params(
     pattern: &BindingPattern,
     ty: &IntermediateType,
 ) -> Result<Vec<WasmFunctionParam>, Diagnostic> {
+    fn struct_field_types(
+        current_type: &IntermediateType,
+        span: SourceSpan,
+    ) -> Result<Vec<(String, IntermediateType)>, Diagnostic> {
+        match current_type {
+            IntermediateType::Struct(field_types) => Ok(field_types.clone()),
+            IntermediateType::Array {
+                element,
+                field_names,
+                ..
+            } => Ok(field_names
+                .iter()
+                .cloned()
+                .map(|name| (name, (*element.clone())))
+                .collect()),
+            _ => Err(
+                Diagnostic::new("Struct pattern requires struct parameter type")
+                    .with_span(span),
+            ),
+        }
+    }
+
     let mut params = Vec::new();
-    let mut stack = vec![(pattern, ty)];
+    let mut stack = vec![(pattern, ty.clone())];
 
     while let Some((current_pattern, current_type)) = stack.pop() {
         match stripped_binding_pattern(current_pattern) {
             BindingPattern::Struct(fields, span) => {
-                let field_types = if let IntermediateType::Struct(field_types) = current_type {
-                    field_types
-                } else {
-                    return Err(
-                        Diagnostic::new("Struct pattern requires struct parameter type")
-                            .with_span(*span),
-                    );
-                };
+                let field_types = struct_field_types(&current_type, *span)?;
 
                 for (field_id, sub_pattern) in fields.iter().rev() {
                     let field_ty = field_types
                         .iter()
                         .find(|(name, _)| name == &field_id.name)
-                        .map(|(_, ty)| ty)
+                        .map(|(_, ty)| ty.clone())
                         .ok_or_else(|| {
                             Diagnostic::new(format!(
                                 "Missing field {} in struct parameter type",
@@ -1050,7 +1275,7 @@ fn extract_function_params(
             }
             BindingPattern::Identifier(identifier, _) => params.push(WasmFunctionParam {
                 name: identifier.name.clone(),
-                ty: intermediate_type_to_wasm(current_type),
+                ty: intermediate_type_to_wasm(&current_type),
             }),
             BindingPattern::Literal(_, span) => {
                 return Err(Diagnostic::new(
@@ -1173,27 +1398,42 @@ fn flatten_call_arguments(
     input_type: &IntermediateType,
     argument_expr: IntermediateKind,
 ) -> Result<Vec<IntermediateKind>, Diagnostic> {
+    fn struct_field_types(
+        current_type: &IntermediateType,
+        span: SourceSpan,
+    ) -> Result<Vec<(String, IntermediateType)>, Diagnostic> {
+        match current_type {
+            IntermediateType::Struct(field_types) => Ok(field_types.clone()),
+            IntermediateType::Array {
+                element,
+                field_names,
+                ..
+            } => Ok(field_names
+                .iter()
+                .cloned()
+                .map(|name| (name, (*element.clone())))
+                .collect()),
+            _ => Err(
+                Diagnostic::new("Struct pattern requires struct parameter type")
+                    .with_span(span),
+            ),
+        }
+    }
+
     let mut results = Vec::new();
-    let mut stack = vec![(pattern, input_type, argument_expr)];
+    let mut stack = vec![(pattern, input_type.clone(), argument_expr)];
 
     while let Some((current_pattern, current_type, current_expr)) = stack.pop() {
         match stripped_binding_pattern(current_pattern) {
             BindingPattern::Identifier(_, _) => results.push(current_expr),
             BindingPattern::Struct(fields, span) => {
-                let field_types = if let IntermediateType::Struct(field_types) = current_type {
-                    field_types
-                } else {
-                    return Err(
-                        Diagnostic::new("Struct pattern requires struct parameter type")
-                            .with_span(*span),
-                    );
-                };
+                let field_types = struct_field_types(&current_type, *span)?;
 
                 for (field_id, sub_pattern) in fields.iter().rev() {
                     let field_ty = field_types
                         .iter()
                         .find(|(name, _)| name == &field_id.name)
-                        .map(|(_, ty)| ty)
+                        .map(|(_, ty)| ty.clone())
                         .ok_or_else(|| {
                             Diagnostic::new(format!(
                                 "Missing field {} in struct parameter type",
@@ -1319,8 +1559,8 @@ fn emit_expression(
                 IntermediateKind::Assignment {
                     target,
                     expr: value,
-                } => match target {
-                    LValue::Identifier(identifier, _) => {
+                } => match &target {
+                    IntermediateLValue::Identifier(identifier, _) => {
                         let local_index =
                             locals.get(&identifier.name).copied().ok_or_else(|| {
                                 Diagnostic::new(format!(
@@ -1332,40 +1572,95 @@ fn emit_expression(
                         tasks.push(EmitTask::Instr(Instruction::LocalTee(local_index)));
                         tasks.push(EmitTask::Eval((*value).clone()));
                     }
-                    LValue::PropertyAccess {
-                        ref object,
-                        ref property,
+                    IntermediateLValue::PropertyAccess {
+                        object,
+                        property,
                         ..
                     } => {
                         let object_expr = lvalue_to_intermediate(object);
                         let object_type =
                             infer_type(&object_expr, locals_types, function_return_types)?;
-                        let WasmType::Struct(fields) = object_type else {
-                            return Err(Diagnostic::new("Property assignment on non-struct type")
+                        match &object_type {
+                            WasmType::Struct(fields) => {
+                                let field_index = fields
+                                    .iter()
+                                    .position(|(name, _)| name == property)
+                                    .ok_or_else(|| {
+                                        Diagnostic::new(format!(
+                                            "Field `{}` not found in struct",
+                                            property
+                                        ))
+                                        .with_span(SourceSpan::default())
+                                    })? as u32;
+
+                                let type_index = type_ctx
+                                    .get_type_index(&WasmType::Struct(fields.clone()))
+                                    .expect("Type should be registered");
+
+                                let full_target_expr = lvalue_to_intermediate(&target);
+
+                                tasks.push(EmitTask::Eval(full_target_expr));
+                                tasks.push(EmitTask::Instr(Instruction::StructSet {
+                                    struct_type_index: type_index,
+                                    field_index,
+                                }));
+                                tasks.push(EmitTask::Eval((*value).clone()));
+                                tasks.push(EmitTask::Eval(object_expr));
+                            }
+                            WasmType::Array {
+                                field_names,
+                                ..
+                            } => {
+                                let field_index = field_names
+                                    .iter()
+                                    .position(|name| name == property)
+                                    .ok_or_else(|| {
+                                        Diagnostic::new(format!(
+                                            "Field `{}` not found in array",
+                                            property
+                                        ))
+                                        .with_span(SourceSpan::default())
+                                    })? as u32;
+                                let type_index = type_ctx
+                                    .get_type_index(&object_type)
+                                    .expect("Type should be registered");
+                                tasks.push(EmitTask::Instr(Instruction::ArraySet(type_index)));
+                                tasks.push(EmitTask::Eval((*value).clone()));
+                                tasks.push(EmitTask::Instr(Instruction::I32Const(field_index as i32)));
+                                tasks.push(EmitTask::Eval(object_expr));
+                            }
+                            WasmType::I32 => {
+                                return Err(Diagnostic::new(
+                                    "Property assignment on non-struct type".to_string(),
+                                )
+                                .with_span(SourceSpan::default()));
+                            }
+                        }
+                    }
+                    IntermediateLValue::ArrayIndex { array, index, .. } => {
+                        let array_expr = lvalue_to_intermediate(array.as_ref());
+                        let array_type =
+                            infer_type(&array_expr, locals_types, function_return_types)?;
+                        let WasmType::Array { .. } = array_type else {
+                            return Err(Diagnostic::new("Index assignment on non-array type")
                                 .with_span(SourceSpan::default()));
                         };
 
-                        let field_index = fields
-                            .iter()
-                            .position(|(name, _)| name == property)
-                            .ok_or_else(|| {
-                                Diagnostic::new(format!("Field `{}` not found in struct", property))
-                                    .with_span(SourceSpan::default())
-                            })? as u32;
+                        let index_type = infer_type(index.as_ref(), locals_types, function_return_types)?;
+                        if index_type != WasmType::I32 {
+                            return Err(Diagnostic::new("Array index must be i32".to_string())
+                                .with_span(SourceSpan::default()));
+                        }
 
                         let type_index = type_ctx
-                            .get_type_index(&fields)
+                            .get_type_index(&array_type)
                             .expect("Type should be registered");
-
                         let full_target_expr = lvalue_to_intermediate(&target);
-
                         tasks.push(EmitTask::Eval(full_target_expr));
-                        tasks.push(EmitTask::Instr(Instruction::StructSet {
-                            struct_type_index: type_index,
-                            field_index,
-                        }));
+                        tasks.push(EmitTask::Instr(Instruction::ArraySet(type_index)));
                         tasks.push(EmitTask::Eval((*value).clone()));
-                        tasks.push(EmitTask::Eval(object_expr));
+                        tasks.push(EmitTask::Eval((**index).clone()));
+                        tasks.push(EmitTask::Eval(array_expr));
                     }
                 },
                 IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
@@ -1650,7 +1945,8 @@ fn emit_expression(
                 }
                 IntermediateKind::Struct(items) => {
                     let mut sorted_items = items.clone();
-                    sorted_items.sort_by(|(a_name, _), (b_name, _)| a_name.name.cmp(&b_name.name));
+                    sorted_items
+                        .sort_by(|(a_name, _), (b_name, _)| a_name.name.cmp(&b_name.name));
 
                     let mut field_types = Vec::new();
                     for (name, value) in &sorted_items {
@@ -1658,10 +1954,13 @@ fn emit_expression(
                         field_types.push((name.name.clone(), ty));
                     }
 
-                    let type_index = type_ctx.get_type_index(&field_types).ok_or_else(|| {
-                        Diagnostic::new("Struct type not found in context")
-                            .with_span(SourceSpan::default())
-                    })?;
+                    let type_index =
+                        type_ctx.get_type_index(&WasmType::Struct(field_types)).ok_or_else(
+                            || {
+                                Diagnostic::new("Struct type not found in context")
+                                    .with_span(SourceSpan::default())
+                            },
+                        )?;
 
                     tasks.push(EmitTask::Instr(Instruction::StructNew(type_index)));
 
@@ -1669,30 +1968,91 @@ fn emit_expression(
                         tasks.push(EmitTask::Eval(value));
                     }
                 }
+                IntermediateKind::ArrayLiteral {
+                    items,
+                    element_type,
+                    field_names,
+                } => {
+                    let element_wasm = intermediate_type_to_wasm(&element_type);
+                    let array_type = WasmType::Array {
+                        element: Box::new(element_wasm),
+                        length: items.len(),
+                        field_names,
+                    };
+                    let type_index = type_ctx.get_type_index(&array_type).ok_or_else(|| {
+                        Diagnostic::new("Array type not found in context")
+                            .with_span(SourceSpan::default())
+                    })?;
+                    tasks.push(EmitTask::Instr(Instruction::ArrayNewFixed {
+                        array_type_index: type_index,
+                        array_size: items.len() as u32,
+                    }));
+                    for value in items.into_iter().rev() {
+                        tasks.push(EmitTask::Eval(value));
+                    }
+                }
                 IntermediateKind::PropertyAccess { object, property } => {
                     let object_type = infer_type(&object, locals_types, function_return_types)?;
-                    if let WasmType::Struct(fields) = object_type {
-                        let field_index = fields
-                            .iter()
-                            .position(|(n, _)| n == &property)
-                            .ok_or_else(|| {
-                                Diagnostic::new(format!("Field `{}` not found in struct", property))
-                                    .with_span(SourceSpan::default())
-                            })?;
+                    match &object_type {
+                        WasmType::Struct(fields) => {
+                            let field_index = fields
+                                .iter()
+                                .position(|(n, _)| n == &property)
+                                .ok_or_else(|| {
+                                    Diagnostic::new(format!("Field `{}` not found in struct", property))
+                                        .with_span(SourceSpan::default())
+                                })?;
 
-                        let type_index = type_ctx
-                            .get_type_index(&fields)
-                            .expect("Type should be registered");
+                            let type_index = type_ctx
+                                .get_type_index(&WasmType::Struct(fields.clone()))
+                                .expect("Type should be registered");
 
-                        tasks.push(EmitTask::Instr(Instruction::StructGet {
-                            struct_type_index: type_index,
-                            field_index: field_index as u32,
-                        }));
-                        tasks.push(EmitTask::Eval((*object).clone()));
-                    } else {
-                        return Err(Diagnostic::new("Property access on non-struct type")
+                            tasks.push(EmitTask::Instr(Instruction::StructGet {
+                                struct_type_index: type_index,
+                                field_index: field_index as u32,
+                            }));
+                            tasks.push(EmitTask::Eval((*object).clone()));
+                        }
+                        WasmType::Array { field_names, .. } => {
+                            let field_index = field_names
+                                .iter()
+                                .position(|name| name == &property)
+                                .ok_or_else(|| {
+                                    Diagnostic::new(format!("Field `{}` not found in array", property))
+                                        .with_span(SourceSpan::default())
+                                })?;
+
+                            let type_index = type_ctx
+                                .get_type_index(&object_type)
+                                .expect("Type should be registered");
+
+                            tasks.push(EmitTask::Instr(Instruction::ArrayGet(type_index)));
+                            tasks.push(EmitTask::Instr(Instruction::I32Const(field_index as i32)));
+                            tasks.push(EmitTask::Eval((*object).clone()));
+                        }
+                        WasmType::I32 => {
+                            return Err(Diagnostic::new("Property access on non-struct type")
+                                .with_span(SourceSpan::default()));
+                        }
+                    }
+                }
+                IntermediateKind::ArrayIndex { array, index } => {
+                    let array_type = infer_type(&array, locals_types, function_return_types)?;
+                    let WasmType::Array { .. } = array_type else {
+                        return Err(Diagnostic::new("Indexing on non-array type")
+                            .with_span(SourceSpan::default()));
+                    };
+                    let index_type = infer_type(&index, locals_types, function_return_types)?;
+                    if index_type != WasmType::I32 {
+                        return Err(Diagnostic::new("Array index must be i32".to_string())
                             .with_span(SourceSpan::default()));
                     }
+                    let type_index = type_ctx
+                        .get_type_index(&array_type)
+                        .expect("Type should be registered");
+                    tasks.push(EmitTask::Instr(Instruction::ArrayGet(type_index)));
+                    tasks.push(EmitTask::Eval((*index).clone()));
+                    tasks.push(EmitTask::Eval((*array).clone()));
                 }
                 IntermediateKind::Unreachable => {
                     tasks.push(EmitTask::Instr(Instruction::Unreachable));
@@ -1843,6 +2203,30 @@ fn expression_does_diverge(
                         });
                     }
                 }
+                IntermediateKind::ArrayLiteral { items, .. } => {
+                    for child in items.iter().rev() {
+                        stack.push(Frame {
+                            expr: child,
+                            possibility: frame.possibility,
+                            in_inner_loop: frame.in_inner_loop,
+                            visited: false,
+                        });
+                    }
+                }
+                IntermediateKind::ArrayIndex { array, index } => {
+                    stack.push(Frame {
+                        expr: index,
+                        possibility: frame.possibility,
+                        in_inner_loop: frame.in_inner_loop,
+                        visited: false,
+                    });
+                    stack.push(Frame {
+                        expr: array,
+                        possibility: frame.possibility,
+                        in_inner_loop: frame.in_inner_loop,
+                        visited: false,
+                    });
+                }
                 _ => {}
             }
             continue;
@@ -1881,6 +2265,7 @@ fn expression_does_diverge(
             | IntermediateKind::FunctionCall { .. }
             | IntermediateKind::Loop { .. }
             | IntermediateKind::PropertyAccess { .. }
+            | IntermediateKind::ArrayIndex { .. }
             | IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(..)) => {
                 results.pop().unwrap_or(false)
             }
@@ -1892,6 +2277,15 @@ fn expression_does_diverge(
             IntermediateKind::Struct(fields) => {
                 let mut diverges = false;
                 for _ in 0..fields.len() {
+                    if results.pop().unwrap_or(false) {
+                        diverges = true;
+                    }
+                }
+                diverges
+            }
+            IntermediateKind::ArrayLiteral { items, .. } => {
+                let mut diverges = false;
+                for _ in 0..items.len() {
                     if results.pop().unwrap_or(false) {
                         diverges = true;
                     }
