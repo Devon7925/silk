@@ -29,10 +29,14 @@ fn run() -> Result<(), CliError> {
 }
 
 fn execute(options: CliOptions) -> Result<(), CliError> {
-    let (source, label) = read_source(&options.input)?;
-    let wasm = compile(source.clone()).map_err(|diagnostic| CliError::Compilation {
+    let (sources, root, root_source, label) = read_sources(&options.input)?;
+    let source_refs: Vec<(&str, &str)> = sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect();
+    let wasm = compile(source_refs, &root).map_err(|diagnostic| CliError::Compilation {
         diagnostic,
-        source_code: source,
+        source_code: root_source,
         filename: label,
     })?;
     write_output(&options.output, &wasm)
@@ -83,21 +87,64 @@ fn parse_invocation() -> Result<Invocation, CliError> {
     }))
 }
 
-fn read_source(input: &InputSource) -> Result<(String, String), CliError> {
+fn read_sources(
+    input: &InputSource,
+) -> Result<(Vec<(String, String)>, String, String, String), CliError> {
     match input {
         InputSource::File(path) => {
-            let contents =
+            let root_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            let mut files = Vec::new();
+            collect_silk_files(root_dir, &mut files)
+                .map_err(|err| CliError::io(Some(root_dir.to_path_buf()), err))?;
+            let mut sources = Vec::with_capacity(files.len());
+            for file_path in files {
+                let contents = fs::read_to_string(&file_path)
+                    .map_err(|err| CliError::io(Some(file_path.clone()), err))?;
+                let relative = file_path
+                    .strip_prefix(root_dir)
+                    .unwrap_or(&file_path)
+                    .to_string_lossy()
+                    .to_string();
+                sources.push((relative, contents));
+            }
+            let root = path
+                .strip_prefix(root_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string();
+            let root_source =
                 fs::read_to_string(path).map_err(|err| CliError::io(Some(path.clone()), err))?;
-            Ok((contents, path.display().to_string()))
+            Ok((sources, root, root_source, path.display().to_string()))
         }
         InputSource::Stdin => {
             let mut contents = String::new();
             io::stdin()
                 .read_to_string(&mut contents)
                 .map_err(|err| CliError::io(None, err))?;
-            Ok((contents, "<stdin>".to_string()))
+            Ok((
+                vec![("<stdin>".to_string(), contents.clone())],
+                "<stdin>".to_string(),
+                contents,
+                "<stdin>".to_string(),
+            ))
         }
     }
+}
+
+fn collect_silk_files(
+    dir: &std::path::Path,
+    files: &mut Vec<std::path::PathBuf>,
+) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_silk_files(&path, files)?;
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("silk") {
+            files.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn write_output(target: &OutputTarget, bytes: &[u8]) -> Result<(), CliError> {

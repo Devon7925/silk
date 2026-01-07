@@ -1,4 +1,8 @@
 use silk::compile;
+
+fn compile_program(program: &str) -> Vec<u8> {
+    compile(vec![("main.silk", program)], "main.silk").expect("compilation should succeed")
+}
 use wasmparser::{Operator, Parser, Payload};
 
 #[test]
@@ -9,7 +13,7 @@ fn compiles_const_wasm_export() {
 );
 answer
 "#;
-    let wasm = compile(program.to_string()).expect("compilation should succeed");
+    let wasm = compile_program(program);
     assert!(
         !wasm.is_empty(),
         "expected wasm module bytes for wasm export"
@@ -56,7 +60,7 @@ fn compiles_parameterized_wasm_export() {
 );
 {}
 "#;
-    let wasm = compile(program.to_string()).expect("compilation should succeed");
+    let wasm = compile_program(program);
     assert!(
         !wasm.is_empty(),
         "expected wasm module bytes for wasm export"
@@ -114,7 +118,7 @@ fn compiles_array_indexing_to_wasm_arrays() {
 );
 {}
 "#;
-    let wasm = compile(program.to_string()).expect("compilation should succeed");
+    let wasm = compile_program(program);
     assert!(
         !wasm.is_empty(),
         "expected wasm module bytes for wasm export"
@@ -157,7 +161,7 @@ fn compiles_u8_struct_and_array_access_with_unsigned_loads() {
 );
 {}
 "#;
-    let wasm = compile(program.to_string()).expect("compilation should succeed");
+    let wasm = compile_program(program);
     assert!(
         !wasm.is_empty(),
         "expected wasm module bytes for wasm export"
@@ -192,7 +196,8 @@ fn compile_without_wasm_exports_returns_empty() {
 answer := 5;
 answer
 "#;
-    let wasm = compile(program.to_string()).expect("compilation should not fail");
+    let wasm =
+        compile(vec![("main.silk", program)], "main.silk").expect("compilation should not fail");
     assert!(wasm.is_empty(), "expected no wasm bytes without exports");
 }
 
@@ -202,7 +207,7 @@ fn exporting_non_function_reports_diagnostic() {
 (export wasm) answer: i32 := 42;
 answer
 "#;
-    let wasm = compile(program.to_string()).expect("compilation should succeed");
+    let wasm = compile_program(program);
 
     let mut exports = Vec::new();
     let mut global_values = Vec::new();
@@ -249,7 +254,7 @@ fn compiles_wasm_export_with_bindings() {
         );
         {}
         "#;
-    let wasm = compile(program.to_string()).expect("compilation should succeed");
+    let wasm = compile_program(program);
     assert!(!wasm.is_empty());
 }
 
@@ -264,7 +269,7 @@ fn wasm_emits_assignment_updates() {
         );
         {}
         "#;
-    let wasm = compile(program.to_string()).expect("compilation should succeed");
+    let wasm = compile_program(program);
 
     let mut instructions = Vec::new();
     for payload in Parser::new(0).parse_all(&wasm) {
@@ -322,6 +327,6 @@ fn wasm_supports_destructured_mut_locals() {
         {}
         "#;
 
-    let wasm = compile(program.to_string()).expect("compilation should succeed");
+    let wasm = compile_program(program);
     assert!(!wasm.is_empty());
 }

@@ -66,7 +66,9 @@ impl LValue {
     pub fn pretty_print(&self) -> String {
         match self {
             LValue::Identifier(id, _) => id.name.clone(),
-            LValue::PropertyAccess { object, property, .. } => {
+            LValue::PropertyAccess {
+                object, property, ..
+            } => {
                 format!("{}.{}", object.pretty_print(), property)
             }
             LValue::ArrayIndex { array, index, .. } => {
@@ -158,6 +160,7 @@ pub enum UnaryIntrinsicOperator {
     BooleanNot,
     EnumFromStruct,
     MatchFromStruct,
+    UseFromString,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -423,6 +426,7 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
                             UnaryIntrinsicOperator::BooleanNot => "!",
                             UnaryIntrinsicOperator::EnumFromStruct => "enum",
                             UnaryIntrinsicOperator::MatchFromStruct => "match",
+                            UnaryIntrinsicOperator::UseFromString => "use",
                         };
                         context.tasks.push(PrettyTask::WriteStatic(")"));
                         context.tasks.push(PrettyTask::Expr(operand));
@@ -1950,15 +1954,13 @@ pub fn parse_identifier(file: &str) -> Option<(Identifier, &str)> {
 
 pub fn parse_literal(file: &str) -> Option<(ExpressionLiteral, &str)> {
     if let Some(rest) = file.strip_prefix('\'') {
-        return parse_char_literal(rest).map(|(value, remaining)| {
-            (ExpressionLiteral::Char(value), remaining)
-        });
+        return parse_char_literal(rest)
+            .map(|(value, remaining)| (ExpressionLiteral::Char(value), remaining));
     }
 
     if let Some(rest) = file.strip_prefix('"') {
-        return parse_string_literal(rest).map(|(bytes, remaining)| {
-            (ExpressionLiteral::String(bytes), remaining)
-        });
+        return parse_string_literal(rest)
+            .map(|(bytes, remaining)| (ExpressionLiteral::String(bytes), remaining));
     }
 
     let mut consumed = 0;
