@@ -4,10 +4,6 @@ use silk::test_support::evaluate_text_to_expression;
 #[test]
 fn generic_enum_option_t() {
     let program = "
-Option := (T: type) => (
-    enum { Some = T, None = {} }
-);
-
 unwrap_or_zero := (x: i32) => (
     val: Option(i32) := if x > 0 then Option(i32)::Some(x) else Option(i32)::None;
 
@@ -32,9 +28,6 @@ unwrap_or_zero(5) + unwrap_or_zero(-3)
 #[test]
 fn generic_enum_nested_generics() {
     let program = "
-Option := (T: type) => (
-    enum { Some = T, None = {} }
-);
 Container := (T: type) => (
     enum { Wrapped = Option(T), Empty = {} }
 );
