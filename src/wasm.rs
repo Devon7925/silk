@@ -1414,6 +1414,22 @@ fn collect_locals(
     function_return_types: &[WasmType],
     match_counter: &mut MatchCounter,
 ) -> Result<Vec<(String, WasmType)>, Diagnostic> {
+    fn collect_lvalue_exprs<'a>(
+        target: &'a IntermediateLValue,
+        stack: &mut Vec<&'a IntermediateKind>,
+    ) {
+        match target {
+            IntermediateLValue::Identifier(_, _) => {}
+            IntermediateLValue::PropertyAccess { object, .. } => {
+                collect_lvalue_exprs(object, stack);
+            }
+            IntermediateLValue::ArrayIndex { array, index, .. } => {
+                stack.push(index);
+                collect_lvalue_exprs(array, stack);
+            }
+        }
+    }
+
     let mut locals = Vec::new();
     let mut stack = vec![expr];
 
@@ -1427,6 +1443,7 @@ fn collect_locals(
             }
             IntermediateKind::Assignment { target, expr } => {
                 ensure_lvalue_local(target, locals_types, SourceSpan::default())?;
+                collect_lvalue_exprs(target, &mut stack);
                 stack.push(expr);
             }
             IntermediateKind::Block(exprs) => {
@@ -1448,12 +1465,29 @@ fn collect_locals(
             )) => {
                 stack.push(operand);
             }
+            IntermediateKind::Struct(items) => {
+                for (_, field_expr) in items.iter().rev() {
+                    stack.push(field_expr);
+                }
+            }
+            IntermediateKind::ArrayLiteral { items, .. } => {
+                for item in items.iter().rev() {
+                    stack.push(item);
+                }
+            }
             IntermediateKind::FunctionCall { argument, .. } => {
                 let arg_type = infer_type(argument, locals_types, function_return_types)?;
                 let temp_local_name = match_counter.next_name();
                 locals.push((temp_local_name.clone(), arg_type.clone()));
                 locals_types.insert(temp_local_name, arg_type);
                 stack.push(argument);
+            }
+            IntermediateKind::ArrayIndex { array, index } => {
+                stack.push(index);
+                stack.push(array);
+            }
+            IntermediateKind::PropertyAccess { object, .. } => {
+                stack.push(object);
             }
             IntermediateKind::If {
                 condition,
@@ -1466,6 +1500,9 @@ fn collect_locals(
             }
             IntermediateKind::Loop { body } => {
                 stack.push(body);
+            }
+            IntermediateKind::Diverge { value, .. } => {
+                stack.push(value);
             }
             _ => {}
         }
