@@ -33,7 +33,7 @@ async function compileAndLoad(silkCode: string, basename: string) {
 
 test("range operator iterates start-inclusive end-exclusive", async () => {
     const silkCode = `
-    (export wasm) sum_range := (start: i32, end: i32) => (
+    (export wasm) sum_range := ({ start: i32, end: i32 }) => (
         mut acc := 0;
         for value in start .. end do (
             acc = acc + value;

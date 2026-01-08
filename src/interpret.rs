@@ -502,7 +502,7 @@ fn literal_number_expr(value: i32) -> Expression {
     ExpressionKind::Literal(ExpressionLiteral::Number(value)).with_span(dummy_span())
 }
 
-fn is_type_expression(expr: &ExpressionKind) -> bool {
+pub(crate) fn is_type_expression(expr: &ExpressionKind) -> bool {
     let mut stack = vec![expr];
     while let Some(expr) = stack.pop() {
         match expr {
@@ -1952,7 +1952,9 @@ pub fn interpret_expression(
                 } = function_value.kind.clone()
                 {
                     let argument_type = get_type_of_expression(&argument_value, context)?;
-                    if !types_equivalent(&payload_type.kind, &argument_type.kind) {
+                    let resolved_payload = resolve_type_alias_expression(&payload_type, context);
+                    let resolved_argument = resolve_type_alias_expression(&argument_type, context);
+                    if !types_equivalent(&resolved_payload.kind, &resolved_argument.kind) {
                         return Err(diagnostic("Enum variant payload type mismatch", span));
                     }
                     values.push(
@@ -2053,6 +2055,37 @@ pub fn interpret_expression(
                         values.push(
                             ExpressionKind::EnumConstructor {
                                 enum_type: Box::new(evaluated_object),
+                                variant: enum_property,
+                                variant_index,
+                                payload_type: Box::new(payload_type),
+                            }
+                            .with_span(span),
+                        );
+                    }
+                    continue;
+                }
+
+                if let Some(enum_type) =
+                    resolve_enum_type_expression(&original_object, &mut context.clone())
+                    && let Some((variant_index, payload_type)) =
+                        enum_variant_info(&enum_type, &enum_property)
+                {
+                    if let ExpressionKind::Struct(fields) = &payload_type.kind
+                        && fields.is_empty()
+                    {
+                        values.push(
+                            ExpressionKind::EnumValue {
+                                enum_type: Box::new(enum_type),
+                                variant: enum_property,
+                                variant_index,
+                                payload: Box::new(ExpressionKind::Struct(vec![]).with_span(span)),
+                            }
+                            .with_span(span),
+                        );
+                    } else {
+                        values.push(
+                            ExpressionKind::EnumConstructor {
+                                enum_type: Box::new(enum_type),
                                 variant: enum_property,
                                 variant_index,
                                 payload_type: Box::new(payload_type),
@@ -3831,7 +3864,7 @@ fn resolve_trait_struct(
     Ok((required_fields, type_bindings))
 }
 
-fn resolve_type_alias_expression(expr: &Expression, context: &Context) -> Expression {
+pub(crate) fn resolve_type_alias_expression(expr: &Expression, context: &Context) -> Expression {
     enum Frame {
         Enter(Expression),
         Struct {
@@ -5587,6 +5620,29 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
         };
         let range_type = ExpressionKind::Identifier(Identifier::new("Range".to_string()))
             .with_span(dummy_span());
+        let range_value = ExpressionKind::Struct(vec![
+            (Identifier::new("current"), identifier_expr("self")),
+            (Identifier::new("end"), identifier_expr("other")),
+        ])
+        .with_span(dummy_span());
+        let range_binding = ExpressionKind::Binding(Box::new(Binding {
+            pattern: BindingPattern::TypeHint(
+                Box::new(BindingPattern::Identifier(
+                    Identifier::new("range".to_string()),
+                    dummy_span(),
+                )),
+                Box::new(range_type.clone()),
+                dummy_span(),
+            ),
+            expr: range_value,
+        }))
+        .with_span(dummy_span());
+        let range_block = ExpressionKind::Block(vec![
+            range_binding,
+            ExpressionKind::Identifier(Identifier::new("range".to_string()))
+                .with_span(dummy_span()),
+        ])
+        .with_span(dummy_span());
         (
             Identifier::new(symbol.to_string()),
             ExpressionKind::Function {
@@ -5602,13 +5658,7 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
                     ExpressionKind::Function {
                         parameter: typed_pattern("other"),
                         return_type: Some(Box::new(range_type.clone())),
-                        body: Box::new(
-                            ExpressionKind::Struct(vec![
-                                (Identifier::new("current"), identifier_expr("self")),
-                                (Identifier::new("end"), identifier_expr("other")),
-                            ])
-                            .with_span(dummy_span()),
-                        ),
+                        body: Box::new(range_block),
                     }
                     .with_span(dummy_span()),
                 ),
@@ -5981,7 +6031,8 @@ Option := (T: type) => (
     enum { Some = T, None = {} }
 );
 
-Range := { current = i32, end = i32 } @ {
+Range := { current = i32, end = i32 };
+Range := Range @ {
     iter_ty = i32,
     next = (mut self: Range) => (
         if self.current < self.end then (
