@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::{
     SourceSpan,
-    interpret::{self, BindingContext, Context, PreserveBehavior},
+    interpret::{self, BindingContext, Context, PreserveBehavior, TraitPropSource},
     parsing::{
         BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, DivergeExpressionType,
         Expression, ExpressionKind, ExpressionLiteral, Identifier, IntrinsicType, LValue,
@@ -52,6 +52,15 @@ pub enum IntermediateKind {
         body: Box<IntermediateKind>,
     },
     Unreachable,
+}
+
+fn binding_identifier(pattern: &BindingPattern) -> Option<Identifier> {
+    match pattern {
+        BindingPattern::Identifier(identifier, _) => Some(identifier.clone()),
+        BindingPattern::TypeHint(inner, _, _) => binding_identifier(inner),
+        BindingPattern::Annotated { pattern, .. } => binding_identifier(pattern),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -361,11 +370,34 @@ pub fn expression_to_intermediate(
                         stack.push(Frame::Enter(*array));
                     }
                     ExpressionKind::PropertyAccess { object, property } => {
-                        stack.push(Frame::FinishPropertyAccess(property));
-                        stack.push(Frame::Enter(*object));
+                        if let Some(method_expr) =
+                            builder.resolve_impl_method(&object, &property)
+                        {
+                            let function_index = builder.register_function(None, method_expr);
+                            stack.push(Frame::FinishFunctionCall(function_index));
+                            stack.push(Frame::Enter(*object));
+                        } else {
+                            stack.push(Frame::FinishPropertyAccess(property));
+                            stack.push(Frame::Enter(*object));
+                        }
                     }
                     ExpressionKind::Binding(binding) => {
                         let Binding { pattern, expr } = *binding;
+                        if let Some(identifier) = binding_identifier(&pattern) {
+                            if let Some(scope) = builder.enum_context.bindings.last_mut() {
+                                scope.insert(
+                                    identifier,
+                                    (
+                                        BindingContext::Bound(
+                                            expr.clone(),
+                                            PreserveBehavior::Inline,
+                                            None,
+                                        ),
+                                        Vec::new(),
+                                    ),
+                                );
+                            }
+                        }
                         let binding_type = builder.infer_binding_type(&pattern, &expr);
                         let stripped_pattern = builder.strip_binding_pattern(pattern.clone());
                         let is_complex = matches!(
@@ -725,6 +757,24 @@ impl IntermediateBuilder {
         }
 
         None
+    }
+
+    fn resolve_impl_method(&mut self, object: &Expression, property: &str) -> Option<Expression> {
+        let object_type = interpret::get_type_of_expression(object, &self.enum_context).ok()?;
+        let (trait_prop, prop_source) = interpret::get_trait_prop_of_type(
+            &object_type,
+            property,
+            object.span(),
+            &self.enum_context,
+        )
+        .ok()?;
+        if matches!(prop_source, TraitPropSource::ImplementationField)
+            && matches!(trait_prop.kind, ExpressionKind::Function { .. })
+        {
+            Some(trait_prop)
+        } else {
+            None
+        }
     }
 
     fn register_function(&mut self, name: Option<Identifier>, function_expr: Expression) -> usize {
@@ -1178,12 +1228,21 @@ impl IntermediateBuilder {
                             }
                         };
 
-                        stack.push(Frame::FinishStruct(fields.len()));
-                        for (field_identifier, field_pattern) in fields.into_iter().rev() {
-                            let field_type = field_types
+                        let field_count = fields.len();
+                        stack.push(Frame::FinishStruct(field_count));
+                        for (position, (field_identifier, field_pattern)) in
+                            fields.into_iter().rev().enumerate()
+                        {
+                            let fallback_index = field_count.saturating_sub(position + 1);
+                            let (property_name, field_type) = field_types
                                 .iter()
                                 .find(|(name, _)| name == &field_identifier.name)
-                                .map(|(_, ty)| ty.clone())
+                                .map(|(name, ty)| (name.clone(), ty.clone()))
+                                .or_else(|| {
+                                    field_types.get(fallback_index).map(|(name, ty)| {
+                                        (name.clone(), ty.clone())
+                                    })
+                                })
                                 .unwrap_or_else(|| {
                                     panic!(
                                         "Missing field {} in struct pattern at {:?}",
@@ -1192,7 +1251,7 @@ impl IntermediateBuilder {
                                 });
                             let field_expr = IntermediateKind::PropertyAccess {
                                 object: Box::new(value_expr.clone()),
-                                property: field_identifier.name.clone(),
+                                property: property_name,
                             };
                             stack.push(Frame::Enter {
                                 pattern: field_pattern,

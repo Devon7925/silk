@@ -737,6 +737,7 @@ enum Frame<'a> {
     Grouping(GroupingFrame),
     Struct(StructFrame<'a>),
     If(IfFrame<'a>),
+    For(ForFrame<'a>),
     Loop(LoopFrame<'a>),
     While(WhileFrame<'a>),
     Return(ReturnFrame<'a>),
@@ -753,15 +754,21 @@ struct ExprFrame {
     operator_stack: Vec<String>,
     min_precedence: u8,
     state: ExprState,
+    stop_at_grouping: bool,
 }
 
 impl ExprFrame {
     fn new(min_precedence: u8) -> Self {
+        Self::new_with_stop(min_precedence, false)
+    }
+
+    fn new_with_stop(min_precedence: u8, stop_at_grouping: bool) -> Self {
         Self {
             operand_stack: Vec::new(),
             operator_stack: Vec::new(),
             min_precedence,
             state: ExprState::ExpectOperand,
+            stop_at_grouping,
         }
     }
 }
@@ -856,6 +863,33 @@ impl<'a> IfFrame<'a> {
             state: IfState::Start,
             condition: None,
             then_branch: None,
+        }
+    }
+}
+
+enum ForState {
+    Start,
+    Pattern,
+    ExpectIn,
+    Iterator,
+    ExpectBody,
+    Body,
+}
+
+struct ForFrame<'a> {
+    start_slice: &'a str,
+    state: ForState,
+    pattern_expr: Option<Expression>,
+    iterator_expr: Option<Expression>,
+}
+
+impl<'a> ForFrame<'a> {
+    fn new(start_slice: &'a str) -> Self {
+        Self {
+            start_slice,
+            state: ForState::Start,
+            pattern_expr: None,
+            iterator_expr: None,
         }
     }
 }
@@ -1011,6 +1045,11 @@ impl<'a> Parser<'a> {
                                     frames.push(Frame::Break(BreakFrame::new(self.remaining)));
                                     continue 'parse;
                                 }
+                                if is_keyword_start(self.remaining, "for") {
+                                    frames.push(Frame::Expr(expr_frame));
+                                    frames.push(Frame::For(ForFrame::new(self.remaining)));
+                                    continue 'parse;
+                                }
                                 if is_keyword_start(self.remaining, "while") {
                                     frames.push(Frame::Expr(expr_frame));
                                     frames.push(Frame::While(WhileFrame::new(self.remaining)));
@@ -1071,7 +1110,29 @@ impl<'a> Parser<'a> {
                                 ));
                             }
                             ExprState::ExpectOperator => {
+                                let before_ws = self.remaining;
                                 self.remaining = parse_optional_whitespace(self.remaining);
+                                let skipped_whitespace = before_ws.len() != self.remaining.len();
+                                if expr_frame.stop_at_grouping
+                                    && skipped_whitespace
+                                    && self.remaining.starts_with('(')
+                                {
+                                    while !expr_frame.operator_stack.is_empty() {
+                                        reduce_stacks(
+                                            &mut expr_frame.operand_stack,
+                                            &mut expr_frame.operator_stack,
+                                            self.source,
+                                        )?;
+                                    }
+                                    let expr = expr_frame.operand_stack.pop().ok_or_else(|| {
+                                        diagnostic_at_eof(
+                                            self.source,
+                                            "Expected expression after parsing operations",
+                                        )
+                                    })?;
+                                    completed_expr = Some(expr);
+                                    continue 'parse;
+                                }
                                 if let Some((operator, rest)) = parse_operator(self.remaining) {
                                     if operator_precedence(&operator) < expr_frame.min_precedence {
                                         while !expr_frame.operator_stack.is_empty() {
@@ -1455,6 +1516,185 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
+                Frame::For(mut for_frame) => {
+                    if let Some(expr) = completed_expr.take() {
+                        match for_frame.state {
+                            ForState::Pattern => {
+                                for_frame.pattern_expr = Some(expr);
+                                for_frame.state = ForState::ExpectIn;
+                            }
+                            ForState::Iterator => {
+                                for_frame.iterator_expr = Some(expr);
+                                for_frame.state = ForState::ExpectBody;
+                            }
+                            ForState::Body => {
+                                let pattern_expr = for_frame.pattern_expr.take().ok_or_else(|| {
+                                    diagnostic_at_eof(
+                                        self.source,
+                                        "Expected for pattern while parsing",
+                                    )
+                                })?;
+                                let iterator_expr = for_frame
+                                    .iterator_expr
+                                    .take()
+                                    .ok_or_else(|| {
+                                        diagnostic_at_eof(
+                                            self.source,
+                                            "Expected for iterator while parsing",
+                                        )
+                                    })?;
+                                let iterator_identifier = match &iterator_expr.kind {
+                                    ExpressionKind::Identifier(identifier) => identifier.clone(),
+                                    _ => Identifier::new("__for_iter"),
+                                };
+                                let iterator_span = iterator_expr.span();
+                                let iter_binding_pattern = BindingPattern::Annotated {
+                                    annotations: vec![BindingAnnotation::Mutable(iterator_span)],
+                                    pattern: Box::new(BindingPattern::Identifier(
+                                        iterator_identifier.clone(),
+                                        iterator_span,
+                                    )),
+                                    span: iterator_span,
+                                };
+                                let iter_binding_expr = ExpressionKind::Binding(Box::new(Binding {
+                                    pattern: iter_binding_pattern,
+                                    expr: iterator_expr,
+                                }))
+                                .with_span(iterator_span);
+                                let overall_span = consumed_span(
+                                    self.source,
+                                    for_frame.start_slice,
+                                    self.remaining,
+                                );
+                                let iter_identifier_expr = ExpressionKind::Identifier(
+                                    iterator_identifier.clone(),
+                                )
+                                .with_span(overall_span);
+                                let iter_ty_access = ExpressionKind::PropertyAccess {
+                                    object: Box::new(iter_identifier_expr.clone()),
+                                    property: "iter_ty".to_string(),
+                                }
+                                .with_span(overall_span);
+                                let element_pattern =
+                                    pattern_expression_to_binding_pattern(pattern_expr.clone())?;
+                                let option_call = ExpressionKind::FunctionCall {
+                                    function: Box::new(
+                                        ExpressionKind::Identifier(Identifier::new("Option"))
+                                            .with_span(overall_span),
+                                    ),
+                                    argument: Box::new(iter_ty_access),
+                                }
+                                .with_span(overall_span);
+                                let condition_pattern = BindingPattern::EnumVariant {
+                                    enum_type: Box::new(option_call),
+                                    variant: Identifier::new("Some"),
+                                    payload: Some(Box::new(element_pattern)),
+                                    span: overall_span,
+                                };
+                                let next_access = ExpressionKind::PropertyAccess {
+                                    object: Box::new(iter_identifier_expr),
+                                    property: "next".to_string(),
+                                }
+                                .with_span(overall_span);
+                                let condition_expr = ExpressionKind::Binding(Box::new(Binding {
+                                    pattern: condition_pattern,
+                                    expr: next_access,
+                                }))
+                                .with_span(overall_span);
+                                let while_expr =
+                                    build_while_expression(condition_expr, expr, overall_span);
+                                completed_expr = Some(
+                                    ExpressionKind::Block(vec![iter_binding_expr, while_expr])
+                                        .with_span(overall_span),
+                                );
+                                continue 'parse;
+                            }
+                            _ => {
+                                return Err(diagnostic_at_eof(
+                                    self.source,
+                                    "Unexpected expression in for parsing",
+                                ));
+                            }
+                        }
+                    }
+
+                    match for_frame.state {
+                        ForState::Start => {
+                            if !is_keyword_start(self.remaining, "for") {
+                                return Err(diagnostic_here(
+                                    self.source,
+                                    self.remaining,
+                                    3,
+                                    "Expected for",
+                                ));
+                            }
+                            let after_keyword = &self.remaining[3..];
+                            self.remaining = parse_optional_whitespace(after_keyword);
+                            for_frame.state = ForState::Pattern;
+                            frames.push(Frame::For(for_frame));
+                            frames.push(Frame::Expr(ExprFrame::new(0)));
+                            continue 'parse;
+                        }
+                        ForState::ExpectIn => {
+                            self.remaining = parse_optional_whitespace(self.remaining);
+                            let Some(after_in) = self.remaining.strip_prefix("in") else {
+                                return Err(diagnostic_here(
+                                    self.source,
+                                    self.remaining,
+                                    2,
+                                    "Expected in after for pattern",
+                                ));
+                            };
+                            self.remaining = parse_optional_whitespace(after_in);
+                            for_frame.state = ForState::Iterator;
+                            frames.push(Frame::For(for_frame));
+                            frames.push(Frame::Expr(ExprFrame::new_with_stop(0, true)));
+                            continue 'parse;
+                        }
+                        ForState::ExpectBody => {
+                            self.remaining = parse_optional_whitespace(self.remaining);
+                            let Some(after_do) = self.remaining.strip_prefix("do") else {
+                                return Err(diagnostic_here(
+                                    self.source,
+                                    self.remaining,
+                                    2,
+                                    "Expected do before for body",
+                                ));
+                            };
+                            self.remaining = parse_optional_whitespace(after_do);
+                            if !self.remaining.starts_with('(') {
+                                return Err(diagnostic_here(
+                                    self.source,
+                                    self.remaining,
+                                    1,
+                                    "Expected for body expression",
+                                ));
+                            }
+                            for_frame.state = ForState::Body;
+                            frames.push(Frame::For(for_frame));
+                            frames.push(Frame::Grouping(GroupingFrame::new()));
+                            continue 'parse;
+                        }
+                        ForState::Pattern => {
+                            return Err(diagnostic_at_eof(
+                                self.source,
+                                "Expected for pattern expression",
+                            ));
+                        }
+                        ForState::Iterator => {
+                            return Err(diagnostic_at_eof(
+                                self.source,
+                                "Expected for iterator expression",
+                            ));
+                        }
+                        ForState::Body => {
+                            return Err(diagnostic_at_eof(
+                                self.source,
+                                "Expected for body expression",
+                            ));
+                        }
+                    }
+                }
                 Frame::Loop(mut loop_frame) => {
                     if let Some(expr) = completed_expr.take() {
                         let span =
@@ -1520,27 +1760,7 @@ impl<'a> Parser<'a> {
                                     while_frame.start_slice,
                                     self.remaining,
                                 );
-                                let condition_span = condition.span();
-                                let break_expr = ExpressionKind::Diverge {
-                                    value: Box::new(Expression::new(
-                                        ExpressionKind::Struct(vec![]),
-                                        span,
-                                    )),
-                                    divergance_type: DivergeExpressionType::Break,
-                                }
-                                .with_span(condition_span);
-                                let body_if = ExpressionKind::If {
-                                    condition: Box::new(condition),
-                                    then_branch: Box::new(expr),
-                                    else_branch: Box::new(break_expr),
-                                }
-                                .with_span(condition_span);
-                                completed_expr = Some(
-                                    ExpressionKind::Loop {
-                                        body: Box::new(body_if),
-                                    }
-                                    .with_span(span),
-                                );
+                                completed_expr = Some(build_while_expression(condition, expr, span));
                                 continue 'parse;
                             }
                             _ => {
@@ -1753,6 +1973,25 @@ fn finish_block(block_frame: BlockFrame<'_>) -> Expression {
             .fold(expressions[0].span(), |acc, expr| acc.merge(&expr.span()));
         Expression::new(ExpressionKind::Block(expressions), span)
     }
+}
+
+fn build_while_expression(condition: Expression, body: Expression, span: SourceSpan) -> Expression {
+    let condition_span = condition.span();
+    let break_expr = ExpressionKind::Diverge {
+        value: Box::new(Expression::new(ExpressionKind::Struct(vec![]), span)),
+        divergance_type: DivergeExpressionType::Break,
+    }
+    .with_span(condition_span);
+    let body_if = ExpressionKind::If {
+        condition: Box::new(condition),
+        then_branch: Box::new(body),
+        else_branch: Box::new(break_expr),
+    }
+    .with_span(condition_span);
+    ExpressionKind::Loop {
+        body: Box::new(body_if),
+    }
+    .with_span(span)
 }
 
 fn reduce_stacks(
@@ -2366,6 +2605,7 @@ pub fn parse_operator(file: &str) -> Option<(String, &str)> {
 
     let stop_words = [
         "if", "then", "else", "match", "fn", "let", "return", "break", "loop", "while", "do",
+        "for", "in",
     ];
     let word = file
         .chars()
@@ -2472,6 +2712,23 @@ fn parse_loop_expression_with_source<'a>(
 }
 
 #[cfg(test)]
+fn parse_for_expression_with_source<'a>(
+    source: &'a str,
+    file: &'a str,
+) -> Option<Result<(Expression, &'a str), Diagnostic>> {
+    if !is_keyword_start(file, "for") {
+        return None;
+    }
+
+    let mut parser = Parser::new(source, file);
+    let expr = match parser.parse_with_frame(Frame::For(ForFrame::new(file))) {
+        Ok(expr) => expr,
+        Err(err) => return Some(Err(err)),
+    };
+    Some(Ok((expr, parser.remaining)))
+}
+
+#[cfg(test)]
 fn parse_while_expression_with_source<'a>(
     source: &'a str,
     file: &'a str,
@@ -2511,6 +2768,9 @@ fn parse_isolated_expression_with_source_with_guard<'a>(
     }
     if let Some(break_parse) = parse_break_expression_with_source(source, file) {
         return break_parse;
+    }
+    if let Some(for_parse) = parse_for_expression_with_source(source, file) {
+        return for_parse;
     }
     if let Some(while_parse) = parse_while_expression_with_source(source, file) {
         return while_parse;
@@ -2787,6 +3047,88 @@ foo = 2
     assert!(matches!(
         target,
         LValue::Identifier(Identifier { name, .. }, _) if name == "foo"
+    ));
+}
+
+#[test]
+fn parse_for_loop_desugars_to_iterator_binding() {
+    let (expr, remaining) = parse_block("for foo in bar do (foo)").unwrap();
+    assert!(remaining.trim().is_empty());
+
+    let ExpressionKind::Block(items) = expr.kind else {
+        panic!("expected for loop to desugar to block");
+    };
+    assert_eq!(items.len(), 2);
+
+    let ExpressionKind::Binding(binding) = &items[0].kind else {
+        panic!("expected iterator binding");
+    };
+    let BindingPattern::Annotated {
+        annotations,
+        pattern,
+        ..
+    } = &binding.pattern
+    else {
+        panic!("expected annotated binding pattern");
+    };
+    assert!(annotations
+        .iter()
+        .any(|ann| matches!(ann, BindingAnnotation::Mutable(_))));
+    assert!(matches!(
+        pattern.as_ref(),
+        BindingPattern::Identifier(Identifier { name, .. }, _) if name == "bar"
+    ));
+
+    let ExpressionKind::Loop { body } = &items[1].kind else {
+        panic!("expected loop in for desugaring");
+    };
+    let ExpressionKind::If { condition, .. } = &body.kind else {
+        panic!("expected if inside loop");
+    };
+    let ExpressionKind::Binding(condition_binding) = &condition.kind else {
+        panic!("expected binding condition");
+    };
+    let BindingPattern::EnumVariant {
+        enum_type,
+        variant,
+        payload,
+        ..
+    } = &condition_binding.pattern
+    else {
+        panic!("expected enum variant pattern");
+    };
+    assert_eq!(variant.name, "Some");
+    assert!(matches!(
+        payload.as_deref(),
+        Some(BindingPattern::Identifier(Identifier { name, .. }, _)) if name == "foo"
+    ));
+    let ExpressionKind::FunctionCall { function, argument } = &enum_type.kind else {
+        panic!("expected Option call");
+    };
+    assert!(matches!(
+        &function.kind,
+        ExpressionKind::Identifier(Identifier { name, .. }) if name == "Option"
+    ));
+    let ExpressionKind::PropertyAccess { object, property } = &argument.kind else {
+        panic!("expected iter_ty property access");
+    };
+    assert_eq!(property, "iter_ty");
+    assert!(matches!(
+        &object.kind,
+        ExpressionKind::Identifier(Identifier { name, .. }) if name == "bar"
+    ));
+
+    let ExpressionKind::PropertyAccess {
+        object: next_obj,
+        property: next_prop,
+    } = &condition_binding.expr.kind
+    else {
+        panic!("expected next property access");
+    };
+    assert_eq!(next_prop, "next");
+    assert!(matches!(
+        &next_obj.kind,
+        ExpressionKind::Identifier(Identifier { name, .. }) if name == "bar"
     ));
 }
 
