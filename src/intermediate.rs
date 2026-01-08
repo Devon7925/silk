@@ -387,20 +387,20 @@ pub fn expression_to_intermediate(
                     }
                     ExpressionKind::Binding(binding) => {
                         let Binding { pattern, expr } = *binding;
-                        if let Some(identifier) = binding_identifier(&pattern) {
-                            if let Some(scope) = builder.enum_context.bindings.last_mut() {
-                                scope.insert(
-                                    identifier,
-                                    (
-                                        BindingContext::Bound(
-                                            expr.clone(),
-                                            PreserveBehavior::Inline,
-                                            None,
-                                        ),
-                                        Vec::new(),
+                        if let Some(identifier) = binding_identifier(&pattern)
+                            && let Some(scope) = builder.enum_context.bindings.last_mut()
+                        {
+                            scope.insert(
+                                identifier,
+                                (
+                                    BindingContext::Bound(
+                                        expr.clone(),
+                                        PreserveBehavior::Inline,
+                                        None,
                                     ),
-                                );
-                            }
+                                    Vec::new(),
+                                ),
+                            );
                         }
                         let binding_type = builder.infer_binding_type(&pattern, &expr);
                         let stripped_pattern = builder.strip_binding_pattern(pattern.clone());
@@ -985,7 +985,7 @@ impl IntermediateBuilder {
                     | ExpressionKind::EnumConstructor { enum_type, .. } => {
                         let enum_type = self
                             .resolve_enum_type_expression(&enum_type)
-                            .unwrap_or_else(|| *enum_type);
+                            .unwrap_or(*enum_type);
                         values.push(self.type_expr_to_intermediate(&enum_type));
                     }
                     _ => values.push(IntermediateType::I32),

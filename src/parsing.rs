@@ -1335,13 +1335,11 @@ impl<'a> Parser<'a> {
                                 {
                                     let after_ws = parse_optional_whitespace(after_identifier);
                                     if let Some((operator, after_equals)) = parse_operator(after_ws)
+                                        && operator == "="
                                     {
-                                        if operator == "=" {
-                                            self.remaining =
-                                                parse_optional_whitespace(after_equals);
-                                            struct_frame.pending_field = Some(identifier);
-                                            has_named_field = true;
-                                        }
+                                        self.remaining = parse_optional_whitespace(after_equals);
+                                        struct_frame.pending_field = Some(identifier);
+                                        has_named_field = true;
                                     }
                                 }
 
@@ -1951,12 +1949,11 @@ impl<'a> Parser<'a> {
 
 fn finish_block(block_frame: BlockFrame<'_>) -> Expression {
     let mut expressions = block_frame.expressions;
-    if block_frame.ended_with_semicolon {
-        if let Some(last_span) = expressions.last().map(|expr| expr.span()) {
-            expressions.push(
-                ExpressionKind::Struct(vec![]).with_span(SourceSpan::new(last_span.end(), 0)),
-            );
-        }
+    if block_frame.ended_with_semicolon
+        && let Some(last_span) = expressions.last().map(|expr| expr.span())
+    {
+        expressions
+            .push(ExpressionKind::Struct(vec![]).with_span(SourceSpan::new(last_span.end(), 0)));
     }
 
     if expressions.len() == 1 {

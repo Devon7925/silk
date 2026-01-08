@@ -580,7 +580,12 @@ fn collect_bindings(expr: &Expression, context: &mut Context) -> Result<(), Diag
                 let value_type = get_type_of_expression(&binding.expr, context).ok();
 
                 if let Some(value_type) = value_type {
-                    bind_pattern_blanks(binding.pattern.clone(), context, Vec::new(), Some(value_type))?;
+                    bind_pattern_blanks(
+                        binding.pattern.clone(),
+                        context,
+                        Vec::new(),
+                        Some(value_type),
+                    )?;
                 } else {
                     let _ = bind_pattern_from_value(
                         binding.pattern.clone(),
@@ -1685,12 +1690,12 @@ pub fn interpret_expression(
                     .with_span(span);
                     let possibly_mutated_values = get_possibly_mutated_values(&interpreted);
                     for possibly_mutated_value in possibly_mutated_values {
-                        if let Some(binding) = context.get_identifier(&possibly_mutated_value) {
-                            if let Some(binding_ty) = binding.0.get_bound_type(context)? {
-                                let binding =
-                                    context.get_mut_identifier(&possibly_mutated_value).unwrap();
-                                binding.0 = BindingContext::UnboundWithType(binding_ty)
-                            }
+                        if let Some(binding) = context.get_identifier(&possibly_mutated_value)
+                            && let Some(binding_ty) = binding.0.get_bound_type(context)?
+                        {
+                            let binding =
+                                context.get_mut_identifier(&possibly_mutated_value).unwrap();
+                            binding.0 = BindingContext::UnboundWithType(binding_ty)
                         }
                     }
                     values.push(interpreted);
@@ -1768,12 +1773,11 @@ pub fn interpret_expression(
                 context.in_loop = was_in_loop_before;
                 let possibly_mutated_values = get_possibly_mutated_values(&interpreted_body);
                 for possibly_mutated_value in possibly_mutated_values {
-                    if let Some(binding) = context.get_identifier(&possibly_mutated_value) {
-                        if let Some(binding_ty) = binding.0.get_bound_type(context)? {
-                            let binding =
-                                context.get_mut_identifier(&possibly_mutated_value).unwrap();
-                            binding.0 = BindingContext::UnboundWithType(binding_ty)
-                        }
+                    if let Some(binding) = context.get_identifier(&possibly_mutated_value)
+                        && let Some(binding_ty) = binding.0.get_bound_type(context)?
+                    {
+                        let binding = context.get_mut_identifier(&possibly_mutated_value).unwrap();
+                        binding.0 = BindingContext::UnboundWithType(binding_ty)
                     }
                 }
                 values.push(
@@ -1798,13 +1802,12 @@ pub fn interpret_expression(
                     if let Ok((_, TraitPropSource::StructField)) =
                         get_trait_prop_of_type(&object_type, property, span, context)
                     {
-                        if let ExpressionKind::Struct(items) = &argument_value.kind {
-                            if let Some((_, item_expr)) =
+                        if let ExpressionKind::Struct(items) = &argument_value.kind
+                            && let Some((_, item_expr)) =
                                 items.iter().find(|(item_id, _)| item_id.name == *property)
-                            {
-                                values.push(item_expr.clone());
-                                continue;
-                            }
+                        {
+                            values.push(item_expr.clone());
+                            continue;
                         }
 
                         values.push(
@@ -2020,13 +2023,12 @@ pub fn interpret_expression(
                 original_object,
             } => {
                 let evaluated_object = values.pop().unwrap();
-                if let ExpressionKind::Struct(items) = &evaluated_object.kind {
-                    if let Some((_, item_expr)) =
+                if let ExpressionKind::Struct(items) = &evaluated_object.kind
+                    && let Some((_, item_expr)) =
                         items.iter().find(|(item_id, _)| item_id.name == property)
-                    {
-                        values.push(item_expr.clone());
-                        continue;
-                    }
+                {
+                    values.push(item_expr.clone());
+                    continue;
                 }
 
                 let enum_property = Identifier::new(property.clone());
@@ -2163,7 +2165,7 @@ pub(crate) fn get_type_of_expression(
                                 resolve_intrinsic_type("u8", *span, context)?
                             }
                             ExpressionLiteral::String(bytes) => {
-                                string_literal_type(&bytes, *span, context)?
+                                string_literal_type(bytes, *span, context)?
                             }
                             ExpressionLiteral::Target(_) => {
                                 resolve_intrinsic_type("target", *span, context)?
@@ -2988,23 +2990,22 @@ pub(crate) fn get_type_of_expression(
                 let object_type = results.pop().unwrap();
                 let enum_property = Identifier::new(property.clone());
                 if let Some(enum_type) = resolve_enum_type_expression(&object, &mut context.clone())
+                    && let Some((_, payload_type)) = enum_variant_info(&enum_type, &enum_property)
                 {
-                    if let Some((_, payload_type)) = enum_variant_info(&enum_type, &enum_property) {
-                        if let ExpressionKind::Struct(fields) = &payload_type.kind
-                            && fields.is_empty()
-                        {
-                            results.push(enum_type);
-                        } else {
-                            results.push(
-                                ExpressionKind::FunctionType {
-                                    parameter: Box::new(payload_type),
-                                    return_type: Box::new(enum_type),
-                                }
-                                .with_span(span),
-                            );
-                        }
-                        continue;
+                    if let ExpressionKind::Struct(fields) = &payload_type.kind
+                        && fields.is_empty()
+                    {
+                        results.push(enum_type);
+                    } else {
+                        results.push(
+                            ExpressionKind::FunctionType {
+                                parameter: Box::new(payload_type),
+                                return_type: Box::new(enum_type),
+                            }
+                            .with_span(span),
+                        );
                     }
+                    continue;
                 }
 
                 let (trait_prop, prop_source) =

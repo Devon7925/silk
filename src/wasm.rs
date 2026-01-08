@@ -137,10 +137,8 @@ fn format_wasm_type(ty: &WasmType) -> String {
 }
 
 fn struct_fields_to_wasm_type(field_names: Vec<String>, field_types: Vec<WasmType>) -> WasmType {
-    let mut wasm_fields: Vec<(String, WasmType)> = field_names
-        .into_iter()
-        .zip(field_types.into_iter())
-        .collect();
+    let mut wasm_fields: Vec<(String, WasmType)> =
+        field_names.into_iter().zip(field_types).collect();
     wasm_fields.sort_by(|a, b| a.0.cmp(&b.0));
     WasmType::Struct(wasm_fields)
 }
