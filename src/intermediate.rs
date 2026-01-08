@@ -594,11 +594,21 @@ pub fn expression_to_intermediate(
                         match_value_type.clone(),
                     );
 
-                    match_expr = IntermediateKind::If {
-                        condition: Box::new(condition),
-                        then_branch: Box::new(branch),
-                        else_branch: Box::new(match_expr),
-                    };
+                    match condition {
+                        IntermediateKind::Binding(binding) => {
+                            match_expr = IntermediateKind::Block(vec![
+                                IntermediateKind::Binding(binding),
+                                branch,
+                            ]);
+                        }
+                        other => {
+                            match_expr = IntermediateKind::If {
+                                condition: Box::new(other),
+                                then_branch: Box::new(branch),
+                                else_branch: Box::new(match_expr),
+                            };
+                        }
+                    }
                 }
 
                 values.push(IntermediateKind::Block(vec![match_binding, match_expr]));

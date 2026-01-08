@@ -577,6 +577,14 @@ fn collect_bindings(expr: &Expression, context: &mut Context) -> Result<(), Diag
     while let Some(expr) = stack.pop() {
         match &expr.kind {
             ExpressionKind::Binding(binding) => {
+                let mut identifiers = HashSet::new();
+                collect_bound_identifiers_from_pattern(&binding.pattern, &mut identifiers);
+                if identifiers
+                    .iter()
+                    .all(|identifier| context.get_identifier(identifier).is_some())
+                {
+                    continue;
+                }
                 let value_type = get_type_of_expression(&binding.expr, context).ok();
 
                 if let Some(value_type) = value_type {
@@ -1107,6 +1115,10 @@ pub fn interpret_expression(
             }
             Frame::BindingFinish => {
                 let value = values.pop().unwrap();
+                let mut eval_context = context.clone();
+                force_inline_bindings(&mut eval_context);
+                let value = interpret_expression(value.clone(), &mut eval_context)
+                    .unwrap_or(value);
                 let interpreted_pattern = pattern_stack.pop().unwrap();
                 let mut bound_type = None;
                 if let Ok(value_type) = get_type_of_expression(&value, context) {
@@ -1930,6 +1942,11 @@ pub fn interpret_expression(
                     }
 
                     if should_inline {
+                        if let ExpressionKind::Identifier(identifier) = &function_expr.kind
+                            && identifier.name == "pick_positive"
+                        {
+                            eprintln!("debug inlining pick_positive");
+                        }
                         let mut call_context = context.clone();
                         bind_pattern_from_value(
                             parameter,
@@ -4933,6 +4950,17 @@ fn value_preserve_behavior(
     preserve_behavior
 }
 
+fn force_inline_bindings(context: &mut Context) {
+    for scope in &mut context.bindings {
+        for (_, (binding, _)) in scope.iter_mut() {
+            if let BindingContext::Bound(value, _, bound_type) = binding {
+                *binding =
+                    BindingContext::Bound(value.clone(), PreserveBehavior::Inline, bound_type.clone());
+            }
+        }
+    }
+}
+
 fn bind_pattern_from_value(
     pattern: BindingPattern,
     value: &Expression,
@@ -5058,20 +5086,75 @@ fn bind_pattern_from_value(
                     payload,
                     span,
                 } => {
-                    let Expression {
-                        kind:
-                            ExpressionKind::EnumValue {
-                                enum_type: value_enum,
-                                variant: value_variant,
-                                payload: value_payload,
-                                ..
-                            },
-                        ..
-                    } = value
-                    else {
-                        results.push((false, preserve_behavior));
-                        continue;
+                    let resolved_value = if let ExpressionKind::Identifier(identifier) = &value.kind
+                        && let Some((BindingContext::Bound(bound_value, _, _), _)) =
+                            context.get_identifier(identifier)
+                    {
+                        match &bound_value.kind {
+                            ExpressionKind::EnumValue { .. } => bound_value.clone(),
+                            ExpressionKind::If {
+                                condition,
+                                then_branch,
+                                else_branch,
+                            } => {
+                                let mut eval_context = context.clone();
+                                force_inline_bindings(&mut eval_context);
+                                if let Ok(evaluated_condition) =
+                                    interpret_expression(*condition.clone(), &mut eval_context)
+                                {
+                                    if let ExpressionKind::Literal(ExpressionLiteral::Boolean(
+                                        condition_value,
+                                    )) = evaluated_condition.kind
+                                    {
+                                        let selected_branch =
+                                            if condition_value { then_branch } else { else_branch };
+                                        let mut branch_context = context.clone();
+                                        force_inline_bindings(&mut branch_context);
+                                        interpret_expression(
+                                            *selected_branch.clone(),
+                                            &mut branch_context,
+                                        )
+                                        .unwrap_or_else(|_| value.clone())
+                                    } else {
+                                        value.clone()
+                                    }
+                                } else {
+                                    value.clone()
+                                }
+                            }
+                            _ if is_resolved_constant(bound_value) => bound_value.clone(),
+                            _ => {
+                                let mut eval_context = context.clone();
+                                force_inline_bindings(&mut eval_context);
+                                if let Ok(evaluated) =
+                                    interpret_expression(bound_value.clone(), &mut eval_context)
+                                {
+                                    match evaluated.kind {
+                                        ExpressionKind::EnumValue { .. } => evaluated,
+                                        _ => value.clone(),
+                                    }
+                                } else {
+                                    value.clone()
+                                }
+                            }
+                        }
+                    } else {
+                        value.clone()
                     };
+
+                    let (value_enum, value_variant, value_payload) =
+                        match &resolved_value.kind {
+                            ExpressionKind::EnumValue {
+                                enum_type,
+                                variant,
+                                payload,
+                                ..
+                            } => (enum_type.clone(), variant.clone(), payload.as_ref().clone()),
+                            _ => {
+                                results.push((false, preserve_behavior));
+                                continue;
+                            }
+                        };
 
                     let enum_type_name = match enum_type.as_ref() {
                         Expression {
@@ -5081,10 +5164,9 @@ fn bind_pattern_from_value(
                         _ => "<unknown>".to_string(),
                     };
 
-                    let expected_enum_type = resolve_enum_type_expression(
-                        enum_type.as_ref(),
-                        context,
-                    )
+                    let mut enum_context = context.clone();
+                    let expected_enum_type =
+                        resolve_enum_type_expression(enum_type.as_ref(), &mut enum_context)
                     .ok_or_else(|| {
                         diagnostic(
                             format!("Enum pattern references unknown type: {}", enum_type_name),
@@ -5103,13 +5185,15 @@ fn bind_pattern_from_value(
                     }
 
                     if let Some(payload_pattern) = payload {
-                        stack.push(Frame::Enter {
-                            pattern: *payload_pattern,
-                            value: value_payload,
+                        let (matched, payload_preserve) = bind_pattern_from_value(
+                            *payload_pattern,
+                            &value_payload,
+                            context,
                             passed_annotations,
                             preserve_behavior,
-                            bound_type: None,
-                        });
+                            None,
+                        )?;
+                        results.push((matched, payload_preserve));
                     } else {
                         results.push((true, preserve_behavior));
                     }
@@ -5345,6 +5429,15 @@ fn is_resolved_constant(expr: &Expression) -> bool {
                     stack.push(value_expr);
                 }
             }
+            ExpressionKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                stack.push(condition);
+                stack.push(then_branch);
+                stack.push(else_branch);
+            }
             ExpressionKind::AttachImplementation {
                 type_expr,
                 implementation,
@@ -5368,7 +5461,11 @@ fn is_resolved_constant(expr: &Expression) -> bool {
                 if !is_resolved_const_function_expression(body, &new_function_context) {
                     return false;
                 }
-                stack.push(return_type.as_ref().unwrap());
+                if let Some(return_type) = return_type.as_ref()
+                    && !is_type_expression(&return_type.kind)
+                {
+                    stack.push(return_type);
+                }
             }
             ExpressionKind::FunctionType {
                 parameter,
@@ -5386,40 +5483,19 @@ fn is_resolved_constant(expr: &Expression) -> bool {
 }
 
 fn is_resolved_const_function_expression(expr: &Expression, function_context: &Context) -> bool {
-    struct Frame<'a> {
-        expr: &'a Expression,
-        context: Context,
-    }
-
-    let mut stack = vec![Frame {
-        expr,
-        context: function_context.clone(),
-    }];
-
-    while let Some(frame) = stack.pop() {
-        match &frame.expr.kind {
-            ExpressionKind::Literal(_) | ExpressionKind::IntrinsicType(_) => {}
-            ExpressionKind::Struct(items) => {
-                for (_, value_expr) in items.iter() {
-                    stack.push(Frame {
-                        expr: value_expr,
-                        context: frame.context.clone(),
-                    });
-                }
-            }
+    fn is_const_with_context(expr: &Expression, context: &Context) -> bool {
+        match &expr.kind {
+            ExpressionKind::Literal(_) | ExpressionKind::IntrinsicType(_) => true,
+            ExpressionKind::Struct(items) => items
+                .iter()
+                .all(|(_, value_expr)| is_const_with_context(value_expr, context)),
             ExpressionKind::AttachImplementation {
                 type_expr,
                 implementation,
                 ..
             } => {
-                stack.push(Frame {
-                    expr: implementation,
-                    context: frame.context.clone(),
-                });
-                stack.push(Frame {
-                    expr: type_expr,
-                    context: frame.context.clone(),
-                });
+                is_const_with_context(type_expr, context)
+                    && is_const_with_context(implementation, context)
             }
             ExpressionKind::Function {
                 parameter,
@@ -5427,121 +5503,87 @@ fn is_resolved_const_function_expression(expr: &Expression, function_context: &C
                 body,
                 ..
             } => {
-                let mut new_function_context = frame.context.clone();
-                bind_pattern_blanks(
-                    parameter.clone(),
-                    &mut new_function_context,
-                    Vec::new(),
-                    None,
-                )
-                .unwrap();
-                stack.push(Frame {
-                    expr: body,
-                    context: new_function_context.clone(),
-                });
-                stack.push(Frame {
-                    expr: return_type.as_ref().unwrap(),
-                    context: new_function_context,
-                });
+                let mut new_context = context.clone();
+                if bind_pattern_blanks(parameter.clone(), &mut new_context, Vec::new(), None)
+                    .is_err()
+                {
+                    return false;
+                }
+                let return_type = return_type.as_ref().unwrap();
+                let return_type_is_const = if is_type_expression(&return_type.kind) {
+                    true
+                } else {
+                    is_const_with_context(return_type, &new_context)
+                };
+                return_type_is_const && is_const_with_context(body, &new_context)
             }
             ExpressionKind::FunctionType {
                 parameter,
                 return_type,
                 ..
             } => {
-                stack.push(Frame {
-                    expr: return_type,
-                    context: frame.context.clone(),
-                });
-                stack.push(Frame {
-                    expr: parameter,
-                    context: frame.context,
-                });
+                is_const_with_context(parameter, context)
+                    && is_const_with_context(return_type, context)
             }
-            ExpressionKind::Identifier(ident) => {
-                if !frame.context.contains_identifier(ident) {
-                    return false;
-                }
-            }
+            ExpressionKind::Identifier(ident) => context.contains_identifier(ident),
             ExpressionKind::IntrinsicOperation(intrinsic_operation) => match intrinsic_operation {
                 IntrinsicOperation::Binary(left, right, _) => {
-                    stack.push(Frame {
-                        expr: right,
-                        context: frame.context.clone(),
-                    });
-                    stack.push(Frame {
-                        expr: left,
-                        context: frame.context,
-                    });
+                    is_const_with_context(left, context) && is_const_with_context(right, context)
                 }
-                IntrinsicOperation::Unary(operand, _) => {
-                    stack.push(Frame {
-                        expr: operand,
-                        context: frame.context,
-                    });
-                }
+                IntrinsicOperation::Unary(operand, _) => is_const_with_context(operand, context),
             },
-            ExpressionKind::EnumType(cases) => {
-                for (_, case_expr) in cases.iter() {
-                    stack.push(Frame {
-                        expr: case_expr,
-                        context: frame.context.clone(),
-                    });
-                }
-            }
+            ExpressionKind::EnumType(cases) => cases
+                .iter()
+                .all(|(_, case_expr)| is_const_with_context(case_expr, context)),
             ExpressionKind::EnumValue {
                 enum_type, payload, ..
             } => {
-                stack.push(Frame {
-                    expr: payload,
-                    context: frame.context.clone(),
-                });
-                stack.push(Frame {
-                    expr: enum_type,
-                    context: frame.context,
-                });
+                is_const_with_context(enum_type, context)
+                    && is_const_with_context(payload, context)
             }
             ExpressionKind::EnumConstructor {
                 enum_type,
                 payload_type,
                 ..
             } => {
-                stack.push(Frame {
-                    expr: payload_type,
-                    context: frame.context.clone(),
-                });
-                stack.push(Frame {
-                    expr: enum_type,
-                    context: frame.context,
-                });
+                is_const_with_context(enum_type, context)
+                    && is_const_with_context(payload_type, context)
             }
             ExpressionKind::FunctionCall {
                 function, argument, ..
             } => {
-                stack.push(Frame {
-                    expr: argument,
-                    context: frame.context.clone(),
-                });
-                stack.push(Frame {
-                    expr: function,
-                    context: frame.context,
-                });
+                is_const_with_context(function, context)
+                    && is_const_with_context(argument, context)
             }
             ExpressionKind::ArrayIndex { array, index } => {
-                stack.push(Frame {
-                    expr: index,
-                    context: frame.context.clone(),
-                });
-                stack.push(Frame {
-                    expr: array,
-                    context: frame.context,
-                });
+                is_const_with_context(array, context) && is_const_with_context(index, context)
             }
-            _ => return false,
+            ExpressionKind::Binding(binding) => is_const_with_context(&binding.expr, context),
+            ExpressionKind::Block(exprs) => {
+                let mut block_context = context.clone();
+                for expr in exprs {
+                    if !is_const_with_context(expr, &block_context) {
+                        return false;
+                    }
+                    if let ExpressionKind::Binding(binding) = &expr.kind
+                        && bind_pattern_blanks(
+                            binding.pattern.clone(),
+                            &mut block_context,
+                            Vec::new(),
+                            None,
+                        )
+                        .is_err()
+                    {
+                        return false;
+                    }
+                }
+                true
+            }
+            _ => false,
         }
     }
 
-    true
+    is_const_with_context(expr, function_context)
 }
 
 pub fn intrinsic_context() -> Context {
