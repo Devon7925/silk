@@ -1108,13 +1108,15 @@ pub fn interpret_expression(
             Frame::BindingFinish => {
                 let value = values.pop().unwrap();
                 let interpreted_pattern = pattern_stack.pop().unwrap();
+                let mut bound_type = None;
                 if let Ok(value_type) = get_type_of_expression(&value, context) {
                     bind_pattern_blanks(
                         interpreted_pattern.clone(),
                         context,
                         Vec::new(),
-                        Some(value_type),
+                        Some(value_type.clone()),
                     )?;
+                    bound_type = Some(value_type);
                 }
                 let value_is_constant =
                     is_resolved_constant(&value) || function_contains_compile_time_data(&value);
@@ -1128,7 +1130,7 @@ pub fn interpret_expression(
                     } else {
                         PreserveBehavior::PreserveUsage
                     },
-                    None,
+                    bound_type,
                 )?;
                 let binding_expr = ExpressionKind::Binding(Box::new(Binding {
                     pattern: interpreted_pattern,
@@ -5572,6 +5574,49 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
         )
     }
 
+    fn range_binary_intrinsic(symbol: &str) -> (Identifier, Expression) {
+        let typed_pattern = |name: &str| {
+            BindingPattern::TypeHint(
+                Box::new(BindingPattern::Identifier(
+                    Identifier::new(name.to_string()),
+                    dummy_span(),
+                )),
+                Box::new(intrinsic_type_expr(IntrinsicType::I32)),
+                dummy_span(),
+            )
+        };
+        let range_type = ExpressionKind::Identifier(Identifier::new("Range".to_string()))
+            .with_span(dummy_span());
+        (
+            Identifier::new(symbol.to_string()),
+            ExpressionKind::Function {
+                parameter: typed_pattern("self"),
+                return_type: Some(Box::new(
+                    ExpressionKind::FunctionType {
+                        parameter: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
+                        return_type: Box::new(range_type.clone()),
+                    }
+                    .with_span(dummy_span()),
+                )),
+                body: Box::new(
+                    ExpressionKind::Function {
+                        parameter: typed_pattern("other"),
+                        return_type: Some(Box::new(range_type.clone())),
+                        body: Box::new(
+                            ExpressionKind::Struct(vec![
+                                (Identifier::new("current"), identifier_expr("self")),
+                                (Identifier::new("end"), identifier_expr("other")),
+                            ])
+                            .with_span(dummy_span()),
+                        ),
+                    }
+                    .with_span(dummy_span()),
+                ),
+            }
+            .with_span(dummy_span()),
+        )
+    }
+
     context.bindings.last_mut().unwrap().insert(
         Identifier::new("i32"),
         (
@@ -5630,6 +5675,7 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
                                 BinaryIntrinsicOperator::I32GreaterThanOrEqual,
                                 IntrinsicType::I32,
                             ),
+                            range_binary_intrinsic(".."),
                         ])
                         .with_span(dummy_span()),
                     ),
@@ -5934,6 +5980,17 @@ const BUILTIN_LIBRARY: &str = r#"
 Option := (T: type) => (
     enum { Some = T, None = {} }
 );
+
+Range := { current = i32, end = i32 } @ {
+    iter_ty = i32,
+    next = (mut self: Range) => (
+        if self.current < self.end then (
+            value := self.current;
+            self.current = self.current + 1;
+            Option(i32)::Some(value)
+        ) else Option(i32)::None
+    ),
+};
 
 Iterator := (T: type) => (
     { iter_ty = type, next = (T) -> Option(type) }
