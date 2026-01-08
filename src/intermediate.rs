@@ -38,7 +38,7 @@ pub enum IntermediateKind {
         array: Box<IntermediateKind>,
         index: Box<IntermediateKind>,
     },
-    PropertyAccess {
+    TypePropertyAccess {
         object: Box<IntermediateKind>,
         property: String,
     },
@@ -83,7 +83,7 @@ pub struct IntermediateBinding {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntermediateLValue {
     Identifier(Identifier, SourceSpan),
-    PropertyAccess {
+    TypePropertyAccess {
         object: Box<IntermediateLValue>,
         property: String,
         span: SourceSpan,
@@ -158,11 +158,11 @@ pub fn context_to_intermediate(context: &Context) -> IntermediateResult {
 fn lower_lvalue(target: LValue, builder: &mut IntermediateBuilder) -> IntermediateLValue {
     match target {
         LValue::Identifier(identifier, span) => IntermediateLValue::Identifier(identifier, span),
-        LValue::PropertyAccess {
+        LValue::TypePropertyAccess {
             object,
             property,
             span,
-        } => IntermediateLValue::PropertyAccess {
+        } => IntermediateLValue::TypePropertyAccess {
             object: Box::new(lower_lvalue(*object, builder)),
             property,
             span,
@@ -191,7 +191,7 @@ pub fn expression_to_intermediate(
         FinishAssignment(IntermediateLValue),
         FinishFunctionCall(usize),
         FinishArrayIndex,
-        FinishPropertyAccess(String),
+        FinishTypePropertyAccess(String),
         FinishBinding {
             pattern: BindingPattern,
             binding_type: IntermediateType,
@@ -257,8 +257,7 @@ pub fn expression_to_intermediate(
                     }
                     ExpressionKind::Struct(fields) => {
                         let field_ids = fields.iter().map(|(id, _)| id.clone()).collect();
-                        let struct_expr =
-                            ExpressionKind::Struct(fields.clone()).with_span(span);
+                        let struct_expr = ExpressionKind::Struct(fields.clone()).with_span(span);
                         let array_fields = match builder.expression_value_type(&struct_expr) {
                             IntermediateType::Array {
                                 field_names,
@@ -284,9 +283,8 @@ pub fn expression_to_intermediate(
                                     IntermediateKind::Literal(ExpressionLiteral::Char(value))
                                 })
                                 .collect();
-                            let field_names = (0..bytes.len())
-                                .map(|index| index.to_string())
-                                .collect();
+                            let field_names =
+                                (0..bytes.len()).map(|index| index.to_string()).collect();
                             values.push(IntermediateKind::ArrayLiteral {
                                 items,
                                 element_type: IntermediateType::U8,
@@ -325,19 +323,33 @@ pub fn expression_to_intermediate(
                             stack.push(Frame::Enter(enum_value));
                             continue;
                         }
-                        if let ExpressionKind::EnumAccess { enum_expr, variant } = &function.kind
-                            && let Some(enum_type) = builder.resolve_enum_type_expression(enum_expr)
-                            && let Some((variant_index, _)) = enum_variant_info(&enum_type, variant)
+                        if let ExpressionKind::TypePropertyAccess { object, property } =
+                            &function.kind
                         {
-                            let enum_value = ExpressionKind::EnumValue {
-                                enum_type: Box::new(enum_type),
-                                variant: variant.clone(),
-                                variant_index,
-                                payload: argument.clone(),
+                            if let Some(method_expr) = builder.resolve_impl_method(object, property)
+                            {
+                                let function_index = builder.register_function(None, method_expr);
+                                stack.push(Frame::FinishFunctionCall(function_index));
+                                stack.push(Frame::Enter(*argument));
+                                continue;
                             }
-                            .with_span(span);
-                            stack.push(Frame::Enter(enum_value));
-                            continue;
+
+                            if let Some(enum_type) = builder.resolve_enum_type_expression(object) {
+                                let variant = Identifier::new(property.clone());
+                                if let Some((variant_index, _)) =
+                                    enum_variant_info(&enum_type, &variant)
+                                {
+                                    let enum_value = ExpressionKind::EnumValue {
+                                        enum_type: Box::new(enum_type),
+                                        variant,
+                                        variant_index,
+                                        payload: argument.clone(),
+                                    }
+                                    .with_span(span);
+                                    stack.push(Frame::Enter(enum_value));
+                                    continue;
+                                }
+                            }
                         }
                         let function_index = match *function {
                             Expression {
@@ -369,17 +381,9 @@ pub fn expression_to_intermediate(
                         stack.push(Frame::Enter(*index));
                         stack.push(Frame::Enter(*array));
                     }
-                    ExpressionKind::PropertyAccess { object, property } => {
-                        if let Some(method_expr) =
-                            builder.resolve_impl_method(&object, &property)
-                        {
-                            let function_index = builder.register_function(None, method_expr);
-                            stack.push(Frame::FinishFunctionCall(function_index));
-                            stack.push(Frame::Enter(*object));
-                        } else {
-                            stack.push(Frame::FinishPropertyAccess(property));
-                            stack.push(Frame::Enter(*object));
-                        }
+                    ExpressionKind::TypePropertyAccess { object, property } => {
+                        stack.push(Frame::FinishTypePropertyAccess(property));
+                        stack.push(Frame::Enter(*object));
                     }
                     ExpressionKind::Binding(binding) => {
                         let Binding { pattern, expr } = *binding;
@@ -427,27 +431,6 @@ pub fn expression_to_intermediate(
                     ExpressionKind::Loop { body } => {
                         stack.push(Frame::FinishLoop);
                         stack.push(Frame::Enter(*body));
-                    }
-                    ExpressionKind::EnumAccess { enum_expr, variant } => {
-                        if let Some(enum_type) = builder.resolve_enum_type_expression(&enum_expr)
-                            && let Some((variant_index, payload_type)) =
-                                enum_variant_info(&enum_type, &variant)
-                            && let ExpressionKind::Struct(fields) = &payload_type.kind
-                            && fields.is_empty()
-                        {
-                            let enum_value = ExpressionKind::EnumValue {
-                                enum_type: Box::new(enum_type),
-                                variant,
-                                variant_index,
-                                payload: Box::new(
-                                    ExpressionKind::Struct(Vec::new()).with_span(span),
-                                ),
-                            }
-                            .with_span(span);
-                            stack.push(Frame::Enter(enum_value));
-                            continue;
-                        }
-                        panic!("Unsupported enum constructor reference in intermediate lowering");
                     }
                     enum_expr @ ExpressionKind::EnumValue { .. } => {
                         if let Some(lowered) = materialize_enum_value(&enum_expr, &span) {
@@ -541,9 +524,9 @@ pub fn expression_to_intermediate(
                     index: Box::new(index),
                 });
             }
-            Frame::FinishPropertyAccess(property) => {
+            Frame::FinishTypePropertyAccess(property) => {
                 let object = values.pop().expect("Missing property access object");
-                values.push(IntermediateKind::PropertyAccess {
+                values.push(IntermediateKind::TypePropertyAccess {
                     object: Box::new(object),
                     property,
                 });
@@ -890,7 +873,9 @@ impl IntermediateBuilder {
                         homogeneous = false;
                     }
 
-                    if let Some(first) = first_type && homogeneous {
+                    if let Some(first) = first_type
+                        && homogeneous
+                    {
                         values.push(IntermediateType::Array {
                             element: Box::new(first),
                             length: field_types.len(),
@@ -1024,7 +1009,9 @@ impl IntermediateBuilder {
                         homogeneous = false;
                     }
 
-                    if let Some(first) = first_type && homogeneous {
+                    if let Some(first) = first_type
+                        && homogeneous
+                    {
                         values.push(IntermediateType::Array {
                             element: Box::new(first),
                             length: field_types.len(),
@@ -1121,7 +1108,9 @@ impl IntermediateBuilder {
                         homogeneous = false;
                     }
 
-                    if let Some(first) = first_type && homogeneous {
+                    if let Some(first) = first_type
+                        && homogeneous
+                    {
                         values.push(IntermediateType::Array {
                             element: Box::new(first),
                             length: field_types.len(),
@@ -1239,9 +1228,9 @@ impl IntermediateBuilder {
                                 .find(|(name, _)| name == &field_identifier.name)
                                 .map(|(name, ty)| (name.clone(), ty.clone()))
                                 .or_else(|| {
-                                    field_types.get(fallback_index).map(|(name, ty)| {
-                                        (name.clone(), ty.clone())
-                                    })
+                                    field_types
+                                        .get(fallback_index)
+                                        .map(|(name, ty)| (name.clone(), ty.clone()))
                                 })
                                 .unwrap_or_else(|| {
                                     panic!(
@@ -1249,7 +1238,7 @@ impl IntermediateBuilder {
                                         field_identifier.name, span
                                     )
                                 });
-                            let field_expr = IntermediateKind::PropertyAccess {
+                            let field_expr = IntermediateKind::TypePropertyAccess {
                                 object: Box::new(value_expr.clone()),
                                 property: property_name,
                             };
@@ -1275,7 +1264,7 @@ impl IntermediateBuilder {
                             });
                         let payload_type = self.type_expr_to_intermediate(&payload_type_expr);
 
-                        let tag_expr = IntermediateKind::PropertyAccess {
+                        let tag_expr = IntermediateKind::TypePropertyAccess {
                             object: Box::new(value_expr.clone()),
                             property: "tag".to_string(),
                         };
@@ -1290,8 +1279,8 @@ impl IntermediateBuilder {
                         );
 
                         if let Some(payload_pattern) = payload {
-                            let payload_access = IntermediateKind::PropertyAccess {
-                                object: Box::new(IntermediateKind::PropertyAccess {
+                            let payload_access = IntermediateKind::TypePropertyAccess {
+                                object: Box::new(IntermediateKind::TypePropertyAccess {
                                     object: Box::new(value_expr),
                                     property: "payload".to_string(),
                                 }),

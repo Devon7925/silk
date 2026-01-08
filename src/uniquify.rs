@@ -99,10 +99,6 @@ enum Task {
         variant: Identifier,
         variant_index: usize,
     },
-    BuildEnumAccess {
-        span: SourceSpan,
-        variant: Identifier,
-    },
     BuildAttachImplementation {
         span: SourceSpan,
     },
@@ -126,7 +122,7 @@ enum Task {
     BuildArrayIndex {
         span: SourceSpan,
     },
-    BuildPropertyAccess {
+    BuildTypePropertyAccess {
         span: SourceSpan,
         property: String,
     },
@@ -351,10 +347,6 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                         tasks.push(Task::Expr(*payload_type, scope.clone()));
                         tasks.push(Task::Expr(*enum_type, scope));
                     }
-                    ExpressionKind::EnumAccess { enum_expr, variant } => {
-                        tasks.push(Task::BuildEnumAccess { span, variant });
-                        tasks.push(Task::Expr(*enum_expr, scope));
-                    }
                     ExpressionKind::If {
                         condition,
                         then_branch,
@@ -452,8 +444,8 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                         tasks.push(Task::Expr(*index, scope.clone()));
                         tasks.push(Task::Expr(*array, scope));
                     }
-                    ExpressionKind::PropertyAccess { object, property } => {
-                        tasks.push(Task::BuildPropertyAccess { span, property });
+                    ExpressionKind::TypePropertyAccess { object, property } => {
+                        tasks.push(Task::BuildTypePropertyAccess { span, property });
                         tasks.push(Task::Expr(*object, scope));
                     }
                     ExpressionKind::Binding(binding) => {
@@ -560,7 +552,7 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                         span,
                     )));
                 }
-                LValue::PropertyAccess {
+                LValue::TypePropertyAccess {
                     object,
                     property,
                     span,
@@ -654,16 +646,6 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                     .with_span(span),
                 ));
             }
-            Task::BuildEnumAccess { span, variant } => {
-                let enum_expr = pop_expr(&mut results);
-                results.push(Value::Expr(
-                    ExpressionKind::EnumAccess {
-                        enum_expr: Box::new(enum_expr),
-                        variant,
-                    }
-                    .with_span(span),
-                ));
-            }
             Task::BuildAttachImplementation { span } => {
                 let implementation = pop_expr(&mut results);
                 let type_expr = pop_expr(&mut results);
@@ -740,10 +722,10 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                     .with_span(span),
                 ));
             }
-            Task::BuildPropertyAccess { span, property } => {
+            Task::BuildTypePropertyAccess { span, property } => {
                 let object = pop_expr(&mut results);
                 results.push(Value::Expr(
-                    ExpressionKind::PropertyAccess {
+                    ExpressionKind::TypePropertyAccess {
                         object: Box::new(object),
                         property,
                     }
@@ -774,7 +756,7 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
             }
             Task::BuildLValueProperty { span, property } => {
                 let object = pop_lvalue(&mut results);
-                results.push(Value::LValue(LValue::PropertyAccess {
+                results.push(Value::LValue(LValue::TypePropertyAccess {
                     object: Box::new(object),
                     property,
                     span,

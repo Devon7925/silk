@@ -26,8 +26,8 @@ fn test_string_literal_value() {
 
 #[test]
 fn test_string_literal_index() {
-    let (expr, _) = evaluate_text_to_expression("\"hi\"(1)")
-        .expect("Failed to interpret string literal index");
+    let (expr, _) =
+        evaluate_text_to_expression("\"hi\"(1)").expect("Failed to interpret string literal index");
     match expr.kind {
         ExpressionKind::Literal(ExpressionLiteral::Char(value)) => {
             assert_eq!(value, b'i');

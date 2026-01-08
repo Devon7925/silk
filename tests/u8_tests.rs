@@ -25,18 +25,12 @@ fn evaluate_text_to_bool(program: &str) -> bool {
 
 #[test]
 fn test_u8_addition() {
-    let program = ""
-        .to_string()
-        + "add_one := (value: u8) => ( value + 1 );\n"
-        + "add_one(41)";
+    let program = "".to_string() + "add_one := (value: u8) => ( value + 1 );\n" + "add_one(41)";
     assert_eq!(evaluate_text_to_number(&program), 42);
 }
 
 #[test]
 fn test_u8_comparisons() {
-    let program = ""
-        .to_string()
-        + "is_even := (value: u8) => ( value == 2 );\n"
-        + "is_even(2)";
+    let program = "".to_string() + "is_even := (value: u8) => ( value == 2 );\n" + "is_even(2)";
     assert_eq!(evaluate_text_to_bool(&program), true);
 }

@@ -579,7 +579,18 @@ fn collect_bindings(expr: &Expression, context: &mut Context) -> Result<(), Diag
             ExpressionKind::Binding(binding) => {
                 let value_type = get_type_of_expression(&binding.expr, context).ok();
 
-                bind_pattern_blanks(binding.pattern.clone(), context, Vec::new(), value_type)?;
+                if let Some(value_type) = value_type {
+                    bind_pattern_blanks(binding.pattern.clone(), context, Vec::new(), Some(value_type))?;
+                } else {
+                    let _ = bind_pattern_from_value(
+                        binding.pattern.clone(),
+                        &binding.expr,
+                        context,
+                        Vec::new(),
+                        PreserveBehavior::Inline,
+                        None,
+                    )?;
+                }
             }
             ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(
                 left,
@@ -664,6 +675,10 @@ pub fn interpret_expression(
             span: SourceSpan,
             operator: UnaryIntrinsicOperator,
         },
+        Operation {
+            span: SourceSpan,
+            operator: String,
+        },
         Diverge {
             span: SourceSpan,
             divergance_type: DivergeExpressionType,
@@ -672,7 +687,7 @@ pub fn interpret_expression(
             span: SourceSpan,
             target: LValue,
         },
-        PropertyAccess {
+        TypePropertyAccess {
             span: SourceSpan,
             property: String,
             original_object: Expression,
@@ -725,6 +740,8 @@ pub fn interpret_expression(
         },
         FunctionCall {
             span: SourceSpan,
+            function_expr: Expression,
+            argument_expr: Expression,
         },
         InlineCall {
             saved_context: Context,
@@ -733,10 +750,6 @@ pub fn interpret_expression(
             span: SourceSpan,
             parameter: BindingPattern,
             saved_context: Context,
-        },
-        EnumAccess {
-            span: SourceSpan,
-            variant: Identifier,
         },
     }
 
@@ -841,19 +854,9 @@ pub fn interpret_expression(
                         left,
                         right,
                     } => {
-                        stack.push(Frame::Eval(
-                            ExpressionKind::FunctionCall {
-                                function: Box::new(
-                                    ExpressionKind::PropertyAccess {
-                                        object: left,
-                                        property: operator.clone(),
-                                    }
-                                    .with_span(span),
-                                ),
-                                argument: right,
-                            }
-                            .with_span(span),
-                        ));
+                        stack.push(Frame::Operation { span, operator });
+                        stack.push(Frame::Eval(*right));
+                        stack.push(Frame::Eval(*left));
                     }
                     ExpressionKind::Binding(binding) => {
                         stack.push(Frame::BindingFinish);
@@ -884,7 +887,11 @@ pub fn interpret_expression(
                         stack.push(Frame::Eval(*expr));
                     }
                     ExpressionKind::FunctionCall { function, argument } => {
-                        stack.push(Frame::FunctionCall { span });
+                        stack.push(Frame::FunctionCall {
+                            span,
+                            function_expr: *function.clone(),
+                            argument_expr: *argument.clone(),
+                        });
                         stack.push(Frame::Eval(*argument));
                         stack.push(Frame::Eval(*function));
                     }
@@ -923,10 +930,6 @@ pub fn interpret_expression(
                         stack.push(Frame::FunctionType { span });
                         stack.push(Frame::Eval(*return_type));
                         stack.push(Frame::Eval(*parameter));
-                    }
-                    ExpressionKind::EnumAccess { enum_expr, variant } => {
-                        stack.push(Frame::EnumAccess { span, variant });
-                        stack.push(Frame::Eval(*enum_expr));
                     }
                     ExpressionKind::EnumValue {
                         enum_type,
@@ -969,9 +972,9 @@ pub fn interpret_expression(
                             }
                         }
                     }
-                    ExpressionKind::PropertyAccess { object, property } => {
+                    ExpressionKind::TypePropertyAccess { object, property } => {
                         let original_object = *object;
-                        stack.push(Frame::PropertyAccess {
+                        stack.push(Frame::TypePropertyAccess {
                             span,
                             property,
                             original_object: original_object.clone(),
@@ -1513,12 +1516,34 @@ pub fn interpret_expression(
                         })?;
                         let mut import_context =
                             intrinsic_context_with_files(context.files.clone());
-                        let (value, _) = interpret_program(expression.clone(), &mut import_context)?;
+                        let (value, _) =
+                            interpret_program(expression.clone(), &mut import_context)?;
                         context.import_cache.insert(normalized, value.clone());
                         value
                     }
                 };
                 values.push(result);
+            }
+            Frame::Operation { span, operator } => {
+                let evaluated_right = values.pop().unwrap();
+                let evaluated_left = values.pop().unwrap();
+                let property_access = ExpressionKind::TypePropertyAccess {
+                    object: Box::new(evaluated_left.clone()),
+                    property: operator,
+                }
+                .with_span(span);
+                let apply_self = ExpressionKind::FunctionCall {
+                    function: Box::new(property_access),
+                    argument: Box::new(evaluated_left),
+                }
+                .with_span(span);
+                stack.push(Frame::Eval(
+                    ExpressionKind::FunctionCall {
+                        function: Box::new(apply_self),
+                        argument: Box::new(evaluated_right),
+                    }
+                    .with_span(span),
+                ));
             }
             Frame::Diverge {
                 span,
@@ -1758,9 +1783,40 @@ pub fn interpret_expression(
                     .with_span(span),
                 );
             }
-            Frame::FunctionCall { span } => {
+            Frame::FunctionCall {
+                span,
+                function_expr,
+                argument_expr,
+            } => {
                 let argument_value = values.pop().unwrap();
                 let function_value = values.pop().unwrap();
+
+                if let ExpressionKind::TypePropertyAccess { object, property } = &function_expr.kind
+                    && argument_expr == **object
+                {
+                    let object_type = get_type_of_expression(object, context)?;
+                    if let Ok((_, TraitPropSource::StructField)) =
+                        get_trait_prop_of_type(&object_type, property, span, context)
+                    {
+                        if let ExpressionKind::Struct(items) = &argument_value.kind {
+                            if let Some((_, item_expr)) =
+                                items.iter().find(|(item_id, _)| item_id.name == *property)
+                            {
+                                values.push(item_expr.clone());
+                                continue;
+                            }
+                        }
+
+                        values.push(
+                            ExpressionKind::TypePropertyAccess {
+                                object: Box::new(argument_value),
+                                property: property.clone(),
+                            }
+                            .with_span(span),
+                        );
+                        continue;
+                    }
+                }
 
                 if let Ok(function_type) = get_type_of_expression(&function_value, context)
                     && homogeneous_struct_element_type(&function_type, context).is_some()
@@ -1958,45 +2014,7 @@ pub fn interpret_expression(
                     .with_span(span),
                 );
             }
-            Frame::EnumAccess { span, variant } => {
-                let interpreted_enum = values.pop().unwrap();
-                if let Some((variant_index, payload_type)) =
-                    enum_variant_info(&interpreted_enum, &variant)
-                {
-                    if let ExpressionKind::Struct(fields) = &payload_type.kind
-                        && fields.is_empty()
-                    {
-                        values.push(
-                            ExpressionKind::EnumValue {
-                                enum_type: Box::new(interpreted_enum),
-                                variant,
-                                variant_index,
-                                payload: Box::new(ExpressionKind::Struct(vec![]).with_span(span)),
-                            }
-                            .with_span(span),
-                        );
-                    } else {
-                        values.push(
-                            ExpressionKind::EnumConstructor {
-                                enum_type: Box::new(interpreted_enum),
-                                variant,
-                                variant_index,
-                                payload_type: Box::new(payload_type),
-                            }
-                            .with_span(span),
-                        );
-                    }
-                } else {
-                    values.push(
-                        ExpressionKind::EnumAccess {
-                            enum_expr: Box::new(interpreted_enum),
-                            variant,
-                        }
-                        .with_span(span),
-                    );
-                }
-            }
-            Frame::PropertyAccess {
+            Frame::TypePropertyAccess {
                 span,
                 property,
                 original_object,
@@ -2011,6 +2029,36 @@ pub fn interpret_expression(
                     }
                 }
 
+                let enum_property = Identifier::new(property.clone());
+                if let Some((variant_index, payload_type)) =
+                    enum_variant_info(&evaluated_object, &enum_property)
+                {
+                    if let ExpressionKind::Struct(fields) = &payload_type.kind
+                        && fields.is_empty()
+                    {
+                        values.push(
+                            ExpressionKind::EnumValue {
+                                enum_type: Box::new(evaluated_object),
+                                variant: enum_property,
+                                variant_index,
+                                payload: Box::new(ExpressionKind::Struct(vec![]).with_span(span)),
+                            }
+                            .with_span(span),
+                        );
+                    } else {
+                        values.push(
+                            ExpressionKind::EnumConstructor {
+                                enum_type: Box::new(evaluated_object),
+                                variant: enum_property,
+                                variant_index,
+                                payload_type: Box::new(payload_type),
+                            }
+                            .with_span(span),
+                        );
+                    }
+                    continue;
+                }
+
                 let mut object_type = get_type_of_expression(&original_object, context)?;
                 if matches!(
                     object_type.kind,
@@ -2020,29 +2068,11 @@ pub fn interpret_expression(
                 }
                 let (trait_prop, prop_source) =
                     get_trait_prop_of_type(&object_type, &property, span, context)?;
-                if matches!(&trait_prop.kind, ExpressionKind::Function { .. })
-                    && matches!(prop_source, TraitPropSource::ImplementationField)
-                {
-                    stack.push(Frame::Eval(
-                        ExpressionKind::FunctionCall {
-                            function: Box::new(trait_prop),
-                            argument: Box::new(evaluated_object),
-                        }
-                        .with_span(span),
-                    ));
-                } else if matches!(prop_source, TraitPropSource::ImplementationField) {
+                if matches!(prop_source, TraitPropSource::ImplementationField) {
                     values.push(trait_prop);
-                } else if matches!(prop_source, TraitPropSource::TraitRequirement) {
-                    values.push(
-                        ExpressionKind::PropertyAccess {
-                            object: Box::new(evaluated_object),
-                            property,
-                        }
-                        .with_span(span),
-                    );
                 } else {
                     values.push(
-                        ExpressionKind::PropertyAccess {
+                        ExpressionKind::TypePropertyAccess {
                             object: Box::new(evaluated_object),
                             property,
                         }
@@ -2156,7 +2186,7 @@ pub(crate) fn get_type_of_expression(
                     }
                     BindingPattern::TypeHint(_, type_expr, _) => {
                         let resolved = resolve_type_alias_expression(type_expr.as_ref(), context);
-                        if matches!(resolved.kind, ExpressionKind::PropertyAccess { .. }) {
+                        if matches!(resolved.kind, ExpressionKind::TypePropertyAccess { .. }) {
                             if let Ok(resolved_type) = get_type_of_expression(&resolved, context) {
                                 results.push(resolved_type);
                             } else {
@@ -2244,6 +2274,7 @@ pub(crate) fn get_type_of_expression(
         },
         FunctionCall {
             span: SourceSpan,
+            function_expr: Expression,
             argument_expr: Expression,
             context: Context,
         },
@@ -2251,10 +2282,11 @@ pub(crate) fn get_type_of_expression(
             span: SourceSpan,
             context: Context,
         },
-        PropertyAccess {
+        TypePropertyAccess {
             span: SourceSpan,
             property: String,
             context: Context,
+            object: Expression,
         },
     }
 
@@ -2375,26 +2407,6 @@ pub(crate) fn get_type_of_expression(
                     ExpressionKind::Binding(..) => {
                         results.push(resolve_intrinsic_type("bool", span, &context)?);
                     }
-                    ExpressionKind::EnumAccess { enum_expr, variant } => {
-                        let enum_type = resolve_type_alias_expression(enum_expr.as_ref(), &context);
-                        if let Some((_, payload_type)) = enum_variant_info(&enum_type, &variant) {
-                            if let ExpressionKind::Struct(fields) = &payload_type.kind
-                                && fields.is_empty()
-                            {
-                                results.push(enum_type);
-                            } else {
-                                results.push(
-                                    ExpressionKind::FunctionType {
-                                        parameter: Box::new(payload_type),
-                                        return_type: Box::new(enum_type),
-                                    }
-                                    .with_span(span),
-                                );
-                            }
-                        } else {
-                            return Err(diagnostic("Unknown enum variant", span));
-                        }
-                    }
                     ExpressionKind::EnumConstructor {
                         enum_type,
                         payload_type,
@@ -2421,16 +2433,22 @@ pub(crate) fn get_type_of_expression(
                         left,
                         right,
                     } => {
+                        let left_expr = *left.clone();
+                        let right_expr = *right.clone();
+                        let property_access = ExpressionKind::TypePropertyAccess {
+                            object: Box::new(left_expr.clone()),
+                            property: operator.clone(),
+                        }
+                        .with_span(span);
+                        let apply_self = ExpressionKind::FunctionCall {
+                            function: Box::new(property_access),
+                            argument: Box::new(left_expr),
+                        }
+                        .with_span(span);
                         stack.push(Frame::Enter(
                             ExpressionKind::FunctionCall {
-                                function: Box::new(
-                                    ExpressionKind::PropertyAccess {
-                                        object: left.clone(),
-                                        property: operator.clone(),
-                                    }
-                                    .with_span(span),
-                                ),
-                                argument: right.clone(),
+                                function: Box::new(apply_self),
+                                argument: Box::new(right_expr),
                             }
                             .with_span(span),
                             context,
@@ -2476,6 +2494,7 @@ pub(crate) fn get_type_of_expression(
                         let call_context = context.clone();
                         stack.push(Frame::FunctionCall {
                             span,
+                            function_expr: *function.clone(),
                             argument_expr: *argument.clone(),
                             context: call_context.clone(),
                         });
@@ -2491,13 +2510,15 @@ pub(crate) fn get_type_of_expression(
                         stack.push(Frame::Enter(*index, call_context.clone()));
                         stack.push(Frame::Enter(*array, call_context));
                     }
-                    ExpressionKind::PropertyAccess { object, property } => {
-                        stack.push(Frame::PropertyAccess {
+                    ExpressionKind::TypePropertyAccess { object, property } => {
+                        let object_expr = *object;
+                        stack.push(Frame::TypePropertyAccess {
                             span,
                             property,
                             context: context.clone(),
+                            object: object_expr.clone(),
                         });
-                        stack.push(Frame::Enter(*object, context));
+                        stack.push(Frame::Enter(object_expr, context));
                     }
                     ExpressionKind::IntrinsicType(intrinsic_type) => match intrinsic_type {
                         IntrinsicType::I32
@@ -2835,11 +2856,24 @@ pub(crate) fn get_type_of_expression(
             }
             Frame::FunctionCall {
                 span,
+                function_expr,
                 argument_expr,
                 context,
             } => {
                 let argument_type = results.pop().unwrap();
+                let argument_type = resolve_type_alias_expression(&argument_type, &context);
                 let mut evaluated_function_type = results.pop().unwrap();
+                if let ExpressionKind::TypePropertyAccess { object, property } = &function_expr.kind
+                    && argument_expr == **object
+                {
+                    let object_type = get_type_of_expression(object, &context)?;
+                    if let Ok((trait_prop, TraitPropSource::StructField)) =
+                        get_trait_prop_of_type(&object_type, property, span, &context)
+                    {
+                        results.push(trait_prop);
+                        continue;
+                    }
+                }
                 if let Some(mut element_type) =
                     homogeneous_struct_element_type(&evaluated_function_type, &context)
                 {
@@ -2945,20 +2979,39 @@ pub(crate) fn get_type_of_expression(
                 }
                 results.push(element_type);
             }
-            Frame::PropertyAccess {
+            Frame::TypePropertyAccess {
                 span,
                 property,
                 context,
+                object,
             } => {
                 let object_type = results.pop().unwrap();
+                let enum_property = Identifier::new(property.clone());
+                if let Some(enum_type) = resolve_enum_type_expression(&object, &mut context.clone())
+                {
+                    if let Some((_, payload_type)) = enum_variant_info(&enum_type, &enum_property) {
+                        if let ExpressionKind::Struct(fields) = &payload_type.kind
+                            && fields.is_empty()
+                        {
+                            results.push(enum_type);
+                        } else {
+                            results.push(
+                                ExpressionKind::FunctionType {
+                                    parameter: Box::new(payload_type),
+                                    return_type: Box::new(enum_type),
+                                }
+                                .with_span(span),
+                            );
+                        }
+                        continue;
+                    }
+                }
+
                 let (trait_prop, prop_source) =
                     get_trait_prop_of_type(&object_type, &property, span, &context)?;
                 if matches!(prop_source, TraitPropSource::ImplementationField) {
-                    if let ExpressionKind::Function { return_type, .. } = &trait_prop.kind {
-                        results.push(resolve_type_alias_expression(
-                            return_type.as_ref().unwrap().as_ref(),
-                            &context,
-                        ));
+                    if matches!(trait_prop.kind, ExpressionKind::Function { .. }) {
+                        results.push(get_type_of_expression(&trait_prop, &context)?);
                     } else {
                         results.push(trait_prop);
                     }
@@ -3057,7 +3110,7 @@ pub fn expression_does_diverge(expr: &Expression, possibility: bool, in_inner_lo
                     stack.push(Frame::Exit(Combine::Any(1)));
                     stack.push(Frame::Enter(body, true));
                 }
-                ExpressionKind::PropertyAccess { object, .. } => {
+                ExpressionKind::TypePropertyAccess { object, .. } => {
                     stack.push(Frame::Exit(Combine::Any(1)));
                     stack.push(Frame::Enter(object, in_inner_loop));
                 }
@@ -3073,10 +3126,6 @@ pub fn expression_does_diverge(expr: &Expression, possibility: bool, in_inner_lo
                     stack.push(Frame::Exit(Combine::Any(2)));
                     stack.push(Frame::Enter(implementation, in_inner_loop));
                     stack.push(Frame::Enter(type_expr, in_inner_loop));
-                }
-                ExpressionKind::EnumAccess { enum_expr, .. } => {
-                    stack.push(Frame::Exit(Combine::Any(1)));
-                    stack.push(Frame::Enter(enum_expr, in_inner_loop));
                 }
                 ExpressionKind::EnumValue {
                     enum_type, payload, ..
@@ -3222,7 +3271,7 @@ pub fn expression_exports(expr: &Expression) -> bool {
                     stack.push(Frame::ExitExpr(ExprCombine::Any(1)));
                     stack.push(Frame::EnterExpr(body));
                 }
-                ExpressionKind::PropertyAccess { object, .. } => {
+                ExpressionKind::TypePropertyAccess { object, .. } => {
                     stack.push(Frame::ExitExpr(ExprCombine::Any(1)));
                     stack.push(Frame::EnterExpr(object));
                 }
@@ -3239,10 +3288,6 @@ pub fn expression_exports(expr: &Expression) -> bool {
                     stack.push(Frame::ExitExpr(ExprCombine::Any(2)));
                     stack.push(Frame::EnterExpr(implementation));
                     stack.push(Frame::EnterExpr(type_expr));
-                }
-                ExpressionKind::EnumAccess { enum_expr, .. } => {
-                    stack.push(Frame::ExitExpr(ExprCombine::Any(1)));
-                    stack.push(Frame::EnterExpr(enum_expr));
                 }
                 ExpressionKind::EnumValue {
                     enum_type, payload, ..
@@ -3594,12 +3639,12 @@ pub(crate) fn get_trait_prop_of_type(
     loop {
         match &current.kind {
             ExpressionKind::Struct(items) => {
-                    return get_struct_field(items, trait_prop)
-                        .map(|expr| (expr, TraitPropSource::StructField))
-                        .ok_or_else(|| {
+                return get_struct_field(items, trait_prop)
+                    .map(|expr| (expr, TraitPropSource::StructField))
+                    .ok_or_else(|| {
                         diagnostic(format!("Missing field {} on type", trait_prop), span)
                     });
-                }
+            }
             ExpressionKind::AttachImplementation {
                 type_expr,
                 implementation,
@@ -3721,16 +3766,17 @@ fn ensure_trait_requirements(
 
     for (field_id, expected_field_value) in required_fields {
         let (field_value, _prop_source) =
-            get_trait_prop_of_type(&evaluated_type, &field_id.name, span, context)
-            .map_err(|_| {
-                diagnostic(
-                    format!(
-                        "Type does not implement trait: missing field {}",
-                        field_id.name
-                    ),
-                    span,
-                )
-            })?;
+            get_trait_prop_of_type(&evaluated_type, &field_id.name, span, context).map_err(
+                |_| {
+                    diagnostic(
+                        format!(
+                            "Type does not implement trait: missing field {}",
+                            field_id.name
+                        ),
+                        span,
+                    )
+                },
+            )?;
         let actual_field_type = get_type_of_expression(&field_value, context)?;
         let expected_field_type = apply_type_bindings(&expected_field_value, &type_bindings);
         let expected_field_type = resolve_type_alias_expression(&expected_field_type, context);
@@ -3984,9 +4030,6 @@ fn fold_expression<T, U: Fn(&Expression, T) -> T>(
                 stack.push(payload_type);
                 stack.push(enum_type);
             }
-            ExpressionKind::EnumAccess { enum_expr, .. } => {
-                stack.push(enum_expr);
-            }
             ExpressionKind::If {
                 condition,
                 then_branch,
@@ -4043,7 +4086,7 @@ fn fold_expression<T, U: Fn(&Expression, T) -> T>(
                 stack.push(index);
                 stack.push(array);
             }
-            ExpressionKind::PropertyAccess { object, .. } => {
+            ExpressionKind::TypePropertyAccess { object, .. } => {
                 stack.push(object);
             }
             ExpressionKind::Binding(binding) => {
@@ -4231,7 +4274,7 @@ fn ensure_lvalue_mutable(
                 }
                 return Ok(());
             }
-            LValue::PropertyAccess { object, .. } => {
+            LValue::TypePropertyAccess { object, .. } => {
                 current = object;
             }
             LValue::ArrayIndex { array, .. } => {
@@ -4244,7 +4287,7 @@ fn ensure_lvalue_mutable(
 fn lvalue_display_name(lvalue: &LValue) -> String {
     match lvalue {
         LValue::Identifier(Identifier { name, .. }, _) => name.clone(),
-        LValue::PropertyAccess {
+        LValue::TypePropertyAccess {
             object, property, ..
         } => format!("{}.{}", lvalue_display_name(object), property),
         LValue::ArrayIndex { array, index, .. } => {
@@ -4286,7 +4329,7 @@ fn get_lvalue_type(
         LValue::Identifier(identifier, target_span) => {
             resolve_identifier_type(identifier, *target_span, context)
         }
-        LValue::PropertyAccess {
+        LValue::TypePropertyAccess {
             object,
             property,
             span: prop_span,
@@ -4297,7 +4340,10 @@ fn get_lvalue_type(
                 ..
             } = current_type
             else {
-                return Err(diagnostic("Property access on non-struct type", *prop_span));
+                return Err(diagnostic(
+                    "Type property access on non-struct type",
+                    *prop_span,
+                ));
             };
 
             fields
@@ -4357,7 +4403,7 @@ fn get_lvalue_value(
                 )),
             }
         }
-        LValue::PropertyAccess {
+        LValue::TypePropertyAccess {
             object,
             property,
             span: prop_span,
@@ -4371,7 +4417,7 @@ fn get_lvalue_value(
             } = object_value
             else {
                 return Err(diagnostic(
-                    "Property access on non-struct value",
+                    "Type property access on non-struct value",
                     *prop_span,
                 ));
             };
@@ -4485,7 +4531,7 @@ fn apply_lvalue_update(
             update_identifier(identifier, value, context, span)?;
             Ok(())
         }
-        LValue::PropertyAccess { .. } | LValue::ArrayIndex { .. } => {
+        LValue::TypePropertyAccess { .. } | LValue::ArrayIndex { .. } => {
             enum AccessStep {
                 Property(String, SourceSpan),
                 Index(usize, SourceSpan),
@@ -4497,7 +4543,7 @@ fn apply_lvalue_update(
             let (base_identifier, base_span) = loop {
                 match current {
                     LValue::Identifier(identifier, span) => break (identifier.clone(), *span),
-                    LValue::PropertyAccess {
+                    LValue::TypePropertyAccess {
                         object,
                         property,
                         span: prop_span,
@@ -4562,7 +4608,7 @@ fn apply_lvalue_update(
                     span: struct_span,
                 } = current_object
                 else {
-                    return Err(diagnostic("Property access on non-struct value", span));
+                    return Err(diagnostic("Type property access on non-struct value", span));
                 };
 
                 let (field_value, update_step) = match step {
@@ -4791,7 +4837,8 @@ fn bind_pattern_blanks(
             }
             BindingPattern::TypeHint(inner, type_hint, _) => {
                 let resolved = resolve_type_alias_expression(type_hint.as_ref(), context);
-                let resolved = if matches!(resolved.kind, ExpressionKind::PropertyAccess { .. }) {
+                let resolved = if matches!(resolved.kind, ExpressionKind::TypePropertyAccess { .. })
+                {
                     get_type_of_expression(&resolved, context).unwrap_or(resolved)
                 } else {
                     resolved
@@ -5901,8 +5948,7 @@ fn add_builtin_library(context: &mut Context) {
     );
     let expression = uniquify::uniquify_program(expression);
     context.bindings.push(HashMap::new());
-    interpret_library_expression(expression, context)
-        .expect("Failed to interpret builtin library");
+    interpret_library_expression(expression, context).expect("Failed to interpret builtin library");
 }
 
 fn interpret_library_expression(expr: Expression, context: &mut Context) -> Result<(), Diagnostic> {

@@ -42,7 +42,7 @@ impl std::hash::Hash for Identifier {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LValue {
     Identifier(Identifier, SourceSpan),
-    PropertyAccess {
+    TypePropertyAccess {
         object: Box<LValue>,
         property: String,
         span: SourceSpan,
@@ -58,7 +58,7 @@ impl LValue {
     pub fn span(&self) -> SourceSpan {
         match self {
             LValue::Identifier(_, span) => *span,
-            LValue::PropertyAccess { span, .. } => *span,
+            LValue::TypePropertyAccess { span, .. } => *span,
             LValue::ArrayIndex { span, .. } => *span,
         }
     }
@@ -66,10 +66,10 @@ impl LValue {
     pub fn pretty_print(&self) -> String {
         match self {
             LValue::Identifier(id, _) => id.name.clone(),
-            LValue::PropertyAccess {
+            LValue::TypePropertyAccess {
                 object, property, ..
             } => {
-                format!("{}.{}", object.pretty_print(), property)
+                format!("{}::{}", object.pretty_print(), property)
             }
             LValue::ArrayIndex { array, index, .. } => {
                 format!("{}({})", array.pretty_print(), index.pretty_print())
@@ -84,7 +84,7 @@ impl LValue {
                 LValue::Identifier(identifier, ..) => {
                     return HashSet::from([identifier.clone()]);
                 }
-                LValue::PropertyAccess { object, .. } => {
+                LValue::TypePropertyAccess { object, .. } => {
                     current = object;
                 }
                 LValue::ArrayIndex { array, .. } => {
@@ -213,10 +213,6 @@ pub enum ExpressionKind {
         variant_index: usize,
         payload_type: Box<Expression>,
     },
-    EnumAccess {
-        enum_expr: Box<Expression>,
-        variant: Identifier,
-    },
     If {
         condition: Box<Expression>,
         then_branch: Box<Expression>,
@@ -255,7 +251,7 @@ pub enum ExpressionKind {
         array: Box<Expression>,
         index: Box<Expression>,
     },
-    PropertyAccess {
+    TypePropertyAccess {
         object: Box<Expression>,
         property: String,
     },
@@ -498,13 +494,6 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
                     context.tasks.push(PrettyTask::WriteStatic("::"));
                     context.tasks.push(PrettyTask::Expr(enum_type));
                 }
-                ExpressionKind::EnumAccess { enum_expr, variant } => {
-                    context
-                        .tasks
-                        .push(PrettyTask::WriteOwned(variant.name.clone()));
-                    context.tasks.push(PrettyTask::WriteStatic("::"));
-                    context.tasks.push(PrettyTask::Expr(enum_expr));
-                }
                 ExpressionKind::If {
                     condition,
                     then_branch,
@@ -605,9 +594,9 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
                     context.tasks.push(PrettyTask::WriteStatic("("));
                     context.tasks.push(PrettyTask::Expr(array));
                 }
-                ExpressionKind::PropertyAccess { object, property } => {
+                ExpressionKind::TypePropertyAccess { object, property } => {
                     context.tasks.push(PrettyTask::WriteOwned(property.clone()));
-                    context.tasks.push(PrettyTask::WriteStatic("."));
+                    context.tasks.push(PrettyTask::WriteStatic("::"));
                     context.tasks.push(PrettyTask::Expr(object));
                 }
                 ExpressionKind::Binding(binding) => {
@@ -1528,16 +1517,15 @@ impl<'a> Parser<'a> {
                                 for_frame.state = ForState::ExpectBody;
                             }
                             ForState::Body => {
-                                let pattern_expr = for_frame.pattern_expr.take().ok_or_else(|| {
-                                    diagnostic_at_eof(
-                                        self.source,
-                                        "Expected for pattern while parsing",
-                                    )
-                                })?;
-                                let iterator_expr = for_frame
-                                    .iterator_expr
-                                    .take()
-                                    .ok_or_else(|| {
+                                let pattern_expr =
+                                    for_frame.pattern_expr.take().ok_or_else(|| {
+                                        diagnostic_at_eof(
+                                            self.source,
+                                            "Expected for pattern while parsing",
+                                        )
+                                    })?;
+                                let iterator_expr =
+                                    for_frame.iterator_expr.take().ok_or_else(|| {
                                         diagnostic_at_eof(
                                             self.source,
                                             "Expected for iterator while parsing",
@@ -1556,21 +1544,21 @@ impl<'a> Parser<'a> {
                                     )),
                                     span: iterator_span,
                                 };
-                                let iter_binding_expr = ExpressionKind::Binding(Box::new(Binding {
-                                    pattern: iter_binding_pattern,
-                                    expr: iterator_expr,
-                                }))
-                                .with_span(iterator_span);
+                                let iter_binding_expr =
+                                    ExpressionKind::Binding(Box::new(Binding {
+                                        pattern: iter_binding_pattern,
+                                        expr: iterator_expr,
+                                    }))
+                                    .with_span(iterator_span);
                                 let overall_span = consumed_span(
                                     self.source,
                                     for_frame.start_slice,
                                     self.remaining,
                                 );
-                                let iter_identifier_expr = ExpressionKind::Identifier(
-                                    iterator_identifier.clone(),
-                                )
-                                .with_span(overall_span);
-                                let iter_ty_access = ExpressionKind::PropertyAccess {
+                                let iter_identifier_expr =
+                                    ExpressionKind::Identifier(iterator_identifier.clone())
+                                        .with_span(overall_span);
+                                let iter_ty_access = ExpressionKind::TypePropertyAccess {
                                     object: Box::new(iter_identifier_expr.clone()),
                                     property: "iter_ty".to_string(),
                                 }
@@ -1591,9 +1579,15 @@ impl<'a> Parser<'a> {
                                     payload: Some(Box::new(element_pattern)),
                                     span: overall_span,
                                 };
-                                let next_access = ExpressionKind::PropertyAccess {
-                                    object: Box::new(iter_identifier_expr),
-                                    property: "next".to_string(),
+                                let next_access = ExpressionKind::FunctionCall {
+                                    function: Box::new(
+                                        ExpressionKind::TypePropertyAccess {
+                                            object: Box::new(iter_identifier_expr.clone()),
+                                            property: "next".to_string(),
+                                        }
+                                        .with_span(overall_span),
+                                    ),
+                                    argument: Box::new(iter_identifier_expr),
                                 }
                                 .with_span(overall_span);
                                 let condition_expr = ExpressionKind::Binding(Box::new(Binding {
@@ -1760,7 +1754,8 @@ impl<'a> Parser<'a> {
                                     while_frame.start_slice,
                                     self.remaining,
                                 );
-                                completed_expr = Some(build_while_expression(condition, expr, span));
+                                completed_expr =
+                                    Some(build_while_expression(condition, expr, span));
                                 continue 'parse;
                             }
                             _ => {
@@ -2037,39 +2032,47 @@ fn reduce_stacks(
             return_type: Box::new(right),
         },
         "::" => {
-            let ExpressionKind::Identifier(variant) = right.kind else {
-                return Err(diagnostic_here(
-                    source,
-                    "",
-                    1,
-                    "Expected identifier as enum variant in enum access",
-                ));
+            let property = match right.kind {
+                ExpressionKind::Identifier(identifier) => identifier.name,
+                ExpressionKind::Literal(ExpressionLiteral::Number(num)) => num.to_string(),
+                _ => {
+                    return Err(diagnostic_here(
+                        source,
+                        "",
+                        1,
+                        "Expected identifier as property name in type property access",
+                    ));
+                }
             };
-            ExpressionKind::EnumAccess {
-                enum_expr: Box::new(left),
-                variant,
+            ExpressionKind::TypePropertyAccess {
+                object: Box::new(left),
+                property,
             }
         }
-        "." => match right.kind {
-            ExpressionKind::Identifier(property) => ExpressionKind::PropertyAccess {
-                object: Box::new(left),
-                property: property.name,
-            },
-            ExpressionKind::Literal(ExpressionLiteral::Number(num)) => {
-                ExpressionKind::PropertyAccess {
-                    object: Box::new(left),
-                    property: num.to_string(),
+        "." => {
+            let property = match right.kind {
+                ExpressionKind::Identifier(identifier) => identifier.name,
+                ExpressionKind::Literal(ExpressionLiteral::Number(num)) => num.to_string(),
+                _ => {
+                    return Err(diagnostic_here(
+                        source,
+                        "",
+                        1,
+                        "Expected identifier as property name in property access",
+                    ));
                 }
+            };
+            ExpressionKind::FunctionCall {
+                function: Box::new(
+                    ExpressionKind::TypePropertyAccess {
+                        object: Box::new(left.clone()),
+                        property,
+                    }
+                    .with_span(span),
+                ),
+                argument: Box::new(left),
             }
-            _ => {
-                return Err(diagnostic_here(
-                    source,
-                    "",
-                    1,
-                    "Expected identifier as property name in property access",
-                ));
-            }
-        },
+        }
         "" => ExpressionKind::FunctionCall {
             function: Box::new(left),
             argument: Box::new(right),
@@ -2345,7 +2348,7 @@ fn expression_to_lvalue(expression: Expression) -> Result<LValue, Diagnostic> {
             ExpressionKind::Identifier(identifier) => {
                 let mut lvalue = LValue::Identifier(identifier, span);
                 for (property, access_span) in properties.into_iter().rev() {
-                    lvalue = LValue::PropertyAccess {
+                    lvalue = LValue::TypePropertyAccess {
                         object: Box::new(lvalue),
                         property,
                         span: access_span,
@@ -2353,11 +2356,16 @@ fn expression_to_lvalue(expression: Expression) -> Result<LValue, Diagnostic> {
                 }
                 return Ok(lvalue);
             }
-            ExpressionKind::PropertyAccess { object, property } => {
+            ExpressionKind::TypePropertyAccess { object, property } => {
                 properties.push((property, span));
                 current = *object;
             }
             ExpressionKind::FunctionCall { function, argument } => {
+                if let ExpressionKind::TypePropertyAccess { object, property } = function.kind {
+                    properties.push((property, span));
+                    current = *object;
+                    continue;
+                }
                 let array = expression_to_lvalue(*function)?;
                 return Ok(LValue::ArrayIndex {
                     array: Box::new(array),
@@ -2441,15 +2449,15 @@ fn pattern_expression_to_binding_pattern(
                     ExpressionKind::FunctionCall { function, argument } => match *function {
                         Expression {
                             kind:
-                                ExpressionKind::EnumAccess {
-                                    enum_expr, variant, ..
+                                ExpressionKind::TypePropertyAccess {
+                                    object, property, ..
                                 },
                             ..
                         } => {
                             stack.push(PatternBuildFrame::EnumVariantFinish {
                                 span,
-                                enum_type: *enum_expr,
-                                variant,
+                                enum_type: *object,
+                                variant: Identifier::new(property),
                                 has_payload: true,
                             });
                             stack.push(PatternBuildFrame::Expr(*argument));
@@ -2460,12 +2468,10 @@ fn pattern_expression_to_binding_pattern(
                             stack.push(PatternBuildFrame::Expr(*argument));
                         }
                     },
-                    ExpressionKind::EnumAccess {
-                        enum_expr, variant, ..
-                    } => {
+                    ExpressionKind::TypePropertyAccess { object, property } => {
                         pattern_stack.push(BindingPattern::EnumVariant {
-                            enum_type: enum_expr,
-                            variant,
+                            enum_type: object,
+                            variant: Identifier::new(property),
                             payload: None,
                             span,
                         });
@@ -3071,9 +3077,11 @@ fn parse_for_loop_desugars_to_iterator_binding() {
     else {
         panic!("expected annotated binding pattern");
     };
-    assert!(annotations
-        .iter()
-        .any(|ann| matches!(ann, BindingAnnotation::Mutable(_))));
+    assert!(
+        annotations
+            .iter()
+            .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)))
+    );
     assert!(matches!(
         pattern.as_ref(),
         BindingPattern::Identifier(Identifier { name, .. }, _) if name == "bar"
@@ -3109,7 +3117,7 @@ fn parse_for_loop_desugars_to_iterator_binding() {
         &function.kind,
         ExpressionKind::Identifier(Identifier { name, .. }) if name == "Option"
     ));
-    let ExpressionKind::PropertyAccess { object, property } = &argument.kind else {
+    let ExpressionKind::TypePropertyAccess { object, property } = &argument.kind else {
         panic!("expected iter_ty property access");
     };
     assert_eq!(property, "iter_ty");
@@ -3118,12 +3126,23 @@ fn parse_for_loop_desugars_to_iterator_binding() {
         ExpressionKind::Identifier(Identifier { name, .. }) if name == "bar"
     ));
 
-    let ExpressionKind::PropertyAccess {
-        object: next_obj,
-        property: next_prop,
+    let ExpressionKind::FunctionCall {
+        function: next_function,
+        argument: next_argument,
     } = &condition_binding.expr.kind
     else {
-        panic!("expected next property access");
+        panic!("expected next call");
+    };
+    assert!(matches!(
+        &next_argument.kind,
+        ExpressionKind::Identifier(Identifier { name, .. }) if name == "bar"
+    ));
+    let ExpressionKind::TypePropertyAccess {
+        object: next_obj,
+        property: next_prop,
+    } = &next_function.kind
+    else {
+        panic!("expected next type property access");
     };
     assert_eq!(next_prop, "next");
     assert!(matches!(
@@ -3345,15 +3364,15 @@ fn parse_struct_binding_pattern_named_fields() {
 
 #[test]
 fn parse_struct_property_access_chain() {
-    let (expr, remaining) = parse_operation_expression("foo.bar.baz").expect("parse");
+    let (expr, remaining) = parse_operation_expression("foo::bar::baz").expect("parse");
     assert!(remaining.trim().is_empty());
 
-    let ExpressionKind::PropertyAccess { object, property } = &expr.kind else {
+    let ExpressionKind::TypePropertyAccess { object, property } = &expr.kind else {
         panic!("expected outer property access");
     };
     assert_eq!(property, "baz");
 
-    let ExpressionKind::PropertyAccess {
+    let ExpressionKind::TypePropertyAccess {
         object: inner_object,
         property: inner_property,
     } = &object.kind
@@ -3379,8 +3398,19 @@ fn parse_struct_property_access_then_call() {
         &argument.kind,
         ExpressionKind::Identifier(Identifier { name, .. }) if name == "baz"
     ));
-    let ExpressionKind::PropertyAccess { object, property } = &function.kind else {
-        panic!("expected property access as function part");
+    let ExpressionKind::FunctionCall {
+        function: inner_function,
+        argument: inner_argument,
+    } = &function.kind
+    else {
+        panic!("expected call from dot desugaring");
+    };
+    assert!(matches!(
+        &inner_argument.kind,
+        ExpressionKind::Identifier(Identifier { name, .. }) if name == "foo"
+    ));
+    let ExpressionKind::TypePropertyAccess { object, property } = &inner_function.kind else {
+        panic!("expected type property access from dot desugaring");
     };
     assert_eq!(property, "bar");
     assert!(matches!(

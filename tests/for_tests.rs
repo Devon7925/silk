@@ -1,4 +1,4 @@
-use silk::parsing::{parse_block, BindingAnnotation, BindingPattern, ExpressionKind, Identifier};
+use silk::parsing::{BindingAnnotation, BindingPattern, ExpressionKind, Identifier, parse_block};
 
 #[test]
 fn for_loop_desugars_with_identifier_iterator() {
@@ -58,9 +58,11 @@ fn for_loop_parses_iterator_call_expression() {
     else {
         panic!("expected annotated iterator binding");
     };
-    assert!(annotations
-        .iter()
-        .any(|ann| matches!(ann, BindingAnnotation::Mutable(_))));
+    assert!(
+        annotations
+            .iter()
+            .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)))
+    );
     assert!(matches!(
         pattern.as_ref(),
         BindingPattern::Identifier(Identifier { name, .. }, _) if name == "__for_iter"

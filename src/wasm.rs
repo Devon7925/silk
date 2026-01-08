@@ -61,18 +61,14 @@ impl WasmType {
             WasmType::I32 => ValType::I32,
             WasmType::U8 => ValType::I32,
             WasmType::Struct(_fields) => {
-                let type_index = ctx
-                    .get_type_index(self)
-                    .expect("Type should be registered");
+                let type_index = ctx.get_type_index(self).expect("Type should be registered");
                 ValType::Ref(RefType {
                     nullable: true,
                     heap_type: HeapType::Concrete(type_index),
                 })
             }
             WasmType::Array { .. } => {
-                let type_index = ctx
-                    .get_type_index(self)
-                    .expect("Type should be registered");
+                let type_index = ctx.get_type_index(self).expect("Type should be registered");
                 ValType::Ref(RefType {
                     nullable: true,
                     heap_type: HeapType::Concrete(type_index),
@@ -214,12 +210,12 @@ fn lvalue_to_intermediate(target: &IntermediateLValue) -> IntermediateKind {
         IntermediateLValue::Identifier(identifier, _) => {
             IntermediateKind::Identifier(identifier.clone())
         }
-        IntermediateLValue::PropertyAccess { object, property, .. } => {
-            IntermediateKind::PropertyAccess {
-                object: Box::new(lvalue_to_intermediate(object)),
-                property: property.clone(),
-            }
-        }
+        IntermediateLValue::TypePropertyAccess {
+            object, property, ..
+        } => IntermediateKind::TypePropertyAccess {
+            object: Box::new(lvalue_to_intermediate(object)),
+            property: property.clone(),
+        },
         IntermediateLValue::ArrayIndex { array, index, .. } => IntermediateKind::ArrayIndex {
             array: Box::new(lvalue_to_intermediate(array)),
             index: Box::new((**index).clone()),
@@ -246,7 +242,7 @@ fn ensure_lvalue_local(
                     .with_span(span))
                 };
             }
-            IntermediateLValue::PropertyAccess { object, .. } => {
+            IntermediateLValue::TypePropertyAccess { object, .. } => {
                 current = object;
             }
             IntermediateLValue::ArrayIndex { array, .. } => {
@@ -687,7 +683,7 @@ fn collect_types(
                 IntermediateKind::Loop { body } => {
                     stack.push((body, false));
                 }
-                IntermediateKind::PropertyAccess { object, .. } => {
+                IntermediateKind::TypePropertyAccess { object, .. } => {
                     stack.push((object, false));
                 }
                 IntermediateKind::ArrayIndex { array, index } => {
@@ -899,7 +895,7 @@ fn infer_type_basic(
         Eval(IntermediateKind),
         FinishStruct { field_names: Vec<String> },
         FinishAssignment,
-        FinishPropertyAccess { property: String },
+        FinishTypePropertyAccess { property: String },
         FinishArrayIndex,
         FinishIntrinsicBinary { op: BinaryIntrinsicOperator },
     }
@@ -966,8 +962,8 @@ fn infer_type_basic(
                         })?;
                     results.push(ty);
                 }
-                IntermediateKind::PropertyAccess { object, property } => {
-                    stack.push(InferTask::FinishPropertyAccess { property });
+                IntermediateKind::TypePropertyAccess { object, property } => {
+                    stack.push(InferTask::FinishTypePropertyAccess { property });
                     stack.push(InferTask::Eval((*object).clone()));
                 }
                 IntermediateKind::ArrayIndex { array, index } => {
@@ -1031,7 +1027,7 @@ fn infer_type_basic(
                 }
                 results.push(value_type);
             }
-            InferTask::FinishPropertyAccess { property } => {
+            InferTask::FinishTypePropertyAccess { property } => {
                 let object_type = results
                     .pop()
                     .expect("infer_type_basic should have object type");
@@ -1047,7 +1043,11 @@ fn infer_type_basic(
                             .with_span(SourceSpan::default()));
                         }
                     }
-                    WasmType::Array { element, field_names, .. } => {
+                    WasmType::Array {
+                        element,
+                        field_names,
+                        ..
+                    } => {
                         if field_names.iter().any(|name| name == &property) {
                             results.push(*element);
                         } else {
@@ -1059,7 +1059,7 @@ fn infer_type_basic(
                         }
                     }
                     WasmType::I32 | WasmType::U8 => {
-                        return Err(Diagnostic::new("Property access on non-struct type")
+                        return Err(Diagnostic::new("Type property access on non-struct type")
                             .with_span(SourceSpan::default()));
                     }
                 }
@@ -1104,7 +1104,7 @@ fn infer_type_impl(
         Eval(IntermediateKind),
         FinishStruct { field_names: Vec<String> },
         FinishAssignment,
-        FinishPropertyAccess { property: String },
+        FinishTypePropertyAccess { property: String },
         FinishArrayIndex,
         FinishLoop { body: IntermediateKind },
         FinishIntrinsicBinary { op: BinaryIntrinsicOperator },
@@ -1175,8 +1175,8 @@ fn infer_type_impl(
                         })?;
                     results.push(ty);
                 }
-                IntermediateKind::PropertyAccess { object, property } => {
-                    stack.push(InferTask::FinishPropertyAccess { property });
+                IntermediateKind::TypePropertyAccess { object, property } => {
+                    stack.push(InferTask::FinishTypePropertyAccess { property });
                     stack.push(InferTask::Eval((*object).clone()));
                 }
                 IntermediateKind::ArrayIndex { array, index } => {
@@ -1240,7 +1240,7 @@ fn infer_type_impl(
                 }
                 results.push(value_type);
             }
-            InferTask::FinishPropertyAccess { property } => {
+            InferTask::FinishTypePropertyAccess { property } => {
                 let object_type = results
                     .pop()
                     .expect("infer_type_impl should have object type");
@@ -1256,7 +1256,11 @@ fn infer_type_impl(
                             .with_span(SourceSpan::default()));
                         }
                     }
-                    WasmType::Array { element, field_names, .. } => {
+                    WasmType::Array {
+                        element,
+                        field_names,
+                        ..
+                    } => {
                         if field_names.iter().any(|name| name == &property) {
                             results.push(*element);
                         } else {
@@ -1268,7 +1272,7 @@ fn infer_type_impl(
                         }
                     }
                     WasmType::I32 | WasmType::U8 => {
-                        return Err(Diagnostic::new("Property access on non-struct type")
+                        return Err(Diagnostic::new("Type property access on non-struct type")
                             .with_span(SourceSpan::default()));
                     }
                 }
@@ -1336,8 +1340,7 @@ fn extract_function_params(
                 .map(|name| (name, (*element.clone())))
                 .collect()),
             _ => Err(
-                Diagnostic::new("Struct pattern requires struct parameter type")
-                    .with_span(span),
+                Diagnostic::new("Struct pattern requires struct parameter type").with_span(span),
             ),
         }
     }
@@ -1420,7 +1423,7 @@ fn collect_locals(
     ) {
         match target {
             IntermediateLValue::Identifier(_, _) => {}
-            IntermediateLValue::PropertyAccess { object, .. } => {
+            IntermediateLValue::TypePropertyAccess { object, .. } => {
                 collect_lvalue_exprs(object, stack);
             }
             IntermediateLValue::ArrayIndex { array, index, .. } => {
@@ -1486,7 +1489,7 @@ fn collect_locals(
                 stack.push(index);
                 stack.push(array);
             }
-            IntermediateKind::PropertyAccess { object, .. } => {
+            IntermediateKind::TypePropertyAccess { object, .. } => {
                 stack.push(object);
             }
             IntermediateKind::If {
@@ -1543,8 +1546,7 @@ fn flatten_call_arguments(
                 .map(|name| (name, (*element.clone())))
                 .collect()),
             _ => Err(
-                Diagnostic::new("Struct pattern requires struct parameter type")
-                    .with_span(span),
+                Diagnostic::new("Struct pattern requires struct parameter type").with_span(span),
             ),
         }
     }
@@ -1570,7 +1572,7 @@ fn flatten_call_arguments(
                             ))
                             .with_span(sub_pattern.span())
                         })?;
-                    let field_expr = IntermediateKind::PropertyAccess {
+                    let field_expr = IntermediateKind::TypePropertyAccess {
                         object: Box::new(current_expr.clone()),
                         property: field_id.name.clone(),
                     };
@@ -1704,10 +1706,8 @@ fn emit_expression(
                         tasks.push(EmitTask::Instr(Instruction::LocalTee(local_index)));
                         tasks.push(EmitTask::Eval((*value).clone()));
                     }
-                    IntermediateLValue::PropertyAccess {
-                        object,
-                        property,
-                        ..
+                    IntermediateLValue::TypePropertyAccess {
+                        object, property, ..
                     } => {
                         let object_expr = lvalue_to_intermediate(object);
                         let object_type =
@@ -1739,10 +1739,7 @@ fn emit_expression(
                                 tasks.push(EmitTask::Eval((*value).clone()));
                                 tasks.push(EmitTask::Eval(object_expr));
                             }
-                            WasmType::Array {
-                                field_names,
-                                ..
-                            } => {
+                            WasmType::Array { field_names, .. } => {
                                 let field_index = field_names
                                     .iter()
                                     .position(|name| name == property)
@@ -1760,7 +1757,9 @@ fn emit_expression(
                                 tasks.push(EmitTask::Eval(full_target_expr));
                                 tasks.push(EmitTask::Instr(Instruction::ArraySet(type_index)));
                                 tasks.push(EmitTask::Eval((*value).clone()));
-                                tasks.push(EmitTask::Instr(Instruction::I32Const(field_index as i32)));
+                                tasks.push(EmitTask::Instr(Instruction::I32Const(
+                                    field_index as i32,
+                                )));
                                 tasks.push(EmitTask::Eval(object_expr));
                             }
                             WasmType::I32 | WasmType::U8 => {
@@ -1780,7 +1779,8 @@ fn emit_expression(
                                 .with_span(SourceSpan::default()));
                         };
 
-                        let index_type = infer_type(index.as_ref(), locals_types, function_return_types)?;
+                        let index_type =
+                            infer_type(index.as_ref(), locals_types, function_return_types)?;
                         if index_type != WasmType::I32 {
                             return Err(Diagnostic::new("Array index must be i32".to_string())
                                 .with_span(SourceSpan::default()));
@@ -1831,8 +1831,8 @@ fn emit_expression(
                             infer_type(left.as_ref(), locals_types, function_return_types)?;
                         let right_type =
                             infer_type(right.as_ref(), locals_types, function_return_types)?;
-                        let is_u8 = matches!(left_type, WasmType::U8)
-                            && matches!(right_type, WasmType::U8);
+                        let is_u8 =
+                            matches!(left_type, WasmType::U8) && matches!(right_type, WasmType::U8);
                         let op_instr = match op {
                             BinaryIntrinsicOperator::I32Add => Instruction::I32Add,
                             BinaryIntrinsicOperator::I32Subtract => Instruction::I32Sub,
@@ -2127,8 +2127,7 @@ fn emit_expression(
                 }
                 IntermediateKind::Struct(items) => {
                     let mut sorted_items = items.clone();
-                    sorted_items
-                        .sort_by(|(a_name, _), (b_name, _)| a_name.name.cmp(&b_name.name));
+                    sorted_items.sort_by(|(a_name, _), (b_name, _)| a_name.name.cmp(&b_name.name));
 
                     let mut field_types = Vec::new();
                     for (name, value) in &sorted_items {
@@ -2136,13 +2135,12 @@ fn emit_expression(
                         field_types.push((name.name.clone(), ty));
                     }
 
-                    let type_index =
-                        type_ctx.get_type_index(&WasmType::Struct(field_types)).ok_or_else(
-                            || {
-                                Diagnostic::new("Struct type not found in context")
-                                    .with_span(SourceSpan::default())
-                            },
-                        )?;
+                    let type_index = type_ctx
+                        .get_type_index(&WasmType::Struct(field_types))
+                        .ok_or_else(|| {
+                            Diagnostic::new("Struct type not found in context")
+                                .with_span(SourceSpan::default())
+                        })?;
 
                     tasks.push(EmitTask::Instr(Instruction::StructNew(type_index)));
 
@@ -2173,7 +2171,7 @@ fn emit_expression(
                         tasks.push(EmitTask::Eval(value));
                     }
                 }
-                IntermediateKind::PropertyAccess { object, property } => {
+                IntermediateKind::TypePropertyAccess { object, property } => {
                     let object_type = infer_type(&object, locals_types, function_return_types)?;
                     match &object_type {
                         WasmType::Struct(fields) => {
@@ -2182,8 +2180,11 @@ fn emit_expression(
                                 .position(|(n, _)| n == &property)
                                 .and_then(|index| fields.get(index).map(|(_, ty)| (index, ty)))
                                 .ok_or_else(|| {
-                                    Diagnostic::new(format!("Field `{}` not found in struct", property))
-                                        .with_span(SourceSpan::default())
+                                    Diagnostic::new(format!(
+                                        "Field `{}` not found in struct",
+                                        property
+                                    ))
+                                    .with_span(SourceSpan::default())
                                 })?;
 
                             let type_index = type_ctx
@@ -2203,13 +2204,20 @@ fn emit_expression(
                             tasks.push(EmitTask::Instr(instr));
                             tasks.push(EmitTask::Eval((*object).clone()));
                         }
-                        WasmType::Array { element, field_names, .. } => {
+                        WasmType::Array {
+                            element,
+                            field_names,
+                            ..
+                        } => {
                             let field_index = field_names
                                 .iter()
                                 .position(|name| name == &property)
                                 .ok_or_else(|| {
-                                    Diagnostic::new(format!("Field `{}` not found in array", property))
-                                        .with_span(SourceSpan::default())
+                                    Diagnostic::new(format!(
+                                        "Field `{}` not found in array",
+                                        property
+                                    ))
+                                    .with_span(SourceSpan::default())
                                 })?;
 
                             let type_index = type_ctx
@@ -2225,7 +2233,7 @@ fn emit_expression(
                             tasks.push(EmitTask::Eval((*object).clone()));
                         }
                         WasmType::I32 | WasmType::U8 => {
-                            return Err(Diagnostic::new("Property access on non-struct type")
+                            return Err(Diagnostic::new("Type property access on non-struct type")
                                 .with_span(SourceSpan::default()));
                         }
                     }
@@ -2354,7 +2362,7 @@ fn expression_does_diverge(
                         visited: false,
                     });
                 }
-                IntermediateKind::PropertyAccess { object, .. } => {
+                IntermediateKind::TypePropertyAccess { object, .. } => {
                     stack.push(Frame {
                         expr: object,
                         possibility: frame.possibility,
@@ -2462,7 +2470,7 @@ fn expression_does_diverge(
             | IntermediateKind::Assignment { .. }
             | IntermediateKind::FunctionCall { .. }
             | IntermediateKind::Loop { .. }
-            | IntermediateKind::PropertyAccess { .. }
+            | IntermediateKind::TypePropertyAccess { .. }
             | IntermediateKind::ArrayIndex { .. }
             | IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(..)) => {
                 results.pop().unwrap_or(false)
@@ -2536,7 +2544,7 @@ fn collect_break_values(expr: &IntermediateKind) -> Vec<IntermediateKind> {
             IntermediateKind::Loop { body } => {
                 stack.push(body);
             }
-            IntermediateKind::PropertyAccess { object, .. } => {
+            IntermediateKind::TypePropertyAccess { object, .. } => {
                 stack.push(object);
             }
             IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
