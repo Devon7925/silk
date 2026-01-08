@@ -9,7 +9,7 @@
 * [x] break;
 * [x] break value;
 * [x] return;
-* [ ] for (Iterator trait)
+* [x] for (Iterator trait)
 * [x] match
 * [x] replace old match with new match
 
@@ -22,13 +22,13 @@ param |> match {
 
 * [ ] mutable borrow
 
-* [ ] Traits
-* [ ] User implementation
-* [ ] User trait implementation
+* [x] Traits
+* [x] User implementation
+* [x] User trait implementation
 
-* [ ] Array
-* [ ] Char
-* [ ] String
+* [x] Array
+* [x] Char
+* [x] String
 * [ ] Memory
 * [ ] assembly insertion
 * [ ] Type hint verification
