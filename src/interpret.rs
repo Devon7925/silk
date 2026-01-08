@@ -1115,10 +1115,13 @@ pub fn interpret_expression(
             }
             Frame::BindingFinish => {
                 let value = values.pop().unwrap();
-                let mut eval_context = context.clone();
-                force_inline_bindings(&mut eval_context);
-                let value = interpret_expression(value.clone(), &mut eval_context)
-                    .unwrap_or(value);
+                let value = if expression_contains_loop(&value) {
+                    value
+                } else {
+                    let mut eval_context = context.clone();
+                    force_inline_bindings(&mut eval_context);
+                    interpret_expression(value.clone(), &mut eval_context).unwrap_or(value)
+                };
                 let interpreted_pattern = pattern_stack.pop().unwrap();
                 let mut bound_type = None;
                 if let Ok(value_type) = get_type_of_expression(&value, context) {
@@ -3502,6 +3505,122 @@ fn expression_contains_external_mutation(expr: &Expression, context: &Context) -
     false
 }
 
+fn expression_contains_loop(expr: &Expression) -> bool {
+    let mut stack = vec![expr];
+    while let Some(expr) = stack.pop() {
+        match &expr.kind {
+            ExpressionKind::Loop { .. } => return true,
+            ExpressionKind::Block(items) => {
+                for item in items.iter() {
+                    stack.push(item);
+                }
+            }
+            ExpressionKind::Struct(items) => {
+                for (_, item) in items.iter() {
+                    stack.push(item);
+                }
+            }
+            ExpressionKind::EnumType(items) => {
+                for (_, item) in items.iter() {
+                    stack.push(item);
+                }
+            }
+            ExpressionKind::EnumValue {
+                enum_type, payload, ..
+            } => {
+                stack.push(enum_type);
+                stack.push(payload);
+            }
+            ExpressionKind::EnumConstructor {
+                enum_type,
+                payload_type,
+                ..
+            } => {
+                stack.push(enum_type);
+                stack.push(payload_type);
+            }
+            ExpressionKind::IntrinsicOperation(op) => match op {
+                IntrinsicOperation::Binary(left, right, _) => {
+                    stack.push(left);
+                    stack.push(right);
+                }
+                IntrinsicOperation::Unary(operand, _) => {
+                    stack.push(operand);
+                }
+            },
+            ExpressionKind::Operation { left, right, .. } => {
+                stack.push(left);
+                stack.push(right);
+            }
+            ExpressionKind::Match { value, branches } => {
+                for (_, branch) in branches.iter() {
+                    stack.push(branch);
+                }
+                stack.push(value);
+            }
+            ExpressionKind::Binding(binding) => {
+                stack.push(&binding.expr);
+            }
+            ExpressionKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                stack.push(condition);
+                stack.push(then_branch);
+                stack.push(else_branch);
+            }
+            ExpressionKind::Function {
+                return_type, body, ..
+            } => {
+                if let Some(return_type) = return_type {
+                    stack.push(return_type);
+                }
+                stack.push(body);
+            }
+            ExpressionKind::FunctionType {
+                parameter,
+                return_type,
+                ..
+            } => {
+                stack.push(parameter);
+                stack.push(return_type);
+            }
+            ExpressionKind::AttachImplementation {
+                type_expr,
+                implementation,
+                ..
+            } => {
+                stack.push(type_expr);
+                stack.push(implementation);
+            }
+            ExpressionKind::FunctionCall {
+                function, argument, ..
+            } => {
+                stack.push(function);
+                stack.push(argument);
+            }
+            ExpressionKind::Assignment { expr, .. } => {
+                stack.push(expr);
+            }
+            ExpressionKind::TypePropertyAccess { object, .. } => {
+                stack.push(object);
+            }
+            ExpressionKind::ArrayIndex { array, index } => {
+                stack.push(array);
+                stack.push(index);
+            }
+            ExpressionKind::Diverge { value, .. } => {
+                stack.push(value);
+            }
+            ExpressionKind::IntrinsicType(_)
+            | ExpressionKind::Literal(_)
+            | ExpressionKind::Identifier(_) => {}
+        }
+    }
+    false
+}
+
 fn pattern_contains_compile_time_data(pattern: &BindingPattern) -> bool {
     let mut stack = vec![pattern];
     while let Some(pattern) = stack.pop() {
@@ -5123,20 +5242,7 @@ fn bind_pattern_from_value(
                                 }
                             }
                             _ if is_resolved_constant(bound_value) => bound_value.clone(),
-                            _ => {
-                                let mut eval_context = context.clone();
-                                force_inline_bindings(&mut eval_context);
-                                if let Ok(evaluated) =
-                                    interpret_expression(bound_value.clone(), &mut eval_context)
-                                {
-                                    match evaluated.kind {
-                                        ExpressionKind::EnumValue { .. } => evaluated,
-                                        _ => value.clone(),
-                                    }
-                                } else {
-                                    value.clone()
-                                }
-                            }
+                            _ => value.clone(),
                         }
                     } else {
                         value.clone()

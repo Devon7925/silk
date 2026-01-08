@@ -1,4 +1,4 @@
-import { test, expect, afterAll } from "bun:test";
+import { test, expect, afterAll, beforeAll } from "bun:test";
 import { join } from "path";
 import { writeFileSync, unlinkSync } from "fs";
 
@@ -6,6 +6,19 @@ const ROOT_DIR = join(import.meta.dir, "..");
 const FIXTURES_DIR = join(ROOT_DIR, "fixtures");
 const TEMP_FILES = new Set<string>();
 const TEST_TIMEOUT_MS = 20000;
+const SILK_BIN = join(ROOT_DIR, "target", "debug", "silk");
+
+beforeAll(async () => {
+    const proc = Bun.spawn(["cargo", "build"], {
+        cwd: ROOT_DIR,
+        stderr: "pipe",
+    });
+    const exitCode = await proc.exited;
+    if (exitCode !== 0) {
+        const stderr = await new Response(proc.stderr).text();
+        throw new Error(`Build failed:\n${stderr}`);
+    }
+});
 
 async function compileAndLoad(silkCode: string, basename: string) {
     const wasmPath = join(FIXTURES_DIR, `${basename}.wasm`);
@@ -15,7 +28,7 @@ async function compileAndLoad(silkCode: string, basename: string) {
 
     writeFileSync(silkPath, silkCode);
 
-    const proc = Bun.spawn(["cargo", "run", "--", silkPath, "-o", wasmPath], {
+    const proc = Bun.spawn([SILK_BIN, silkPath, "-o", wasmPath], {
         cwd: ROOT_DIR,
         stderr: "pipe",
     });
