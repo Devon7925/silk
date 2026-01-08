@@ -6053,7 +6053,6 @@ fn add_builtin_library(context: &mut Context) {
     interpret_library_expression(expression, context).expect("Failed to interpret builtin library");
 }
 
-
 fn interpret_library_expression(expr: Expression, context: &mut Context) -> Result<(), Diagnostic> {
     match expr {
         Expression {
