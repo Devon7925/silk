@@ -150,6 +150,57 @@ fn intrinsic_type_expr(ty: IntrinsicType) -> Expression {
     Expression::new(ExpressionKind::IntrinsicType(ty), dummy_span())
 }
 
+fn range_operator_intrinsic() -> (Identifier, Expression) {
+    let typed_pattern = |name: &str| {
+        BindingPattern::TypeHint(
+            Box::new(BindingPattern::Identifier(
+                Identifier::new(name.to_string()),
+                dummy_span(),
+            )),
+            Box::new(intrinsic_type_expr(IntrinsicType::I32)),
+            dummy_span(),
+        )
+    };
+    let range_type = ExpressionKind::Struct(vec![
+        (
+            Identifier::new("current"),
+            intrinsic_type_expr(IntrinsicType::I32),
+        ),
+        (
+            Identifier::new("end"),
+            intrinsic_type_expr(IntrinsicType::I32),
+        ),
+    ])
+    .with_span(dummy_span());
+    let return_type = ExpressionKind::FunctionType {
+        parameter: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
+        return_type: Box::new(range_type.clone()),
+    }
+    .with_span(dummy_span());
+    let body = ExpressionKind::Function {
+        parameter: typed_pattern("other"),
+        return_type: Some(Box::new(range_type.clone())),
+        body: Box::new(
+            ExpressionKind::Struct(vec![
+                (Identifier::new("current"), identifier_expr("self")),
+                (Identifier::new("end"), identifier_expr("other")),
+            ])
+            .with_span(dummy_span()),
+        ),
+    }
+    .with_span(dummy_span());
+
+    (
+        Identifier::new("..".to_string()),
+        ExpressionKind::Function {
+            parameter: typed_pattern("self"),
+            return_type: Some(Box::new(return_type)),
+            body: Box::new(body),
+        }
+        .with_span(dummy_span()),
+    )
+}
+
 fn ensure_boolean_condition(
     condition: &Expression,
     span: SourceSpan,
@@ -3636,15 +3687,52 @@ pub(crate) fn get_trait_prop_of_type(
             .map(|(_, expr)| expr.clone())
     }
 
+    fn find_matching_impl_field(
+        value_type: &Expression,
+        trait_prop: &str,
+        context: &Context,
+    ) -> Option<Expression> {
+        for scope in context.bindings.iter().rev() {
+            for (binding, _) in scope.values() {
+                let BindingContext::Bound(value, _, _) = binding else {
+                    continue;
+                };
+                let ExpressionKind::AttachImplementation {
+                    type_expr,
+                    implementation,
+                    ..
+                } = &value.kind
+                else {
+                    continue;
+                };
+                if !types_equivalent(&type_expr.kind, &value_type.kind) {
+                    continue;
+                }
+                let ExpressionKind::Struct(ref items) = implementation.kind else {
+                    continue;
+                };
+                if let Some(field) = get_struct_field(items, trait_prop) {
+                    return Some(field);
+                }
+            }
+        }
+        None
+    }
+
     let mut current = value_type;
     loop {
         match &current.kind {
             ExpressionKind::Struct(items) => {
-                return get_struct_field(items, trait_prop)
-                    .map(|expr| (expr, TraitPropSource::StructField))
-                    .ok_or_else(|| {
-                        diagnostic(format!("Missing field {} on type", trait_prop), span)
-                    });
+                if let Some(field) = get_struct_field(items, trait_prop) {
+                    return Ok((field, TraitPropSource::StructField));
+                }
+                if let Some(field) = find_matching_impl_field(current, trait_prop, context) {
+                    return Ok((field, TraitPropSource::ImplementationField));
+                }
+                return Err(diagnostic(
+                    format!("Missing field {} on type", trait_prop),
+                    span,
+                ));
             }
             ExpressionKind::AttachImplementation {
                 type_expr,
@@ -5630,6 +5718,7 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
                                 BinaryIntrinsicOperator::I32GreaterThanOrEqual,
                                 IntrinsicType::I32,
                             ),
+                            range_operator_intrinsic(),
                         ])
                         .with_span(dummy_span()),
                     ),
@@ -5938,6 +6027,18 @@ Option := (T: type) => (
 Iterator := (T: type) => (
     { iter_ty = type, next = (T) -> Option(type) }
 );
+
+Range := { current = i32, end = i32 };
+Range := Range @ {
+    iter_ty = i32,
+    next = (mut self: Range) => (
+        if self.current < self.end then (
+            value := self.current;
+            self.current = self.current + 1;
+            Option(i32)::Some(value)
+        ) else Option(i32)::None
+    ),
+};
 "#;
 
 fn add_builtin_library(context: &mut Context) {
@@ -5951,6 +6052,7 @@ fn add_builtin_library(context: &mut Context) {
     context.bindings.push(HashMap::new());
     interpret_library_expression(expression, context).expect("Failed to interpret builtin library");
 }
+
 
 fn interpret_library_expression(expr: Expression, context: &mut Context) -> Result<(), Diagnostic> {
     match expr {
