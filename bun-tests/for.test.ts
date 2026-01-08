@@ -36,8 +36,9 @@ RangeIter := { value = i32, limit = i32 } @ {
     iter_ty = i32,
     next = (mut self: { value = i32, limit = i32 }) => (
         if self.value < self.limit then (
+            current := self.value;
             self.value = self.value + 1;
-            Option(i32)::Some(self.value)
+            Option(i32)::Some(current)
         ) else Option(i32)::None
     ),
 };
@@ -86,7 +87,7 @@ test("for loops support struct patterns", async () => {
 
     (export wasm) sum_pairs := (limit: i32) => (
         mut acc := 0;
-        for { left, right } in make_pairs(limit) do (
+        for { left: i32, right: i32 } in make_pairs(limit) do (
             acc = acc + left + right;
         );
         acc

@@ -1743,10 +1743,12 @@ pub fn interpret_expression(
                 context.in_loop = was_in_loop_before;
                 let possibly_mutated_values = get_possibly_mutated_values(&interpreted_body);
                 for possibly_mutated_value in possibly_mutated_values {
-                    let binding = context.get_identifier(&possibly_mutated_value).unwrap();
-                    if let Some(binding_ty) = binding.0.get_bound_type(context)? {
-                        let binding = context.get_mut_identifier(&possibly_mutated_value).unwrap();
-                        binding.0 = BindingContext::UnboundWithType(binding_ty)
+                    if let Some(binding) = context.get_identifier(&possibly_mutated_value) {
+                        if let Some(binding_ty) = binding.0.get_bound_type(context)? {
+                            let binding =
+                                context.get_mut_identifier(&possibly_mutated_value).unwrap();
+                            binding.0 = BindingContext::UnboundWithType(binding_ty)
+                        }
                     }
                 }
                 values.push(
@@ -1834,11 +1836,36 @@ pub fn interpret_expression(
                     ..
                 }) = effective_function
                 {
+                    let returns_compile_time_type = return_type
+                        .as_ref()
+                        .is_some_and(|ty| type_expression_contains_compile_time_data(ty.as_ref()));
                     let pattern_is_compile_time = pattern_contains_compile_time_data(&parameter);
+                    let argument_is_const = is_resolved_constant(&argument_value);
                     let returns_function_value =
                         matches!(body.kind, ExpressionKind::Function { .. });
+                    let captures_outer_scope = {
+                        let mut bound = HashSet::new();
+                        collect_bound_identifiers_from_pattern(&parameter, &mut bound);
+                        let mut used = identifiers_used(&body);
+                        let created = identifiers_created_or_modified(&body);
+                        used.retain(|id| !bound.contains(id) && !created.contains(id));
+                        !used.is_empty()
+                    };
+                    let parameter_is_mutable = pattern_has_mutable_annotation(&parameter);
+                    let mut should_inline = returns_compile_time_type
+                        || pattern_is_compile_time
+                        || argument_is_const
+                        || returns_function_value
+                        || captures_outer_scope;
+                    if parameter_is_mutable
+                        && !returns_compile_time_type
+                        && !pattern_is_compile_time
+                        && !argument_is_const
+                    {
+                        should_inline = false;
+                    }
 
-                    if pattern_is_compile_time || returns_function_value {
+                    if should_inline {
                         let mut call_context = context.clone();
                         bind_pattern_from_value(
                             parameter,
@@ -1876,7 +1903,9 @@ pub fn interpret_expression(
                         }
                         .with_span(span.merge(&function_value.span)),
                     );
-                } else if is_resolved_constant(&function_value) {
+                } else if is_resolved_constant(&function_value)
+                    && !matches!(function_value.kind, ExpressionKind::Function { .. })
+                {
                     return Err(diagnostic("Attempted to call a non-function value", span));
                 } else {
                     values.push(
@@ -1989,8 +2018,11 @@ pub fn interpret_expression(
                 ) {
                     object_type = get_type_of_expression(&evaluated_object, context)?;
                 }
-                let trait_prop = get_trait_prop_of_type(&object_type, &property, span, context)?;
-                if matches!(&trait_prop.kind, ExpressionKind::Function { .. }) {
+                let (trait_prop, prop_source) =
+                    get_trait_prop_of_type(&object_type, &property, span, context)?;
+                if matches!(&trait_prop.kind, ExpressionKind::Function { .. })
+                    && matches!(prop_source, TraitPropSource::ImplementationField)
+                {
                     stack.push(Frame::Eval(
                         ExpressionKind::FunctionCall {
                             function: Box::new(trait_prop),
@@ -1998,8 +2030,24 @@ pub fn interpret_expression(
                         }
                         .with_span(span),
                     ));
-                } else {
+                } else if matches!(prop_source, TraitPropSource::ImplementationField) {
                     values.push(trait_prop);
+                } else if matches!(prop_source, TraitPropSource::TraitRequirement) {
+                    values.push(
+                        ExpressionKind::PropertyAccess {
+                            object: Box::new(evaluated_object),
+                            property,
+                        }
+                        .with_span(span),
+                    );
+                } else {
+                    values.push(
+                        ExpressionKind::PropertyAccess {
+                            object: Box::new(evaluated_object),
+                            property,
+                        }
+                        .with_span(span),
+                    );
                 }
             }
         }
@@ -2019,7 +2067,10 @@ fn get_possibly_mutated_values(body: &Expression) -> HashSet<Identifier> {
     })
 }
 
-fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expression, Diagnostic> {
+pub(crate) fn get_type_of_expression(
+    expr: &Expression,
+    context: &Context,
+) -> Result<Expression, Diagnostic> {
     let resolve_intrinsic_type =
         |name: &str, span: SourceSpan, context: &Context| -> Result<Expression, Diagnostic> {
             let identifier = Identifier::new(name.to_string());
@@ -2104,7 +2155,16 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
                         results.push(*enum_type.clone());
                     }
                     BindingPattern::TypeHint(_, type_expr, _) => {
-                        results.push(*type_expr.clone());
+                        let resolved = resolve_type_alias_expression(type_expr.as_ref(), context);
+                        if matches!(resolved.kind, ExpressionKind::PropertyAccess { .. }) {
+                            if let Ok(resolved_type) = get_type_of_expression(&resolved, context) {
+                                results.push(resolved_type);
+                            } else {
+                                results.push(resolved);
+                            }
+                        } else {
+                            results.push(resolved);
+                        }
                     }
                     BindingPattern::Annotated { pattern, .. } => {
                         stack.push(Frame::Enter(pattern));
@@ -2891,12 +2951,17 @@ fn get_type_of_expression(expr: &Expression, context: &Context) -> Result<Expres
                 context,
             } => {
                 let object_type = results.pop().unwrap();
-                let trait_prop = get_trait_prop_of_type(&object_type, &property, span, &context)?;
-                if let ExpressionKind::Function { return_type, .. } = &trait_prop.kind {
-                    results.push(resolve_type_alias_expression(
-                        return_type.as_ref().unwrap().as_ref(),
-                        &context,
-                    ));
+                let (trait_prop, prop_source) =
+                    get_trait_prop_of_type(&object_type, &property, span, &context)?;
+                if matches!(prop_source, TraitPropSource::ImplementationField) {
+                    if let ExpressionKind::Function { return_type, .. } = &trait_prop.kind {
+                        results.push(resolve_type_alias_expression(
+                            return_type.as_ref().unwrap().as_ref(),
+                            &context,
+                        ));
+                    } else {
+                        results.push(trait_prop);
+                    }
                 } else {
                     results.push(trait_prop);
                 }
@@ -3503,12 +3568,18 @@ fn collect_pattern_value_bindings(
     Ok(())
 }
 
-fn get_trait_prop_of_type(
+pub(crate) enum TraitPropSource {
+    StructField,
+    ImplementationField,
+    TraitRequirement,
+}
+
+pub(crate) fn get_trait_prop_of_type(
     value_type: &Expression,
     trait_prop: &str,
     span: SourceSpan,
     context: &Context,
-) -> Result<Expression, Diagnostic> {
+) -> Result<(Expression, TraitPropSource), Diagnostic> {
     fn get_struct_field(
         items: &[(Identifier, Expression)],
         trait_prop: &str,
@@ -3523,10 +3594,12 @@ fn get_trait_prop_of_type(
     loop {
         match &current.kind {
             ExpressionKind::Struct(items) => {
-                return get_struct_field(items, trait_prop).ok_or_else(|| {
-                    diagnostic(format!("Missing field {} on type", trait_prop), span)
-                });
-            }
+                    return get_struct_field(items, trait_prop)
+                        .map(|expr| (expr, TraitPropSource::StructField))
+                        .ok_or_else(|| {
+                        diagnostic(format!("Missing field {} on type", trait_prop), span)
+                    });
+                }
             ExpressionKind::AttachImplementation {
                 type_expr,
                 implementation,
@@ -3535,7 +3608,7 @@ fn get_trait_prop_of_type(
                 if let ExpressionKind::Struct(ref items) = implementation.kind
                     && let Some(field) = get_struct_field(items, trait_prop)
                 {
-                    return Ok(field);
+                    return Ok((field, TraitPropSource::ImplementationField));
                 }
 
                 current = type_expr;
@@ -3559,7 +3632,7 @@ fn get_trait_prop_of_type(
                             return required_fields
                                 .iter()
                                 .find(|(field_id, _)| field_id.name == trait_prop)
-                                .map(|(_, expr)| expr.clone())
+                                .map(|(_, expr)| (expr.clone(), TraitPropSource::TraitRequirement))
                                 .ok_or_else(|| {
                                     diagnostic(
                                         format!(
@@ -3647,7 +3720,8 @@ fn ensure_trait_requirements(
         resolve_trait_struct(trait_expr, evaluated_type.clone(), context, span)?;
 
     for (field_id, expected_field_value) in required_fields {
-        let field_value = get_trait_prop_of_type(&evaluated_type, &field_id.name, span, context)
+        let (field_value, _prop_source) =
+            get_trait_prop_of_type(&evaluated_type, &field_id.name, span, context)
             .map_err(|_| {
                 diagnostic(
                     format!(
@@ -4694,9 +4768,15 @@ fn bind_pattern_blanks(
                 payload,
                 ..
             } => {
-                let type_hint = frame
-                    .type_hint
-                    .or_else(|| resolve_enum_type_expression(&enum_type, context));
+                let type_hint = frame.type_hint.or_else(|| {
+                    resolve_enum_type_expression(&enum_type, context).or_else(|| {
+                        get_type_of_expression(&enum_type, context)
+                            .ok()
+                            .and_then(|expr| {
+                                matches!(expr.kind, ExpressionKind::EnumType(_)).then_some(expr)
+                            })
+                    })
+                });
                 let payload_hint = type_hint
                     .as_ref()
                     .and_then(|hint| enum_variant_info(hint, &variant).map(|(_, ty)| ty));
@@ -4710,10 +4790,16 @@ fn bind_pattern_blanks(
                 }
             }
             BindingPattern::TypeHint(inner, type_hint, _) => {
+                let resolved = resolve_type_alias_expression(type_hint.as_ref(), context);
+                let resolved = if matches!(resolved.kind, ExpressionKind::PropertyAccess { .. }) {
+                    get_type_of_expression(&resolved, context).unwrap_or(resolved)
+                } else {
+                    resolved
+                };
                 stack.push(Frame {
                     pattern: *inner,
                     passed_annotations: frame.passed_annotations,
-                    type_hint: Some(*type_hint),
+                    type_hint: Some(resolved),
                 });
             }
             BindingPattern::Annotated {

@@ -1543,8 +1543,6 @@ impl<'a> Parser<'a> {
                                             "Expected for iterator while parsing",
                                         )
                                     })?;
-                                let element_pattern =
-                                    pattern_expression_to_binding_pattern(pattern_expr.clone())?;
                                 let iterator_identifier = match &iterator_expr.kind {
                                     ExpressionKind::Identifier(identifier) => identifier.clone(),
                                     _ => Identifier::new("__for_iter"),
@@ -1577,6 +1575,8 @@ impl<'a> Parser<'a> {
                                     property: "iter_ty".to_string(),
                                 }
                                 .with_span(overall_span);
+                                let element_pattern =
+                                    pattern_expression_to_binding_pattern(pattern_expr.clone())?;
                                 let option_call = ExpressionKind::FunctionCall {
                                     function: Box::new(
                                         ExpressionKind::Identifier(Identifier::new("Option"))
