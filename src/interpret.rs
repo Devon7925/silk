@@ -1118,8 +1118,9 @@ pub fn interpret_expression(
                     )?;
                     bound_type = Some(value_type);
                 }
-                let value_is_constant =
-                    is_resolved_constant(&value) || function_contains_compile_time_data(&value);
+                let value_is_constant = is_resolved_constant(&value)
+                    || function_contains_compile_time_data(&value)
+                    || is_type_expression(&value.kind);
                 let (bound_success, preserve_behavior) = bind_pattern_from_value(
                     interpreted_pattern.clone(),
                     &value,
@@ -1401,7 +1402,9 @@ pub fn interpret_expression(
                 let evaluated_operand = values.pop().unwrap();
                 let op_requires_const_argument = match operator {
                     UnaryIntrinsicOperator::BooleanNot => true,
-                    UnaryIntrinsicOperator::EnumFromStruct => true,
+                    UnaryIntrinsicOperator::EnumFromStruct => {
+                        !is_type_expression(&evaluated_operand.kind)
+                    }
                     UnaryIntrinsicOperator::MatchFromStruct => false,
                     UnaryIntrinsicOperator::UseFromString => true,
                 };
@@ -2065,8 +2068,11 @@ pub fn interpret_expression(
                     continue;
                 }
 
-                if let Some(enum_type) =
-                    resolve_enum_type_expression(&original_object, &mut context.clone())
+                let resolved_enum =
+                    resolve_enum_type_expression(&evaluated_object, &mut context.clone()).or_else(
+                        || resolve_enum_type_expression(&original_object, &mut context.clone()),
+                    );
+                if let Some(enum_type) = resolved_enum
                     && let Some((variant_index, payload_type)) =
                         enum_variant_info(&enum_type, &enum_property)
                 {
@@ -3024,7 +3030,11 @@ pub(crate) fn get_type_of_expression(
             } => {
                 let object_type = results.pop().unwrap();
                 let enum_property = Identifier::new(property.clone());
-                if let Some(enum_type) = resolve_enum_type_expression(&object, &mut context.clone())
+                let resolved_enum =
+                    resolve_enum_type_expression(&object, &mut context.clone()).or_else(|| {
+                        resolve_enum_type_expression(&object_type, &mut context.clone())
+                    });
+                if let Some(enum_type) = resolved_enum
                     && let Some((_, payload_type)) = enum_variant_info(&enum_type, &enum_property)
                 {
                     if let ExpressionKind::Struct(fields) = &payload_type.kind
@@ -4370,7 +4380,11 @@ fn get_lvalue_type(
             property,
             span: prop_span,
         } => {
-            let current_type = get_lvalue_type(object, context, *prop_span)?;
+            let mut current_type = get_lvalue_type(object, context, *prop_span)?;
+            current_type = resolve_type_alias_expression(&current_type, context);
+            while let ExpressionKind::AttachImplementation { type_expr, .. } = current_type.kind {
+                current_type = resolve_type_alias_expression(&type_expr, context);
+            }
             let Expression {
                 kind: ExpressionKind::Struct(fields),
                 ..
