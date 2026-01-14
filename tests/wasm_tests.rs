@@ -1,7 +1,13 @@
 use silk::compile;
 
 fn compile_program(program: &str) -> Vec<u8> {
-    compile(vec![("main.silk", program)], "main.silk").expect("compilation should succeed")
+    let artifacts =
+        compile(vec![("main.silk", program)], "main.silk").expect("compilation should succeed");
+    artifacts
+        .into_iter()
+        .find(|a| matches!(a.kind, silk::ArtifactKind::Wasm))
+        .expect("should produce wasm artifact")
+        .content
 }
 use wasmparser::{Operator, Parser, Payload};
 
@@ -196,9 +202,12 @@ fn compile_without_wasm_exports_returns_empty() {
 answer := 5;
 answer
 "#;
-    let wasm =
+    let artifacts =
         compile(vec![("main.silk", program)], "main.silk").expect("compilation should not fail");
-    assert!(wasm.is_empty(), "expected no wasm bytes without exports");
+    assert!(
+        artifacts.is_empty(),
+        "expected no artifacts without exports"
+    );
 }
 
 #[test]

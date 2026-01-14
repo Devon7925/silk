@@ -34,12 +34,36 @@ fn execute(options: CliOptions) -> Result<(), CliError> {
         .iter()
         .map(|(path, source)| (path.as_str(), source.as_str()))
         .collect();
-    let wasm = compile(source_refs, &root).map_err(|diagnostic| CliError::Compilation {
+    let artifacts = compile(source_refs, &root).map_err(|diagnostic| CliError::Compilation {
         diagnostic,
         source_code: root_source,
         filename: label,
     })?;
-    write_output(&options.output, &wasm)
+
+    for artifact in artifacts {
+        match &options.output {
+            OutputTarget::Stdout => {
+                eprintln!("DEBUG: writing artifact to stdout");
+                write_output(&OutputTarget::Stdout, &artifact.content)?;
+            }
+            OutputTarget::File(base_path) => {
+                let mut output_path = base_path.clone();
+                // If the output path has an extension, strip it to treat as base
+                if output_path.extension().is_some() {
+                    output_path.set_extension("");
+                }
+
+                // Append the artifact specific extension
+                match artifact.kind {
+                    silk::ArtifactKind::Wasm => output_path.set_extension("wasm"),
+                    silk::ArtifactKind::JS => output_path.set_extension("js"),
+                };
+                eprintln!("DEBUG: writing artifact to {:?}", output_path);
+                write_output(&OutputTarget::File(output_path), &artifact.content)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn parse_invocation() -> Result<Invocation, CliError> {
@@ -139,6 +163,11 @@ fn collect_silk_files(
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with('.') || name == "target" || name == "node_modules" {
+                    continue;
+                }
+            }
             collect_silk_files(&path, files)?;
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("silk") {
             files.push(path);

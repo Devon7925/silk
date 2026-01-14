@@ -1,7 +1,13 @@
 use silk::compile;
 
 fn compile_program(program: &str) -> Vec<u8> {
-    compile(vec![("main.silk", program)], "main.silk").expect("compilation should succeed")
+    let artifacts =
+        compile(vec![("main.silk", program)], "main.silk").expect("compilation should succeed");
+    artifacts
+        .into_iter()
+        .find(|a| matches!(a.kind, silk::ArtifactKind::Wasm))
+        .expect("should produce wasm artifact")
+        .content
 }
 use wasmparser::{Parser, Validator, WasmFeatures};
 
