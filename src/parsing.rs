@@ -161,6 +161,7 @@ pub enum UnaryIntrinsicOperator {
     EnumFromStruct,
     MatchFromStruct,
     UseFromString,
+    BoxFromType,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -195,6 +196,7 @@ pub enum DivergeExpressionType {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpressionKind {
     IntrinsicType(IntrinsicType),
+    BoxType(Box<Expression>),
     IntrinsicOperation(IntrinsicOperation),
     EnumType(Vec<(Identifier, Expression)>),
     Match {
@@ -394,6 +396,11 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
                     };
                     context.tasks.push(PrettyTask::WriteStatic(ty_str));
                 }
+                ExpressionKind::BoxType(inner) => {
+                    context.tasks.push(PrettyTask::WriteStatic(")"));
+                    context.tasks.push(PrettyTask::Expr(inner));
+                    context.tasks.push(PrettyTask::WriteStatic("Box("));
+                }
                 ExpressionKind::IntrinsicOperation(op) => match op {
                     IntrinsicOperation::Binary(left, right, op) => {
                         let op_str = match op {
@@ -423,6 +430,7 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
                             UnaryIntrinsicOperator::EnumFromStruct => "enum",
                             UnaryIntrinsicOperator::MatchFromStruct => "match",
                             UnaryIntrinsicOperator::UseFromString => "use",
+                            UnaryIntrinsicOperator::BoxFromType => "Box",
                         };
                         context.tasks.push(PrettyTask::WriteStatic(")"));
                         context.tasks.push(PrettyTask::Expr(operand));
@@ -2250,9 +2258,7 @@ fn parse_char_literal(file: &str) -> Option<(u8, &str)> {
     };
 
     let remaining = &file[consumed..];
-    let Some(after_quote) = remaining.strip_prefix('\'') else {
-        return None;
-    };
+    let after_quote = remaining.strip_prefix('\'')?;
     Some((value, after_quote))
 }
 

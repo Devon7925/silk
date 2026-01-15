@@ -24,6 +24,10 @@ pub enum IntermediateKind {
         element_type: IntermediateType,
         field_names: Vec<String>,
     },
+    BoxAlloc {
+        value: Box<IntermediateKind>,
+        element_type: IntermediateType,
+    },
     Literal(ExpressionLiteral),
     Identifier(Identifier),
     Assignment {
@@ -99,6 +103,9 @@ pub enum IntermediateLValue {
 pub enum IntermediateType {
     I32,
     U8,
+    Box {
+        element: Box<IntermediateType>,
+    },
     Struct(Vec<(String, IntermediateType)>),
     Array {
         element: Box<IntermediateType>,
@@ -192,6 +199,7 @@ pub fn expression_to_intermediate(
         FinishFunctionCall(usize),
         FinishArrayIndex,
         FinishTypePropertyAccess(String),
+        FinishInlineWithType(IntermediateType),
         FinishBinding {
             pattern: BindingPattern,
             binding_type: IntermediateType,
@@ -295,7 +303,14 @@ pub fn expression_to_intermediate(
                     },
                     ExpressionKind::Identifier(identifier) => {
                         if let Some(inlined) = builder.inline_bindings.get(&identifier).cloned() {
-                            stack.push(Frame::Enter(inlined));
+                            if let Some(binding_type) =
+                                builder.inline_binding_types.get(&identifier).cloned()
+                            {
+                                stack.push(Frame::FinishInlineWithType(binding_type));
+                                stack.push(Frame::Enter(inlined));
+                            } else {
+                                stack.push(Frame::Enter(inlined));
+                            }
                         } else {
                             values.push(IntermediateKind::Identifier(identifier));
                         }
@@ -443,6 +458,7 @@ pub fn expression_to_intermediate(
                         stack.push(Frame::Enter(*type_expr));
                     }
                     ExpressionKind::IntrinsicType(..)
+                    | ExpressionKind::BoxType(..)
                     | ExpressionKind::EnumType(..)
                     | ExpressionKind::EnumConstructor { .. }
                     | ExpressionKind::Function { .. }
@@ -531,12 +547,20 @@ pub fn expression_to_intermediate(
                     property,
                 });
             }
+            Frame::FinishInlineWithType(binding_type) => {
+                let lowered_expr = values.pop().expect("Missing inline binding expression");
+                values.push(IntermediateBuilder::apply_boxing(
+                    lowered_expr,
+                    &binding_type,
+                ));
+            }
             Frame::FinishBinding {
                 pattern,
                 binding_type,
                 is_complex,
             } => {
                 let lowered_expr = values.pop().expect("Missing binding expression");
+                let lowered_expr = IntermediateBuilder::apply_boxing(lowered_expr, &binding_type);
                 if is_complex {
                     let temp_identifier = builder.next_match_temp_identifier();
                     let temp_binding = IntermediateKind::Binding(Box::new(IntermediateBinding {
@@ -628,6 +652,7 @@ pub struct IntermediateBuilder {
     exports: Vec<IntermediateExport>,
     function_indices: HashMap<Identifier, usize>,
     inline_bindings: HashMap<Identifier, Expression>,
+    inline_binding_types: HashMap<Identifier, IntermediateType>,
     type_aliases: HashMap<Identifier, Expression>,
     enum_context: Context,
     match_temp_counter: usize,
@@ -641,6 +666,7 @@ impl IntermediateBuilder {
             exports: Vec::new(),
             function_indices: HashMap::new(),
             inline_bindings: HashMap::new(),
+            inline_binding_types: HashMap::new(),
             type_aliases: HashMap::new(),
             enum_context,
             match_temp_counter: 0,
@@ -677,7 +703,7 @@ impl IntermediateBuilder {
         };
 
         for (identifier, (binding, annotations)) in scope {
-            let BindingContext::Bound(value, preserve_behavior, _) = binding else {
+            let BindingContext::Bound(value, preserve_behavior, bound_type) = binding else {
                 continue;
             };
 
@@ -700,7 +726,8 @@ impl IntermediateBuilder {
             }
 
             if !is_function && !export_targets.is_empty() {
-                let index = self.register_global(identifier.clone(), value.clone());
+                let index =
+                    self.register_global(identifier.clone(), value.clone(), bound_type.clone());
                 for target in export_targets {
                     self.exports.push(IntermediateExport {
                         target,
@@ -714,6 +741,10 @@ impl IntermediateBuilder {
             if *preserve_behavior == PreserveBehavior::Inline {
                 self.inline_bindings
                     .insert(identifier.clone(), value.clone());
+                if let Some(bound_type) = bound_type {
+                    let ty = self.type_expr_to_intermediate(bound_type);
+                    self.inline_binding_types.insert(identifier.clone(), ty);
+                }
             }
         }
     }
@@ -809,9 +840,18 @@ impl IntermediateBuilder {
         index
     }
 
-    fn register_global(&mut self, name: Identifier, value: Expression) -> usize {
-        let ty = self.expression_value_type(&value);
+    fn register_global(
+        &mut self,
+        name: Identifier,
+        value: Expression,
+        bound_type: Option<Expression>,
+    ) -> usize {
+        let ty = bound_type
+            .as_ref()
+            .map(|ty| self.type_expr_to_intermediate(ty))
+            .unwrap_or_else(|| self.expression_value_type(&value));
         let lowered_value = expression_to_intermediate(value, self);
+        let lowered_value = IntermediateBuilder::apply_boxing(lowered_value, &ty);
         let index = self.globals.len();
         self.globals.push(IntermediateGlobal {
             name: name.name,
@@ -1044,6 +1084,7 @@ impl IntermediateBuilder {
             Enter(Expression),
             FinishStruct(Vec<String>),
             FinishEnumType(Vec<String>),
+            FinishBox,
         }
 
         let mut stack = Vec::new();
@@ -1061,6 +1102,10 @@ impl IntermediateBuilder {
                     }
                     ExpressionKind::IntrinsicType(IntrinsicType::U8) => {
                         values.push(IntermediateType::U8);
+                    }
+                    ExpressionKind::BoxType(inner) => {
+                        stack.push(Frame::FinishBox);
+                        stack.push(Frame::Enter(*inner));
                     }
                     ExpressionKind::Struct(fields) => {
                         let field_names = fields.iter().map(|(id, _)| id.name.clone()).collect();
@@ -1140,6 +1185,12 @@ impl IntermediateBuilder {
                         ("tag".to_string(), IntermediateType::I32),
                     ]));
                 }
+                Frame::FinishBox => {
+                    let inner = values.pop().expect("Missing box inner type");
+                    values.push(IntermediateType::Box {
+                        element: Box::new(inner),
+                    });
+                }
             }
         }
 
@@ -1158,6 +1209,62 @@ impl IntermediateBuilder {
                 BindingPattern::Annotated { pattern, .. } => current = *pattern,
                 other => return other,
             }
+        }
+    }
+
+    fn apply_boxing(expr: IntermediateKind, target: &IntermediateType) -> IntermediateKind {
+        match target {
+            IntermediateType::Box { element } => match expr {
+                IntermediateKind::BoxAlloc { .. } => expr,
+                other => IntermediateKind::BoxAlloc {
+                    value: Box::new(other),
+                    element_type: (*element.clone()),
+                },
+            },
+            IntermediateType::Struct(fields) => match expr {
+                IntermediateKind::Struct(items) => {
+                    let mut boxed_items = Vec::with_capacity(items.len());
+                    for (id, value) in items {
+                        if let Some((_, field_ty)) =
+                            fields.iter().find(|(name, _)| name == &id.name)
+                        {
+                            boxed_items
+                                .push((id, IntermediateBuilder::apply_boxing(value, field_ty)));
+                        } else {
+                            boxed_items.push((id, value));
+                        }
+                    }
+                    IntermediateKind::Struct(boxed_items)
+                }
+                other => other,
+            },
+            IntermediateType::Array {
+                element,
+                field_names,
+                ..
+            } => match expr {
+                IntermediateKind::ArrayLiteral {
+                    items,
+                    field_names: literal_names,
+                    ..
+                } => {
+                    let boxed_items = items
+                        .into_iter()
+                        .map(|item| IntermediateBuilder::apply_boxing(item, element))
+                        .collect();
+                    IntermediateKind::ArrayLiteral {
+                        items: boxed_items,
+                        element_type: (*element.clone()),
+                        field_names: if literal_names.is_empty() {
+                            field_names.clone()
+                        } else {
+                            literal_names
+                        },
+                    }
+                }
+                other => other,
+            },
+            _ => expr,
         }
     }
 
@@ -1393,6 +1500,7 @@ fn is_type_expression(expr: &Expression) -> bool {
     matches!(
         expr.kind,
         ExpressionKind::IntrinsicType(_)
+            | ExpressionKind::BoxType(_)
             | ExpressionKind::Struct(_)
             | ExpressionKind::EnumType(_)
             | ExpressionKind::AttachImplementation { .. }

@@ -226,6 +226,20 @@ fn ensure_boolean_condition(
 fn types_equivalent(left: &ExpressionKind, right: &ExpressionKind) -> bool {
     let mut stack = vec![(left, right)];
     while let Some((left, right)) = stack.pop() {
+        let mut left = left;
+        let mut right = right;
+        loop {
+            match (left, right) {
+                (ExpressionKind::BoxType(inner), _) => {
+                    left = &inner.kind;
+                }
+                (_, ExpressionKind::BoxType(inner)) => {
+                    right = &inner.kind;
+                }
+                _ => break,
+            }
+        }
+
         match (left, right) {
             (ExpressionKind::IntrinsicType(a), ExpressionKind::IntrinsicType(b)) => {
                 if a == b {
@@ -413,6 +427,9 @@ fn apply_type_bindings(expr: &Expression, bindings: &HashMap<String, Expression>
             span: SourceSpan,
             identifiers: Vec<Identifier>,
         },
+        BoxType {
+            span: SourceSpan,
+        },
         EnumType {
             span: SourceSpan,
             identifiers: Vec<Identifier>,
@@ -453,6 +470,10 @@ fn apply_type_bindings(expr: &Expression, bindings: &HashMap<String, Expression>
                     for (_, value) in items.into_iter().rev() {
                         stack.push(Frame::Enter(value));
                     }
+                }
+                ExpressionKind::BoxType(inner) => {
+                    stack.push(Frame::BoxType { span: expr.span });
+                    stack.push(Frame::Enter(*inner));
                 }
                 ExpressionKind::EnumType(variants) => {
                     let identifiers = variants.iter().map(|(id, _)| id.clone()).collect();
@@ -497,6 +518,13 @@ fn apply_type_bindings(expr: &Expression, bindings: &HashMap<String, Expression>
                 evaluated.reverse();
                 let items = identifiers.into_iter().zip(evaluated.into_iter()).collect();
                 results.push(Expression::new(ExpressionKind::Struct(items), span));
+            }
+            Frame::BoxType { span } => {
+                let inner = results.pop().unwrap();
+                results.push(Expression::new(
+                    ExpressionKind::BoxType(Box::new(inner)),
+                    span,
+                ));
             }
             Frame::EnumType { span, identifiers } => {
                 let mut evaluated = Vec::with_capacity(identifiers.len());
@@ -562,6 +590,9 @@ fn is_type_expression(expr: &ExpressionKind) -> bool {
             | ExpressionKind::EnumType(_)
             | ExpressionKind::FunctionType { .. }
             | ExpressionKind::Identifier(_) => {}
+            ExpressionKind::BoxType(inner) => {
+                stack.push(&inner.kind);
+            }
             ExpressionKind::Struct(items) => {
                 for (_, ty) in items.iter() {
                     stack.push(&ty.kind);
@@ -703,6 +734,9 @@ pub fn interpret_expression(
             span: SourceSpan,
             identifiers: Vec<Identifier>,
         },
+        BoxType {
+            span: SourceSpan,
+        },
         Struct {
             span: SourceSpan,
             identifiers: Vec<Identifier>,
@@ -841,6 +875,10 @@ pub fn interpret_expression(
                         for (_, ty_expr) in variants.into_iter().rev() {
                             stack.push(Frame::Eval(ty_expr));
                         }
+                    }
+                    ExpressionKind::BoxType(inner) => {
+                        stack.push(Frame::BoxType { span });
+                        stack.push(Frame::Eval(*inner));
                     }
                     ExpressionKind::Literal(lit) => {
                         values.push(Expression::new(ExpressionKind::Literal(lit), span));
@@ -1159,13 +1197,25 @@ pub fn interpret_expression(
             Frame::BindingFinish => {
                 let value = values.pop().unwrap();
                 let interpreted_pattern = pattern_stack.pop().unwrap();
-                if let Ok(value_type) = get_type_of_expression(&value, context) {
+                let value_type = get_type_of_expression(&value, context).ok();
+                if let Some(value_type) = value_type.clone() {
                     bind_pattern_blanks(
                         interpreted_pattern.clone(),
                         context,
                         Vec::new(),
                         Some(value_type),
                     )?;
+                }
+                if pattern_contains_box_type(&interpreted_pattern, context)
+                    && !is_resolved_constant(&value)
+                    && !value_type
+                        .as_ref()
+                        .is_some_and(|ty| type_expression_contains_box(ty, context))
+                {
+                    return Err(diagnostic(
+                        "Box values must be compile-time constants",
+                        interpreted_pattern.span(),
+                    ));
                 }
                 let value_is_constant =
                     is_resolved_constant(&value) || function_contains_compile_time_data(&value);
@@ -1312,6 +1362,13 @@ pub fn interpret_expression(
                 let variants = identifiers.into_iter().zip(evaluated.into_iter()).collect();
                 values.push(Expression::new(ExpressionKind::EnumType(variants), span));
             }
+            Frame::BoxType { span } => {
+                let inner = values.pop().unwrap();
+                values.push(Expression::new(
+                    ExpressionKind::BoxType(Box::new(inner)),
+                    span,
+                ));
+            }
             Frame::Struct { span, identifiers } => {
                 let mut evaluated = Vec::with_capacity(identifiers.len());
                 for _ in 0..identifiers.len() {
@@ -1453,6 +1510,7 @@ pub fn interpret_expression(
                     UnaryIntrinsicOperator::EnumFromStruct => true,
                     UnaryIntrinsicOperator::MatchFromStruct => false,
                     UnaryIntrinsicOperator::UseFromString => true,
+                    UnaryIntrinsicOperator::BoxFromType => true,
                 };
                 if !is_resolved_constant(&evaluated_operand) && op_requires_const_argument {
                     values.push(Expression::new(
@@ -1576,6 +1634,26 @@ pub fn interpret_expression(
                             interpret_program(expression.clone(), &mut import_context)?;
                         context.import_cache.insert(normalized, value.clone());
                         value
+                    }
+                    UnaryIntrinsicOperator::BoxFromType => {
+                        let mut resolved =
+                            resolve_type_alias_expression(&evaluated_operand, context);
+                        if !is_type_expression(&resolved.kind) {
+                            return Err(diagnostic(
+                                "Box expects a type expression",
+                                evaluated_operand.span(),
+                            ));
+                        }
+                        if matches!(resolved.kind, ExpressionKind::BoxType(_)) {
+                            return Err(diagnostic(
+                                "Box cannot be nested",
+                                evaluated_operand.span(),
+                            ));
+                        }
+                        if let ExpressionKind::IntrinsicType(intrinsic) = &resolved.kind {
+                            resolved = intrinsic_type_expr(intrinsic.clone());
+                        }
+                        ExpressionKind::BoxType(Box::new(resolved)).with_span(span)
                     }
                 };
                 values.push(result);
@@ -2283,7 +2361,6 @@ pub(crate) fn get_type_of_expression(
             index: usize,
         },
         BlockAfterExpr {
-            span: SourceSpan,
             expressions: Vec<Expression>,
             context: Context,
             index: usize,
@@ -2481,6 +2558,11 @@ pub(crate) fn get_type_of_expression(
                             ExpressionKind::IntrinsicType(IntrinsicType::Type).with_span(span),
                         );
                     }
+                    ExpressionKind::BoxType(_) => {
+                        results.push(
+                            ExpressionKind::IntrinsicType(IntrinsicType::Type).with_span(span),
+                        );
+                    }
                     ExpressionKind::Operation {
                         operator,
                         left,
@@ -2673,6 +2755,12 @@ pub(crate) fn get_type_of_expression(
                             span,
                         ));
                     }
+                    ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
+                        _,
+                        UnaryIntrinsicOperator::BoxFromType,
+                    )) => {
+                        results.push(resolve_intrinsic_type("type", span, &context)?);
+                    }
                 }
             }
             Frame::Struct { span, identifiers } => {
@@ -2709,7 +2797,6 @@ pub(crate) fn get_type_of_expression(
                     _ => {
                         let expr_context = context.clone();
                         stack.push(Frame::BlockAfterExpr {
-                            span,
                             expressions,
                             context,
                             index,
@@ -2719,7 +2806,6 @@ pub(crate) fn get_type_of_expression(
                 }
             }
             Frame::BlockAfterExpr {
-                span: _,
                 expressions,
                 context,
                 index,
@@ -3216,6 +3302,7 @@ pub fn expression_does_diverge(expr: &Expression, possibility: bool, in_inner_lo
                 ExpressionKind::Literal(_)
                 | ExpressionKind::Identifier(_)
                 | ExpressionKind::IntrinsicType(_)
+                | ExpressionKind::BoxType(_)
                 | ExpressionKind::EnumType(_)
                 | ExpressionKind::Function { .. }
                 | ExpressionKind::FunctionType { .. }
@@ -3378,6 +3465,7 @@ pub fn expression_exports(expr: &Expression) -> bool {
                 ExpressionKind::Literal(_)
                 | ExpressionKind::Identifier(_)
                 | ExpressionKind::IntrinsicType(_)
+                | ExpressionKind::BoxType(_)
                 | ExpressionKind::EnumType(_)
                 | ExpressionKind::Function { .. }
                 | ExpressionKind::FunctionType { .. }
@@ -3521,6 +3609,69 @@ fn pattern_contains_compile_time_data(pattern: &BindingPattern) -> bool {
     false
 }
 
+fn type_expression_contains_box(expr: &Expression, context: &Context) -> bool {
+    let mut stack = vec![resolve_type_alias_expression(expr, context)];
+    while let Some(expr) = stack.pop() {
+        match &expr.kind {
+            ExpressionKind::BoxType(_) => return true,
+            ExpressionKind::Struct(items) => {
+                for (_, field_expr) in items.iter() {
+                    stack.push(field_expr.clone());
+                }
+            }
+            ExpressionKind::EnumType(cases) => {
+                for (_, field_expr) in cases.iter() {
+                    stack.push(field_expr.clone());
+                }
+            }
+            ExpressionKind::FunctionType {
+                parameter,
+                return_type,
+            } => {
+                stack.push(*parameter.clone());
+                stack.push(*return_type.clone());
+            }
+            ExpressionKind::AttachImplementation { type_expr, .. } => {
+                stack.push(*type_expr.clone());
+            }
+            ExpressionKind::IntrinsicType(_)
+            | ExpressionKind::Identifier(_)
+            | ExpressionKind::TypePropertyAccess { .. } => {}
+            other => panic!("Unsupported expression {:?} for resolved type", other),
+        }
+    }
+    false
+}
+
+fn pattern_contains_box_type(pattern: &BindingPattern, context: &Context) -> bool {
+    let mut stack = vec![pattern];
+    while let Some(pattern) = stack.pop() {
+        match pattern {
+            BindingPattern::Identifier(_, _) | BindingPattern::Literal(_, _) => {}
+            BindingPattern::Struct(items, _) => {
+                for (_, field_pattern) in items.iter() {
+                    stack.push(field_pattern);
+                }
+            }
+            BindingPattern::EnumVariant { payload, .. } => {
+                if let Some(payload) = payload {
+                    stack.push(payload);
+                }
+            }
+            BindingPattern::TypeHint(inner, ty, _) => {
+                if type_expression_contains_box(ty, context) {
+                    return true;
+                }
+                stack.push(inner);
+            }
+            BindingPattern::Annotated { pattern, .. } => {
+                stack.push(pattern);
+            }
+        }
+    }
+    false
+}
+
 fn function_contains_compile_time_data(expr: &Expression) -> bool {
     if let ExpressionKind::Function {
         parameter,
@@ -3543,6 +3694,9 @@ fn type_expression_contains_compile_time_data(expr: &Expression) -> bool {
                 for (_, field_expr) in items.iter() {
                     stack.push(field_expr);
                 }
+            }
+            ExpressionKind::BoxType(inner) => {
+                stack.push(inner);
             }
             ExpressionKind::FunctionType { .. } => return true,
             ExpressionKind::AttachImplementation { type_expr, .. } => {
@@ -3722,6 +3876,9 @@ pub(crate) fn get_trait_prop_of_type(
     let mut current = value_type;
     loop {
         match &current.kind {
+            ExpressionKind::BoxType(inner) => {
+                current = inner;
+            }
             ExpressionKind::Struct(items) => {
                 if let Some(field) = get_struct_field(items, trait_prop) {
                     return Ok((field, TraitPropSource::StructField));
@@ -3882,12 +4039,14 @@ fn ensure_trait_requirements(
     Ok(())
 }
 
+type TraitStructResolution = (Vec<(Identifier, Expression)>, HashMap<String, Expression>);
+
 fn resolve_trait_struct(
     trait_expr: &Expression,
     type_arg: Expression,
     context: &Context,
     span: SourceSpan,
-) -> Result<(Vec<(Identifier, Expression)>, HashMap<String, Expression>), Diagnostic> {
+) -> Result<TraitStructResolution, Diagnostic> {
     let evaluated_trait = if let ExpressionKind::Identifier(identifier) = &trait_expr.kind {
         context
             .get_identifier(identifier)
@@ -3923,6 +4082,9 @@ fn resolve_type_alias_expression(expr: &Expression, context: &Context) -> Expres
         Struct {
             span: SourceSpan,
             identifiers: Vec<Identifier>,
+        },
+        BoxType {
+            span: SourceSpan,
         },
         EnumType {
             span: SourceSpan,
@@ -3965,6 +4127,10 @@ fn resolve_type_alias_expression(expr: &Expression, context: &Context) -> Expres
                         stack.push(Frame::Enter(value));
                     }
                 }
+                ExpressionKind::BoxType(inner) => {
+                    stack.push(Frame::BoxType { span: expr.span });
+                    stack.push(Frame::Enter(*inner));
+                }
                 ExpressionKind::FunctionType {
                     parameter,
                     return_type,
@@ -4003,6 +4169,13 @@ fn resolve_type_alias_expression(expr: &Expression, context: &Context) -> Expres
                 resolved.reverse();
                 let items = identifiers.into_iter().zip(resolved.into_iter()).collect();
                 results.push(Expression::new(ExpressionKind::Struct(items), span));
+            }
+            Frame::BoxType { span } => {
+                let inner = results.pop().unwrap();
+                results.push(Expression::new(
+                    ExpressionKind::BoxType(Box::new(inner)),
+                    span,
+                ));
             }
             Frame::EnumType { span, identifiers } => {
                 let mut resolved = Vec::with_capacity(identifiers.len());
@@ -4085,6 +4258,9 @@ fn fold_expression<T, U: Fn(&Expression, T) -> T>(
             ExpressionKind::IntrinsicType(..)
             | ExpressionKind::Literal(..)
             | ExpressionKind::Identifier(..) => {}
+            ExpressionKind::BoxType(inner) => {
+                stack.push(inner);
+            }
             ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(left, right, ..)) => {
                 stack.push(right);
                 stack.push(left);
@@ -4403,7 +4579,7 @@ fn get_lvalue_type(
             )
         })?;
 
-        match binding_ctx {
+        let ty = match binding_ctx {
             BindingContext::Bound(_, _, Some(bound_type)) => Ok(bound_type.clone()),
             BindingContext::Bound(value, _, None) => get_type_of_expression(value, context),
             BindingContext::UnboundWithType(type_expr) => Ok(type_expr.clone()),
@@ -4411,7 +4587,16 @@ fn get_lvalue_type(
                 format!("Cannot determine type of {}", identifier.name),
                 target_span,
             )),
+        }?;
+
+        if type_expression_contains_box(&ty, context) {
+            return Err(diagnostic(
+                format!("Cannot assign to boxed identifier: {}", identifier.name),
+                target_span,
+            ));
         }
+
+        Ok(ty)
     }
 
     match target {
@@ -4444,6 +4629,16 @@ fn get_lvalue_type(
                         format!("Field {} not found in struct type", property),
                         *prop_span,
                     )
+                })
+                .and_then(|ty| {
+                    if matches!(ty.kind, ExpressionKind::BoxType(_)) {
+                        Err(diagnostic(
+                            format!("Cannot assign to boxed field {}", property),
+                            *prop_span,
+                        ))
+                    } else {
+                        Ok(ty)
+                    }
                 })
         }
         LValue::ArrayIndex { array, index, span } => {
@@ -4623,8 +4818,8 @@ fn apply_lvalue_update(
         LValue::TypePropertyAccess { .. } | LValue::ArrayIndex { .. } => {
             enum AccessStep {
                 Property(String, SourceSpan),
-                Index(usize, SourceSpan),
-                DynamicIndex(SourceSpan),
+                Index(usize),
+                DynamicIndex,
             }
 
             let mut steps: Vec<AccessStep> = Vec::new();
@@ -4640,13 +4835,17 @@ fn apply_lvalue_update(
                         steps.push(AccessStep::Property(property.clone(), *prop_span));
                         current = object;
                     }
-                    LValue::ArrayIndex { array, index, span } => {
+                    LValue::ArrayIndex {
+                        array,
+                        index,
+                        span: _,
+                    } => {
                         match index.kind {
                             ExpressionKind::Literal(ExpressionLiteral::Number(idx)) if idx >= 0 => {
-                                steps.push(AccessStep::Index(idx as usize, *span));
+                                steps.push(AccessStep::Index(idx as usize));
                             }
                             _ => {
-                                steps.push(AccessStep::DynamicIndex(*span));
+                                steps.push(AccessStep::DynamicIndex);
                             }
                         }
                         current = array;
@@ -4656,7 +4855,7 @@ fn apply_lvalue_update(
 
             if steps
                 .iter()
-                .any(|step| matches!(step, AccessStep::DynamicIndex(_)))
+                .any(|step| matches!(step, AccessStep::DynamicIndex))
             {
                 for invalidated_identifier in target.get_used_identifiers() {
                     let binding_to_invalidate =
@@ -4689,8 +4888,8 @@ fn apply_lvalue_update(
                 Index(usize),
             }
 
-            let mut struct_stack: Vec<(Vec<(Identifier, Expression)>, SourceSpan, UpdateStep)> =
-                Vec::new();
+            type StructUpdateStack = Vec<(Vec<(Identifier, Expression)>, SourceSpan, UpdateStep)>;
+            let mut struct_stack: StructUpdateStack = Vec::new();
             for step in steps.into_iter().rev() {
                 let Expression {
                     kind: ExpressionKind::Struct(fields),
@@ -4714,14 +4913,14 @@ fn apply_lvalue_update(
                         })?;
                         (field_value, UpdateStep::Property(property))
                     }
-                    AccessStep::Index(index, _) => {
+                    AccessStep::Index(index) => {
                         let field_value = fields
                             .get(index)
                             .map(|(_, expr)| expr.clone())
                             .ok_or_else(|| diagnostic("Array index out of range", struct_span))?;
                         (field_value, UpdateStep::Index(index))
                     }
-                    AccessStep::DynamicIndex(_) => unreachable!("dynamic index handled earlier"),
+                    AccessStep::DynamicIndex => unreachable!("dynamic index handled earlier"),
                 };
 
                 struct_stack.push((fields, struct_span, update_step));
@@ -5360,6 +5559,9 @@ fn is_resolved_constant(expr: &Expression) -> bool {
     while let Some(expr) = stack.pop() {
         match &expr.kind {
             ExpressionKind::Literal(_) | ExpressionKind::IntrinsicType(_) => {}
+            ExpressionKind::BoxType(inner) => {
+                stack.push(inner);
+            }
             ExpressionKind::EnumType(variants) => {
                 for (_, ty) in variants.iter() {
                     stack.push(ty);
@@ -5438,6 +5640,12 @@ fn is_resolved_const_function_expression(expr: &Expression, function_context: &C
     while let Some(frame) = stack.pop() {
         match &frame.expr.kind {
             ExpressionKind::Literal(_) | ExpressionKind::IntrinsicType(_) => {}
+            ExpressionKind::BoxType(inner) => {
+                stack.push(Frame {
+                    expr: inner,
+                    context: frame.context.clone(),
+                });
+            }
             ExpressionKind::Struct(items) => {
                 for (_, value_expr) in items.iter() {
                     stack.push(Frame {
@@ -6004,6 +6212,39 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
                                 dummy_span(),
                             )),
                             UnaryIntrinsicOperator::MatchFromStruct,
+                        )),
+                        dummy_span(),
+                    )),
+                }
+                .with_span(dummy_span()),
+                PreserveBehavior::Inline,
+                None,
+            ),
+            Vec::new(),
+        ),
+    );
+
+    context.bindings.last_mut().unwrap().insert(
+        Identifier::new("Box"),
+        (
+            BindingContext::Bound(
+                ExpressionKind::Function {
+                    parameter: BindingPattern::TypeHint(
+                        Box::new(BindingPattern::Identifier(
+                            Identifier::new("boxed_type"),
+                            dummy_span(),
+                        )),
+                        Box::new(intrinsic_type_expr(IntrinsicType::Type)),
+                        dummy_span(),
+                    ),
+                    return_type: Some(Box::new(intrinsic_type_expr(IntrinsicType::Type))),
+                    body: Box::new(Expression::new(
+                        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
+                            Box::new(Expression::new(
+                                ExpressionKind::Identifier(Identifier::new("boxed_type")),
+                                dummy_span(),
+                            )),
+                            UnaryIntrinsicOperator::BoxFromType,
                         )),
                         dummy_span(),
                     )),

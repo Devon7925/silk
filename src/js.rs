@@ -13,7 +13,7 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
 
     // First, generate all functions as internal functions
     for (idx, function) in intermediate.functions.iter().enumerate() {
-        let (params, destructuring) = flatten_parameters(&function.parameter, "arg")?;
+        let (params, destructuring) = flatten_parameters(&function.parameter)?;
 
         let mut bound_ids = HashSet::new();
         collect_bound_identifiers(&function.body, &mut bound_ids);
@@ -62,10 +62,7 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
     Ok(output)
 }
 
-fn flatten_parameters(
-    pattern: &BindingPattern,
-    source: &str,
-) -> Result<(Vec<String>, String), Diagnostic> {
+fn flatten_parameters(pattern: &BindingPattern) -> Result<(Vec<String>, String), Diagnostic> {
     match pattern {
         BindingPattern::Struct(fields, _) => {
             let mut params = Vec::new();
@@ -84,8 +81,8 @@ fn flatten_parameters(
             Ok((params, destructuring_code))
         }
         BindingPattern::Identifier(id, _) => Ok((vec![id.name.clone()], String::new())),
-        BindingPattern::TypeHint(inner, _, _) => flatten_parameters(inner, source),
-        BindingPattern::Annotated { pattern, .. } => flatten_parameters(pattern, source),
+        BindingPattern::TypeHint(inner, _, _) => flatten_parameters(inner),
+        BindingPattern::Annotated { pattern, .. } => flatten_parameters(pattern),
         _ => {
             // Fallback for single unknown arg type
             Ok((
@@ -189,12 +186,10 @@ fn compile_expression(
                 let s = compile_expression(e, intermediate)?;
                 if i == exprs.len() - 1 {
                     stmts.push(format!("return {};", s));
+                } else if s.ends_with(";") {
+                    stmts.push(s);
                 } else {
-                    if s.ends_with(";") {
-                        stmts.push(s);
-                    } else {
-                        stmts.push(format!("{};", s));
-                    }
+                    stmts.push(format!("{};", s));
                 }
             }
 
@@ -257,6 +252,7 @@ fn compile_expression(
                 Ok(format!("[{}]", parts.join(", ")))
             }
         }
+        IntermediateKind::BoxAlloc { value, .. } => compile_expression(value, intermediate),
         _ => Err(Diagnostic::new(
             "Unsupported expression type for JS backend",
         )),

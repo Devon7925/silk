@@ -111,9 +111,9 @@ fn parse_invocation() -> Result<Invocation, CliError> {
     }))
 }
 
-fn read_sources(
-    input: &InputSource,
-) -> Result<(Vec<(String, String)>, String, String, String), CliError> {
+type SourceBundle = (Vec<(String, String)>, String, String, String);
+
+fn read_sources(input: &InputSource) -> Result<SourceBundle, CliError> {
     match input {
         InputSource::File(path) => {
             let root_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
@@ -163,10 +163,10 @@ fn collect_silk_files(
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with('.') || name == "target" || name == "node_modules" {
-                    continue;
-                }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && (name.starts_with('.') || name == "target" || name == "node_modules")
+            {
+                continue;
             }
             collect_silk_files(&path, files)?;
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("silk") {

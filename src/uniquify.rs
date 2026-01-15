@@ -105,6 +105,9 @@ enum Task {
     BuildFunctionType {
         span: SourceSpan,
     },
+    BuildBoxType {
+        span: SourceSpan,
+    },
     BuildStruct {
         span: SourceSpan,
         ids: Vec<Identifier>,
@@ -302,6 +305,10 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                     ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(operand, op)) => {
                         tasks.push(Task::BuildUnary { span, op });
                         tasks.push(Task::Expr(*operand, scope));
+                    }
+                    ExpressionKind::BoxType(inner) => {
+                        tasks.push(Task::BuildBoxType { span });
+                        tasks.push(Task::Expr(*inner, scope));
                     }
                     ExpressionKind::EnumType(variants) => {
                         let ids = variants.iter().map(|(id, _)| id.clone()).collect();
@@ -666,6 +673,12 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                         return_type: Box::new(return_type),
                     }
                     .with_span(span),
+                ));
+            }
+            Task::BuildBoxType { span } => {
+                let inner = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::BoxType(Box::new(inner)).with_span(span),
                 ));
             }
             Task::BuildStruct { span, ids } => {

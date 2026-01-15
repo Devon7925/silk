@@ -1,7 +1,7 @@
 use wasm_encoder::{
-    CodeSection, ConstExpr, ExportKind, ExportSection, FieldType, Function, FunctionSection,
-    GlobalSection, GlobalType, HeapType, Instruction, Module, RefType, StorageType, TypeSection,
-    ValType,
+    CodeSection, ConstExpr, DataSection, ExportKind, ExportSection, FieldType, Function,
+    FunctionSection, GlobalSection, GlobalType, HeapType, Instruction, MemArg, MemorySection,
+    MemoryType, Module, RefType, StorageType, TypeSection, ValType,
 };
 
 use crate::{
@@ -21,6 +21,9 @@ use crate::{
 enum WasmType {
     I32,
     U8,
+    Box {
+        element: Box<WasmType>,
+    },
     Struct(Vec<(String, WasmType)>),
     Array {
         element: Box<WasmType>,
@@ -55,11 +58,312 @@ impl MatchCounter {
     }
 }
 
+#[derive(Default)]
+struct BoxRegistry {
+    next_index: u32,
+    memories: Vec<BoxMemory>,
+}
+
+#[derive(Clone, Debug)]
+struct BoxInfo {
+    memory_index: u32,
+}
+
+#[derive(Clone, Debug)]
+struct BoxMemory {
+    memory_index: u32,
+    bytes: Vec<u8>,
+    export_name: Option<String>,
+}
+
+impl BoxRegistry {
+    fn register_box(
+        &mut self,
+        value: &IntermediateKind,
+        element_type: &IntermediateType,
+        export_name: Option<String>,
+    ) -> Result<BoxInfo, Diagnostic> {
+        let bytes = encode_box_value(value, element_type)?;
+        let memory_index = self.next_index;
+        self.next_index = self.next_index.saturating_add(1);
+        self.memories.push(BoxMemory {
+            memory_index,
+            bytes,
+            export_name,
+        });
+        Ok(BoxInfo { memory_index })
+    }
+}
+
+#[derive(Default)]
+struct BoxContext {
+    bindings: std::collections::HashMap<String, BoxInfo>,
+    struct_fields: std::collections::HashMap<String, std::collections::HashMap<String, BoxInfo>>,
+    array_elements: std::collections::HashMap<String, Vec<BoxInfo>>,
+}
+
+fn resolve_box_expr(
+    expr: &IntermediateKind,
+    box_ctx: &mut BoxContext,
+    box_registry: &mut BoxRegistry,
+) -> Result<BoxInfo, Diagnostic> {
+    match expr {
+        IntermediateKind::BoxAlloc {
+            value,
+            element_type,
+        } => box_registry.register_box(value, element_type, None),
+        IntermediateKind::Identifier(identifier) => box_ctx
+            .bindings
+            .get(&identifier.name)
+            .cloned()
+            .ok_or_else(|| {
+                Diagnostic::new(format!(
+                    "Unknown boxed identifier `{}` in wasm lowering",
+                    identifier.name
+                ))
+                .with_span(SourceSpan::default())
+            }),
+        IntermediateKind::TypePropertyAccess { object, property } => {
+            if let IntermediateKind::Identifier(identifier) = object.as_ref()
+                && let Some(fields) = box_ctx.struct_fields.get(&identifier.name)
+                && let Some(info) = fields.get(property)
+            {
+                return Ok(info.clone());
+            }
+            if let IntermediateKind::Struct(items) = object.as_ref()
+                && let Some((_, field_expr)) = items.iter().find(|(id, _)| id.name == *property)
+            {
+                return resolve_box_expr(field_expr, box_ctx, box_registry);
+            }
+            Err(
+                Diagnostic::new("Unable to resolve boxed struct field at compile time".to_string())
+                    .with_span(SourceSpan::default()),
+            )
+        }
+        IntermediateKind::ArrayIndex { array, index } => {
+            let idx = match index.as_ref() {
+                IntermediateKind::Literal(ExpressionLiteral::Number(value)) if *value >= 0 => {
+                    Some(*value as usize)
+                }
+                _ => None,
+            };
+            if let (Some(idx), IntermediateKind::Identifier(identifier)) = (idx, array.as_ref())
+                && let Some(elements) = box_ctx.array_elements.get(&identifier.name)
+                && let Some(info) = elements.get(idx)
+            {
+                return Ok(info.clone());
+            }
+            if let (Some(idx), IntermediateKind::ArrayLiteral { items, .. }) = (idx, array.as_ref())
+                && let Some(item) = items.get(idx)
+            {
+                return resolve_box_expr(item, box_ctx, box_registry);
+            }
+            Err(Diagnostic::new(
+                "Unable to resolve boxed array element at compile time".to_string(),
+            )
+            .with_span(SourceSpan::default()))
+        }
+        _ => Err(
+            Diagnostic::new("Unable to resolve boxed value at compile time".to_string())
+                .with_span(SourceSpan::default()),
+        ),
+    }
+}
+
+fn record_box_binding(
+    binding: &IntermediateBinding,
+    box_ctx: &mut BoxContext,
+    box_registry: &mut BoxRegistry,
+) -> Result<(), Diagnostic> {
+    let name = binding.identifier.name.clone();
+    match &binding.binding_type {
+        IntermediateType::Box { .. } => {
+            let info = resolve_box_expr(&binding.expr, box_ctx, box_registry)?;
+            box_ctx.bindings.insert(name, info);
+        }
+        IntermediateType::Struct(fields) => {
+            let mut field_map = std::collections::HashMap::new();
+            match &binding.expr {
+                IntermediateKind::Struct(items) => {
+                    for (field_name, field_ty) in fields {
+                        if !matches!(field_ty, IntermediateType::Box { .. }) {
+                            continue;
+                        }
+                        let field_expr = items
+                            .iter()
+                            .find(|(id, _)| id.name == *field_name)
+                            .map(|(_, expr)| expr)
+                            .ok_or_else(|| {
+                                Diagnostic::new(format!(
+                                    "Missing field {} in boxed struct binding",
+                                    field_name
+                                ))
+                                .with_span(SourceSpan::default())
+                            })?;
+                        let info = resolve_box_expr(field_expr, box_ctx, box_registry)?;
+                        field_map.insert(field_name.clone(), info);
+                    }
+                }
+                IntermediateKind::Identifier(identifier) => {
+                    if let Some(existing) = box_ctx.struct_fields.get(&identifier.name) {
+                        field_map = existing.clone();
+                    }
+                }
+                _ => {
+                    if fields
+                        .iter()
+                        .any(|(_, ty)| matches!(ty, IntermediateType::Box { .. }))
+                    {
+                        return Err(Diagnostic::new(
+                            "Struct bindings containing boxes must be compile-time literals"
+                                .to_string(),
+                        )
+                        .with_span(SourceSpan::default()));
+                    }
+                }
+            }
+            if !field_map.is_empty() {
+                box_ctx.struct_fields.insert(name, field_map);
+            }
+        }
+        IntermediateType::Array {
+            element, length, ..
+        } => {
+            if !matches!(element.as_ref(), IntermediateType::Box { .. }) {
+                return Ok(());
+            }
+            let mut element_map = Vec::new();
+            match &binding.expr {
+                IntermediateKind::ArrayLiteral { items, .. } => {
+                    if items.len() != *length {
+                        return Err(Diagnostic::new(
+                            "Boxed array binding length mismatch".to_string(),
+                        )
+                        .with_span(SourceSpan::default()));
+                    }
+                    for item in items {
+                        element_map.push(resolve_box_expr(item, box_ctx, box_registry)?);
+                    }
+                }
+                IntermediateKind::Identifier(identifier) => {
+                    if let Some(existing) = box_ctx.array_elements.get(&identifier.name) {
+                        element_map = existing.clone();
+                    }
+                }
+                _ => {
+                    return Err(Diagnostic::new(
+                        "Array bindings containing boxes must be compile-time literals".to_string(),
+                    )
+                    .with_span(SourceSpan::default()));
+                }
+            }
+            if !element_map.is_empty() {
+                box_ctx.array_elements.insert(name, element_map);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn sorted_intermediate_fields(
+    fields: &[(String, IntermediateType)],
+) -> Vec<(String, IntermediateType)> {
+    let mut sorted = fields.to_vec();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    sorted
+}
+
+fn encode_box_value(
+    value: &IntermediateKind,
+    ty: &IntermediateType,
+) -> Result<Vec<u8>, Diagnostic> {
+    match ty {
+        IntermediateType::I32 => {
+            let number = match value {
+                IntermediateKind::Literal(ExpressionLiteral::Number(value)) => *value,
+                IntermediateKind::Literal(ExpressionLiteral::Boolean(value)) => {
+                    if *value {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                IntermediateKind::Literal(ExpressionLiteral::Char(value)) => i32::from(*value),
+                _ => {
+                    return Err(Diagnostic::new(
+                        "Box allocation requires a constant i32 value".to_string(),
+                    ));
+                }
+            };
+            Ok(number.to_le_bytes().to_vec())
+        }
+        IntermediateType::U8 => {
+            let number = match value {
+                IntermediateKind::Literal(ExpressionLiteral::Char(value)) => *value,
+                IntermediateKind::Literal(ExpressionLiteral::Number(value)) => u8::try_from(*value)
+                    .map_err(|_| {
+                        Diagnostic::new("Box allocation u8 is out of range".to_string())
+                    })?,
+                _ => {
+                    return Err(Diagnostic::new(
+                        "Box allocation requires a constant u8 value".to_string(),
+                    ));
+                }
+            };
+            Ok(vec![number])
+        }
+        IntermediateType::Box { .. } => Err(Diagnostic::new(
+            "Nested box values are not supported in wasm exports".to_string(),
+        )),
+        IntermediateType::Struct(fields) => {
+            let IntermediateKind::Struct(items) = value else {
+                return Err(Diagnostic::new(
+                    "Box allocation requires a struct value".to_string(),
+                ));
+            };
+            let mut bytes = Vec::new();
+            let sorted_fields = sorted_intermediate_fields(fields);
+            for (name, field_ty) in sorted_fields.iter() {
+                let field_value = items
+                    .iter()
+                    .find(|(id, _)| id.name == *name)
+                    .map(|(_, expr)| expr)
+                    .ok_or_else(|| {
+                        Diagnostic::new(format!("Missing field {name} in struct value"))
+                    })?;
+                bytes.extend(encode_box_value(field_value, field_ty)?);
+            }
+            Ok(bytes)
+        }
+        IntermediateType::Array {
+            element, length, ..
+        } => {
+            let IntermediateKind::ArrayLiteral { items, .. } = value else {
+                return Err(Diagnostic::new(
+                    "Box allocation requires an array value".to_string(),
+                ));
+            };
+            if items.len() != *length {
+                return Err(Diagnostic::new(
+                    "Box allocation array length mismatch".to_string(),
+                ));
+            }
+            let mut bytes = Vec::new();
+            for item in items {
+                bytes.extend(encode_box_value(item, element)?);
+            }
+            Ok(bytes)
+        }
+    }
+}
+
 impl WasmType {
     fn to_val_type(&self, ctx: &TypeContext) -> ValType {
         match self {
             WasmType::I32 => ValType::I32,
             WasmType::U8 => ValType::I32,
+            WasmType::Box { .. } => ValType::I32,
             WasmType::Struct(_fields) => {
                 let type_index = ctx.get_type_index(self).expect("Type should be registered");
                 ValType::Ref(RefType {
@@ -91,6 +395,9 @@ fn format_wasm_type(ty: &WasmType) -> String {
                         stack.push((field_ty, false));
                     }
                 }
+                WasmType::Box { element } => {
+                    stack.push((element, false));
+                }
                 WasmType::Array { element, .. } => {
                     stack.push((element, false));
                 }
@@ -102,6 +409,12 @@ fn format_wasm_type(ty: &WasmType) -> String {
         match node {
             WasmType::I32 => results.push("i32".to_string()),
             WasmType::U8 => results.push("u8".to_string()),
+            WasmType::Box { .. } => {
+                let inner = results
+                    .pop()
+                    .expect("format_wasm_type should have box inner type");
+                results.push(format!("box {}", inner));
+            }
             WasmType::Struct(fields) => {
                 let mut parts = Vec::with_capacity(fields.len());
                 for (name, _) in fields.iter().rev() {
@@ -136,6 +449,87 @@ fn format_wasm_type(ty: &WasmType) -> String {
         .expect("format_wasm_type should produce one result")
 }
 
+fn sorted_wasm_fields(fields: &[(String, WasmType)]) -> Vec<(String, WasmType)> {
+    let mut sorted = fields.to_vec();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    sorted
+}
+
+fn wasm_type_size(ty: &WasmType) -> usize {
+    match ty {
+        WasmType::I32 => 4,
+        WasmType::U8 => 1,
+        WasmType::Box { .. } => 4,
+        WasmType::Struct(fields) => sorted_wasm_fields(fields)
+            .iter()
+            .map(|(_, field)| wasm_type_size(field))
+            .sum(),
+        WasmType::Array {
+            element, length, ..
+        } => wasm_type_size(element) * length,
+    }
+}
+
+fn wasm_types_equivalent(left: &WasmType, right: &WasmType) -> bool {
+    let mut left = left;
+    let mut right = right;
+    loop {
+        match (left, right) {
+            (WasmType::Box { element }, _) => {
+                left = element;
+            }
+            (_, WasmType::Box { element }) => {
+                right = element;
+            }
+            _ => break,
+        }
+    }
+    matches!(
+        (left, right),
+        (WasmType::I32, WasmType::U8) | (WasmType::U8, WasmType::I32)
+    ) || left == right
+}
+
+fn strip_box_type(ty: &WasmType) -> &WasmType {
+    let mut current = ty;
+    loop {
+        match current {
+            WasmType::Box { element } => {
+                current = element.as_ref();
+            }
+            _ => return current,
+        }
+    }
+}
+
+fn strip_box_owned(ty: WasmType) -> WasmType {
+    let mut current = ty;
+    loop {
+        match current {
+            WasmType::Box { element } => {
+                current = *element;
+            }
+            other => return other,
+        }
+    }
+}
+
+fn memarg(offset: u32, align: u32, memory_index: u32) -> MemArg {
+    MemArg {
+        offset: u64::from(offset),
+        align,
+        memory_index,
+    }
+}
+
+fn pages_for_size(size: usize) -> u64 {
+    if size == 0 {
+        1
+    } else {
+        (size as u64).div_ceil(65536)
+    }
+}
+
 fn struct_fields_to_wasm_type(field_names: Vec<String>, field_types: Vec<WasmType>) -> WasmType {
     let mut wasm_fields: Vec<(String, WasmType)> =
         field_names.into_iter().zip(field_types).collect();
@@ -156,6 +550,9 @@ fn intermediate_type_to_wasm(ty: &IntermediateType) -> WasmType {
                         stack.push((field_ty, false));
                     }
                 }
+                IntermediateType::Box { element } => {
+                    stack.push((element, false));
+                }
                 IntermediateType::Array { element, .. } => {
                     stack.push((element, false));
                 }
@@ -167,6 +564,14 @@ fn intermediate_type_to_wasm(ty: &IntermediateType) -> WasmType {
         match node {
             IntermediateType::I32 => results.push(WasmType::I32),
             IntermediateType::U8 => results.push(WasmType::U8),
+            IntermediateType::Box { .. } => {
+                let element_type = results
+                    .pop()
+                    .expect("intermediate_type_to_wasm should have box element type");
+                results.push(WasmType::Box {
+                    element: Box::new(element_type),
+                });
+            }
             IntermediateType::Struct(fields) => {
                 let mut field_types = Vec::with_capacity(fields.len());
                 let mut field_names = Vec::with_capacity(fields.len());
@@ -292,6 +697,13 @@ impl TypeContext {
                             stack.push((element.as_ref().clone(), false));
                         }
                     }
+                    WasmType::Box { element } => {
+                        if !matches!(element.as_ref(), WasmType::I32 | WasmType::U8)
+                            && !self.type_map.contains_key(element.as_ref())
+                        {
+                            stack.push((element.as_ref().clone(), false));
+                        }
+                    }
                     WasmType::I32 | WasmType::U8 => {
                         continue;
                     }
@@ -304,7 +716,7 @@ impl TypeContext {
                 continue;
             }
 
-            if matches!(current, WasmType::I32 | WasmType::U8) {
+            if matches!(current, WasmType::I32 | WasmType::U8 | WasmType::Box { .. }) {
                 continue;
             }
             let index = self.types.len() as u32;
@@ -341,6 +753,7 @@ struct WasmGlobalExport {
     name: String,
     ty: WasmType,
     init: IntermediateKind,
+    intermediate_ty: IntermediateType,
 }
 
 struct WasmExports {
@@ -373,6 +786,7 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
     let mut global_section = GlobalSection::new();
     let mut export_section = ExportSection::new();
     let mut code_section = CodeSection::new();
+    let mut box_registry = BoxRegistry::default();
 
     let mut type_ctx = TypeContext::new();
 
@@ -385,12 +799,18 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
     for function in &all_functions {
         let mut locals_types = std::collections::HashMap::new();
         for param in &function.params {
-            if !matches!(param.ty, WasmType::I32 | WasmType::U8) {
+            if !matches!(
+                param.ty,
+                WasmType::I32 | WasmType::U8 | WasmType::Box { .. }
+            ) {
                 type_ctx.get_or_register_type(param.ty.clone());
             }
             locals_types.insert(param.name.clone(), param.ty.clone());
         }
-        if !matches!(function.return_type, WasmType::I32 | WasmType::U8) {
+        if !matches!(
+            function.return_type,
+            WasmType::I32 | WasmType::U8 | WasmType::Box { .. }
+        ) {
             type_ctx.get_or_register_type(function.return_type.clone());
         }
         collect_types(
@@ -402,7 +822,10 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
     }
 
     for global in &exports.globals {
-        if !matches!(global.ty, WasmType::I32 | WasmType::U8) {
+        if !matches!(
+            global.ty,
+            WasmType::I32 | WasmType::U8 | WasmType::Box { .. }
+        ) {
             type_ctx.get_or_register_type(global.ty.clone());
         }
     }
@@ -434,7 +857,7 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
                     mutable: true,
                 }))
             }
-            WasmType::I32 | WasmType::U8 => {
+            WasmType::I32 | WasmType::U8 | WasmType::Box { .. } => {
                 continue;
             }
         };
@@ -466,6 +889,23 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
     }
 
     for global in &exports.globals {
+        if matches!(global.ty, WasmType::Box { .. }) {
+            let IntermediateType::Box { element } = &global.intermediate_ty else {
+                return Err(Diagnostic::new(
+                    "Box export missing intermediate element type".to_string(),
+                )
+                .with_span(SourceSpan::default()));
+            };
+            let (init_value, element_type) = match &global.init {
+                IntermediateKind::BoxAlloc {
+                    value,
+                    element_type,
+                } => (value.as_ref(), element_type),
+                other => (other, element.as_ref()),
+            };
+            box_registry.register_box(init_value, element_type, Some(global.name.clone()))?;
+            continue;
+        }
         let init_expr = const_expr_for_global(&global.init, &global.ty)?;
         global_section.global(
             GlobalType {
@@ -492,6 +932,7 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
             &function.body,
             &mut locals_types,
             &function_return_types,
+            &intermediate.functions,
             &mut match_counter,
         )?;
         for (name, ty) in body_locals {
@@ -501,12 +942,20 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
             }
         }
 
+        let box_temp_local = ensure_box_temp_local(
+            &mut locals,
+            &mut locals_types,
+            &mut local_indices,
+            function.params.len(),
+        );
+
         let mut func = Function::new(locals.iter().map(|ty| (1, ty.to_val_type(&type_ctx))));
 
         let mut control_stack = Vec::new();
         let mut loop_stack = Vec::new();
 
         let mut match_counter = MatchCounter::default();
+        let mut box_ctx = BoxContext::default();
         emit_expression(
             &function.body,
             &local_indices,
@@ -518,6 +967,10 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
             &mut control_stack,
             &mut loop_stack,
             &mut match_counter,
+            &function.return_type,
+            &mut box_ctx,
+            &mut box_registry,
+            Some(box_temp_local),
         )?;
 
         let body_produces_value = expression_produces_value(
@@ -536,19 +989,57 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
         code_section.function(&func);
     }
 
+    let (memory_section, data_section) = if box_registry.memories.is_empty() {
+        (None, None)
+    } else {
+        let mut memory_section = MemorySection::new();
+        let mut data_section = DataSection::new();
+        let mut memories = box_registry.memories.clone();
+        memories.sort_by_key(|memory| memory.memory_index);
+        for memory in memories.iter() {
+            let minimum_pages = std::cmp::max(1u64, pages_for_size(memory.bytes.len()));
+            memory_section.memory(MemoryType {
+                minimum: minimum_pages,
+                maximum: None,
+                memory64: false,
+                shared: false,
+                page_size_log2: None,
+            });
+            let offset_expr = ConstExpr::i32_const(0);
+            data_section.active(memory.memory_index, &offset_expr, memory.bytes.clone());
+        }
+        (Some(memory_section), Some(data_section))
+    };
+
     module.section(&type_section);
     module.section(&function_section);
+    if let Some(memory_section) = &memory_section {
+        module.section(memory_section);
+    }
     if !exports.globals.is_empty() {
         module.section(&global_section);
     }
     for export in &exports.functions {
         export_section.export(&export.name, ExportKind::Func, export.index as u32);
     }
-    for (global_index, global) in exports.globals.iter().enumerate() {
-        export_section.export(&global.name, ExportKind::Global, global_index as u32);
+    let mut global_export_index = 0;
+    for global in &exports.globals {
+        if matches!(global.ty, WasmType::Box { .. }) {
+            continue;
+        }
+        export_section.export(&global.name, ExportKind::Global, global_export_index as u32);
+        global_export_index += 1;
+    }
+    for memory in &box_registry.memories {
+        if let Some(name) = &memory.export_name {
+            export_section.export(name, ExportKind::Memory, memory.memory_index);
+        }
     }
     module.section(&export_section);
     module.section(&code_section);
+    if let Some(data_section) = &data_section {
+        module.section(data_section);
+    }
 
     Ok(module.finish())
 }
@@ -588,6 +1079,7 @@ fn collect_wasm_exports(intermediate: &IntermediateResult) -> Result<WasmExports
                     name: global.name.clone(),
                     ty: intermediate_type_to_wasm(&global.ty),
                     init: global.value.clone(),
+                    intermediate_ty: global.ty.clone(),
                 });
             }
         }
@@ -652,6 +1144,9 @@ fn collect_types(
                 IntermediateKind::Binding(binding) => {
                     stack.push((&binding.expr, false));
                 }
+                IntermediateKind::BoxAlloc { value, .. } => {
+                    stack.push((value, false));
+                }
                 IntermediateKind::FunctionCall { argument, .. } => {
                     stack.push((argument, false));
                 }
@@ -715,9 +1210,21 @@ fn collect_types(
             }
             IntermediateKind::Binding(binding) => {
                 let binding = binding.as_ref();
-                let ty = infer_type(&binding.expr, locals_types, function_return_types)?;
+                let ty = intermediate_type_to_wasm(&binding.binding_type);
+                if !matches!(ty, WasmType::I32 | WasmType::U8) {
+                    ctx.get_or_register_type(ty.clone());
+                }
                 let mut locals = Vec::new();
                 collect_locals_for_pattern(binding, ty, locals_types, &mut locals)?;
+            }
+            IntermediateKind::BoxAlloc { element_type, .. } => {
+                let element_wasm = intermediate_type_to_wasm(element_type);
+                if !matches!(
+                    element_wasm,
+                    WasmType::I32 | WasmType::U8 | WasmType::Box { .. }
+                ) {
+                    ctx.get_or_register_type(element_wasm);
+                }
             }
             _ => {}
         }
@@ -739,9 +1246,10 @@ fn determine_loop_result_type(
     }
 
     if let Some(first_type) = break_types.first() {
+        let normalized = strip_box_owned(first_type.clone());
         let mut mismatched = None;
         for ty in &break_types {
-            if ty != first_type {
+            if !wasm_types_equivalent(&normalized, ty) {
                 mismatched = Some(ty.clone());
                 break;
             }
@@ -756,7 +1264,7 @@ fn determine_loop_result_type(
             .with_span(SourceSpan::default()));
         }
 
-        Ok(Some(first_type.clone()))
+        Ok(Some(normalized))
     } else {
         Ok(None)
     }
@@ -860,6 +1368,8 @@ fn intrinsic_binary_result_type(
     left: &WasmType,
     right: &WasmType,
 ) -> WasmType {
+    let left = strip_box_type(left);
+    let right = strip_box_type(right);
     let is_u8 = matches!(left, WasmType::U8) && matches!(right, WasmType::U8);
     match op {
         BinaryIntrinsicOperator::I32Add
@@ -929,6 +1439,12 @@ fn infer_type_basic(
                         element: Box::new(wasm_element),
                         length: items.len(),
                         field_names,
+                    });
+                }
+                IntermediateKind::BoxAlloc { element_type, .. } => {
+                    let element = intermediate_type_to_wasm(&element_type);
+                    results.push(WasmType::Box {
+                        element: Box::new(element),
                     });
                 }
                 IntermediateKind::Identifier(identifier) => {
@@ -1017,7 +1533,7 @@ fn infer_type_basic(
                     .pop()
                     .expect("infer_type_basic should have assignment value type");
 
-                if value_type != existing_type {
+                if !wasm_types_equivalent(&value_type, &existing_type) {
                     return Err(Diagnostic::new(
                         "Cannot assign value of different type to target".to_string(),
                     )
@@ -1029,7 +1545,7 @@ fn infer_type_basic(
                 let object_type = results
                     .pop()
                     .expect("infer_type_basic should have object type");
-                match object_type {
+                match strip_box_owned(object_type) {
                     WasmType::Struct(fields) => {
                         if let Some((_, field_type)) = fields.iter().find(|(n, _)| n == &property) {
                             results.push(field_type.clone());
@@ -1060,6 +1576,10 @@ fn infer_type_basic(
                         return Err(Diagnostic::new("Type property access on non-struct type")
                             .with_span(SourceSpan::default()));
                     }
+                    WasmType::Box { .. } => {
+                        return Err(Diagnostic::new("Nested box types are not supported")
+                            .with_span(SourceSpan::default()));
+                    }
                 }
             }
             InferTask::FinishArrayIndex => {
@@ -1069,7 +1589,7 @@ fn infer_type_basic(
                 let array_type = results
                     .pop()
                     .expect("infer_type_basic should have array type");
-                if let WasmType::Array { element, .. } = array_type {
+                if let WasmType::Array { element, .. } = strip_box_owned(array_type) {
                     results.push(*element);
                 } else {
                     return Err(Diagnostic::new("Indexing on non-array type")
@@ -1139,6 +1659,12 @@ fn infer_type_impl(
                         element: Box::new(wasm_element),
                         length: items.len(),
                         field_names,
+                    });
+                }
+                IntermediateKind::BoxAlloc { element_type, .. } => {
+                    let element = intermediate_type_to_wasm(&element_type);
+                    results.push(WasmType::Box {
+                        element: Box::new(element),
                     });
                 }
                 IntermediateKind::Identifier(identifier) => {
@@ -1230,7 +1756,7 @@ fn infer_type_impl(
                     .pop()
                     .expect("infer_type_impl should have assignment value type");
 
-                if value_type != existing_type {
+                if !wasm_types_equivalent(&value_type, &existing_type) {
                     return Err(Diagnostic::new(
                         "Cannot assign value of different type to target".to_string(),
                     )
@@ -1242,7 +1768,7 @@ fn infer_type_impl(
                 let object_type = results
                     .pop()
                     .expect("infer_type_impl should have object type");
-                match object_type {
+                match strip_box_owned(object_type) {
                     WasmType::Struct(fields) => {
                         if let Some((_, field_type)) = fields.iter().find(|(n, _)| n == &property) {
                             results.push(field_type.clone());
@@ -1273,6 +1799,10 @@ fn infer_type_impl(
                         return Err(Diagnostic::new("Type property access on non-struct type")
                             .with_span(SourceSpan::default()));
                     }
+                    WasmType::Box { .. } => {
+                        return Err(Diagnostic::new("Nested box types are not supported")
+                            .with_span(SourceSpan::default()));
+                    }
                 }
             }
             InferTask::FinishArrayIndex => {
@@ -1282,7 +1812,7 @@ fn infer_type_impl(
                 let array_type = results
                     .pop()
                     .expect("infer_type_impl should have array type");
-                if let WasmType::Array { element, .. } = array_type {
+                if let WasmType::Array { element, .. } = strip_box_owned(array_type) {
                     results.push(*element);
                 } else {
                     return Err(Diagnostic::new("Indexing on non-array type")
@@ -1413,6 +1943,7 @@ fn collect_locals(
     expr: &IntermediateKind,
     locals_types: &mut std::collections::HashMap<String, WasmType>,
     function_return_types: &[WasmType],
+    functions: &[IntermediateFunction],
     match_counter: &mut MatchCounter,
 ) -> Result<Vec<(String, WasmType)>, Diagnostic> {
     fn collect_lvalue_exprs<'a>(
@@ -1476,8 +2007,12 @@ fn collect_locals(
                     stack.push(item);
                 }
             }
-            IntermediateKind::FunctionCall { argument, .. } => {
-                let arg_type = infer_type(argument, locals_types, function_return_types)?;
+            IntermediateKind::FunctionCall { function, argument } => {
+                let callee = functions.get(*function).ok_or_else(|| {
+                    Diagnostic::new("Unknown function call target".to_string())
+                        .with_span(SourceSpan::default())
+                })?;
+                let arg_type = intermediate_type_to_wasm(&callee.input_type);
                 let temp_local_name = match_counter.next_name();
                 locals.push((temp_local_name.clone(), arg_type.clone()));
                 locals_types.insert(temp_local_name, arg_type);
@@ -1521,6 +2056,26 @@ fn collect_locals_for_pattern(
     locals.push((name.clone(), expr_type.clone()));
     locals_types.insert(name, expr_type);
     Ok(())
+}
+
+fn ensure_box_temp_local(
+    locals: &mut Vec<WasmType>,
+    locals_types: &mut std::collections::HashMap<String, WasmType>,
+    local_indices: &mut std::collections::HashMap<String, u32>,
+    param_count: usize,
+) -> u32 {
+    let base = "__box_temp";
+    let mut name = base.to_string();
+    let mut suffix = 0;
+    while locals_types.contains_key(&name) || local_indices.contains_key(&name) {
+        name = format!("{base}_{suffix}");
+        suffix += 1;
+    }
+    let index = (param_count + locals.len()) as u32;
+    locals.push(WasmType::I32);
+    locals_types.insert(name.clone(), WasmType::I32);
+    local_indices.insert(name, index);
+    index
 }
 
 fn flatten_call_arguments(
@@ -1605,6 +2160,70 @@ fn flatten_call_arguments(
     Ok(results)
 }
 
+fn emit_load_from_memory(
+    func: &mut Function,
+    ty: &WasmType,
+    type_ctx: &TypeContext,
+    temp_local: u32,
+    base_offset: u32,
+    memory_index: u32,
+) -> Result<(), Diagnostic> {
+    match ty {
+        WasmType::I32 | WasmType::Box { .. } => {
+            func.instruction(&Instruction::LocalGet(temp_local));
+            func.instruction(&Instruction::I32Load(memarg(base_offset, 2, memory_index)));
+        }
+        WasmType::U8 => {
+            func.instruction(&Instruction::LocalGet(temp_local));
+            func.instruction(&Instruction::I32Load8U(memarg(
+                base_offset,
+                0,
+                memory_index,
+            )));
+        }
+        WasmType::Struct(fields) => {
+            let sorted_fields = sorted_wasm_fields(fields);
+            let mut offset = base_offset;
+            for (_, field_ty) in &sorted_fields {
+                emit_load_from_memory(func, field_ty, type_ctx, temp_local, offset, memory_index)?;
+                offset = offset.saturating_add(wasm_type_size(field_ty) as u32);
+            }
+            let type_index = type_ctx
+                .get_type_index(&WasmType::Struct(sorted_fields))
+                .ok_or_else(|| {
+                    Diagnostic::new("Struct type not found in context")
+                        .with_span(SourceSpan::default())
+                })?;
+            func.instruction(&Instruction::StructNew(type_index));
+        }
+        WasmType::Array {
+            element,
+            length,
+            field_names,
+        } => {
+            let array_type = WasmType::Array {
+                element: element.clone(),
+                length: *length,
+                field_names: field_names.clone(),
+            };
+            let type_index = type_ctx.get_type_index(&array_type).ok_or_else(|| {
+                Diagnostic::new("Array type not found in context").with_span(SourceSpan::default())
+            })?;
+            let element_size = wasm_type_size(element);
+            for idx in 0..*length {
+                let offset = base_offset.saturating_add((idx * element_size) as u32);
+                emit_load_from_memory(func, element, type_ctx, temp_local, offset, memory_index)?;
+            }
+            func.instruction(&Instruction::ArrayNewFixed {
+                array_type_index: type_index,
+                array_size: *length as u32,
+            });
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn emit_expression(
     expr: &IntermediateKind,
     locals: &std::collections::HashMap<String, u32>,
@@ -1616,9 +2235,18 @@ fn emit_expression(
     control_stack: &mut Vec<ControlFrame>,
     loop_stack: &mut Vec<LoopContext>,
     match_counter: &mut MatchCounter,
+    expected_return_type: &WasmType,
+    box_ctx: &mut BoxContext,
+    box_registry: &mut BoxRegistry,
+    box_temp_local: Option<u32>,
 ) -> Result<(), Diagnostic> {
     enum EmitTask<'a> {
         Eval(IntermediateKind),
+        EvalValue(IntermediateKind),
+        EvalWithType {
+            expr: IntermediateKind,
+            expected: WasmType,
+        },
         Instr(Instruction<'a>),
         PushControl(ControlFrame),
         PopControl,
@@ -1630,9 +2258,16 @@ fn emit_expression(
             arg_type: WasmType,
             expected_type: WasmType,
         },
+        FinishBoxArrayIndex {
+            element: WasmType,
+            memory_index: u32,
+        },
     }
 
-    let mut tasks = vec![EmitTask::Eval(expr.clone())];
+    let mut tasks = vec![EmitTask::EvalWithType {
+        expr: expr.clone(),
+        expected: expected_return_type.clone(),
+    }];
 
     while let Some(task) = tasks.pop() {
         match task {
@@ -1657,12 +2292,101 @@ fn emit_expression(
                 arg_type,
                 expected_type,
             } => {
-                if arg_type != expected_type {
+                if !wasm_types_equivalent(&arg_type, &expected_type)
+                    || (matches!(expected_type, WasmType::Box { .. })
+                        && !matches!(arg_type, WasmType::Box { .. }))
+                {
                     return Err(Diagnostic::new(
                         "Function call argument does not match function input type".to_string(),
                     )
                     .with_span(SourceSpan::default()));
                 }
+            }
+            EmitTask::EvalValue(node) => {
+                let expr_type = infer_type(&node, locals_types, function_return_types)?;
+                match expr_type {
+                    WasmType::Box { element } => {
+                        let box_info = resolve_box_expr(&node, box_ctx, box_registry)?;
+                        let temp_local = box_temp_local.ok_or_else(|| {
+                            Diagnostic::new("Box load requires a temporary local".to_string())
+                                .with_span(SourceSpan::default())
+                        })?;
+                        func.instruction(&Instruction::I32Const(0));
+                        func.instruction(&Instruction::LocalSet(temp_local));
+                        emit_load_from_memory(
+                            func,
+                            &element,
+                            type_ctx,
+                            temp_local,
+                            0,
+                            box_info.memory_index,
+                        )?;
+                    }
+                    _ => tasks.push(EmitTask::Eval(node)),
+                }
+            }
+            EmitTask::EvalWithType { expr, expected } => {
+                let expr_type = infer_type(&expr, locals_types, function_return_types)?;
+                match expected {
+                    boxed @ WasmType::Box { .. } => {
+                        if expr_type != boxed {
+                            return Err(Diagnostic::new("Expected boxed value".to_string())
+                                .with_span(SourceSpan::default()));
+                        }
+                        tasks.push(EmitTask::Eval(expr));
+                    }
+                    other => {
+                        if !wasm_types_equivalent(&expr_type, &other) {
+                            return Err(
+                                Diagnostic::new(format!(
+                                    "Expression type does not match expected type: expected `{}`, got `{}`",
+                                    format_wasm_type(&other),
+                                    format_wasm_type(&expr_type)
+                                ))
+                                .with_span(SourceSpan::default()),
+                            );
+                        }
+                        if let WasmType::Box { element } = &expr_type {
+                            let box_info = resolve_box_expr(&expr, box_ctx, box_registry)?;
+                            let temp_local = box_temp_local.ok_or_else(|| {
+                                Diagnostic::new("Box load requires a temporary local".to_string())
+                                    .with_span(SourceSpan::default())
+                            })?;
+                            func.instruction(&Instruction::I32Const(0));
+                            func.instruction(&Instruction::LocalSet(temp_local));
+                            emit_load_from_memory(
+                                func,
+                                element.as_ref(),
+                                type_ctx,
+                                temp_local,
+                                0,
+                                box_info.memory_index,
+                            )?;
+                        } else if matches!(other, WasmType::U8)
+                            && matches!(expr_type, WasmType::I32)
+                        {
+                            tasks.push(EmitTask::Instr(Instruction::I32And));
+                            tasks.push(EmitTask::Instr(Instruction::I32Const(0xFF)));
+                            tasks.push(EmitTask::Eval(expr));
+                        } else {
+                            tasks.push(EmitTask::Eval(expr));
+                        }
+                    }
+                }
+            }
+            EmitTask::FinishBoxArrayIndex {
+                element,
+                memory_index,
+            } => {
+                let temp_local = box_temp_local.ok_or_else(|| {
+                    Diagnostic::new("Box array access requires a temporary local".to_string())
+                        .with_span(SourceSpan::default())
+                })?;
+                let element_size = wasm_type_size(&element) as i32;
+                func.instruction(&Instruction::I32Const(element_size));
+                func.instruction(&Instruction::I32Mul);
+                func.instruction(&Instruction::LocalSet(temp_local));
+                emit_load_from_memory(func, &element, type_ctx, temp_local, 0, memory_index)?;
             }
             EmitTask::Eval(node) => match node {
                 IntermediateKind::Literal(ExpressionLiteral::Number(value)) => {
@@ -1677,6 +2401,9 @@ fn emit_expression(
                     } else {
                         0
                     })));
+                }
+                IntermediateKind::BoxAlloc { .. } => {
+                    tasks.push(EmitTask::Instr(Instruction::I32Const(0)));
                 }
                 IntermediateKind::Identifier(identifier) => {
                     let local_index = locals.get(&identifier.name).copied().ok_or_else(|| {
@@ -1701,8 +2428,19 @@ fn emit_expression(
                                 ))
                                 .with_span(SourceSpan::default())
                             })?;
+                        let target_type =
+                            locals_types.get(&identifier.name).cloned().ok_or_else(|| {
+                                Diagnostic::new(format!(
+                                    "Identifier `{}` is not a local variable or parameter",
+                                    identifier.name
+                                ))
+                                .with_span(SourceSpan::default())
+                            })?;
                         tasks.push(EmitTask::Instr(Instruction::LocalTee(local_index)));
-                        tasks.push(EmitTask::Eval((*value).clone()));
+                        tasks.push(EmitTask::EvalWithType {
+                            expr: (*value).clone(),
+                            expected: target_type,
+                        });
                     }
                     IntermediateLValue::TypePropertyAccess {
                         object, property, ..
@@ -1712,16 +2450,18 @@ fn emit_expression(
                             infer_type(&object_expr, locals_types, function_return_types)?;
                         match &object_type {
                             WasmType::Struct(fields) => {
-                                let field_index = fields
+                                let (field_index, field_type) = fields
                                     .iter()
-                                    .position(|(name, _)| name == property)
+                                    .enumerate()
+                                    .find(|(_, (name, _))| name == property)
+                                    .map(|(index, (_, ty))| (index as u32, ty.clone()))
                                     .ok_or_else(|| {
                                         Diagnostic::new(format!(
                                             "Field `{}` not found in struct",
                                             property
                                         ))
                                         .with_span(SourceSpan::default())
-                                    })? as u32;
+                                    })?;
 
                                 let type_index = type_ctx
                                     .get_type_index(&WasmType::Struct(fields.clone()))
@@ -1734,10 +2474,17 @@ fn emit_expression(
                                     struct_type_index: type_index,
                                     field_index,
                                 }));
-                                tasks.push(EmitTask::Eval((*value).clone()));
+                                tasks.push(EmitTask::EvalWithType {
+                                    expr: (*value).clone(),
+                                    expected: field_type.clone(),
+                                });
                                 tasks.push(EmitTask::Eval(object_expr));
                             }
-                            WasmType::Array { field_names, .. } => {
+                            WasmType::Array {
+                                field_names,
+                                element,
+                                ..
+                            } => {
                                 let field_index = field_names
                                     .iter()
                                     .position(|name| name == property)
@@ -1754,7 +2501,10 @@ fn emit_expression(
                                 let full_target_expr = lvalue_to_intermediate(&target);
                                 tasks.push(EmitTask::Eval(full_target_expr));
                                 tasks.push(EmitTask::Instr(Instruction::ArraySet(type_index)));
-                                tasks.push(EmitTask::Eval((*value).clone()));
+                                tasks.push(EmitTask::EvalWithType {
+                                    expr: (*value).clone(),
+                                    expected: (**element).clone(),
+                                });
                                 tasks.push(EmitTask::Instr(Instruction::I32Const(
                                     field_index as i32,
                                 )));
@@ -1766,20 +2516,30 @@ fn emit_expression(
                                 )
                                 .with_span(SourceSpan::default()));
                             }
+                            WasmType::Box { .. } => {
+                                return Err(Diagnostic::new(
+                                    "Property assignment on boxed value".to_string(),
+                                )
+                                .with_span(SourceSpan::default()));
+                            }
                         }
                     }
                     IntermediateLValue::ArrayIndex { array, index, .. } => {
                         let array_expr = lvalue_to_intermediate(array.as_ref());
                         let array_type =
                             infer_type(&array_expr, locals_types, function_return_types)?;
-                        let WasmType::Array { .. } = array_type else {
+                        if matches!(array_type, WasmType::Box { .. }) {
+                            return Err(Diagnostic::new("Index assignment on boxed array")
+                                .with_span(SourceSpan::default()));
+                        }
+                        let WasmType::Array { element, .. } = &array_type else {
                             return Err(Diagnostic::new("Index assignment on non-array type")
                                 .with_span(SourceSpan::default()));
                         };
 
                         let index_type =
                             infer_type(index.as_ref(), locals_types, function_return_types)?;
-                        if index_type != WasmType::I32 {
+                        if strip_box_type(&index_type) != &WasmType::I32 {
                             return Err(Diagnostic::new("Array index must be i32".to_string())
                                 .with_span(SourceSpan::default()));
                         }
@@ -1790,8 +2550,11 @@ fn emit_expression(
                         let full_target_expr = lvalue_to_intermediate(&target);
                         tasks.push(EmitTask::Eval(full_target_expr));
                         tasks.push(EmitTask::Instr(Instruction::ArraySet(type_index)));
-                        tasks.push(EmitTask::Eval((*value).clone()));
-                        tasks.push(EmitTask::Eval((**index).clone()));
+                        tasks.push(EmitTask::EvalWithType {
+                            expr: (*value).clone(),
+                            expected: (**element).clone(),
+                        });
+                        tasks.push(EmitTask::EvalValue((**index).clone()));
                         tasks.push(EmitTask::Eval(array_expr));
                     }
                 },
@@ -1805,32 +2568,34 @@ fn emit_expression(
                         tasks.push(EmitTask::Instr(Instruction::End));
                         tasks.push(EmitTask::Instr(Instruction::I32Const(0)));
                         tasks.push(EmitTask::Instr(Instruction::Else));
-                        tasks.push(EmitTask::Eval((*right).clone()));
+                        tasks.push(EmitTask::EvalValue((*right).clone()));
                         tasks.push(EmitTask::Instr(Instruction::If(
                             wasm_encoder::BlockType::Result(ValType::I32),
                         )));
                         tasks.push(EmitTask::PushControl(ControlFrame::If));
-                        tasks.push(EmitTask::Eval((*left).clone()));
+                        tasks.push(EmitTask::EvalValue((*left).clone()));
                     }
                     BinaryIntrinsicOperator::BooleanOr => {
                         tasks.push(EmitTask::PopControl);
                         tasks.push(EmitTask::Instr(Instruction::End));
-                        tasks.push(EmitTask::Eval((*right).clone()));
+                        tasks.push(EmitTask::EvalValue((*right).clone()));
                         tasks.push(EmitTask::Instr(Instruction::Else));
                         tasks.push(EmitTask::Instr(Instruction::I32Const(1)));
                         tasks.push(EmitTask::Instr(Instruction::If(
                             wasm_encoder::BlockType::Result(ValType::I32),
                         )));
                         tasks.push(EmitTask::PushControl(ControlFrame::If));
-                        tasks.push(EmitTask::Eval((*left).clone()));
+                        tasks.push(EmitTask::EvalValue((*left).clone()));
                     }
                     _ => {
                         let left_type =
                             infer_type(left.as_ref(), locals_types, function_return_types)?;
                         let right_type =
                             infer_type(right.as_ref(), locals_types, function_return_types)?;
-                        let is_u8 =
-                            matches!(left_type, WasmType::U8) && matches!(right_type, WasmType::U8);
+                        let left_unboxed = strip_box_type(&left_type);
+                        let right_unboxed = strip_box_type(&right_type);
+                        let is_u8 = matches!(left_unboxed, WasmType::U8)
+                            && matches!(right_unboxed, WasmType::U8);
                         let op_instr = match op {
                             BinaryIntrinsicOperator::I32Add => Instruction::I32Add,
                             BinaryIntrinsicOperator::I32Subtract => Instruction::I32Sub,
@@ -1891,8 +2656,8 @@ fn emit_expression(
                             tasks.push(EmitTask::Instr(Instruction::I32Const(0xFF)));
                         }
                         tasks.push(EmitTask::Instr(op_instr));
-                        tasks.push(EmitTask::Eval((*right).clone()));
-                        tasks.push(EmitTask::Eval((*left).clone()));
+                        tasks.push(EmitTask::EvalValue((*right).clone()));
+                        tasks.push(EmitTask::EvalValue((*left).clone()));
                     }
                 },
                 IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(
@@ -1909,7 +2674,7 @@ fn emit_expression(
                     UnaryIntrinsicOperator::BooleanNot,
                 )) => {
                     tasks.push(EmitTask::Instr(Instruction::I32Eqz));
-                    tasks.push(EmitTask::Eval((*operand).clone()));
+                    tasks.push(EmitTask::EvalValue((*operand).clone()));
                 }
                 IntermediateKind::Diverge {
                     value,
@@ -1926,7 +2691,7 @@ fn emit_expression(
                     })?;
 
                     let value_type = infer_type(&value, locals_types, function_return_types)?;
-                    if &value_type != expected_type {
+                    if !wasm_types_equivalent(&value_type, expected_type) {
                         return Err(
                             Diagnostic::new("break value does not match loop result type")
                                 .with_span(SourceSpan::default()),
@@ -1939,7 +2704,10 @@ fn emit_expression(
                         as u32;
 
                     tasks.push(EmitTask::Instr(Instruction::Br(break_depth)));
-                    tasks.push(EmitTask::Eval((*value).clone()));
+                    tasks.push(EmitTask::EvalWithType {
+                        expr: (*value).clone(),
+                        expected: expected_type.clone(),
+                    });
                 }
                 IntermediateKind::Loop { body } => {
                     let loop_result_type =
@@ -2021,7 +2789,7 @@ fn emit_expression(
                     tasks.push(EmitTask::Instr(Instruction::Call(function as u32)));
                     tasks.push(EmitTask::CheckCallArgType {
                         arg_type,
-                        expected_type,
+                        expected_type: expected_type.clone(),
                     });
 
                     for expr in argument_exprs.into_iter().rev() {
@@ -2029,7 +2797,10 @@ fn emit_expression(
                     }
 
                     tasks.push(EmitTask::Instr(Instruction::LocalSet(temp_local_index)));
-                    tasks.push(EmitTask::Eval((*argument).clone()));
+                    tasks.push(EmitTask::EvalWithType {
+                        expr: (*argument).clone(),
+                        expected: expected_type,
+                    });
                 }
                 IntermediateKind::If {
                     condition,
@@ -2052,16 +2823,18 @@ fn emit_expression(
                     let then_diverges = expression_does_diverge(&then_branch, false, false);
                     let else_diverges = expression_does_diverge(&else_branch, false, false);
 
+                    let mut result_type = None;
                     let block_type = if (then_produces_value && else_produces_value)
                         || ((then_diverges || else_diverges)
                             && (then_produces_value || else_produces_value))
                     {
-                        let result_type = if then_produces_value {
+                        let inferred_type = if then_produces_value {
                             infer_type(&then_branch, locals_types, function_return_types)?
                         } else {
                             infer_type(&else_branch, locals_types, function_return_types)?
                         };
-                        let wasm_result_type = result_type.to_val_type(type_ctx);
+                        let wasm_result_type = inferred_type.to_val_type(type_ctx);
+                        result_type = Some(inferred_type);
                         wasm_encoder::BlockType::Result(wasm_result_type)
                     } else {
                         wasm_encoder::BlockType::Empty
@@ -2072,26 +2845,56 @@ fn emit_expression(
                     if else_produces_value && matches!(block_type, wasm_encoder::BlockType::Empty) {
                         tasks.push(EmitTask::Instr(Instruction::Drop));
                     }
-                    tasks.push(EmitTask::Eval((*else_branch).clone()));
+                    if let Some(expected_type) = result_type.clone() {
+                        if else_diverges {
+                            tasks.push(EmitTask::Eval((*else_branch).clone()));
+                        } else {
+                            tasks.push(EmitTask::EvalWithType {
+                                expr: (*else_branch).clone(),
+                                expected: expected_type,
+                            });
+                        }
+                    } else {
+                        tasks.push(EmitTask::Eval((*else_branch).clone()));
+                    }
                     tasks.push(EmitTask::Instr(Instruction::Else));
                     if then_produces_value && matches!(block_type, wasm_encoder::BlockType::Empty) {
                         tasks.push(EmitTask::Instr(Instruction::Drop));
                     }
-                    tasks.push(EmitTask::Eval((*then_branch).clone()));
+                    if let Some(expected_type) = result_type {
+                        if then_diverges {
+                            tasks.push(EmitTask::Eval((*then_branch).clone()));
+                        } else {
+                            tasks.push(EmitTask::EvalWithType {
+                                expr: (*then_branch).clone(),
+                                expected: expected_type,
+                            });
+                        }
+                    } else {
+                        tasks.push(EmitTask::Eval((*then_branch).clone()));
+                    }
                     tasks.push(EmitTask::Instr(Instruction::If(block_type)));
                     tasks.push(EmitTask::PushControl(ControlFrame::If));
-                    tasks.push(EmitTask::Eval((*condition).clone()));
+                    tasks.push(EmitTask::EvalValue((*condition).clone()));
                 }
                 IntermediateKind::Binding(binding) => {
                     let binding = binding.as_ref();
+                    record_box_binding(binding, box_ctx, box_registry)?;
                     let name = binding.identifier.name.clone();
                     let local_index = locals
                         .get(&name)
                         .copied()
                         .unwrap_or_else(|| panic!("Local '{}' should have been collected", name));
+                    let binding_type = locals_types
+                        .get(&name)
+                        .cloned()
+                        .unwrap_or_else(|| intermediate_type_to_wasm(&binding.binding_type));
                     tasks.push(EmitTask::Instr(Instruction::I32Const(1)));
                     tasks.push(EmitTask::Instr(Instruction::LocalSet(local_index)));
-                    tasks.push(EmitTask::Eval(binding.expr.clone()));
+                    tasks.push(EmitTask::EvalWithType {
+                        expr: binding.expr.clone(),
+                        expected: binding_type,
+                    });
                 }
                 IntermediateKind::Block(exprs) => {
                     let mut end_index = exprs.len();
@@ -2121,7 +2924,10 @@ fn emit_expression(
                     divergance_type: DivergeExpressionType::Return,
                 } => {
                     tasks.push(EmitTask::Instr(Instruction::Return));
-                    tasks.push(EmitTask::Eval((*value).clone()));
+                    tasks.push(EmitTask::EvalWithType {
+                        expr: (*value).clone(),
+                        expected: expected_return_type.clone(),
+                    });
                 }
                 IntermediateKind::Struct(items) => {
                     let mut sorted_items = items.clone();
@@ -2171,7 +2977,84 @@ fn emit_expression(
                 }
                 IntermediateKind::TypePropertyAccess { object, property } => {
                     let object_type = infer_type(&object, locals_types, function_return_types)?;
-                    match &object_type {
+                    match object_type {
+                        WasmType::Box { element } => match *element {
+                            WasmType::Struct(fields) => {
+                                let (field_index, field_type) = fields
+                                    .iter()
+                                    .position(|(n, _)| n == &property)
+                                    .and_then(|index| fields.get(index).map(|(_, ty)| (index, ty)))
+                                    .ok_or_else(|| {
+                                        Diagnostic::new(format!(
+                                            "Field `{}` not found in struct",
+                                            property
+                                        ))
+                                        .with_span(SourceSpan::default())
+                                    })?;
+                                let field_offset = sorted_wasm_fields(&fields)
+                                    .iter()
+                                    .take(field_index)
+                                    .map(|(_, ty)| wasm_type_size(ty) as u32)
+                                    .sum();
+                                let box_info = resolve_box_expr(&object, box_ctx, box_registry)?;
+                                let temp_local = box_temp_local.ok_or_else(|| {
+                                    Diagnostic::new(
+                                        "Box load requires a temporary local".to_string(),
+                                    )
+                                    .with_span(SourceSpan::default())
+                                })?;
+                                func.instruction(&Instruction::I32Const(0));
+                                func.instruction(&Instruction::LocalSet(temp_local));
+                                emit_load_from_memory(
+                                    func,
+                                    field_type,
+                                    type_ctx,
+                                    temp_local,
+                                    field_offset,
+                                    box_info.memory_index,
+                                )?;
+                            }
+                            WasmType::Array {
+                                element,
+                                field_names,
+                                ..
+                            } => {
+                                let field_index = field_names
+                                    .iter()
+                                    .position(|name| name == &property)
+                                    .ok_or_else(|| {
+                                        Diagnostic::new(format!(
+                                            "Field `{}` not found in array",
+                                            property
+                                        ))
+                                        .with_span(SourceSpan::default())
+                                    })?;
+                                let offset = (field_index * wasm_type_size(&element)) as u32;
+                                let box_info = resolve_box_expr(&object, box_ctx, box_registry)?;
+                                let temp_local = box_temp_local.ok_or_else(|| {
+                                    Diagnostic::new(
+                                        "Box load requires a temporary local".to_string(),
+                                    )
+                                    .with_span(SourceSpan::default())
+                                })?;
+                                func.instruction(&Instruction::I32Const(0));
+                                func.instruction(&Instruction::LocalSet(temp_local));
+                                emit_load_from_memory(
+                                    func,
+                                    &element,
+                                    type_ctx,
+                                    temp_local,
+                                    offset,
+                                    box_info.memory_index,
+                                )?;
+                            }
+                            _ => {
+                                return Err(Diagnostic::new(
+                                    "Type property access on non-struct type",
+                                )
+                                .with_span(SourceSpan::default()));
+                            }
+                        },
                         WasmType::Struct(fields) => {
                             let (field_index, field_type) = fields
                                 .iter()
@@ -2204,8 +3087,8 @@ fn emit_expression(
                         }
                         WasmType::Array {
                             element,
+                            length,
                             field_names,
-                            ..
                         } => {
                             let field_index = field_names
                                 .iter()
@@ -2218,8 +3101,13 @@ fn emit_expression(
                                     .with_span(SourceSpan::default())
                                 })?;
 
+                            let array_type = WasmType::Array {
+                                element: element.clone(),
+                                length,
+                                field_names: field_names.clone(),
+                            };
                             let type_index = type_ctx
-                                .get_type_index(&object_type)
+                                .get_type_index(&array_type)
                                 .expect("Type should be registered");
 
                             let instr = match element.as_ref() {
@@ -2238,25 +3126,44 @@ fn emit_expression(
                 }
                 IntermediateKind::ArrayIndex { array, index } => {
                     let array_type = infer_type(&array, locals_types, function_return_types)?;
-                    let WasmType::Array { element, .. } = &array_type else {
-                        return Err(Diagnostic::new("Indexing on non-array type")
-                            .with_span(SourceSpan::default()));
+                    let (array_element, is_boxed) = match &array_type {
+                        WasmType::Array { element, .. } => (element.clone(), false),
+                        WasmType::Box { element } => match element.as_ref() {
+                            WasmType::Array { element, .. } => (element.clone(), true),
+                            _ => {
+                                return Err(Diagnostic::new("Indexing on non-array type")
+                                    .with_span(SourceSpan::default()));
+                            }
+                        },
+                        _ => {
+                            return Err(Diagnostic::new("Indexing on non-array type")
+                                .with_span(SourceSpan::default()));
+                        }
                     };
                     let index_type = infer_type(&index, locals_types, function_return_types)?;
-                    if index_type != WasmType::I32 {
+                    if strip_box_type(&index_type) != &WasmType::I32 {
                         return Err(Diagnostic::new("Array index must be i32".to_string())
                             .with_span(SourceSpan::default()));
                     }
-                    let type_index = type_ctx
-                        .get_type_index(&array_type)
-                        .expect("Type should be registered");
-                    let instr = match element.as_ref() {
-                        WasmType::U8 => Instruction::ArrayGetU(type_index),
-                        _ => Instruction::ArrayGet(type_index),
-                    };
-                    tasks.push(EmitTask::Instr(instr));
-                    tasks.push(EmitTask::Eval((*index).clone()));
-                    tasks.push(EmitTask::Eval((*array).clone()));
+                    if is_boxed {
+                        let box_info = resolve_box_expr(&array, box_ctx, box_registry)?;
+                        tasks.push(EmitTask::FinishBoxArrayIndex {
+                            element: (*array_element).clone(),
+                            memory_index: box_info.memory_index,
+                        });
+                        tasks.push(EmitTask::EvalValue((*index).clone()));
+                    } else {
+                        let type_index = type_ctx
+                            .get_type_index(&array_type)
+                            .expect("Type should be registered");
+                        let instr = match array_element.as_ref() {
+                            WasmType::U8 => Instruction::ArrayGetU(type_index),
+                            _ => Instruction::ArrayGet(type_index),
+                        };
+                        tasks.push(EmitTask::Instr(instr));
+                        tasks.push(EmitTask::EvalValue((*index).clone()));
+                        tasks.push(EmitTask::Eval((*array).clone()));
+                    }
                 }
                 IntermediateKind::Unreachable => {
                     tasks.push(EmitTask::Instr(Instruction::Unreachable));
@@ -2496,7 +3403,9 @@ fn expression_does_diverge(
                 }
                 diverges
             }
-            IntermediateKind::Literal(_) | IntermediateKind::Identifier(_) => false,
+            IntermediateKind::Literal(_)
+            | IntermediateKind::Identifier(_)
+            | IntermediateKind::BoxAlloc { .. } => false,
         };
 
         results.push(result);

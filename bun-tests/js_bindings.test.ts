@@ -135,6 +135,46 @@ test("supports mutable assignment", async () => {
     cleanup();
 }, TEST_TIMEOUT_MS);
 
+test("supports boxed values", async () => {
+    const SILK_CODE_BOX = `
+    Point := { x = Box(i32), y = i32 };
+    (export js) sum_boxed := {} => (
+        boxed: Box(i32) := 10;
+        p: Point := { x = 7, y = 5 };
+        boxed + p.x + p.y
+    );
+    `;
+    const { module, cleanup } = await compileAndLoad(SILK_CODE_BOX);
+    expect(module.sum_boxed()).toBe(22);
+    cleanup();
+}, TEST_TIMEOUT_MS);
+
+test("rejects runtime box allocations in js exports", async () => {
+    const SILK_CODE_BOX = `
+    (export js) bad_box := (x: i32) => (
+        boxed: Box(i32) := x;
+        boxed + 1
+    );
+    `;
+
+    writeFileSync(TEMP_SILK, SILK_CODE_BOX);
+
+    const id = Date.now() + "_" + Math.random().toString().slice(2);
+    const outputBase = join(FIXTURES_DIR, `temp_js_${id}`);
+    const proc = Bun.spawn(["cargo", "run", "--", TEMP_SILK, "-o", outputBase], {
+        cwd: ROOT_DIR,
+        stdin: "ignore",
+        stderr: "pipe",
+        stdout: "ignore",
+        env: process.env,
+    });
+
+    const exitCode = await proc.exited;
+    expect(exitCode).toBe(1);
+    const stderr = await new Response(proc.stderr).text();
+    expect(stderr).toContain("Box values must be compile-time constants");
+}, TEST_TIMEOUT_MS);
+
 afterAll(() => {
     try {
         if (existsSync(TEMP_SILK)) unlinkSync(TEMP_SILK);
