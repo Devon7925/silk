@@ -141,6 +141,7 @@ pub enum TargetLiteral {
 pub enum BindingAnnotationLiteral {
     Mut,
     Export(TargetLiteral),
+    Target(TargetLiteral),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -171,6 +172,7 @@ pub enum UnaryIntrinsicOperator {
     UseFromString,
     BoxFromType,
     BindingAnnotationExportFromTarget,
+    BindingAnnotationTargetFromTarget,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -314,6 +316,7 @@ pub struct Binding {
 pub enum BindingAnnotation {
     Export(Expression, SourceSpan),
     Mutable(SourceSpan),
+    Target(TargetLiteral, SourceSpan),
 }
 
 enum PrettyTask<'a> {
@@ -360,6 +363,13 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
                         TargetLiteral::WasmTarget => "wasm",
                     };
                     format!("export {}", target_str)
+                }
+                BindingAnnotationLiteral::Target(target) => {
+                    let target_str = match target {
+                        TargetLiteral::JSTarget => "js",
+                        TargetLiteral::WasmTarget => "wasm",
+                    };
+                    format!("target {}", target_str)
                 }
             },
         }
@@ -452,6 +462,7 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
                             UnaryIntrinsicOperator::UseFromString => "use",
                             UnaryIntrinsicOperator::BoxFromType => "Box",
                             UnaryIntrinsicOperator::BindingAnnotationExportFromTarget => "export",
+                            UnaryIntrinsicOperator::BindingAnnotationTargetFromTarget => "target",
                         };
                         context.tasks.push(PrettyTask::WriteStatic(")"));
                         context.tasks.push(PrettyTask::Expr(operand));
