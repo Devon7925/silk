@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::diagnostics::SourceSpan;
 use crate::parsing::{
-    BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, DivergeExpressionType,
-    Expression, ExpressionKind, Identifier, IntrinsicOperation, LValue, UnaryIntrinsicOperator,
+    BinaryIntrinsicOperator, Binding, BindingPattern, DivergeExpressionType, Expression,
+    ExpressionKind, Identifier, IntrinsicOperation, LValue, UnaryIntrinsicOperator,
 };
 
 #[derive(Default, Clone)]
@@ -69,14 +69,14 @@ enum Value {
         scope: ScopeStack,
     },
     LValue(LValue),
-    Annotations(Vec<BindingAnnotation>),
+    Annotations(Vec<Expression>),
 }
 
 enum Task {
     Expr(Expression, ScopeStack),
     Pattern(BindingPattern, ScopeStack),
     LValue(LValue, ScopeStack),
-    Annotations(Vec<BindingAnnotation>, ScopeStack),
+    Annotations(Vec<Expression>, ScopeStack),
     BuildBinary {
         span: SourceSpan,
         op: BinaryIntrinsicOperator,
@@ -239,19 +239,12 @@ enum Task {
     },
     ContinuePatternAnnotatedPattern {
         span: SourceSpan,
-        annotations: Vec<BindingAnnotation>,
+        annotations: Vec<Expression>,
     },
     ContinueAnnotationsItem {
-        iter: std::vec::IntoIter<BindingAnnotation>,
+        iter: std::vec::IntoIter<Expression>,
         scope: ScopeStack,
-        acc: Vec<BindingAnnotation>,
-        annotation: BindingAnnotation,
-    },
-    ContinueAnnotationsExport {
-        iter: std::vec::IntoIter<BindingAnnotation>,
-        scope: ScopeStack,
-        acc: Vec<BindingAnnotation>,
-        span: SourceSpan,
+        acc: Vec<Expression>,
     },
 }
 
@@ -276,7 +269,7 @@ fn pop_lvalue(results: &mut Vec<Value>) -> LValue {
     }
 }
 
-fn pop_annotations(results: &mut Vec<Value>) -> Vec<BindingAnnotation> {
+fn pop_annotations(results: &mut Vec<Value>) -> Vec<Expression> {
     match results.pop() {
         Some(Value::Annotations(annotations)) => annotations,
         _ => panic!("expected annotations result"),
@@ -578,10 +571,10 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 if let Some(annotation) = iter.next() {
                     tasks.push(Task::ContinueAnnotationsItem {
                         iter,
-                        scope,
+                        scope: scope.clone(),
                         acc: Vec::new(),
-                        annotation,
                     });
+                    tasks.push(Task::Expr(annotation, scope));
                 } else {
                     results.push(Value::Annotations(Vec::new()));
                 }
@@ -1082,47 +1075,16 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 mut iter,
                 scope,
                 mut acc,
-                annotation,
-            } => match annotation {
-                BindingAnnotation::Mutable(span) => {
-                    acc.push(BindingAnnotation::Mutable(span));
-                    if let Some(annotation) = iter.next() {
-                        tasks.push(Task::ContinueAnnotationsItem {
-                            iter,
-                            scope,
-                            acc,
-                            annotation,
-                        });
-                    } else {
-                        results.push(Value::Annotations(acc));
-                    }
-                }
-                BindingAnnotation::Export(expr, span) => {
-                    let expr_scope = scope.clone();
-                    tasks.push(Task::ContinueAnnotationsExport {
-                        iter,
-                        scope,
-                        acc,
-                        span,
-                    });
-                    tasks.push(Task::Expr(expr, expr_scope));
-                }
-            },
-            Task::ContinueAnnotationsExport {
-                mut iter,
-                scope,
-                mut acc,
-                span,
             } => {
                 let expr = pop_expr(&mut results);
-                acc.push(BindingAnnotation::Export(expr, span));
+                acc.push(expr);
                 if let Some(annotation) = iter.next() {
                     tasks.push(Task::ContinueAnnotationsItem {
                         iter,
-                        scope,
+                        scope: scope.clone(),
                         acc,
-                        annotation,
                     });
+                    tasks.push(Task::Expr(annotation, scope));
                 } else {
                     results.push(Value::Annotations(acc));
                 }

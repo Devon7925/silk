@@ -4,9 +4,10 @@ use crate::{
     diagnostics::{Diagnostic, SourceSpan},
     loader,
     parsing::{
-        BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, DivergeExpressionType,
-        Expression, ExpressionKind, ExpressionLiteral, Identifier, IntrinsicOperation,
-        IntrinsicType, LValue, TargetLiteral, UnaryIntrinsicOperator,
+        BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingAnnotationLiteral,
+        BindingPattern, DivergeExpressionType, Expression, ExpressionKind, ExpressionLiteral,
+        Identifier, IntrinsicOperation, IntrinsicType, LValue, TargetLiteral,
+        UnaryIntrinsicOperator,
     },
     uniquify,
 };
@@ -148,6 +149,51 @@ fn identifier_expr(name: &str) -> Expression {
 
 fn intrinsic_type_expr(ty: IntrinsicType) -> Expression {
     Expression::new(ExpressionKind::IntrinsicType(ty), dummy_span())
+}
+
+fn binding_annotation_from_value(value: Expression) -> Result<BindingAnnotation, Diagnostic> {
+    let span = value.span();
+    let ExpressionKind::Literal(ExpressionLiteral::BindingAnnotation(annotation)) = value.kind
+    else {
+        return Err(diagnostic("Expected binding annotation value", span));
+    };
+    match annotation {
+        BindingAnnotationLiteral::Mut => Ok(BindingAnnotation::Mutable(span)),
+        BindingAnnotationLiteral::Export(target) => Ok(BindingAnnotation::Export(
+            ExpressionKind::Literal(ExpressionLiteral::Target(target)).with_span(span),
+            span,
+        )),
+    }
+}
+
+fn resolve_binding_annotations(
+    annotations: Vec<Expression>,
+    context: &mut Context,
+) -> Result<Vec<BindingAnnotation>, Diagnostic> {
+    let mut resolved = Vec::with_capacity(annotations.len());
+    for annotation in annotations {
+        let value = interpret_expression(annotation, context)?;
+        resolved.push(binding_annotation_from_value(value)?);
+    }
+    Ok(resolved)
+}
+
+fn annotated_mutable(annotations: &[Expression]) -> bool {
+    for annotation in annotations {
+        if matches!(annotation.kind, ExpressionKind::Literal(ExpressionLiteral::BindingAnnotation(BindingAnnotationLiteral::Mut))) {
+            return true;
+        }
+    }
+    false
+}
+
+fn annotated_export(annotations: &[Expression]) -> bool {
+    for annotation in annotations {
+        if matches!(annotation.kind, ExpressionKind::Literal(ExpressionLiteral::BindingAnnotation(BindingAnnotationLiteral::Export(_)))) {
+            return true;
+        }
+    }
+    false
 }
 
 fn range_operator_intrinsic() -> (Identifier, Expression) {
@@ -713,9 +759,8 @@ pub fn interpret_expression(
             span: SourceSpan,
         },
         PatternAnnotated {
-            annotations: Vec<BindingAnnotation>,
             span: SourceSpan,
-            export_indices: Vec<usize>,
+            annotation_count: usize,
         },
         BindingFinish,
         FunctionStart {
@@ -1109,30 +1154,21 @@ pub fn interpret_expression(
                     stack.push(Frame::PatternStart(*inner));
                     stack.push(Frame::Eval(*type_expr));
                 }
-                BindingPattern::Annotated {
-                    annotations,
-                    pattern,
+            BindingPattern::Annotated {
+                annotations,
+                pattern,
+                span,
+            } => {
+                stack.push(Frame::PatternAnnotated {
                     span,
-                } => {
-                    let mut export_indices = Vec::new();
-                    let mut export_exprs = Vec::new();
-                    for (idx, ann) in annotations.iter().enumerate() {
-                        if let BindingAnnotation::Export(expr, _) = ann {
-                            export_indices.push(idx);
-                            export_exprs.push(expr.clone());
-                        }
-                    }
-                    stack.push(Frame::PatternAnnotated {
-                        annotations,
-                        span,
-                        export_indices,
-                    });
-                    stack.push(Frame::PatternStart(*pattern));
-                    for expr in export_exprs.into_iter().rev() {
-                        stack.push(Frame::Eval(expr));
-                    }
+                    annotation_count: annotations.len(),
+                });
+                stack.push(Frame::PatternStart(*pattern));
+                for annotation in annotations.into_iter().rev() {
+                    stack.push(Frame::Eval(annotation));
                 }
-            },
+            }
+        },
             Frame::PatternStruct { span, identifiers } => {
                 let mut interpreted = Vec::with_capacity(identifiers.len());
                 for _ in 0..identifiers.len() {
@@ -1173,24 +1209,18 @@ pub fn interpret_expression(
                 ));
             }
             Frame::PatternAnnotated {
-                mut annotations,
                 span,
-                export_indices,
+                annotation_count,
             } => {
                 let inner = pattern_stack.pop().unwrap();
-                let mut export_values = Vec::with_capacity(export_indices.len());
-                for _ in 0..export_indices.len() {
-                    export_values.push(values.pop().unwrap());
+                let mut evaluated = Vec::with_capacity(annotation_count);
+                for _ in 0..annotation_count {
+                    evaluated.push(values.pop().unwrap());
                 }
-                export_values.reverse();
-                for (idx, expr) in export_indices.into_iter().zip(export_values.into_iter()) {
-                    if let BindingAnnotation::Export(_, ann_span) = annotations[idx] {
-                        annotations[idx] = BindingAnnotation::Export(expr, ann_span);
-                    }
-                }
+                evaluated.reverse();
                 pattern_stack.push(BindingPattern::Annotated {
                     pattern: Box::new(inner),
-                    annotations,
+                    annotations: evaluated,
                     span,
                 });
             }
@@ -1511,6 +1541,7 @@ pub fn interpret_expression(
                     UnaryIntrinsicOperator::MatchFromStruct => false,
                     UnaryIntrinsicOperator::UseFromString => true,
                     UnaryIntrinsicOperator::BoxFromType => true,
+                    UnaryIntrinsicOperator::BindingAnnotationExportFromTarget => true,
                 };
                 if !is_resolved_constant(&evaluated_operand) && op_requires_const_argument {
                     values.push(Expression::new(
@@ -1654,6 +1685,20 @@ pub fn interpret_expression(
                             resolved = intrinsic_type_expr(intrinsic.clone());
                         }
                         ExpressionKind::BoxType(Box::new(resolved)).with_span(span)
+                    }
+                    UnaryIntrinsicOperator::BindingAnnotationExportFromTarget => {
+                        let ExpressionKind::Literal(ExpressionLiteral::Target(target)) =
+                            evaluated_operand.kind
+                        else {
+                            return Err(diagnostic(
+                                "export annotation expects a target literal",
+                                evaluated_operand.span(),
+                            ));
+                        };
+                        ExpressionKind::Literal(ExpressionLiteral::BindingAnnotation(
+                            BindingAnnotationLiteral::Export(target),
+                        ))
+                        .with_span(span)
                     }
                 };
                 values.push(result);
@@ -2299,6 +2344,9 @@ pub(crate) fn get_type_of_expression(
                             ExpressionLiteral::Target(_) => {
                                 resolve_intrinsic_type("target", *span, context)?
                             }
+                            ExpressionLiteral::BindingAnnotation(_) => {
+                                resolve_intrinsic_type("binding_annotation", *span, context)?
+                            }
                         };
                         results.push(type_expr);
                     }
@@ -2444,6 +2492,9 @@ pub(crate) fn get_type_of_expression(
                             }
                             ExpressionLiteral::Target(_) => {
                                 resolve_intrinsic_type("target", span, &context)?
+                            }
+                            ExpressionLiteral::BindingAnnotation(_) => {
+                                resolve_intrinsic_type("binding_annotation", span, &context)?
                             }
                         };
                         results.push(type_expr);
@@ -2660,7 +2711,8 @@ pub(crate) fn get_type_of_expression(
                         | IntrinsicType::U8
                         | IntrinsicType::Boolean
                         | IntrinsicType::Target
-                        | IntrinsicType::Type => {
+                        | IntrinsicType::Type
+                        | IntrinsicType::BindingAnnotation => {
                             results.push(
                                 ExpressionKind::IntrinsicType(IntrinsicType::Type).with_span(span),
                             );
@@ -2760,6 +2812,12 @@ pub(crate) fn get_type_of_expression(
                         UnaryIntrinsicOperator::BoxFromType,
                     )) => {
                         results.push(resolve_intrinsic_type("type", span, &context)?);
+                    }
+                    ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
+                        _,
+                        UnaryIntrinsicOperator::BindingAnnotationExportFromTarget,
+                    )) => {
+                        results.push(resolve_intrinsic_type("binding_annotation", span, &context)?);
                     }
                 }
             }
@@ -3032,6 +3090,9 @@ pub(crate) fn get_type_of_expression(
                                 resolve_intrinsic_type("target", span, &context)?
                             }
                             IntrinsicType::Type => resolve_intrinsic_type("type", span, &context)?,
+                            IntrinsicType::BindingAnnotation => {
+                                resolve_intrinsic_type("binding_annotation", span, &context)?
+                            }
                         };
                     }
                     results.push(element_type);
@@ -3090,6 +3151,9 @@ pub(crate) fn get_type_of_expression(
                         IntrinsicType::Boolean => resolve_intrinsic_type("bool", span, &context)?,
                         IntrinsicType::Target => resolve_intrinsic_type("target", span, &context)?,
                         IntrinsicType::Type => resolve_intrinsic_type("type", span, &context)?,
+                        IntrinsicType::BindingAnnotation => {
+                            resolve_intrinsic_type("binding_annotation", span, &context)?
+                        }
                     };
                 }
                 results.push(return_value);
@@ -3114,6 +3178,9 @@ pub(crate) fn get_type_of_expression(
                         IntrinsicType::Boolean => resolve_intrinsic_type("bool", span, &context)?,
                         IntrinsicType::Target => resolve_intrinsic_type("target", span, &context)?,
                         IntrinsicType::Type => resolve_intrinsic_type("type", span, &context)?,
+                        IntrinsicType::BindingAnnotation => {
+                            resolve_intrinsic_type("binding_annotation", span, &context)?
+                        }
                     };
                 }
                 results.push(element_type);
@@ -3534,9 +3601,7 @@ pub fn expression_exports(expr: &Expression) -> bool {
                     pattern,
                     ..
                 } => {
-                    let base = annotations
-                        .iter()
-                        .any(|ann| matches!(ann, BindingAnnotation::Export(..)));
+                    let base = annotated_export(annotations);
                     stack.push(Frame::ExitPattern {
                         child_count: 1,
                         base,
@@ -3707,7 +3772,9 @@ fn type_expression_contains_compile_time_data(expr: &Expression) -> bool {
                     stack.push(field_expr);
                 }
             }
-            ExpressionKind::IntrinsicType(IntrinsicType::Target | IntrinsicType::Type) => {
+            ExpressionKind::IntrinsicType(
+                IntrinsicType::Target | IntrinsicType::Type | IntrinsicType::BindingAnnotation,
+            ) => {
                 return true;
             }
             ExpressionKind::IntrinsicType(
@@ -5005,10 +5072,7 @@ fn pattern_has_mutable_annotation(pattern: &BindingPattern) -> bool {
                 pattern,
                 ..
             } => {
-                if annotations
-                    .iter()
-                    .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)))
-                {
+                if annotated_mutable(annotations) {
                     return true;
                 }
                 stack.push(pattern);
@@ -5142,14 +5206,117 @@ fn bind_pattern_blanks(
                 annotations,
                 ..
             } => {
+                let resolved_annotations = resolve_binding_annotations(annotations, context)?;
                 let combined_annotations = frame
                     .passed_annotations
                     .into_iter()
-                    .chain(annotations)
+                    .chain(resolved_annotations)
                     .collect();
                 stack.push(Frame {
                     pattern: *pattern,
                     passed_annotations: combined_annotations,
+                    type_hint: frame.type_hint,
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn bind_pattern_blanks_for_const(
+    pattern: BindingPattern,
+    context: &mut Context,
+    type_hint: Option<Expression>,
+) -> Result<(), Diagnostic> {
+    struct Frame {
+        pattern: BindingPattern,
+        type_hint: Option<Expression>,
+    }
+
+    let mut stack = vec![Frame { pattern, type_hint }];
+
+    while let Some(frame) = stack.pop() {
+        match frame.pattern {
+            BindingPattern::Identifier(identifier, _) => {
+                if let Some(type_expr) = frame.type_hint {
+                    context.bindings.last_mut().unwrap().insert(
+                        identifier,
+                        (BindingContext::UnboundWithType(type_expr), Vec::new()),
+                    );
+                } else {
+                    context.bindings.last_mut().unwrap().insert(
+                        identifier,
+                        (BindingContext::UnboundWithoutType, Vec::new()),
+                    );
+                }
+            }
+            BindingPattern::Literal(_, _) => {}
+            BindingPattern::Struct(pattern_items, _) => {
+                let mut type_lookup = None;
+                if let Some(Expression {
+                    kind: ExpressionKind::Struct(type_fields),
+                    ..
+                }) = &frame.type_hint
+                {
+                    type_lookup = Some(type_fields.clone());
+                }
+
+                for (field_identifier, field_pattern) in pattern_items.into_iter().rev() {
+                    let field_type_hint = type_lookup.as_ref().and_then(|fields| {
+                        fields
+                            .iter()
+                            .find(|(name, _)| name.name == field_identifier.name)
+                            .map(|(_, ty)| ty.clone())
+                    });
+                    stack.push(Frame {
+                        pattern: field_pattern,
+                        type_hint: field_type_hint,
+                    });
+                }
+            }
+            BindingPattern::EnumVariant {
+                enum_type,
+                variant,
+                payload,
+                ..
+            } => {
+                let type_hint = frame.type_hint.or_else(|| {
+                    resolve_enum_type_expression(&enum_type, context).or_else(|| {
+                        get_type_of_expression(&enum_type, context)
+                            .ok()
+                            .and_then(|expr| {
+                                matches!(expr.kind, ExpressionKind::EnumType(_)).then_some(expr)
+                            })
+                    })
+                });
+                let payload_hint = type_hint
+                    .as_ref()
+                    .and_then(|hint| enum_variant_info(hint, &variant).map(|(_, ty)| ty));
+
+                if let Some(payload_pattern) = payload {
+                    stack.push(Frame {
+                        pattern: *payload_pattern,
+                        type_hint: payload_hint,
+                    });
+                }
+            }
+            BindingPattern::TypeHint(inner, type_hint, _) => {
+                let resolved = resolve_type_alias_expression(type_hint.as_ref(), context);
+                let resolved = if matches!(resolved.kind, ExpressionKind::TypePropertyAccess { .. })
+                {
+                    get_type_of_expression(&resolved, context).unwrap_or(resolved)
+                } else {
+                    resolved
+                };
+                stack.push(Frame {
+                    pattern: *inner,
+                    type_hint: Some(resolved),
+                });
+            }
+            BindingPattern::Annotated { pattern, .. } => {
+                stack.push(Frame {
+                    pattern: *pattern,
                     type_hint: frame.type_hint,
                 });
             }
@@ -5369,23 +5536,26 @@ fn bind_pattern_from_value(
                     annotations,
                     ..
                 } => {
+                    let resolved_annotations = resolve_binding_annotations(annotations, context)?;
                     let mut new_preserve_behavior = preserve_behavior;
-                    if annotations
+                    if resolved_annotations
                         .iter()
                         .any(|ann| matches!(ann, BindingAnnotation::Export(_, _)))
                     {
                         new_preserve_behavior =
                             new_preserve_behavior.max(PreserveBehavior::PreserveBinding);
                     }
-                    if annotations
+                    if resolved_annotations
                         .iter()
                         .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)))
                     {
                         new_preserve_behavior =
                             new_preserve_behavior.max(PreserveBehavior::PreserveUsageInLoops);
                     }
-                    let combined_annotations =
-                        passed_annotations.into_iter().chain(annotations).collect();
+                    let combined_annotations = passed_annotations
+                        .into_iter()
+                        .chain(resolved_annotations)
+                        .collect();
                     stack.push(Frame::Enter {
                         pattern: *pattern,
                         value,
@@ -5603,7 +5773,7 @@ fn is_resolved_constant(expr: &Expression) -> bool {
                 let new_function_context = {
                     let mut ctx = Context::empty();
                     ctx.bindings.push(HashMap::new());
-                    bind_pattern_blanks(parameter.clone(), &mut ctx, Vec::new(), None).unwrap();
+                    bind_pattern_blanks_for_const(parameter.clone(), &mut ctx, None).unwrap();
                     ctx
                 };
                 if !is_resolved_const_function_expression(body, &new_function_context) {
@@ -5675,13 +5845,8 @@ fn is_resolved_const_function_expression(expr: &Expression, function_context: &C
                 ..
             } => {
                 let mut new_function_context = frame.context.clone();
-                bind_pattern_blanks(
-                    parameter.clone(),
-                    &mut new_function_context,
-                    Vec::new(),
-                    None,
-                )
-                .unwrap();
+                bind_pattern_blanks_for_const(parameter.clone(), &mut new_function_context, None)
+                    .unwrap();
                 stack.push(Frame {
                     expr: body,
                     context: new_function_context.clone(),
@@ -6123,6 +6288,69 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
             BindingContext::Bound(
                 ExpressionKind::Literal(ExpressionLiteral::Target(TargetLiteral::WasmTarget))
                     .with_span(dummy_span()),
+                PreserveBehavior::Inline,
+                None,
+            ),
+            Vec::new(),
+        ),
+    );
+
+    context.bindings.last_mut().unwrap().insert(
+        Identifier::new("binding_annotation"),
+        (
+            BindingContext::Bound(
+                ExpressionKind::AttachImplementation {
+                    type_expr: Box::new(intrinsic_type_expr(IntrinsicType::BindingAnnotation)),
+                    implementation: Box::new(ExpressionKind::Struct(vec![]).with_span(dummy_span())),
+                }
+                .with_span(dummy_span()),
+                PreserveBehavior::Inline,
+                None,
+            ),
+            Vec::new(),
+        ),
+    );
+
+    context.bindings.last_mut().unwrap().insert(
+        Identifier::new("mut"),
+        (
+            BindingContext::Bound(
+                ExpressionKind::Literal(ExpressionLiteral::BindingAnnotation(
+                    BindingAnnotationLiteral::Mut,
+                ))
+                .with_span(dummy_span()),
+                PreserveBehavior::Inline,
+                None,
+            ),
+            Vec::new(),
+        ),
+    );
+
+    context.bindings.last_mut().unwrap().insert(
+        Identifier::new("export"),
+        (
+            BindingContext::Bound(
+                ExpressionKind::Function {
+                    parameter: BindingPattern::TypeHint(
+                        Box::new(BindingPattern::Identifier(
+                            Identifier::new("target"),
+                            dummy_span(),
+                        )),
+                        Box::new(intrinsic_type_expr(IntrinsicType::Target)),
+                        dummy_span(),
+                    ),
+                    return_type: Some(Box::new(intrinsic_type_expr(
+                        IntrinsicType::BindingAnnotation,
+                    ))),
+                    body: Box::new(
+                        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
+                            Box::new(identifier_expr("target")),
+                            UnaryIntrinsicOperator::BindingAnnotationExportFromTarget,
+                        ))
+                        .with_span(dummy_span()),
+                    ),
+                }
+                .with_span(dummy_span()),
                 PreserveBehavior::Inline,
                 None,
             ),

@@ -112,6 +112,23 @@ test("allows struct field updates via rebinding", async () => {
     expect(update_struct()).toBe(9);
 }, TEST_TIMEOUT_MS);
 
+test("allows dynamic binding annotations for mutability", async () => {
+    const silkCode = `
+    dyn_annotation := (flag: bool) => (
+        if flag then mut else (export wasm)
+    );
+    (export wasm) set_value := {} => (
+        (dyn_annotation true) x := 5;
+        x = 10;
+        x
+    );
+    {}
+  `;
+
+    const { set_value } = await compileAndLoad(silkCode);
+    expect(set_value()).toBe(10);
+}, TEST_TIMEOUT_MS);
+
 afterAll(() => {
     try {
         unlinkSync(TEMP_SILK);

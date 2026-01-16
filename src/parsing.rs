@@ -108,7 +108,7 @@ pub enum BindingPattern {
     },
     TypeHint(Box<BindingPattern>, Box<Expression>, SourceSpan),
     Annotated {
-        annotations: Vec<BindingAnnotation>,
+        annotations: Vec<Expression>,
         pattern: Box<BindingPattern>,
         span: SourceSpan,
     },
@@ -138,12 +138,19 @@ pub enum TargetLiteral {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BindingAnnotationLiteral {
+    Mut,
+    Export(TargetLiteral),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpressionLiteral {
     Number(i32),
     Boolean(bool),
     Char(u8),
     String(Vec<u8>),
     Target(TargetLiteral),
+    BindingAnnotation(BindingAnnotationLiteral),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,6 +160,7 @@ pub enum IntrinsicType {
     Boolean,
     Type,
     Target,
+    BindingAnnotation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -162,6 +170,7 @@ pub enum UnaryIntrinsicOperator {
     MatchFromStruct,
     UseFromString,
     BoxFromType,
+    BindingAnnotationExportFromTarget,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -343,6 +352,16 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
                 TargetLiteral::JSTarget => "js".to_string(),
                 TargetLiteral::WasmTarget => "wasm".to_string(),
             },
+            ExpressionLiteral::BindingAnnotation(binding_annotation) => match binding_annotation {
+                BindingAnnotationLiteral::Mut => "mut".to_string(),
+                BindingAnnotationLiteral::Export(target) => {
+                    let target_str = match target {
+                        TargetLiteral::JSTarget => "js",
+                        TargetLiteral::WasmTarget => "wasm",
+                    };
+                    format!("export {}", target_str)
+                }
+            },
         }
     }
 
@@ -393,6 +412,7 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
                         IntrinsicType::Boolean => "boolean",
                         IntrinsicType::Type => "type",
                         IntrinsicType::Target => "target",
+                        IntrinsicType::BindingAnnotation => "binding_annotation",
                     };
                     context.tasks.push(PrettyTask::WriteStatic(ty_str));
                 }
@@ -431,6 +451,7 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
                             UnaryIntrinsicOperator::MatchFromStruct => "match",
                             UnaryIntrinsicOperator::UseFromString => "use",
                             UnaryIntrinsicOperator::BoxFromType => "Box",
+                            UnaryIntrinsicOperator::BindingAnnotationExportFromTarget => "export",
                         };
                         context.tasks.push(PrettyTask::WriteStatic(")"));
                         context.tasks.push(PrettyTask::Expr(operand));
@@ -687,26 +708,18 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
                     context.tasks.push(PrettyTask::WriteStatic(": "));
                     context.tasks.push(PrettyTask::Pattern(inner));
                 }
-                BindingPattern::Annotated {
-                    annotations,
-                    pattern,
-                    ..
-                } => {
-                    context.tasks.push(PrettyTask::Pattern(pattern));
-                    for annotation in annotations.iter().rev() {
-                        context.tasks.push(PrettyTask::WriteStatic(") "));
-                        match annotation {
-                            BindingAnnotation::Export(expr, _) => {
-                                context.tasks.push(PrettyTask::Expr(expr));
-                                context.tasks.push(PrettyTask::WriteStatic("export "));
-                            }
-                            BindingAnnotation::Mutable(_) => {
-                                context.tasks.push(PrettyTask::WriteStatic("mut"));
-                            }
-                        }
-                        context.tasks.push(PrettyTask::WriteStatic("("));
-                    }
+            BindingPattern::Annotated {
+                annotations,
+                pattern,
+                ..
+            } => {
+                context.tasks.push(PrettyTask::Pattern(pattern));
+                for annotation in annotations.iter().rev() {
+                    context.tasks.push(PrettyTask::WriteStatic(") "));
+                    context.tasks.push(PrettyTask::Expr(annotation));
+                    context.tasks.push(PrettyTask::WriteStatic("("));
                 }
+            }
             },
         }
     }
@@ -1543,7 +1556,10 @@ impl<'a> Parser<'a> {
                                 };
                                 let iterator_span = iterator_expr.span();
                                 let iter_binding_pattern = BindingPattern::Annotated {
-                                    annotations: vec![BindingAnnotation::Mutable(iterator_span)],
+                                    annotations: vec![ExpressionKind::Identifier(
+                                        Identifier::new("mut"),
+                                    )
+                                    .with_span(iterator_span)],
                                     pattern: Box::new(BindingPattern::Identifier(
                                         iterator_identifier.clone(),
                                         iterator_span,
@@ -2403,7 +2419,7 @@ fn pattern_expression_to_binding_pattern(
         },
         AnnotatedFinish {
             span: SourceSpan,
-            annotations: Vec<BindingAnnotation>,
+            annotations: Vec<Expression>,
         },
     }
 
@@ -2554,33 +2570,16 @@ fn pattern_expression_to_binding_pattern(
 
 fn extract_binding_annotations_from_expression(
     expression: Expression,
-) -> Result<Vec<BindingAnnotation>, Diagnostic> {
-    let mut annotations = Vec::new();
-    let mut stack = vec![expression];
-
-    while let Some(expr) = stack.pop() {
-        let span = expr.span();
-        match expr.kind {
-            ExpressionKind::Identifier(Identifier { name: id, .. }) if id == "mut" => {
-                annotations.push(BindingAnnotation::Mutable(span));
-            }
-            ExpressionKind::FunctionCall { function, argument } => match *function {
-                Expression {
-                    kind: ExpressionKind::Identifier(Identifier { name: id, .. }),
-                    span: ann_span,
-                } if id == "export" => {
-                    annotations.push(BindingAnnotation::Export(*argument, ann_span));
-                }
-                other => {
-                    stack.push(*argument);
-                    stack.push(other);
-                }
-            },
-            _ => return Err(Diagnostic::new("Invalid binding annotation").with_span(span)),
-        }
+) -> Result<Vec<Expression>, Diagnostic> {
+    if let ExpressionKind::FunctionCall { function, argument } = &expression.kind
+        && matches!(function.kind, ExpressionKind::FunctionCall { .. })
+    {
+        let mut annotations =
+            extract_binding_annotations_from_expression((**function).clone())?;
+        annotations.push((**argument).clone());
+        return Ok(annotations);
     }
-
-    Ok(annotations)
+    Ok(vec![expression])
 }
 
 #[cfg(test)]
@@ -2906,6 +2905,29 @@ y: i32 := x
     );
 }
 
+#[cfg(test)]
+fn assert_export_annotation(expr: &Expression, expected_target: &str) {
+    let ExpressionKind::FunctionCall { function, argument } = &expr.kind else {
+        panic!("expected export annotation expression");
+    };
+    assert!(matches!(
+        &function.kind,
+        ExpressionKind::Identifier(Identifier { name, .. }) if name == "export"
+    ));
+    assert!(matches!(
+        &argument.kind,
+        ExpressionKind::Identifier(Identifier { name, .. }) if name == expected_target
+    ));
+}
+
+#[cfg(test)]
+fn assert_mut_annotation(expr: &Expression) {
+    assert!(matches!(
+        &expr.kind,
+        ExpressionKind::Identifier(Identifier { name, .. }) if name == "mut"
+    ));
+}
+
 #[test]
 fn parse_binding_with_export_annotation() {
     let Ok((parsed, "")) = parse_block(
@@ -2935,26 +2957,26 @@ bar
         panic!("expected annotated pattern");
     };
     assert_eq!(annotations.len(), 1);
-    match &annotations[0] {
-        BindingAnnotation::Export(target_expr, _) => match target_expr {
-            Expression {
-                kind: ExpressionKind::Identifier(identifier),
-                ..
-            } => assert_eq!(identifier.name, "js"),
-            other => panic!("expected target identifier, got {:?}", other),
-        },
-        other => panic!("unexpected annotation: {:?}", other),
-    }
+    assert_export_annotation(&annotations[0], "js");
 
     let ExpressionKind::Binding(binding2) = &parsed[1].kind else {
         panic!()
     };
-    let BindingPattern::Annotated { annotations, .. } = &binding2.pattern else {
+    let BindingPattern::Annotated {
+        annotations,
+        pattern,
+        ..
+    } = &binding2.pattern
+    else {
         panic!("expected annotated pattern")
     };
     assert_eq!(annotations.len(), 2);
-    assert!(matches!(annotations[0], BindingAnnotation::Export(_, _)));
-    assert!(matches!(annotations[1], BindingAnnotation::Export(_, _)));
+    assert_export_annotation(&annotations[0], "wasm");
+    assert_export_annotation(&annotations[1], "js");
+    assert!(matches!(
+        pattern.as_ref(),
+        BindingPattern::Identifier(Identifier { name, .. }, _) if name == "bar"
+    ));
 }
 
 #[test]
@@ -2985,12 +3007,8 @@ foo_binding
         panic!("expected annotated foo field")
     };
     assert_eq!(annotations.len(), 2);
-    let BindingAnnotation::Export(_, _) = &annotations[0] else {
-        panic!("expected export annotation first")
-    };
-    let BindingAnnotation::Mutable(_) = &annotations[1] else {
-        panic!("expected mutable annotation second")
-    };
+    assert_export_annotation(&annotations[0], "js");
+    assert_mut_annotation(&annotations[1]);
 }
 
 #[test]
@@ -3021,6 +3039,7 @@ foo_binding
         panic!("expected annotated foo field")
     };
     assert_eq!(annotations.len(), 1);
+    assert_export_annotation(&annotations[0], "js");
 }
 
 #[test]
@@ -3047,7 +3066,7 @@ foo = 2
     assert!(
         annotations
             .iter()
-            .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)))
+            .any(|ann| matches!(&ann.kind, ExpressionKind::Identifier(Identifier { name, .. }) if name == "mut"))
     );
 
     let ExpressionKind::Assignment { target, .. } = &parsed[1].kind else {
@@ -3083,7 +3102,7 @@ fn parse_for_loop_desugars_to_iterator_binding() {
     assert!(
         annotations
             .iter()
-            .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)))
+            .any(|ann| matches!(&ann.kind, ExpressionKind::Identifier(Identifier { name, .. }) if name == "mut"))
     );
     assert!(matches!(
         pattern.as_ref(),

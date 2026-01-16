@@ -986,7 +986,8 @@ impl IntermediateBuilder {
                             },
                             ExpressionLiteral::Number(_)
                             | ExpressionLiteral::Boolean(_)
-                            | ExpressionLiteral::Target(_) => IntermediateType::I32,
+                            | ExpressionLiteral::Target(_)
+                            | ExpressionLiteral::BindingAnnotation(_) => IntermediateType::I32,
                         };
                         values.push(value);
                     }
@@ -1097,7 +1098,8 @@ impl IntermediateBuilder {
                     ExpressionKind::IntrinsicType(IntrinsicType::I32)
                     | ExpressionKind::IntrinsicType(IntrinsicType::Boolean)
                     | ExpressionKind::IntrinsicType(IntrinsicType::Target)
-                    | ExpressionKind::IntrinsicType(IntrinsicType::Type) => {
+                    | ExpressionKind::IntrinsicType(IntrinsicType::Type)
+                    | ExpressionKind::IntrinsicType(IntrinsicType::BindingAnnotation) => {
                         values.push(IntermediateType::I32);
                     }
                     ExpressionKind::IntrinsicType(IntrinsicType::U8) => {
