@@ -29,14 +29,14 @@ param |> match {
 * [x] Array
 * [x] Char
 * [x] String
-* [ ] Memory
-* [ ] assembly insertion
+* [x] Memory
+* [x] assembly insertion
 * [ ] Type hint verification
 * [x] Enum
 
 * [x] WASM output
-* [ ] JS output
-* [ ] WGSL output
+* [x] JS output
+* [x] WGSL output
 * [ ] WASM <-> JS interface helper
 * [ ] WGSL <-> JS interface helper
 
