@@ -59,7 +59,6 @@ test("executes wgsl with boxed storage bindings", async () => {
   `;
 
     const wgsl = await compileToWgsl(silkCode);
-    console.error(wgsl);
     const boxABinding = extractBinding(wgsl, "box_a");
     const boxBBinding = extractBinding(wgsl, "box_b");
     const outBinding = extractBinding(wgsl, "silk_out_sum_boxes");
