@@ -57,6 +57,7 @@ fn execute(options: CliOptions) -> Result<(), CliError> {
                 match artifact.kind {
                     silk::ArtifactKind::Wasm => output_path.set_extension("wasm"),
                     silk::ArtifactKind::JS => output_path.set_extension("js"),
+                    silk::ArtifactKind::Wgsl => output_path.set_extension("wgsl"),
                 };
                 eprintln!("DEBUG: writing artifact to {:?}", output_path);
                 write_output(&OutputTarget::File(output_path), &artifact.content)?;

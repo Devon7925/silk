@@ -213,6 +213,7 @@ fn normalize_targets(mut targets: Vec<TargetLiteral>) -> Vec<TargetLiteral> {
     targets.sort_by_key(|target| match target {
         TargetLiteral::JSTarget => 0,
         TargetLiteral::WasmTarget => 1,
+        TargetLiteral::WgslTarget => 2,
     });
     targets.dedup();
     targets
@@ -227,6 +228,7 @@ fn format_targets(targets: &[TargetLiteral]) -> String {
         let name = match target {
             TargetLiteral::JSTarget => "js",
             TargetLiteral::WasmTarget => "wasm",
+            TargetLiteral::WgslTarget => "wgsl",
         };
         parts.push(name);
     }
@@ -1959,6 +1961,7 @@ pub fn interpret_expression(
                             match target {
                                 TargetLiteral::JSTarget => "js",
                                 TargetLiteral::WasmTarget => "wasm",
+                                TargetLiteral::WgslTarget => "wgsl",
                             }
                         ),
                         span,
@@ -1972,6 +1975,7 @@ pub fn interpret_expression(
                             match target {
                                 TargetLiteral::JSTarget => "js",
                                 TargetLiteral::WasmTarget => "wasm",
+                                TargetLiteral::WgslTarget => "wgsl",
                             }
                         ),
                         span,
@@ -6618,6 +6622,19 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
         (
             BindingContext::Bound(
                 ExpressionKind::Literal(ExpressionLiteral::Target(TargetLiteral::WasmTarget))
+                    .with_span(dummy_span()),
+                PreserveBehavior::Inline,
+                None,
+            ),
+            Vec::new(),
+        ),
+    );
+
+    context.bindings.last_mut().unwrap().insert(
+        Identifier::new("wgsl"),
+        (
+            BindingContext::Bound(
+                ExpressionKind::Literal(ExpressionLiteral::Target(TargetLiteral::WgslTarget))
                     .with_span(dummy_span()),
                 PreserveBehavior::Inline,
                 None,

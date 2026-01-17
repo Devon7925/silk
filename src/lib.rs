@@ -6,6 +6,7 @@ mod loader;
 pub mod parsing;
 mod uniquify;
 mod wasm;
+mod wgsl;
 
 pub mod test_support {
     pub use crate::intermediate::{IntermediateResult, context_to_intermediate};
@@ -29,6 +30,7 @@ pub struct CompilationArtifact {
 pub enum ArtifactKind {
     Wasm,
     JS,
+    Wgsl,
 }
 
 pub fn compile(
@@ -70,6 +72,19 @@ pub fn compile(
             name: "main".to_string(), // TODO: use file name
             content: content.into_bytes(),
             kind: ArtifactKind::JS,
+        });
+    }
+
+    if intermediate
+        .exports
+        .iter()
+        .any(|e| matches!(e.target, parsing::TargetLiteral::WgslTarget))
+    {
+        let content = wgsl::compile_exports(&intermediate)?;
+        artifacts.push(CompilationArtifact {
+            name: "main".to_string(), // TODO: use file name
+            content: content.into_bytes(),
+            kind: ArtifactKind::Wgsl,
         });
     }
 

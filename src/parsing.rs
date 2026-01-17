@@ -135,6 +135,7 @@ impl BindingPattern {
 pub enum TargetLiteral {
     JSTarget,
     WasmTarget,
+    WgslTarget,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -359,6 +360,7 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
             ExpressionLiteral::Target(t) => match t {
                 TargetLiteral::JSTarget => "js".to_string(),
                 TargetLiteral::WasmTarget => "wasm".to_string(),
+                TargetLiteral::WgslTarget => "wgsl".to_string(),
             },
             ExpressionLiteral::BindingAnnotation(binding_annotation) => match binding_annotation {
                 BindingAnnotationLiteral::Mut => "mut".to_string(),
@@ -366,6 +368,7 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
                     let target_str = match target {
                         TargetLiteral::JSTarget => "js",
                         TargetLiteral::WasmTarget => "wasm",
+                        TargetLiteral::WgslTarget => "wgsl",
                     };
                     format!("export {}", target_str)
                 }
@@ -373,6 +376,7 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
                     let target_str = match target {
                         TargetLiteral::JSTarget => "js",
                         TargetLiteral::WasmTarget => "wasm",
+                        TargetLiteral::WgslTarget => "wgsl",
                     };
                     format!("target {}", target_str)
                 }
@@ -479,6 +483,7 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
                         let target_str = match target {
                             TargetLiteral::JSTarget => "js",
                             TargetLiteral::WasmTarget => "wasm",
+                            TargetLiteral::WgslTarget => "wgsl",
                         };
                         context.tasks.push(PrettyTask::WriteStatic(")"));
                         context.tasks.push(PrettyTask::Expr(code));
