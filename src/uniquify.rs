@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::diagnostics::SourceSpan;
 use crate::parsing::{
     BinaryIntrinsicOperator, Binding, BindingPattern, DivergeExpressionType, Expression,
-    ExpressionKind, Identifier, IntrinsicOperation, LValue, UnaryIntrinsicOperator,
+    ExpressionKind, Identifier, IntrinsicOperation, LValue, TargetLiteral, UnaryIntrinsicOperator,
 };
 
 #[derive(Default, Clone)]
@@ -84,6 +84,10 @@ enum Task {
     BuildUnary {
         span: SourceSpan,
         op: UnaryIntrinsicOperator,
+    },
+    BuildInlineAssembly {
+        span: SourceSpan,
+        target: TargetLiteral,
     },
     BuildEnumType {
         span: SourceSpan,
@@ -298,6 +302,13 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                     ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(operand, op)) => {
                         tasks.push(Task::BuildUnary { span, op });
                         tasks.push(Task::Expr(*operand, scope));
+                    }
+                    ExpressionKind::IntrinsicOperation(IntrinsicOperation::InlineAssembly {
+                        target,
+                        code,
+                    }) => {
+                        tasks.push(Task::BuildInlineAssembly { span, target });
+                        tasks.push(Task::Expr(*code, scope));
                     }
                     ExpressionKind::BoxType(inner) => {
                         tasks.push(Task::BuildBoxType { span });
@@ -598,6 +609,16 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                         Box::new(operand),
                         op,
                     ))
+                    .with_span(span),
+                ));
+            }
+            Task::BuildInlineAssembly { span, target } => {
+                let code = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::IntrinsicOperation(IntrinsicOperation::InlineAssembly {
+                        target,
+                        code: Box::new(code),
+                    })
                     .with_span(span),
                 ));
             }

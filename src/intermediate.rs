@@ -13,6 +13,10 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntermediateKind {
     IntrinsicOperation(IntermediateIntrinsicOperation),
+    InlineAssembly {
+        target: TargetLiteral,
+        code: Vec<u8>,
+    },
     If {
         condition: Box<IntermediateKind>,
         then_branch: Box<IntermediateKind>,
@@ -233,6 +237,14 @@ pub fn expression_to_intermediate(
                         crate::parsing::IntrinsicOperation::Unary(operand, operator) => {
                             stack.push(Frame::FinishIntrinsicUnary(operator));
                             stack.push(Frame::Enter(*operand));
+                        }
+                        crate::parsing::IntrinsicOperation::InlineAssembly { target, code } => {
+                            let ExpressionKind::Literal(ExpressionLiteral::String(bytes)) =
+                                code.kind
+                            else {
+                                panic!("Inline assembly expects a string literal");
+                            };
+                            values.push(IntermediateKind::InlineAssembly { target, code: bytes });
                         }
                     },
                     ExpressionKind::Match { value, branches } => {

@@ -1355,6 +1355,152 @@ fn expression_produces_value(
         .ok_or_else(|| Diagnostic::new("Failed to compute expression value".to_string()))
 }
 
+fn parse_inline_wasm(code: &str) -> Result<Vec<Instruction<'static>>, Diagnostic> {
+    let mut instructions = Vec::new();
+    for raw in code.split(|c| c == ';' || c == '\n' || c == '\r') {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut parts = trimmed.split_whitespace();
+        let op = parts
+            .next()
+            .ok_or_else(|| Diagnostic::new("asm instruction cannot be empty".to_string()))?;
+        match op {
+            "local.get" => {
+                let index = parts
+                    .next()
+                    .ok_or_else(|| {
+                        Diagnostic::new("asm local.get expects a local index".to_string())
+                    })?
+                    .parse::<u32>()
+                    .map_err(|_| {
+                        Diagnostic::new("asm local.get expects a valid u32".to_string())
+                    })?;
+                if parts.next().is_some() {
+                    return Err(Diagnostic::new(
+                        "asm local.get expects a single index value".to_string(),
+                    ));
+                }
+                instructions.push(Instruction::LocalGet(index));
+            }
+            "local.set" => {
+                let index = parts
+                    .next()
+                    .ok_or_else(|| {
+                        Diagnostic::new("asm local.set expects a local index".to_string())
+                    })?
+                    .parse::<u32>()
+                    .map_err(|_| {
+                        Diagnostic::new("asm local.set expects a valid u32".to_string())
+                    })?;
+                if parts.next().is_some() {
+                    return Err(Diagnostic::new(
+                        "asm local.set expects a single index value".to_string(),
+                    ));
+                }
+                instructions.push(Instruction::LocalSet(index));
+            }
+            "i32.const" => {
+                let value = parts
+                    .next()
+                    .ok_or_else(|| {
+                        Diagnostic::new("asm i32.const expects an immediate value".to_string())
+                    })?
+                    .parse::<i32>()
+                    .map_err(|_| {
+                        Diagnostic::new("asm i32.const expects a valid i32".to_string())
+                    })?;
+                if parts.next().is_some() {
+                    return Err(Diagnostic::new(
+                        "asm i32.const expects a single immediate value".to_string(),
+                    ));
+                }
+                instructions.push(Instruction::I32Const(value));
+            }
+            "i32.add" => {
+                if parts.next().is_some() {
+                    return Err(Diagnostic::new("asm i32.add takes no operands".to_string()));
+                }
+                instructions.push(Instruction::I32Add);
+            }
+            "i32.sub" => {
+                if parts.next().is_some() {
+                    return Err(Diagnostic::new("asm i32.sub takes no operands".to_string()));
+                }
+                instructions.push(Instruction::I32Sub);
+            }
+            "i32.mul" => {
+                if parts.next().is_some() {
+                    return Err(Diagnostic::new("asm i32.mul takes no operands".to_string()));
+                }
+                instructions.push(Instruction::I32Mul);
+            }
+            "i32.div_s" => {
+                if parts.next().is_some() {
+                    return Err(Diagnostic::new("asm i32.div_s takes no operands".to_string()));
+                }
+                instructions.push(Instruction::I32DivS);
+            }
+            "i32.eq" => {
+                if parts.next().is_some() {
+                    return Err(Diagnostic::new("asm i32.eq takes no operands".to_string()));
+                }
+                instructions.push(Instruction::I32Eq);
+            }
+            "i32.ne" => {
+                if parts.next().is_some() {
+                    return Err(Diagnostic::new("asm i32.ne takes no operands".to_string()));
+                }
+                instructions.push(Instruction::I32Ne);
+            }
+            "i32.lt_s" => {
+                if parts.next().is_some() {
+                    return Err(Diagnostic::new("asm i32.lt_s takes no operands".to_string()));
+                }
+                instructions.push(Instruction::I32LtS);
+            }
+            "i32.gt_s" => {
+                if parts.next().is_some() {
+                    return Err(Diagnostic::new("asm i32.gt_s takes no operands".to_string()));
+                }
+                instructions.push(Instruction::I32GtS);
+            }
+            "i32.le_s" => {
+                if parts.next().is_some() {
+                    return Err(Diagnostic::new("asm i32.le_s takes no operands".to_string()));
+                }
+                instructions.push(Instruction::I32LeS);
+            }
+            "i32.ge_s" => {
+                if parts.next().is_some() {
+                    return Err(Diagnostic::new("asm i32.ge_s takes no operands".to_string()));
+                }
+                instructions.push(Instruction::I32GeS);
+            }
+            "i32.eqz" => {
+                if parts.next().is_some() {
+                    return Err(Diagnostic::new("asm i32.eqz takes no operands".to_string()));
+                }
+                instructions.push(Instruction::I32Eqz);
+            }
+            other => {
+                return Err(Diagnostic::new(format!(
+                    "Unsupported asm instruction `{other}`"
+                )));
+            }
+        }
+    }
+
+    if instructions.is_empty() {
+        return Err(Diagnostic::new(
+            "asm string must contain at least one instruction".to_string(),
+        ));
+    }
+
+    Ok(instructions)
+}
+
 fn infer_type(
     expr: &IntermediateKind,
     locals_types: &std::collections::HashMap<String, WasmType>,
@@ -2405,6 +2551,19 @@ fn emit_expression(
                 IntermediateKind::BoxAlloc { .. } => {
                     tasks.push(EmitTask::Instr(Instruction::I32Const(0)));
                 }
+                IntermediateKind::InlineAssembly { target, code } => {
+                    if target != TargetLiteral::WasmTarget {
+                        tasks.push(EmitTask::Instr(Instruction::Unreachable));
+                    } else {
+                        let source = String::from_utf8(code.clone()).map_err(|_| {
+                            Diagnostic::new("asm string must be valid UTF-8".to_string())
+                        })?;
+                        let instructions = parse_inline_wasm(&source)?;
+                        for instr in instructions.into_iter().rev() {
+                            tasks.push(EmitTask::Instr(instr));
+                        }
+                    }
+                }
                 IntermediateKind::Identifier(identifier) => {
                     let local_index = locals.get(&identifier.name).copied().ok_or_else(|| {
                         Diagnostic::new(format!(
@@ -3405,6 +3564,7 @@ fn expression_does_diverge(
             }
             IntermediateKind::Literal(_)
             | IntermediateKind::Identifier(_)
+            | IntermediateKind::InlineAssembly { .. }
             | IntermediateKind::BoxAlloc { .. } => false,
         };
 

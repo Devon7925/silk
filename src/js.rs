@@ -148,6 +148,15 @@ fn compile_expression(
             }
             _ => Ok("null".to_string()),
         },
+        IntermediateKind::InlineAssembly { target, code } => {
+            if *target != TargetLiteral::JSTarget {
+                return Ok("(() => { throw new Error(\"inline asm target mismatch\"); })()"
+                    .to_string());
+            }
+            let source = String::from_utf8(code.clone())
+                .map_err(|_| Diagnostic::new("asm string must be valid UTF-8"))?;
+            Ok(format!("({})", source))
+        }
         IntermediateKind::Identifier(id) => Ok(id.name.clone()),
         IntermediateKind::IntrinsicOperation(op) => match op {
             crate::intermediate::IntermediateIntrinsicOperation::Binary(left, right, op) => {
@@ -337,6 +346,7 @@ fn collect_bound_identifiers(expr: &IntermediateKind, ids: &mut HashSet<String>)
         IntermediateKind::Loop { body } => {
             collect_bound_identifiers(body, ids);
         }
+        IntermediateKind::InlineAssembly { .. } => {}
         _ => {}
     }
 }

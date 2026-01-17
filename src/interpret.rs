@@ -975,6 +975,10 @@ pub fn interpret_expression(
             span: SourceSpan,
             operator: UnaryIntrinsicOperator,
         },
+        InlineAssembly {
+            span: SourceSpan,
+            target: TargetLiteral,
+        },
         Operation {
             span: SourceSpan,
             operator: String,
@@ -1281,6 +1285,10 @@ pub fn interpret_expression(
                             IntrinsicOperation::Unary(operand, operator) => {
                                 stack.push(Frame::IntrinsicUnary { span, operator });
                                 stack.push(Frame::Eval(*operand));
+                            }
+                            IntrinsicOperation::InlineAssembly { target, code } => {
+                                stack.push(Frame::InlineAssembly { span, target });
+                                stack.push(Frame::Eval(*code));
                             }
                         }
                     }
@@ -1730,6 +1738,7 @@ pub fn interpret_expression(
                     UnaryIntrinsicOperator::BoxFromType => true,
                     UnaryIntrinsicOperator::BindingAnnotationExportFromTarget => true,
                     UnaryIntrinsicOperator::BindingAnnotationTargetFromTarget => true,
+                    UnaryIntrinsicOperator::AssemblyFromTarget => true,
                 };
                 if !is_resolved_constant(&evaluated_operand) && op_requires_const_argument {
                     values.push(Expression::new(
@@ -1902,8 +1911,82 @@ pub fn interpret_expression(
                         ))
                         .with_span(span)
                     }
+                    UnaryIntrinsicOperator::AssemblyFromTarget => {
+                        let ExpressionKind::Literal(ExpressionLiteral::Target(target)) =
+                            evaluated_operand.kind
+                        else {
+                            return Err(diagnostic(
+                                "asm expects a target literal",
+                                evaluated_operand.span(),
+                            ));
+                        };
+                        let code_identifier = Identifier::new("code");
+                        let parameter =
+                            BindingPattern::Identifier(code_identifier.clone(), dummy_span());
+                        let body = ExpressionKind::IntrinsicOperation(
+                            IntrinsicOperation::InlineAssembly {
+                                target,
+                                code: Box::new(ExpressionKind::Identifier(code_identifier).with_span(span)),
+                            },
+                        )
+                        .with_span(span);
+
+                        ExpressionKind::Function {
+                            parameter,
+                            return_type: Some(Box::new(intrinsic_type_expr(IntrinsicType::I32))),
+                            body: Box::new(body),
+                        }
+                        .with_span(span)
+                    }
                 };
                 values.push(result);
+            }
+            Frame::InlineAssembly { span, target } => {
+                let evaluated_code = values.pop().unwrap();
+                let ExpressionKind::Literal(ExpressionLiteral::String(code)) =
+                    evaluated_code.kind
+                else {
+                    return Err(diagnostic(
+                        "asm expects a string literal",
+                        evaluated_code.span(),
+                    ));
+                };
+
+                let Some(current_targets) = context.binding_target_stack.last() else {
+                    return Err(diagnostic(
+                        format!(
+                            "Cannot use asm({}) without a target annotation",
+                            match target {
+                                TargetLiteral::JSTarget => "js",
+                                TargetLiteral::WasmTarget => "wasm",
+                            }
+                        ),
+                        span,
+                    ));
+                };
+
+                if current_targets.is_empty() || !current_targets.contains(&target) {
+                    return Err(diagnostic(
+                        format!(
+                            "asm({}) requires a matching target annotation",
+                            match target {
+                                TargetLiteral::JSTarget => "js",
+                                TargetLiteral::WasmTarget => "wasm",
+                            }
+                        ),
+                        span,
+                    ));
+                }
+
+                values.push(
+                    ExpressionKind::IntrinsicOperation(IntrinsicOperation::InlineAssembly {
+                        target,
+                        code: Box::new(
+                            ExpressionKind::Literal(ExpressionLiteral::String(code)).with_span(span),
+                        ),
+                    })
+                    .with_span(span),
+                );
             }
             Frame::Operation { span, operator } => {
                 let evaluated_right = values.pop().unwrap();
@@ -3011,6 +3094,15 @@ pub(crate) fn get_type_of_expression(
                     }
                     ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
                         _,
+                        UnaryIntrinsicOperator::AssemblyFromTarget,
+                    )) => {
+                        return Err(diagnostic(
+                            "asm intrinsic should be resolved before type checking",
+                            span,
+                        ));
+                    }
+                    ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
+                        _,
                         UnaryIntrinsicOperator::BoxFromType,
                     )) => {
                         results.push(resolve_intrinsic_type("type", span, &context)?);
@@ -3026,6 +3118,11 @@ pub(crate) fn get_type_of_expression(
                         UnaryIntrinsicOperator::BindingAnnotationTargetFromTarget,
                     )) => {
                         results.push(resolve_intrinsic_type("binding_annotation", span, &context)?);
+                    }
+                    ExpressionKind::IntrinsicOperation(IntrinsicOperation::InlineAssembly {
+                        ..
+                    }) => {
+                        results.push(resolve_intrinsic_type("i32", span, &context)?);
                     }
                 }
             }
@@ -3574,6 +3671,12 @@ pub fn expression_does_diverge(expr: &Expression, possibility: bool, in_inner_lo
                     stack.push(Frame::Exit(Combine::Any(1)));
                     stack.push(Frame::Enter(operand, in_inner_loop));
                 }
+                ExpressionKind::IntrinsicOperation(IntrinsicOperation::InlineAssembly {
+                    code, ..
+                }) => {
+                    stack.push(Frame::Exit(Combine::Any(1)));
+                    stack.push(Frame::Enter(code, in_inner_loop));
+                }
                 ExpressionKind::Literal(_)
                 | ExpressionKind::Identifier(_)
                 | ExpressionKind::IntrinsicType(_)
@@ -3736,6 +3839,12 @@ pub fn expression_exports(expr: &Expression) -> bool {
                 ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(operand, _)) => {
                     stack.push(Frame::ExitExpr(ExprCombine::Any(1)));
                     stack.push(Frame::EnterExpr(operand));
+                }
+                ExpressionKind::IntrinsicOperation(IntrinsicOperation::InlineAssembly {
+                    code, ..
+                }) => {
+                    stack.push(Frame::ExitExpr(ExprCombine::Any(1)));
+                    stack.push(Frame::EnterExpr(code));
                 }
                 ExpressionKind::Literal(_)
                 | ExpressionKind::Identifier(_)
@@ -4542,6 +4651,11 @@ fn fold_expression<T, U: Fn(&Expression, T) -> T>(
             }
             ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(operand, ..)) => {
                 stack.push(operand);
+            }
+            ExpressionKind::IntrinsicOperation(IntrinsicOperation::InlineAssembly {
+                code, ..
+            }) => {
+                stack.push(code);
             }
             ExpressionKind::EnumType(items) => {
                 for (_, field_expr) in items.iter().rev() {
@@ -6102,6 +6216,12 @@ fn is_resolved_const_function_expression(expr: &Expression, function_context: &C
                         context: frame.context,
                     });
                 }
+                IntrinsicOperation::InlineAssembly { code, .. } => {
+                    stack.push(Frame {
+                        expr: code,
+                        context: frame.context,
+                    });
+                }
             },
             ExpressionKind::EnumType(cases) => {
                 for (_, case_expr) in cases.iter() {
@@ -6589,6 +6709,42 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
                         ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
                             Box::new(identifier_expr("target")),
                             UnaryIntrinsicOperator::BindingAnnotationTargetFromTarget,
+                        ))
+                        .with_span(dummy_span()),
+                    ),
+                }
+                .with_span(dummy_span()),
+                PreserveBehavior::Inline,
+                None,
+            ),
+            Vec::new(),
+        ),
+    );
+
+    context.bindings.last_mut().unwrap().insert(
+        Identifier::new("asm"),
+        (
+            BindingContext::Bound(
+                ExpressionKind::Function {
+                    parameter: BindingPattern::TypeHint(
+                        Box::new(BindingPattern::Identifier(
+                            Identifier::new("target"),
+                            dummy_span(),
+                        )),
+                        Box::new(intrinsic_type_expr(IntrinsicType::Target)),
+                        dummy_span(),
+                    ),
+                    return_type: Some(Box::new(
+                        ExpressionKind::FunctionType {
+                            parameter: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
+                            return_type: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
+                        }
+                        .with_span(dummy_span()),
+                    )),
+                    body: Box::new(
+                        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
+                            Box::new(identifier_expr("target")),
+                            UnaryIntrinsicOperator::AssemblyFromTarget,
                         ))
                         .with_span(dummy_span()),
                     ),

@@ -173,6 +173,7 @@ pub enum UnaryIntrinsicOperator {
     BoxFromType,
     BindingAnnotationExportFromTarget,
     BindingAnnotationTargetFromTarget,
+    AssemblyFromTarget,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,6 +197,10 @@ pub enum BinaryIntrinsicOperator {
 pub enum IntrinsicOperation {
     Binary(Box<Expression>, Box<Expression>, BinaryIntrinsicOperator),
     Unary(Box<Expression>, UnaryIntrinsicOperator),
+    InlineAssembly {
+        target: TargetLiteral,
+        code: Box<Expression>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -463,11 +468,23 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
                             UnaryIntrinsicOperator::BoxFromType => "Box",
                             UnaryIntrinsicOperator::BindingAnnotationExportFromTarget => "export",
                             UnaryIntrinsicOperator::BindingAnnotationTargetFromTarget => "target",
+                            UnaryIntrinsicOperator::AssemblyFromTarget => "asm",
                         };
                         context.tasks.push(PrettyTask::WriteStatic(")"));
                         context.tasks.push(PrettyTask::Expr(operand));
                         context.tasks.push(PrettyTask::WriteStatic("("));
                         context.tasks.push(PrettyTask::WriteStatic(op_str));
+                    }
+                    IntrinsicOperation::InlineAssembly { target, code } => {
+                        let target_str = match target {
+                            TargetLiteral::JSTarget => "js",
+                            TargetLiteral::WasmTarget => "wasm",
+                        };
+                        context.tasks.push(PrettyTask::WriteStatic(")"));
+                        context.tasks.push(PrettyTask::Expr(code));
+                        context.tasks.push(PrettyTask::WriteStatic(")("));
+                        context.tasks.push(PrettyTask::WriteStatic(target_str));
+                        context.tasks.push(PrettyTask::WriteStatic("asm("));
                     }
                 },
                 ExpressionKind::EnumType(variants) => {
