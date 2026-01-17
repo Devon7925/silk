@@ -105,10 +105,9 @@ test("exports boxed globals as distinct memories", async () => {
   `;
 
     const wasmBuffer = await compileToWasm(silkCode);
-    // Hack: Bun doesn't support multi-memory yet, so we spawn Node to validate exports.
-    const nodeScript = `
-        const fs = require("fs");
-        const bytes = fs.readFileSync(process.argv[1]);
+    // Hack: Bun doesn't support multi-memory yet, so we spawn Deno to validate exports.
+    const denoScript = `
+        const bytes = Deno.readFileSync(Deno.args[0]);
         WebAssembly.instantiate(bytes).then(({ instance }) => {
             const { box_a, box_b } = instance.exports;
             if (!(box_a instanceof WebAssembly.Memory) || !(box_b instanceof WebAssembly.Memory)) {
@@ -127,10 +126,10 @@ test("exports boxed globals as distinct memories", async () => {
             }
         }).catch((err) => {
             console.error(err);
-            process.exit(1);
+            Deno.exit(1);
         });
     `;
-    const proc = Bun.spawn(["node", "-e", nodeScript, TEMP_WASM], {
+    const proc = Bun.spawn(["deno", "eval", denoScript, "--", TEMP_WASM], {
         cwd: ROOT_DIR,
         stderr: "pipe",
     });
