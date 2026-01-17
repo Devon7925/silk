@@ -23,7 +23,7 @@ jobs:
       - uses: oven-sh/setup-bun@v1
       - uses: denoland/setup-deno@v1
         with:
-          deno-version: v1.x
+          deno-version: latest
       - name: Install dependencies
         run: bun install
       - name: Build silk binary
