@@ -135,6 +135,10 @@ test("exports boxed globals as distinct memories", async () => {
         stderr: "pipe",
     });
     const exitCode = await proc.exited;
+    if (exitCode !== 0) {
+        const stderr = await new Response(proc.stderr).text();
+        console.error(stderr);
+    }
     expect(exitCode).toBe(0);
 }, TEST_TIMEOUT_MS);
 
