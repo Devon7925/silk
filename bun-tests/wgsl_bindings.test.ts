@@ -8,6 +8,35 @@ const TEMP_WGSL = join(FIXTURES_DIR, "temp_bindings.wgsl");
 const TEMP_SILK = join(FIXTURES_DIR, "temp_bindings.silk");
 const TEST_TIMEOUT_MS = 20000;
 
+async function hasWebGpu() {
+    const proc = Bun.spawn(
+        [
+            "deno",
+            "eval",
+            "const adapter = await navigator.gpu?.requestAdapter(); Deno.exit(adapter ? 0 : 2);",
+        ],
+        {
+            cwd: ROOT_DIR,
+            stderr: "pipe",
+        },
+    );
+    const exitCode = await proc.exited;
+    if (exitCode === 0) {
+        return true;
+    }
+    if (exitCode === 2) {
+        return false;
+    }
+    const stderr = await new Response(proc.stderr).text();
+    if (stderr) {
+        console.error(stderr);
+    }
+    return false;
+}
+
+const HAS_WEBGPU = await hasWebGpu();
+const wgslTest = HAS_WEBGPU ? test : test.skip;
+
 async function compileToWgsl(silkCode: string) {
     writeFileSync(TEMP_SILK, silkCode);
 
@@ -48,7 +77,7 @@ test("emits wgsl compute entrypoints with workgroup size 1", async () => {
     expect(wgsl).toContain("fn add_one()");
 }, TEST_TIMEOUT_MS);
 
-test("executes wgsl with boxed storage bindings", async () => {
+wgslTest("executes wgsl with boxed storage bindings", async () => {
     const silkCode = `
     (export wgsl) box_a: Box(i32) := 11;
     (export wgsl) box_b: Box(i32) := 42;
@@ -163,7 +192,7 @@ test("executes wgsl with boxed storage bindings", async () => {
     expect(exitCode).toBe(0);
 }, TEST_TIMEOUT_MS);
 
-test("runs wgsl export with input and output buffers", async () => {
+wgslTest("runs wgsl export with input and output buffers", async () => {
     const silkCode = `
     (export wgsl) add_three := (x: i32) => (
         x + 3
