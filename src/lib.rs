@@ -53,6 +53,10 @@ pub fn compile(
         .exports
         .iter()
         .any(|e| matches!(e.target, parsing::TargetLiteral::WasmTarget))
+        || intermediate
+            .wrappers
+            .iter()
+            .any(|w| matches!(w.wrap_target, parsing::TargetLiteral::WasmTarget))
     {
         let content = wasm::compile_exports(&intermediate)?;
         artifacts.push(CompilationArtifact {
@@ -66,6 +70,17 @@ pub fn compile(
         .exports
         .iter()
         .any(|e| matches!(e.target, parsing::TargetLiteral::JSTarget))
+        || intermediate
+            .wrappers
+            .iter()
+            .any(|w| matches!(w.wrap_target, parsing::TargetLiteral::JSTarget))
+        || intermediate.wrappers.iter().any(|w| {
+            matches!(
+                (w.wrap_target.clone(), w.source_target.clone()),
+                (parsing::TargetLiteral::WasmTarget, parsing::TargetLiteral::JSTarget)
+                    | (parsing::TargetLiteral::WasmTarget, parsing::TargetLiteral::WgslTarget)
+            )
+        })
     {
         let content = js::compile_exports(&intermediate)?;
         artifacts.push(CompilationArtifact {

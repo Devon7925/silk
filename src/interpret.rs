@@ -166,6 +166,15 @@ fn binding_annotation_from_value(value: Expression) -> Result<BindingAnnotation,
             span,
         )),
         BindingAnnotationLiteral::Target(target) => Ok(BindingAnnotation::Target(target, span)),
+        BindingAnnotationLiteral::Wrap(target) => {
+            if matches!(target, TargetLiteral::WgslTarget) {
+                return Err(diagnostic(
+                    "wrap annotation does not support wgsl target",
+                    span,
+                ));
+            }
+            Ok(BindingAnnotation::Wrap(target, span))
+        }
     }
 }
 
@@ -192,7 +201,12 @@ fn annotated_mutable(annotations: &[Expression]) -> bool {
 
 fn annotated_export(annotations: &[Expression]) -> bool {
     for annotation in annotations {
-        if matches!(annotation.kind, ExpressionKind::Literal(ExpressionLiteral::BindingAnnotation(BindingAnnotationLiteral::Export(_)))) {
+        if matches!(
+            annotation.kind,
+            ExpressionKind::Literal(ExpressionLiteral::BindingAnnotation(
+                BindingAnnotationLiteral::Export(_) | BindingAnnotationLiteral::Wrap(_)
+            ))
+        ) {
             return true;
         }
     }
@@ -205,6 +219,30 @@ fn binding_target_literals(annotations: &[BindingAnnotation]) -> Vec<TargetLiter
         if let BindingAnnotation::Target(target, _) = annotation {
             targets.push(target.clone());
         }
+    }
+    targets
+}
+
+fn binding_export_targets(annotations: &[BindingAnnotation]) -> Vec<TargetLiteral> {
+    let mut targets = Vec::new();
+    for annotation in annotations {
+        let BindingAnnotation::Export(expr, _) = annotation else {
+            continue;
+        };
+        if let ExpressionKind::Literal(ExpressionLiteral::Target(target)) = &expr.kind {
+            targets.push(target.clone());
+        }
+    }
+    targets
+}
+
+fn binding_wrap_targets(annotations: &[BindingAnnotation]) -> Vec<TargetLiteral> {
+    let mut targets = Vec::new();
+    for annotation in annotations {
+        let BindingAnnotation::Wrap(target, _) = annotation else {
+            continue;
+        };
+        targets.push(target.clone());
     }
     targets
 }
@@ -1740,6 +1778,7 @@ pub fn interpret_expression(
                     UnaryIntrinsicOperator::BoxFromType => true,
                     UnaryIntrinsicOperator::BindingAnnotationExportFromTarget => true,
                     UnaryIntrinsicOperator::BindingAnnotationTargetFromTarget => true,
+                    UnaryIntrinsicOperator::BindingAnnotationWrapFromTarget => true,
                     UnaryIntrinsicOperator::AssemblyFromTarget => true,
                 };
                 if !is_resolved_constant(&evaluated_operand) && op_requires_const_argument {
@@ -1910,6 +1949,20 @@ pub fn interpret_expression(
                         };
                         ExpressionKind::Literal(ExpressionLiteral::BindingAnnotation(
                             BindingAnnotationLiteral::Target(target),
+                        ))
+                        .with_span(span)
+                    }
+                    UnaryIntrinsicOperator::BindingAnnotationWrapFromTarget => {
+                        let ExpressionKind::Literal(ExpressionLiteral::Target(target)) =
+                            evaluated_operand.kind
+                        else {
+                            return Err(diagnostic(
+                                "wrap annotation expects a target literal",
+                                evaluated_operand.span(),
+                            ));
+                        };
+                        ExpressionKind::Literal(ExpressionLiteral::BindingAnnotation(
+                            BindingAnnotationLiteral::Wrap(target),
                         ))
                         .with_span(span)
                     }
@@ -3120,6 +3173,12 @@ pub(crate) fn get_type_of_expression(
                     ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
                         _,
                         UnaryIntrinsicOperator::BindingAnnotationTargetFromTarget,
+                    )) => {
+                        results.push(resolve_intrinsic_type("binding_annotation", span, &context)?);
+                    }
+                    ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
+                        _,
+                        UnaryIntrinsicOperator::BindingAnnotationWrapFromTarget,
                     )) => {
                         results.push(resolve_intrinsic_type("binding_annotation", span, &context)?);
                     }
@@ -5868,7 +5927,7 @@ fn bind_pattern_from_value(
                     let mut new_preserve_behavior = preserve_behavior;
                     if resolved_annotations
                         .iter()
-                        .any(|ann| matches!(ann, BindingAnnotation::Export(_, _)))
+                        .any(|ann| matches!(ann, BindingAnnotation::Export(_, _) | BindingAnnotation::Wrap(_, _)))
                     {
                         new_preserve_behavior =
                             new_preserve_behavior.max(PreserveBehavior::PreserveBinding);
@@ -5880,10 +5939,40 @@ fn bind_pattern_from_value(
                         new_preserve_behavior =
                             new_preserve_behavior.max(PreserveBehavior::PreserveUsageInLoops);
                     }
-                    let combined_annotations = passed_annotations
+                    let combined_annotations: Vec<BindingAnnotation> = passed_annotations
                         .into_iter()
                         .chain(resolved_annotations)
                         .collect();
+                    let wrap_targets = binding_wrap_targets(&combined_annotations);
+                    if !wrap_targets.is_empty() {
+                        let export_targets = binding_export_targets(&combined_annotations);
+                        let wrap_span = combined_annotations
+                            .iter()
+                            .find_map(|ann| match ann {
+                                BindingAnnotation::Wrap(_, span) => Some(*span),
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| pattern.span());
+                        if export_targets.len() != 1 {
+                            return Err(diagnostic(
+                                "wrap annotation requires exactly one export target",
+                                wrap_span,
+                            ));
+                        }
+                        if !matches!(value.kind, ExpressionKind::Function { .. }) {
+                            let export_target = export_targets[0].clone();
+                            let only_wasm_to_js = export_target == TargetLiteral::WasmTarget
+                                && wrap_targets
+                                    .iter()
+                                    .all(|target| *target == TargetLiteral::JSTarget);
+                            if !only_wasm_to_js {
+                                return Err(diagnostic(
+                                    "wrap annotation only supports globals for wasm exports wrapped to js",
+                                    wrap_span,
+                                ));
+                            }
+                        }
+                    }
                     stack.push(Frame::Enter {
                         pattern: *pattern,
                         value,
@@ -6726,6 +6815,38 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
                         ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
                             Box::new(identifier_expr("target")),
                             UnaryIntrinsicOperator::BindingAnnotationTargetFromTarget,
+                        ))
+                        .with_span(dummy_span()),
+                    ),
+                }
+                .with_span(dummy_span()),
+                PreserveBehavior::Inline,
+                None,
+            ),
+            Vec::new(),
+        ),
+    );
+
+    context.bindings.last_mut().unwrap().insert(
+        Identifier::new("wrap"),
+        (
+            BindingContext::Bound(
+                ExpressionKind::Function {
+                    parameter: BindingPattern::TypeHint(
+                        Box::new(BindingPattern::Identifier(
+                            Identifier::new("target"),
+                            dummy_span(),
+                        )),
+                        Box::new(intrinsic_type_expr(IntrinsicType::Target)),
+                        dummy_span(),
+                    ),
+                    return_type: Some(Box::new(intrinsic_type_expr(
+                        IntrinsicType::BindingAnnotation,
+                    ))),
+                    body: Box::new(
+                        ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
+                            Box::new(identifier_expr("target")),
+                            UnaryIntrinsicOperator::BindingAnnotationWrapFromTarget,
                         ))
                         .with_span(dummy_span()),
                     ),

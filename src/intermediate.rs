@@ -141,6 +141,15 @@ pub struct IntermediateExport {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IntermediateWrap {
+    pub source_target: TargetLiteral,
+    pub wrap_target: TargetLiteral,
+    pub name: String,
+    pub export_type: IntermediateExportType,
+    pub index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IntermediateGlobal {
     pub name: String,
     pub ty: IntermediateType,
@@ -152,6 +161,7 @@ pub struct IntermediateResult {
     pub functions: Vec<IntermediateFunction>,
     pub globals: Vec<IntermediateGlobal>,
     pub exports: Vec<IntermediateExport>,
+    pub wrappers: Vec<IntermediateWrap>,
 }
 
 pub fn context_to_intermediate(context: &Context) -> IntermediateResult {
@@ -163,6 +173,7 @@ pub fn context_to_intermediate(context: &Context) -> IntermediateResult {
         functions: builder.functions,
         globals: builder.globals,
         exports: builder.exports,
+        wrappers: builder.wrappers,
     }
 }
 
@@ -662,6 +673,7 @@ pub struct IntermediateBuilder {
     functions: Vec<IntermediateFunction>,
     globals: Vec<IntermediateGlobal>,
     exports: Vec<IntermediateExport>,
+    wrappers: Vec<IntermediateWrap>,
     function_indices: HashMap<Identifier, usize>,
     inline_bindings: HashMap<Identifier, Expression>,
     inline_binding_types: HashMap<Identifier, IntermediateType>,
@@ -676,6 +688,7 @@ impl IntermediateBuilder {
             functions: Vec::new(),
             globals: Vec::new(),
             exports: Vec::new(),
+            wrappers: Vec::new(),
             function_indices: HashMap::new(),
             inline_bindings: HashMap::new(),
             inline_binding_types: HashMap::new(),
@@ -720,19 +733,41 @@ impl IntermediateBuilder {
             };
 
             let export_targets = export_targets(annotations);
+            let wrap_targets = wrap_targets(annotations);
             let is_function = matches!(value.kind, ExpressionKind::Function { .. });
             let should_materialize =
-                *preserve_behavior != PreserveBehavior::Inline || !export_targets.is_empty();
+                *preserve_behavior != PreserveBehavior::Inline
+                    || !export_targets.is_empty()
+                    || !wrap_targets.is_empty();
+            let export_target_for_wrap = if wrap_targets.is_empty() {
+                None
+            } else {
+                export_targets.get(0).cloned()
+            };
 
             if is_function && should_materialize {
                 let index = self.register_function(Some(identifier.clone()), value.clone());
-                for target in export_targets {
+                for target in &export_targets {
                     self.exports.push(IntermediateExport {
-                        target,
+                        target: target.clone(),
                         name: identifier.name.clone(),
                         export_type: IntermediateExportType::Function,
                         index,
                     });
+                }
+                if let Some(source_target) = export_target_for_wrap.clone() {
+                    for target in &wrap_targets {
+                        if *target == source_target {
+                            continue;
+                        }
+                        self.wrappers.push(IntermediateWrap {
+                            source_target: source_target.clone(),
+                            wrap_target: target.clone(),
+                            name: identifier.name.clone(),
+                            export_type: IntermediateExportType::Function,
+                            index,
+                        });
+                    }
                 }
                 continue;
             }
@@ -747,6 +782,20 @@ impl IntermediateBuilder {
                         export_type: IntermediateExportType::Global,
                         index,
                     });
+                }
+                if let Some(source_target) = export_target_for_wrap.clone() {
+                    for target in &wrap_targets {
+                        if *target == source_target {
+                            continue;
+                        }
+                        self.wrappers.push(IntermediateWrap {
+                            source_target: source_target.clone(),
+                            wrap_target: target.clone(),
+                            name: identifier.name.clone(),
+                            export_type: IntermediateExportType::Global,
+                            index,
+                        });
+                    }
                 }
             }
 
@@ -1532,6 +1581,17 @@ fn export_targets(annotations: &[BindingAnnotation]) -> Vec<TargetLiteral> {
         if let ExpressionKind::Literal(ExpressionLiteral::Target(target)) = &expr.kind {
             targets.push(target.clone());
         }
+    }
+    targets
+}
+
+fn wrap_targets(annotations: &[BindingAnnotation]) -> Vec<TargetLiteral> {
+    let mut targets = Vec::new();
+    for annotation in annotations {
+        let BindingAnnotation::Wrap(target, _) = annotation else {
+            continue;
+        };
+        targets.push(target.clone());
     }
     targets
 }

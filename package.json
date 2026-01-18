@@ -1,7 +1,7 @@
 {
   "name": "silk-cli",
   "private": true,
-  "scripts": {
-    "test": "bun test"
+  "dependencies": {
+    "@types/node": "^25.0.9"
   }
 }

@@ -1,7 +1,7 @@
 use wasm_encoder::{
-    CodeSection, ConstExpr, DataSection, ExportKind, ExportSection, FieldType, Function,
-    FunctionSection, GlobalSection, GlobalType, HeapType, Instruction, MemArg, MemorySection,
-    MemoryType, Module, RefType, StorageType, TypeSection, ValType,
+    CodeSection, ConstExpr, DataSection, EntityType, ExportKind, ExportSection, FieldType,
+    Function, FunctionSection, GlobalSection, GlobalType, HeapType, ImportSection, Instruction,
+    MemArg, MemorySection, MemoryType, Module, RefType, StorageType, TypeSection, ValType,
 };
 
 use crate::{
@@ -749,6 +749,13 @@ struct WasmFunctionExport {
     index: usize,
 }
 
+struct WasmFunctionImport {
+    import_name: String,
+    export_name: String,
+    params: Vec<WasmFunctionParam>,
+    return_type: WasmType,
+}
+
 struct WasmGlobalExport {
     name: String,
     ty: WasmType,
@@ -757,13 +764,14 @@ struct WasmGlobalExport {
 }
 
 struct WasmExports {
+    imports: Vec<WasmFunctionImport>,
     functions: Vec<WasmFunctionExport>,
     globals: Vec<WasmGlobalExport>,
 }
 
 pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Diagnostic> {
     let exports = collect_wasm_exports(intermediate)?;
-    if exports.functions.is_empty() && exports.globals.is_empty() {
+    if exports.imports.is_empty() && exports.functions.is_empty() && exports.globals.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -782,6 +790,7 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
 
     let mut module = Module::new();
     let mut type_section = TypeSection::new();
+    let mut import_section = ImportSection::new();
     let mut function_section = FunctionSection::new();
     let mut global_section = GlobalSection::new();
     let mut export_section = ExportSection::new();
@@ -830,6 +839,20 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
         }
     }
 
+    for import in &exports.imports {
+        for param in &import.params {
+            if !matches!(param.ty, WasmType::I32 | WasmType::U8 | WasmType::Box { .. }) {
+                type_ctx.get_or_register_type(param.ty.clone());
+            }
+        }
+        if !matches!(
+            import.return_type,
+            WasmType::I32 | WasmType::U8 | WasmType::Box { .. }
+        ) {
+            type_ctx.get_or_register_type(import.return_type.clone());
+        }
+    }
+
     for ty in &type_ctx.types {
         let composite_type = match ty {
             WasmType::Struct(fields) => {
@@ -875,6 +898,22 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
     let composite_type_count = type_ctx.types.len() as u32;
     let mut next_type_index = composite_type_count;
 
+    for import in &exports.imports {
+        let param_types: Vec<ValType> = import
+            .params
+            .iter()
+            .map(|param| param.ty.to_val_type(&type_ctx))
+            .collect();
+        let return_types = vec![import.return_type.to_val_type(&type_ctx)];
+        type_section.function(param_types, return_types);
+        import_section.import(
+            "silk",
+            &import.import_name,
+            EntityType::Function(next_type_index),
+        );
+        next_type_index += 1;
+    }
+
     for function in &all_functions {
         let param_types: Vec<ValType> = function
             .params
@@ -916,6 +955,8 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
             &init_expr,
         );
     }
+
+    let function_index_offset = exports.imports.len() as u32;
 
     for function in &all_functions {
         let mut locals = Vec::new();
@@ -971,6 +1012,7 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
             &mut box_ctx,
             &mut box_registry,
             Some(box_temp_local),
+            function_index_offset,
         )?;
 
         let body_produces_value = expression_produces_value(
@@ -1012,6 +1054,9 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
     };
 
     module.section(&type_section);
+    if !exports.imports.is_empty() {
+        module.section(&import_section);
+    }
     module.section(&function_section);
     if let Some(memory_section) = &memory_section {
         module.section(memory_section);
@@ -1019,8 +1064,20 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
     if !exports.globals.is_empty() {
         module.section(&global_section);
     }
+    let import_count = exports.imports.len() as u32;
+    for (import_index, import) in exports.imports.iter().enumerate() {
+        export_section.export(
+            &import.export_name,
+            ExportKind::Func,
+            import_index as u32,
+        );
+    }
     for export in &exports.functions {
-        export_section.export(&export.name, ExportKind::Func, export.index as u32);
+        export_section.export(
+            &export.name,
+            ExportKind::Func,
+            export.index as u32 + import_count,
+        );
     }
     let mut global_export_index = 0;
     for global in &exports.globals {
@@ -1045,6 +1102,7 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
 }
 
 fn collect_wasm_exports(intermediate: &IntermediateResult) -> Result<WasmExports, Diagnostic> {
+    let mut imports = Vec::new();
     let mut functions = Vec::new();
     let mut globals = Vec::new();
 
@@ -1085,9 +1143,45 @@ fn collect_wasm_exports(intermediate: &IntermediateResult) -> Result<WasmExports
         }
     }
 
+    for wrap in &intermediate.wrappers {
+        if wrap.wrap_target != TargetLiteral::WasmTarget {
+            continue;
+        }
+        match wrap.export_type {
+            IntermediateExportType::Function => {
+                let function = intermediate.functions.get(wrap.index).ok_or_else(|| {
+                    Diagnostic::new(format!(
+                        "Wrap `{}` references unknown function index {}",
+                        wrap.name, wrap.index
+                    ))
+                    .with_span(SourceSpan::default())
+                })?;
+                let params = extract_function_params(&function.parameter, &function.input_type)?;
+                let return_type = intermediate_type_to_wasm(&function.return_type);
+                imports.push(WasmFunctionImport {
+                    import_name: format!("__silk_wrap_{}", wrap.name),
+                    export_name: wrap.name.clone(),
+                    params,
+                    return_type,
+                });
+            }
+            IntermediateExportType::Global => {
+                return Err(
+                    Diagnostic::new("wrap annotation does not support globals for wasm target")
+                        .with_span(SourceSpan::default()),
+                );
+            }
+        }
+    }
+
+    imports.sort_by(|a, b| a.export_name.cmp(&b.export_name));
     functions.sort_by(|a, b| a.name.cmp(&b.name));
     globals.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(WasmExports { functions, globals })
+    Ok(WasmExports {
+        imports,
+        functions,
+        globals,
+    })
 }
 
 fn const_expr_for_global(expr: &IntermediateKind, ty: &WasmType) -> Result<ConstExpr, Diagnostic> {
@@ -2385,6 +2479,7 @@ fn emit_expression(
     box_ctx: &mut BoxContext,
     box_registry: &mut BoxRegistry,
     box_temp_local: Option<u32>,
+    function_index_offset: u32,
 ) -> Result<(), Diagnostic> {
     enum EmitTask<'a> {
         Eval(IntermediateKind),
@@ -2945,7 +3040,9 @@ fn emit_expression(
 
                     let expected_type = intermediate_type_to_wasm(&callee.input_type);
 
-                    tasks.push(EmitTask::Instr(Instruction::Call(function as u32)));
+                    tasks.push(EmitTask::Instr(Instruction::Call(
+                        (function as u32) + function_index_offset,
+                    )));
                     tasks.push(EmitTask::CheckCallArgType {
                         arg_type,
                         expected_type: expected_type.clone(),

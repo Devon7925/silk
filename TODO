@@ -37,8 +37,12 @@ param |> match {
 * [x] WASM output
 * [x] JS output
 * [x] WGSL output
-* [ ] WASM <-> JS interface helper
-* [ ] WGSL <-> JS interface helper
+* [x] WASM <-> JS interface helper (wrap bindings)
+* [x] WGSL <-> JS wrapper helper (wrap bindings)
+* [ ] Expand wrap type support (wgsl inputs/outputs beyond i32/unit)
+* [ ] Improve wrap argument mapping for complex/nested patterns
+* [ ] Support wrap globals for non-wasm targets
+* [ ] Avoid Atomics.wait for wgsl wrappers when wrapping wasm (browser main thread support)
 
 * [ ] macros
 

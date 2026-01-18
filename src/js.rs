@@ -4,12 +4,41 @@ use crate::{
     diagnostics::Diagnostic,
     intermediate::{
         IntermediateExportType, IntermediateKind, IntermediateLValue, IntermediateResult,
+        IntermediateType, IntermediateWrap,
     },
     parsing::{BinaryIntrinsicOperator, BindingPattern, ExpressionLiteral, TargetLiteral},
 };
 
 pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diagnostic> {
     let mut output = String::new();
+
+    let js_wrappers: Vec<&IntermediateWrap> = intermediate
+        .wrappers
+        .iter()
+        .filter(|wrap| wrap.wrap_target == TargetLiteral::JSTarget)
+        .collect();
+    let wasm_wrappers: Vec<&IntermediateWrap> = intermediate
+        .wrappers
+        .iter()
+        .filter(|wrap| wrap.wrap_target == TargetLiteral::WasmTarget)
+        .collect();
+
+    let needs_wasm_loader = js_wrappers
+        .iter()
+        .any(|wrap| wrap.source_target == TargetLiteral::WasmTarget)
+        || wasm_wrappers.iter().any(|wrap| {
+            matches!(
+                wrap.source_target,
+                TargetLiteral::JSTarget | TargetLiteral::WgslTarget
+            )
+        });
+    let needs_wgsl_runner = js_wrappers
+        .iter()
+        .any(|wrap| wrap.source_target == TargetLiteral::WgslTarget)
+        || wasm_wrappers
+            .iter()
+            .any(|wrap| wrap.source_target == TargetLiteral::WgslTarget);
+    let mut wgsl_wrapper_names = HashSet::new();
 
     // First, generate all functions as internal functions
     for (idx, function) in intermediate.functions.iter().enumerate() {
@@ -37,6 +66,201 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
         output.push_str("}\n");
     }
 
+    if needs_wgsl_runner {
+        output.push_str("async function __silk_run_wgsl(entryPoint, inputValues, outputCount) {\n");
+        output.push_str("  const wgslUrl = new URL(import.meta.url);\n");
+        output.push_str("  wgslUrl.pathname = wgslUrl.pathname.replace(/\\.js$/, \".wgsl\");\n");
+        output.push_str("  const wgsl = await fetch(wgslUrl).then((res) => res.text());\n");
+        output.push_str("  const adapter = await navigator.gpu?.requestAdapter();\n");
+        output.push_str("  if (!adapter) { throw new Error(\"No GPU adapter available\"); }\n");
+        output.push_str("  const device = await adapter.requestDevice();\n");
+        output.push_str("  const module = device.createShaderModule({ code: wgsl });\n");
+        output.push_str("  const pipeline = device.createComputePipeline({ layout: \"auto\", compute: { module, entryPoint } });\n");
+        output.push_str("  const bindGroupLayout = pipeline.getBindGroupLayout(0);\n");
+        output.push_str("  const findBinding = (name) => {\n");
+        output.push_str("    const varToken = \"var<storage, read_write> \" + name;\n");
+        output.push_str("    const varIndex = wgsl.indexOf(varToken);\n");
+        output.push_str("    if (varIndex === -1) return null;\n");
+        output.push_str("    const marker = \"@binding(\";\n");
+        output.push_str("    const bindingIndex = wgsl.lastIndexOf(marker, varIndex);\n");
+        output.push_str("    if (bindingIndex === -1) return null;\n");
+        output.push_str("    const start = bindingIndex + marker.length;\n");
+        output.push_str("    const end = wgsl.indexOf(\")\", start);\n");
+        output.push_str("    if (end === -1) return null;\n");
+        output.push_str("    return Number(wgsl.slice(start, end));\n");
+        output.push_str("  };\n");
+        output.push_str("  const inBinding = inputValues.length ? findBinding(\"silk_in_\" + entryPoint) : null;\n");
+        output.push_str("  const outBinding = outputCount ? findBinding(\"silk_out_\" + entryPoint) : null;\n");
+        output.push_str("  const makeStorage = (count) => device.createBuffer({ size: Math.max(16, count * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });\n");
+        output.push_str("  const input = inputValues.length ? makeStorage(inputValues.length) : null;\n");
+        output.push_str("  const output = outputCount ? makeStorage(outputCount) : null;\n");
+        output.push_str("  if (input) device.queue.writeBuffer(input, 0, new Int32Array(inputValues));\n");
+        output.push_str("  if (output) device.queue.writeBuffer(output, 0, new Int32Array(outputCount));\n");
+        output.push_str("  const entries = [];\n");
+        output.push_str("  if (input && inBinding !== null) entries.push({ binding: inBinding, resource: { buffer: input } });\n");
+        output.push_str("  if (output && outBinding !== null) entries.push({ binding: outBinding, resource: { buffer: output } });\n");
+        output.push_str("  const bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries });\n");
+        output.push_str("  const encoder = device.createCommandEncoder();\n");
+        output.push_str("  const pass = encoder.beginComputePass();\n");
+        output.push_str("  pass.setPipeline(pipeline);\n");
+        output.push_str("  pass.setBindGroup(0, bindGroup);\n");
+        output.push_str("  pass.dispatchWorkgroups(1);\n");
+        output.push_str("  pass.end();\n");
+        output.push_str("  device.queue.submit([encoder.finish()]);\n");
+        output.push_str("  await device.queue.onSubmittedWorkDone();\n");
+        output.push_str("  if (!outputCount) { return undefined; }\n");
+        output.push_str("  const read = device.createBuffer({ size: Math.max(16, outputCount * 4), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });\n");
+        output.push_str("  const copy = device.createCommandEncoder();\n");
+        output.push_str("  copy.copyBufferToBuffer(output, 0, read, 0, Math.max(16, outputCount * 4));\n");
+        output.push_str("  device.queue.submit([copy.finish()]);\n");
+        output.push_str("  await device.queue.onSubmittedWorkDone();\n");
+        output.push_str("  await read.mapAsync(GPUMapMode.READ);\n");
+        output.push_str("  const view = new DataView(read.getMappedRange());\n");
+        output.push_str("  const value = view.getInt32(0, true);\n");
+        output.push_str("  read.unmap();\n");
+        output.push_str("  return value;\n");
+        output.push_str("}\n");
+        output.push_str("function __silk_run_wgsl_sync(entryPoint, inputValues, outputCount) {\n");
+        output.push_str("  if (typeof SharedArrayBuffer === \"undefined\" || typeof Atomics === \"undefined\" || typeof Atomics.wait !== \"function\" || typeof Worker === \"undefined\") {\n");
+        output.push_str("    throw new Error(\"Synchronous WGSL wrapper requires SharedArrayBuffer, Atomics.wait, and Worker support.\");\n");
+        output.push_str("  }\n");
+        output.push_str("  const sab = new SharedArrayBuffer(8);\n");
+        output.push_str("  const view = new Int32Array(sab);\n");
+        output.push_str("  const wgslUrl = new URL(import.meta.url);\n");
+        output.push_str("  wgslUrl.pathname = wgslUrl.pathname.replace(/\\.js$/, \".wgsl\");\n");
+        output.push_str("  const workerSrc = `\n");
+        output.push_str("    onmessage = async (e) => {\n");
+        output.push_str("      const { entryPoint, inputValues, outputCount, wgslUrl, sab } = e.data;\n");
+        output.push_str("      const view = new Int32Array(sab);\n");
+        output.push_str("      try {\n");
+        output.push_str("        const wgsl = await fetch(wgslUrl).then((res) => res.text());\n");
+        output.push_str("        const adapter = await navigator.gpu?.requestAdapter();\n");
+        output.push_str("        if (!adapter) throw new Error(\"No GPU adapter available\");\n");
+        output.push_str("        const device = await adapter.requestDevice();\n");
+        output.push_str("        const module = device.createShaderModule({ code: wgsl });\n");
+        output.push_str("        const pipeline = device.createComputePipeline({ layout: \"auto\", compute: { module, entryPoint } });\n");
+        output.push_str("        const bindGroupLayout = pipeline.getBindGroupLayout(0);\n");
+        output.push_str("        const findBinding = (name) => {\n");
+        output.push_str("          const varToken = \"var<storage, read_write> \" + name;\n");
+        output.push_str("          const varIndex = wgsl.indexOf(varToken);\n");
+        output.push_str("          if (varIndex === -1) return null;\n");
+        output.push_str("          const marker = \"@binding(\";\n");
+        output.push_str("          const bindingIndex = wgsl.lastIndexOf(marker, varIndex);\n");
+        output.push_str("          if (bindingIndex === -1) return null;\n");
+        output.push_str("          const start = bindingIndex + marker.length;\n");
+        output.push_str("          const end = wgsl.indexOf(\")\", start);\n");
+        output.push_str("          if (end === -1) return null;\n");
+        output.push_str("          return Number(wgsl.slice(start, end));\n");
+        output.push_str("        };\n");
+        output.push_str("        const inBinding = inputValues.length ? findBinding(\"silk_in_\" + entryPoint) : null;\n");
+        output.push_str("        const outBinding = outputCount ? findBinding(\"silk_out_\" + entryPoint) : null;\n");
+        output.push_str("        const makeStorage = (count) => device.createBuffer({ size: Math.max(16, count * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });\n");
+        output.push_str("        const input = inputValues.length ? makeStorage(inputValues.length) : null;\n");
+        output.push_str("        const output = outputCount ? makeStorage(outputCount) : null;\n");
+        output.push_str("        if (input) device.queue.writeBuffer(input, 0, new Int32Array(inputValues));\n");
+        output.push_str("        if (output) device.queue.writeBuffer(output, 0, new Int32Array(outputCount));\n");
+        output.push_str("        const entries = [];\n");
+        output.push_str("        if (input && inBinding !== null) entries.push({ binding: inBinding, resource: { buffer: input } });\n");
+        output.push_str("        if (output && outBinding !== null) entries.push({ binding: outBinding, resource: { buffer: output } });\n");
+        output.push_str("        const bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries });\n");
+        output.push_str("        const encoder = device.createCommandEncoder();\n");
+        output.push_str("        const pass = encoder.beginComputePass();\n");
+        output.push_str("        pass.setPipeline(pipeline);\n");
+        output.push_str("        pass.setBindGroup(0, bindGroup);\n");
+        output.push_str("        pass.dispatchWorkgroups(1);\n");
+        output.push_str("        pass.end();\n");
+        output.push_str("        device.queue.submit([encoder.finish()]);\n");
+        output.push_str("        await device.queue.onSubmittedWorkDone();\n");
+        output.push_str("        let value = 0;\n");
+        output.push_str("        if (outputCount) {\n");
+        output.push_str("          const read = device.createBuffer({ size: Math.max(16, outputCount * 4), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });\n");
+        output.push_str("          const copy = device.createCommandEncoder();\n");
+        output.push_str("          copy.copyBufferToBuffer(output, 0, read, 0, Math.max(16, outputCount * 4));\n");
+        output.push_str("          device.queue.submit([copy.finish()]);\n");
+        output.push_str("          await device.queue.onSubmittedWorkDone();\n");
+        output.push_str("          await read.mapAsync(GPUMapMode.READ);\n");
+        output.push_str("          const dataView = new DataView(read.getMappedRange());\n");
+        output.push_str("          value = dataView.getInt32(0, true);\n");
+        output.push_str("          read.unmap();\n");
+        output.push_str("        }\n");
+        output.push_str("        view[1] = value;\n");
+        output.push_str("        Atomics.store(view, 0, 1);\n");
+        output.push_str("        Atomics.notify(view, 0);\n");
+        output.push_str("      } catch (err) {\n");
+        output.push_str("        console.error(err);\n");
+        output.push_str("        Atomics.store(view, 0, 2);\n");
+        output.push_str("        Atomics.notify(view, 0);\n");
+        output.push_str("      }\n");
+        output.push_str("    };\n");
+        output.push_str("  `;\n");
+        output.push_str("  const worker = new Worker(URL.createObjectURL(new Blob([workerSrc], { type: \"text/javascript\" })), { type: \"module\" });\n");
+        output.push_str("  worker.postMessage({ entryPoint, inputValues, outputCount, wgslUrl: wgslUrl.href, sab });\n");
+        output.push_str("  Atomics.wait(view, 0, 0);\n");
+        output.push_str("  worker.terminate();\n");
+        output.push_str("  if (view[0] === 2) {\n");
+        output.push_str("    throw new Error(\"wgsl wrapper failed\");\n");
+        output.push_str("  }\n");
+        output.push_str("  return outputCount ? view[1] : undefined;\n");
+        output.push_str("}\n");
+    }
+
+    if needs_wasm_loader {
+        output.push_str("let __silk_wasm_exports;\n");
+        output.push_str("let __silk_wasm_promise;\n");
+        if !wasm_wrappers.is_empty() {
+            output.push_str("function __silk_build_wasm_imports() {\n");
+            output.push_str("  return { silk: {\n");
+            for wrap in &wasm_wrappers {
+                let import_name = wrapper_import_name(&wrap.name);
+                match wrap.export_type {
+                    IntermediateExportType::Function => {
+                        let call_target = match wrap.source_target {
+                            TargetLiteral::JSTarget => format!("__silk_fn_{}", wrap.index),
+                            TargetLiteral::WgslTarget => {
+                                format!("__silk_js_wrap_sync_{}", wrap.name)
+                            }
+                            TargetLiteral::WasmTarget => wrap.name.clone(),
+                        };
+                        output.push_str(&format!(
+                            "    {}: (...args) => {}(...args),\n",
+                            import_name, call_target
+                        ));
+                    }
+                    IntermediateExportType::Global => {
+                        let call_target = match wrap.source_target {
+                            TargetLiteral::JSTarget => format!("__silk_fn_{}", wrap.index),
+                            TargetLiteral::WgslTarget => format!("__silk_js_wrap_{}", wrap.name),
+                            TargetLiteral::WasmTarget => wrap.name.clone(),
+                        };
+                        output.push_str(&format!(
+                            "    {}: () => {},\n",
+                            import_name, call_target
+                        ));
+                    }
+                }
+            }
+                output.push_str("  } };\n");
+            output.push_str("}\n");
+            output.push_str("const __silk_wasm_imports_internal = __silk_build_wasm_imports();\n");
+        } else {
+            output.push_str("const __silk_wasm_imports_internal = {};\n");
+        }
+        output.push_str("async function __silk_load_wasm() {\n");
+        output.push_str("  if (__silk_wasm_exports) return __silk_wasm_exports;\n");
+        output.push_str("  if (__silk_wasm_promise) return __silk_wasm_promise;\n");
+        output.push_str("  const wasmUrl = new URL(import.meta.url);\n");
+        output.push_str("  wasmUrl.pathname = wasmUrl.pathname.replace(/\\.js$/, \".wasm\");\n");
+        output.push_str("  __silk_wasm_promise = fetch(wasmUrl)\n");
+        output.push_str("    .then((res) => res.arrayBuffer())\n");
+        output.push_str("    .then((bytes) => WebAssembly.instantiate(bytes, __silk_wasm_imports_internal))\n");
+        output.push_str("    .then((result) => {\n");
+        output.push_str("      __silk_wasm_exports = result.instance.exports;\n");
+        output.push_str("      return __silk_wasm_exports;\n");
+        output.push_str("    });\n");
+        output.push_str("  return __silk_wasm_promise;\n");
+        output.push_str("}\n");
+    }
+
     // Then, generate exports
     for export in &intermediate.exports {
         if export.target != TargetLiteral::JSTarget {
@@ -59,7 +283,252 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
         }
     }
 
+    for wrap in &js_wrappers {
+        match wrap.export_type {
+            IntermediateExportType::Function => {
+                let function = intermediate
+                    .functions
+                    .get(wrap.index)
+                    .ok_or_else(|| {
+                        Diagnostic::new("Missing function for js wrapper".to_string())
+                    })?;
+                let input_count = flatten_input_count(function.input_type.as_ref())?;
+                let output_count = wgsl_output_count(function.return_type.as_ref())?;
+                let accessors = pattern_object_accessors(&function.parameter);
+                let wrapper_name = wrap.name.clone();
+                match wrap.source_target {
+                    TargetLiteral::WasmTarget => {
+                        output.push_str(&format!(
+                            "export const {} = async (...args) => {{\n",
+                            wrapper_name
+                        ));
+                        output.push_str("  const wasm = await __silk_load_wasm();\n");
+                        if let Some(accessors) = accessors {
+                            output.push_str(
+                                "  if (args.length === 1 && args[0] && typeof args[0] === \"object\") {\n",
+                            );
+                            output.push_str("    const value = args[0];\n");
+                            output.push_str("    args = [");
+                            output.push_str(&accessors.join(", "));
+                            output.push_str("];\n");
+                            output.push_str("  }\n");
+                        }
+                        output.push_str(&format!("  return wasm.{}(...args);\n", wrapper_name));
+                        output.push_str("};\n");
+                    }
+                    TargetLiteral::WgslTarget => {
+                        if input_count.is_none() || output_count.is_none() {
+                            return Err(Diagnostic::new(
+                                "wgsl wrapper only supports i32 inputs and outputs".to_string(),
+                            ));
+                        }
+                        output.push_str(&format!(
+                            "async function __silk_js_wrap_{}(...args) {{\n",
+                            wrapper_name
+                        ));
+                        if let Some(accessors) = accessors {
+                            output.push_str(
+                                "  if (args.length === 1 && args[0] && typeof args[0] === \"object\") {\n",
+                            );
+                            output.push_str("    const value = args[0];\n");
+                            output.push_str("    args = [");
+                            output.push_str(&accessors.join(", "));
+                            output.push_str("];\n");
+                            output.push_str("  }\n");
+                        }
+                        output.push_str(&format!(
+                            "  return __silk_run_wgsl(\"{}\", args, {});\n",
+                            wrapper_name,
+                            output_count.unwrap_or(0)
+                        ));
+                        output.push_str("}\n");
+                        output.push_str(&format!(
+                            "function __silk_js_wrap_sync_{}(...args) {{\n",
+                            wrapper_name
+                        ));
+                        output.push_str(&format!(
+                            "  return __silk_run_wgsl_sync(\"{}\", args, {});\n",
+                            wrapper_name,
+                            output_count.unwrap_or(0)
+                        ));
+                        output.push_str("}\n");
+                        output.push_str(&format!(
+                            "export const {} = __silk_js_wrap_{};\n",
+                            wrapper_name, wrapper_name
+                        ));
+                        wgsl_wrapper_names.insert(wrapper_name.clone());
+                    }
+                    TargetLiteral::JSTarget => {}
+                }
+            }
+            IntermediateExportType::Global => {
+                match wrap.source_target {
+                    TargetLiteral::WasmTarget => {
+                        output.push_str(&format!("export const {} = async () => {{\n", wrap.name));
+                        output.push_str("  const wasm = await __silk_load_wasm();\n");
+                        output.push_str(&format!("  const value = wasm.{};\n", wrap.name));
+                        output.push_str(
+                            "  return value && typeof value === \"object\" && \"value\" in value ? value.value : value;\n",
+                        );
+                        output.push_str("};\n");
+                    }
+                    _ => {
+                        return Err(Diagnostic::new(
+                            "wrap annotation does not support globals for js target".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    for wrap in &wasm_wrappers {
+        if wrap.source_target != TargetLiteral::WgslTarget {
+            continue;
+        }
+        if wgsl_wrapper_names.contains(&wrap.name) {
+            continue;
+        }
+        let function = intermediate
+            .functions
+            .get(wrap.index)
+            .ok_or_else(|| Diagnostic::new("Missing function for wgsl wrapper".to_string()))?;
+        let input_count = flatten_input_count(function.input_type.as_ref())?;
+        let output_count = wgsl_output_count(function.return_type.as_ref())?;
+        if input_count.is_none() || output_count.is_none() {
+            return Err(Diagnostic::new(
+                "wgsl wrapper only supports i32 inputs and outputs".to_string(),
+            ));
+        }
+        output.push_str(&format!(
+            "async function __silk_js_wrap_{}(...args) {{\n",
+            wrap.name
+        ));
+        if let Some(accessors) = pattern_object_accessors(&function.parameter) {
+            output.push_str(
+                "  if (args.length === 1 && args[0] && typeof args[0] === \"object\") {\n",
+            );
+            output.push_str("    const value = args[0];\n");
+            output.push_str("    args = [");
+            output.push_str(&accessors.join(", "));
+            output.push_str("];\n");
+            output.push_str("  }\n");
+        }
+        output.push_str(&format!(
+            "  return __silk_run_wgsl(\"{}\", args, {});\n",
+            wrap.name,
+            output_count.unwrap_or(0)
+        ));
+        output.push_str("}\n");
+        output.push_str(&format!(
+            "function __silk_js_wrap_sync_{}(...args) {{\n",
+            wrap.name
+        ));
+        output.push_str(&format!(
+            "  return __silk_run_wgsl_sync(\"{}\", args, {});\n",
+            wrap.name,
+            output_count.unwrap_or(0)
+        ));
+        output.push_str("}\n");
+        wgsl_wrapper_names.insert(wrap.name.clone());
+    }
+
+    if !wasm_wrappers.is_empty() {
+        output.push_str("export function __silk_wasm_imports() {\n");
+        output.push_str("  return __silk_build_wasm_imports();\n");
+        output.push_str("}\n");
+    }
+
     Ok(output)
+}
+
+fn wrapper_import_name(name: &str) -> String {
+    format!("__silk_wrap_{}", name)
+}
+
+fn flatten_input_count(ty: &IntermediateType) -> Result<Option<usize>, Diagnostic> {
+    match ty {
+        IntermediateType::I32 | IntermediateType::U8 => Ok(Some(1)),
+        IntermediateType::Struct(fields) if fields.is_empty() => Ok(Some(0)),
+        IntermediateType::Struct(_) => Ok(None),
+        IntermediateType::Array { .. } => Ok(None),
+        IntermediateType::Box { .. } => Ok(None),
+    }
+}
+
+fn wgsl_output_count(ty: &IntermediateType) -> Result<Option<usize>, Diagnostic> {
+    match ty {
+        IntermediateType::I32 | IntermediateType::U8 => Ok(Some(1)),
+        IntermediateType::Struct(fields) if fields.is_empty() => Ok(Some(0)),
+        _ => Ok(None),
+    }
+}
+
+fn pattern_object_accessors(pattern: &BindingPattern) -> Option<Vec<String>> {
+    fn is_js_identifier(name: &str) -> bool {
+        let mut chars = name.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        if !(first.is_ascii_alphabetic() || first == '_') {
+            return false;
+        }
+        chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    }
+
+    fn field_accessor(prefix: &str, name: &str) -> String {
+        if is_js_identifier(name) {
+            format!("{}.{}", prefix, name)
+        } else {
+            format!("{}[\"{}\"]", prefix, name)
+        }
+    }
+
+    fn stripped_pattern<'a>(pattern: &'a BindingPattern) -> &'a BindingPattern {
+        let mut current = pattern;
+        loop {
+            match current {
+                BindingPattern::TypeHint(inner, _, _) => current = inner,
+                BindingPattern::Annotated { pattern: inner, .. } => current = inner,
+                other => return other,
+            }
+        }
+    }
+
+    fn walk(pattern: &BindingPattern, prefix: &str, out: &mut Vec<String>) -> bool {
+        match pattern {
+            BindingPattern::Identifier(_, _) => {
+                out.push(prefix.to_string());
+                true
+            }
+            BindingPattern::Struct(fields, _) => {
+                for (field_name, field_pattern) in fields {
+                    let access_name =
+                        extract_simple_name(field_pattern).unwrap_or_else(|| field_name.name.clone());
+                    let next = field_accessor(prefix, &access_name);
+                    if !walk(field_pattern, &next, out) {
+                        return false;
+                    }
+                }
+                true
+            }
+            BindingPattern::TypeHint(inner, _, _) => walk(inner, prefix, out),
+            BindingPattern::Annotated { pattern, .. } => walk(pattern, prefix, out),
+            BindingPattern::Literal(_, _) => false,
+            BindingPattern::EnumVariant { .. } => false,
+        }
+    }
+
+    if !matches!(stripped_pattern(pattern), BindingPattern::Struct(_, _)) {
+        return None;
+    }
+
+    let mut out = Vec::new();
+    if walk(pattern, "value", &mut out) && !out.is_empty() {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 fn flatten_parameters(pattern: &BindingPattern) -> Result<(Vec<String>, String), Diagnostic> {
