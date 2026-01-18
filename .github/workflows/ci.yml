@@ -32,5 +32,19 @@ jobs:
         run: cargo build
       - name: Run bun tests
         run: bun test
+
+  deno-tests:
+    name: Deno tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: denoland/setup-deno@v1
+        with:
+          deno-version: latest
+      - name: Install dependencies
+        run: deno install
+      - name: Build silk binary
+        run: cargo build
       - name: Run deno tests
         run: deno test --allow-write --allow-run --allow-read
