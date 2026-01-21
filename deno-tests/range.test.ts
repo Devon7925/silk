@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals } from "@std/asserts";
 import { compileToInstance } from "./test_helpers.ts";
 
 Deno.test("range operator iterates start inclusive and end exclusive", async () => {
@@ -14,7 +14,7 @@ Deno.test("range operator iterates start inclusive and end exclusive", async () 
     `;
 
   const { sum_range } = (await compileToInstance(silkCode, "range_sum"))
-    .exports as any;
+    .exports as { sum_range: (start: number, end: number) => number };
   assertEquals(sum_range(0, 5), 10);
   assertEquals(sum_range(2, 5), 9);
   assertEquals(sum_range(5, 5), 0);
@@ -34,7 +34,7 @@ Deno.test("range operator respects addition precedence on the end value", async 
     `;
 
   const { sum_to } = (await compileToInstance(silkCode, "range_precedence"))
-    .exports as any;
+    .exports as { sum_to: (end: number) => number };
   assertEquals(sum_to(0), 0);
   assertEquals(sum_to(3), 6);
 });

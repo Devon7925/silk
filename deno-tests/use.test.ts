@@ -1,8 +1,11 @@
-import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
-import { basename, dirname, join } from "https://deno.land/std/path/mod.ts";
+import { assertEquals } from "@std/asserts";
+import { basename, dirname, join } from "@std/path";
 import { cleanup, runCommand, tempBase } from "./test_helpers.ts";
 
-async function compileAndLoad(mainPath: string, wasmPath: string) {
+async function compileAndLoad<T extends WebAssembly.Exports>(
+  mainPath: string,
+  wasmPath: string,
+) {
   const { code, stderr } = await runCommand("cargo", [
     "run",
     "--",
@@ -15,7 +18,7 @@ async function compileAndLoad(mainPath: string, wasmPath: string) {
   }
   const wasmBuffer = await Deno.readFile(wasmPath);
   const { instance } = await WebAssembly.instantiate(wasmBuffer);
-  return instance.exports as any;
+  return instance.exports as T;
 }
 
 async function setupUseFiles(
@@ -50,7 +53,10 @@ Deno.test("use imports block expressions from other files", async () => {
   );
 
   try {
-    const exports = await compileAndLoad(mainPath, wasmPath);
+    const exports = await compileAndLoad<{ answer: () => number }>(
+      mainPath,
+      wasmPath,
+    );
     assertEquals(exports.answer(), 42);
   } finally {
     await cleanup([mainPath, modulePath, wasmPath]);
@@ -72,7 +78,10 @@ Deno.test("use imports functions from other files", async () => {
   );
 
   try {
-    const exports = await compileAndLoad(mainPath, wasmPath);
+    const exports = await compileAndLoad<{ double_answer: () => number }>(
+      mainPath,
+      wasmPath,
+    );
     assertEquals(exports.double_answer(), 42);
   } finally {
     await cleanup([mainPath, modulePath, wasmPath]);

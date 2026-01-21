@@ -1,7 +1,4 @@
-import {
-  assertEquals,
-  assertStringIncludes,
-} from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals, assertStringIncludes } from "@std/asserts";
 import {
   cleanupBase,
   compileToBase,
@@ -75,7 +72,8 @@ Deno.test("wraps js export for wasm", async () => {
     const imports = module.__silk_wasm_imports
       ? module.__silk_wasm_imports()
       : {};
-    const exports = (await loadWasm(wasmPath, imports)).exports as any;
+    const exports = (await loadWasm(wasmPath, imports))
+      .exports as { add_one: (value: number) => number };
     assertEquals(exports.add_one(41), 42);
   } finally {
     await cleanupBase(basePath, [".silk", ".js", ".wasm"]);

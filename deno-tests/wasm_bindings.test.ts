@@ -2,7 +2,7 @@ import {
   assertEquals,
   assertInstanceOf,
   assertStringIncludes,
-} from "https://deno.land/std/testing/asserts.ts";
+} from "@std/asserts";
 import {
   cleanup,
   compileSilk,
@@ -20,8 +20,10 @@ Deno.test("compiles and runs wasm with bindings", async () => {
     {}
   `;
 
-  const { double_add } =
-    (await compileToInstance(silkCode, "wasm_bindings_double")).exports as any;
+  const { double_add } = (await compileToInstance(
+    silkCode,
+    "wasm_bindings_double",
+  )).exports as { double_add: (value: number) => number };
   assertEquals(double_add(5), 20);
 });
 
@@ -36,8 +38,10 @@ Deno.test("supports mutable assignments in wasm exports", async () => {
     {}
   `;
 
-  const { increment_twice } =
-    (await compileToInstance(silkCode, "wasm_bindings_mut")).exports as any;
+  const { increment_twice } = (await compileToInstance(
+    silkCode,
+    "wasm_bindings_mut",
+  )).exports as { increment_twice: (value: number) => number };
   assertEquals(increment_twice(10), 12);
 });
 
@@ -52,8 +56,10 @@ Deno.test("supports boxed values in wasm exports", async () => {
     {}
   `;
 
-  const { sum_boxed } =
-    (await compileToInstance(silkCode, "wasm_bindings_boxed")).exports as any;
+  const { sum_boxed } = (await compileToInstance(
+    silkCode,
+    "wasm_bindings_boxed",
+  )).exports as { sum_boxed: () => number };
   assertEquals(sum_boxed(), 22);
 });
 
@@ -91,7 +97,10 @@ Deno.test("exports boxed globals as distinct memories", async () => {
   try {
     const bytes = await Deno.readFile(wasmPath);
     const { instance } = await WebAssembly.instantiate(bytes);
-    const { box_a, box_b } = instance.exports as any;
+    const { box_a, box_b } = instance.exports as {
+      box_a: WebAssembly.Memory;
+      box_b: WebAssembly.Memory;
+    };
     assertInstanceOf(box_a, WebAssembly.Memory);
     assertInstanceOf(box_b, WebAssembly.Memory);
     if (box_a.buffer === box_b.buffer) {

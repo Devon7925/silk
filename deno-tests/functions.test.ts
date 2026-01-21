@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals } from "@std/asserts";
 import { compileToInstance } from "./test_helpers.ts";
 
 Deno.test("functions can be passed as arguments", async () => {
@@ -17,7 +17,7 @@ Deno.test("functions can be passed as arguments", async () => {
     `;
 
   const exports = (await compileToInstance(silkCode, "functions_apply"))
-    .exports as any;
+    .exports as { apply_increment: (x: number) => number };
   assertEquals(exports.apply_increment(41), 42);
 });
 
@@ -36,6 +36,6 @@ Deno.test("functions can be returned and invoked", async () => {
     `;
 
   const exports = (await compileToInstance(silkCode, "functions_return"))
-    .exports as any;
+    .exports as { apply_offset: (offset: number) => number };
   assertEquals(exports.apply_offset(7), 10);
 });

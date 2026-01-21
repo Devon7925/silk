@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals } from "@std/asserts";
 import { compileToInstance } from "./test_helpers.ts";
 
 Deno.test("let as expression", async () => {
@@ -9,7 +9,7 @@ Deno.test("let as expression", async () => {
     {}
     `;
   const exports = (await compileToInstance(silkCode, "if_let_expr"))
-    .exports as any;
+    .exports as { let_as_expr: (value: number) => number };
   assertEquals(exports.let_as_expr(5), 1);
 });
 
@@ -25,7 +25,7 @@ Deno.test("let in if condition", async () => {
     {}
     `;
   const exports = (await compileToInstance(silkCode, "if_let_cond"))
-    .exports as any;
+    .exports as { let_as_expr: (value: number) => number };
   assertEquals(exports.let_as_expr(5), 5);
 });
 
@@ -41,7 +41,7 @@ Deno.test("refutable let in if condition", async () => {
     {}
     `;
   const exports = (await compileToInstance(silkCode, "if_let_refutable"))
-    .exports as any;
+    .exports as { let_as_expr: (value: number) => number };
   assertEquals(exports.let_as_expr(5), 10);
   assertEquals(exports.let_as_expr(6), 0);
 });
@@ -60,7 +60,7 @@ Deno.test("let chain with boolean condition", async () => {
     {}
     `;
   const exports = (await compileToInstance(silkCode, "if_let_bool_chain"))
-    .exports as any;
+    .exports as { check: (value: number) => number };
   assertEquals(exports.check(5), 1);
   assertEquals(exports.check(4), 0);
 });
@@ -81,7 +81,7 @@ Deno.test("let chain with multiple lets", async () => {
     {}
     `;
   const exports = (await compileToInstance(silkCode, "if_let_multi_chain"))
-    .exports as any;
+    .exports as { check: (value: number) => number };
   assertEquals(exports.check(10), 10);
   assertEquals(exports.check(-10), 0);
 });
@@ -102,7 +102,7 @@ Deno.test("if let with multiple unwraps", async () => {
     {}
     `;
   const exports = (await compileToInstance(silkCode, "if_let_multi_unwrap"))
-    .exports as any;
+    .exports as { check: (value: number) => number };
   assertEquals(exports.check(10), 10);
   assertEquals(exports.check(-10), 0);
 });

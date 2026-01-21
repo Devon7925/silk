@@ -1,10 +1,10 @@
-import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals } from "@std/asserts";
 import { cleanup, compileToWasm } from "./test_helpers.ts";
 
 async function compileAndRun(
   code: string,
   prefix: string,
-  callback: (instance: WebAssembly.Instance) => Promise<void>,
+  callback: (instance: WebAssembly.Instance) => void | Promise<void>,
 ) {
   const { wasmPath, silkPath } = await compileToWasm(code, prefix);
   const wasmBuffer = await Deno.readFile(wasmPath);
@@ -22,8 +22,11 @@ Deno.test("boolean literals", async () => {
     (export wasm) get_false := {} => ( false );
     {}
     `;
-  await compileAndRun(code, "boolean_literals", async (instance) => {
-    const exports = instance.exports as any;
+  await compileAndRun(code, "boolean_literals", (instance) => {
+    const exports = instance.exports as {
+      get_true: () => number;
+      get_false: () => number;
+    };
     assertEquals(exports.get_true(), 1);
     assertEquals(exports.get_false(), 0);
   });
@@ -42,8 +45,17 @@ Deno.test("boolean comparisons", async () => {
     (export wasm) check_ge_10 := (a: i32) => ( a >= 10 );
         `,
     "boolean_comparisons",
-    async (instance) => {
-      const exports = instance.exports as any;
+    (instance) => {
+      const exports = instance.exports as {
+        is_true: (value: number) => number;
+        is_false: (value: number) => number;
+        check_eq_5: (value: number) => number;
+        check_neq_5: (value: number) => number;
+        check_lt_10: (value: number) => number;
+        check_gt_10: (value: number) => number;
+        check_le_10: (value: number) => number;
+        check_ge_10: (value: number) => number;
+      };
       assertEquals(exports.is_true(1), 1);
       assertEquals(exports.is_true(0), 0);
       assertEquals(exports.is_false(0), 1);
@@ -81,8 +93,15 @@ Deno.test("boolean operators", async () => {
     (export wasm) xor_false := (a: bool) => ( a ^ false );
         `,
     "boolean_ops",
-    async (instance) => {
-      const exports = instance.exports as any;
+    (instance) => {
+      const exports = instance.exports as {
+        and_true: (value: number) => number;
+        and_false: (value: number) => number;
+        or_true: (value: number) => number;
+        or_false: (value: number) => number;
+        xor_true: (value: number) => number;
+        xor_false: (value: number) => number;
+      };
       assertEquals(exports.and_true(1), 1);
       assertEquals(exports.and_true(0), 0);
       assertEquals(exports.and_false(1), 0);
@@ -112,8 +131,15 @@ Deno.test("boolean operator chaining", async () => {
     (export wasm) odd_false := {} => ( true ^ false ^ true );
         `,
     "boolean_chain",
-    async (instance) => {
-      const exports = instance.exports as any;
+    (instance) => {
+      const exports = instance.exports as {
+        all_true: () => number;
+        short_circuit_false: () => number;
+        any_true: () => number;
+        all_false: () => number;
+        odd_true: () => number;
+        odd_false: () => number;
+      };
 
       assertEquals(exports.all_true(), 1);
       assertEquals(exports.short_circuit_false(), 0);

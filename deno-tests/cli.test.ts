@@ -1,9 +1,5 @@
-import {
-  assert,
-  assertEquals,
-  assertInstanceOf,
-} from "https://deno.land/std/testing/asserts.ts";
-import { join } from "https://deno.land/std/path/mod.ts";
+import { assert, assertEquals, assertInstanceOf } from "@std/asserts";
+import { join } from "@std/path";
 import { ROOT_DIR, runCommand } from "./test_helpers.ts";
 
 async function runSilk(args: string[]) {
@@ -86,8 +82,10 @@ Deno.test("runs add_one module and returns incremented value", async () => {
 Deno.test("runs pass_pair module and returns correct value", async () => {
   const moduleBytes = await compileFixtureToBytes("pass_pair.silk");
   const { instance } = await WebAssembly.instantiate(moduleBytes);
-  const constructRange = instance.exports.construct_range as (max: any) => any;
-  const rangeSum = instance.exports.sum_range as (range: any) => number;
+  const constructRange = instance.exports.construct_range as (
+    max: number,
+  ) => unknown;
+  const rangeSum = instance.exports.sum_range as (range: unknown) => number;
 
   assertEquals(typeof rangeSum, "function");
   assertEquals(rangeSum(constructRange(1)), 1);
@@ -99,10 +97,10 @@ Deno.test("runs range_sum module and returns correct value", async () => {
   const moduleBytes = await compileFixtureToBytes("range_sum.silk");
   const { instance } = await WebAssembly.instantiate(moduleBytes);
   const constructRange = instance.exports.construct_range as (
-    min: any,
-    max: any,
-  ) => any;
-  const rangeSum = instance.exports.sum_range as (range: any) => number;
+    min: number,
+    max: number,
+  ) => unknown;
+  const rangeSum = instance.exports.sum_range as (range: unknown) => number;
 
   assertEquals(typeof constructRange, "function");
   assertEquals(typeof rangeSum, "function");

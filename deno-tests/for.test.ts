@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals } from "@std/asserts";
 import { compileToInstance } from "./test_helpers.ts";
 
 const iteratorHelpers = `
@@ -33,7 +33,7 @@ Deno.test("for loops sum ranges", async () => {
     `;
 
   const { sum_range } = (await compileToInstance(silkCode, "for_sum_range"))
-    .exports as any;
+    .exports as { sum_range: (limit: number) => number };
   assertEquals(sum_range(0), 0);
   assertEquals(sum_range(5), 10);
 });
@@ -66,8 +66,10 @@ Deno.test("for loops support struct patterns", async () => {
     {};
     `;
 
-  const { sum_pairs } =
-    (await compileToInstance(silkCode, "for_struct_patterns")).exports as any;
+  const { sum_pairs } = (await compileToInstance(
+    silkCode,
+    "for_struct_patterns",
+  )).exports as { sum_pairs: (limit: number) => number };
   assertEquals(sum_pairs(0), 0);
   assertEquals(sum_pairs(3), 9);
 });
@@ -85,8 +87,10 @@ Deno.test("for loops parse iterator calls with arguments", async () => {
     {};
     `;
 
-  const { sum_plus_one } =
-    (await compileToInstance(silkCode, "for_call_argument")).exports as any;
+  const { sum_plus_one } = (await compileToInstance(
+    silkCode,
+    "for_call_argument",
+  )).exports as { sum_plus_one: (limit: number) => number };
   assertEquals(sum_plus_one(0), 0);
   assertEquals(sum_plus_one(4), 10);
 });

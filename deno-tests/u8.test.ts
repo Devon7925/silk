@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals } from "@std/asserts";
 import { compileToInstance } from "./test_helpers.ts";
 
 Deno.test("u8 values", async () => {
@@ -8,7 +8,11 @@ Deno.test("u8 values", async () => {
     {}
     `;
 
-  const exports = (await compileToInstance(code, "u8_values")).exports as any;
+  const exports = (await compileToInstance(code, "u8_values"))
+    .exports as {
+      add_one: (value: number) => number;
+      add_pair: (left: number, right: number) => number;
+    };
   assertEquals(exports.add_one(41), 42);
   assertEquals(exports.add_pair(12, 34), 46);
 });

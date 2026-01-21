@@ -1,7 +1,4 @@
-import {
-  assertEquals,
-  assertStringIncludes,
-} from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals, assertStringIncludes } from "@std/asserts";
 import {
   cleanup,
   compileSilk,

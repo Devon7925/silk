@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals } from "@std/asserts";
 import { compileToInstance } from "./test_helpers.ts";
 
 Deno.test("match literal number", async () => {
@@ -14,7 +14,7 @@ Deno.test("match literal number", async () => {
       {}
     `;
   const exports = (await compileToInstance(code, "match_literal"))
-    .exports as any;
+    .exports as { main: () => number };
   assertEquals(exports.main(), 1);
 });
 
@@ -31,7 +31,7 @@ Deno.test("match literal number else", async () => {
       {}
     `;
   const exports = (await compileToInstance(code, "match_literal_else"))
-    .exports as any;
+    .exports as { main: () => number };
   assertEquals(exports.main(), 3);
 });
 
@@ -47,7 +47,7 @@ Deno.test("match boolean", async () => {
       {}
     `;
   const exports = (await compileToInstance(code, "match_boolean"))
-    .exports as any;
+    .exports as { main: () => number };
   assertEquals(exports.main(), 1);
 });
 
@@ -66,7 +66,7 @@ Deno.test("match enum variant without payload", async () => {
       {}
     `;
   const exports = (await compileToInstance(code, "match_enum_simple"))
-    .exports as any;
+    .exports as { main: () => number };
   assertEquals(exports.main(), 2);
 });
 
@@ -84,7 +84,7 @@ Deno.test("match enum variant with payload", async () => {
       {}
     `;
   const exports = (await compileToInstance(code, "match_enum_payload"))
-    .exports as any;
+    .exports as { main: () => number };
   assertEquals(exports.main(), 42);
 });
 
@@ -102,7 +102,7 @@ Deno.test("match enum variant with payload else", async () => {
       {}
     `;
   const exports = (await compileToInstance(code, "match_enum_else"))
-    .exports as any;
+    .exports as { main: () => number };
   assertEquals(exports.main(), 0);
 });
 
@@ -120,6 +120,7 @@ Deno.test("match with block bodies", async () => {
       );
       {}
     `;
-  const exports = (await compileToInstance(code, "match_block")).exports as any;
+  const exports = (await compileToInstance(code, "match_block"))
+    .exports as { main: () => number };
   assertEquals(exports.main(), 3);
 });

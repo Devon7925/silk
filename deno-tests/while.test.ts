@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals } from "@std/asserts";
 import { compileToInstance } from "./test_helpers.ts";
 
 Deno.test("while loops accumulate until reaching limit", async () => {
@@ -16,7 +16,7 @@ Deno.test("while loops accumulate until reaching limit", async () => {
     `;
 
   const { sum_until } = (await compileToInstance(silkCode, "while_accumulate"))
-    .exports as any;
+    .exports as { sum_until: (limit: number) => number };
   assertEquals(sum_until(5), 10);
 });
 
@@ -32,8 +32,10 @@ Deno.test("while loops stop when the guard is false", async () => {
     {};
     `;
 
-  const { decrement_to_zero } =
-    (await compileToInstance(silkCode, "while_decrement")).exports as any;
+  const { decrement_to_zero } = (await compileToInstance(
+    silkCode,
+    "while_decrement",
+  )).exports as { decrement_to_zero: (start: number) => number };
   assertEquals(decrement_to_zero(0), 0);
   assertEquals(decrement_to_zero(3), 0);
 });
@@ -53,8 +55,10 @@ Deno.test("while with let expression stops when the pattern fails", async () => 
     {};
     `;
 
-  const { sum_until_none } =
-    (await compileToInstance(silkCode, "while_let_binding")).exports as any;
+  const { sum_until_none } = (await compileToInstance(
+    silkCode,
+    "while_let_binding",
+  )).exports as { sum_until_none: (limit: number) => number };
   assertEquals(sum_until_none(0), 0);
   assertEquals(sum_until_none(4), 6);
 });
@@ -76,9 +80,10 @@ Deno.test("while break without an argument exits immediately", async () => {
     {};
     `;
 
-  const { break_without_value } =
-    (await compileToInstance(silkCode, "while_break_without_value"))
-      .exports as any;
+  const { break_without_value } = (await compileToInstance(
+    silkCode,
+    "while_break_without_value",
+  )).exports as { break_without_value: (limit: number) => number };
   assertEquals(break_without_value(5), 1);
   assertEquals(break_without_value(1), 0);
 });

@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals } from "@std/asserts";
 import { compileToInstance } from "./test_helpers.ts";
 
 Deno.test("pipeline forwards values into functions", async () => {
@@ -13,7 +13,7 @@ Deno.test("pipeline forwards values into functions", async () => {
     `;
 
   const exports = (await compileToInstance(silkCode, "pipeline_simple"))
-    .exports as any;
+    .exports as { pipe_simple: (value: number) => number };
   assertEquals(exports.pipe_simple(41), 42);
 });
 
@@ -32,7 +32,7 @@ Deno.test("pipeline composes multiple functions", async () => {
     `;
 
   const exports = (await compileToInstance(silkCode, "pipeline_chain"))
-    .exports as any;
+    .exports as { pipe_chain: (value: number) => number };
   assertEquals(exports.pipe_chain(5), 12);
 });
 
@@ -46,6 +46,6 @@ Deno.test("pipeline accepts inline function literals", async () => {
     `;
 
   const exports = (await compileToInstance(silkCode, "pipeline_literal"))
-    .exports as any;
+    .exports as { pipe_literal: (value: number) => number };
   assertEquals(exports.pipe_literal(6), 36);
 });

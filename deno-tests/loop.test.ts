@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals } from "@std/asserts";
 import { compileToInstance } from "./test_helpers.ts";
 
 Deno.test("loop can compute factorial", async () => {
@@ -19,7 +19,7 @@ Deno.test("loop can compute factorial", async () => {
     `;
 
   const exports = (await compileToInstance(silkCode, "loop_factorial"))
-    .exports as any;
+    .exports as { factorial: (limit: number) => number };
   assertEquals(exports.factorial(5), 120);
 });
 
@@ -38,7 +38,7 @@ Deno.test("loop break returns value", async () => {
     `;
 
   const exports = (await compileToInstance(silkCode, "loop_break_value"))
-    .exports as any;
+    .exports as { first_non_positive: (start: number) => number };
   assertEquals(exports.first_non_positive(3), 0);
   assertEquals(exports.first_non_positive(-2), -2);
 });

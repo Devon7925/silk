@@ -1,8 +1,4 @@
-import {
-  assertEquals,
-  assertStringIncludes,
-  assertThrows,
-} from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals, assertStringIncludes, assertThrows } from "@std/asserts";
 import {
   cleanup,
   compileSilk,
@@ -22,7 +18,7 @@ Deno.test("shadowing in block", async () => {
     {}
     `;
   const exports = (await compileToInstance(silkCode, "edge_shadow"))
-    .exports as any;
+    .exports as { shadow_test: (value: number) => number };
   assertEquals(exports.shadow_test(5), 25);
 });
 
@@ -33,7 +29,10 @@ Deno.test("multiple exports", async () => {
     {}
     `;
   const exports = (await compileToInstance(silkCode, "edge_exports"))
-    .exports as any;
+    .exports as {
+      add: (value: number) => number;
+      sub: (value: number) => number;
+    };
   assertEquals(exports.add(10), 11);
   assertEquals(exports.sub(10), 9);
 });
@@ -44,7 +43,7 @@ Deno.test("arithmetic edge cases", async () => {
     {}
     `;
   const exports = (await compileToInstance(silkCode, "edge_arithmetic"))
-    .exports as any;
+    .exports as { div_test: (value: number) => number };
   assertEquals(exports.div_test(2), 50);
   assertThrows(() => exports.div_test(0));
 });
@@ -60,7 +59,7 @@ Deno.test("deeply nested bindings", async () => {
     {}
     `;
   const exports = (await compileToInstance(silkCode, "edge_nested"))
-    .exports as any;
+    .exports as { nested_test: (value: number) => number };
   assertEquals(exports.nested_test(2), 9);
 });
 
@@ -74,7 +73,11 @@ Deno.test("if expressions evaluate and type check", async () => {
     );
     {} 
     `;
-  const exports = (await compileToInstance(silkCode, "edge_if")).exports as any;
+  const exports = (await compileToInstance(silkCode, "edge_if"))
+    .exports as {
+      choose: (flag: number) => number;
+      ladder: (flag: number) => number;
+    };
   assertEquals(exports.choose(1), 10);
   assertEquals(exports.choose(0), 20);
   assertEquals(exports.ladder(1), 2);

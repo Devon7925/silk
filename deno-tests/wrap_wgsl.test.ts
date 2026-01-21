@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std/assert/assert_equals.ts";
+import { assertEquals } from "@std/asserts";
 import {
   cleanupBase,
   compileToBase,
@@ -115,7 +115,8 @@ Deno.test({
       const imports = module.__silk_wasm_imports
         ? module.__silk_wasm_imports()
         : {};
-      const exports = (await loadWasm(wasmPath, imports)).exports as any;
+      const exports = (await loadWasm(wasmPath, imports))
+        .exports as { add_one: (value: number) => number };
       const result = exports.add_one(41);
       if (result !== 42) {
         throw new Error(`Expected 42, got ${result}`);

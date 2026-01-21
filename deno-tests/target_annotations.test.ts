@@ -1,7 +1,4 @@
-import {
-  assertEquals,
-  assertStringIncludes,
-} from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals, assertStringIncludes } from "@std/asserts";
 import {
   cleanup,
   compileSilk,
@@ -19,7 +16,7 @@ Deno.test("allows matching target bindings", async () => {
   `;
 
   const { add_two } = (await compileToInstance(silkCode, "target_match"))
-    .exports as any;
+    .exports as { add_two: () => number };
   assertEquals(add_two(), 42);
 });
 
@@ -33,7 +30,7 @@ Deno.test("allows bindings with fewer target annotations to use shared bindings"
   `;
 
   const { double_shared } = (await compileToInstance(silkCode, "target_shared"))
-    .exports as any;
+    .exports as { double_shared: () => number };
   assertEquals(double_shared(), 42);
 });
 

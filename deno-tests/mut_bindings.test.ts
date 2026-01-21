@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals } from "@std/asserts";
 import { compileToInstance } from "./test_helpers.ts";
 
 Deno.test("supports mutable assignments in wasm exports", async () => {
@@ -12,8 +12,10 @@ Deno.test("supports mutable assignments in wasm exports", async () => {
     {}
   `;
 
-  const { increment_twice } =
-    (await compileToInstance(silkCode, "mut_increment")).exports as any;
+  const { increment_twice } = (await compileToInstance(
+    silkCode,
+    "mut_increment",
+  )).exports as { increment_twice: (value: number) => number };
   assertEquals(increment_twice(10), 12);
 });
 
@@ -27,8 +29,10 @@ Deno.test("propagates mutability through destructured wasm bindings", async () =
     {}
   `;
 
-  const { destructure_mut } =
-    (await compileToInstance(silkCode, "mut_destructure")).exports as any;
+  const { destructure_mut } = (await compileToInstance(
+    silkCode,
+    "mut_destructure",
+  )).exports as { destructure_mut: () => number };
   assertEquals(destructure_mut(), 7);
 });
 
@@ -42,8 +46,10 @@ Deno.test("struct props can be mutated", async () => {
     {}
   `;
 
-  const { destructure_mut } =
-    (await compileToInstance(silkCode, "mut_struct_props")).exports as any;
+  const { destructure_mut } = (await compileToInstance(
+    silkCode,
+    "mut_struct_props",
+  )).exports as { destructure_mut: () => number };
   assertEquals(destructure_mut(), 7);
 });
 
@@ -58,7 +64,7 @@ Deno.test("nested dependent struct and tuple props can be mutated", async () => 
   `;
 
   const { destructure_mut } = (await compileToInstance(silkCode, "mut_nested"))
-    .exports as any;
+    .exports as { destructure_mut: (value: number) => number };
   assertEquals(destructure_mut(3), 7);
 });
 
@@ -73,7 +79,7 @@ Deno.test("partial mutability in destructured wasm bindings", async () => {
   `;
 
   const { destructure_mut } = (await compileToInstance(silkCode, "mut_partial"))
-    .exports as any;
+    .exports as { destructure_mut: () => number };
   assertEquals(destructure_mut(), 7);
 });
 
@@ -88,7 +94,7 @@ Deno.test("allows struct field updates via rebinding", async () => {
   `;
 
   const { update_struct } = (await compileToInstance(silkCode, "mut_rebinding"))
-    .exports as any;
+    .exports as { update_struct: () => number };
   assertEquals(update_struct(), 9);
 });
 
@@ -106,6 +112,6 @@ Deno.test("allows dynamic binding annotations for mutability", async () => {
   `;
 
   const { set_value } = (await compileToInstance(silkCode, "mut_dynamic"))
-    .exports as any;
+    .exports as { set_value: () => number };
   assertEquals(set_value(), 10);
 });

@@ -1,4 +1,4 @@
-import { assert, assertEquals } from "https://deno.land/std/testing/asserts.ts";
+import { assert, assertEquals } from "@std/asserts";
 import { compileToInstance } from "./test_helpers.ts";
 
 Deno.test("wasm structref: passing and returning generic structs", async () => {
@@ -21,7 +21,11 @@ Deno.test("wasm structref: passing and returning generic structs", async () => {
     `;
 
   const exports = (await compileToInstance(source, "generic_struct_point"))
-    .exports as any;
+    .exports as {
+      create_point: (x: number, y: number) => unknown;
+      get_x: (point: unknown) => number;
+      get_y: (point: unknown) => number;
+    };
 
   const p = exports.create_point(10, 20);
   assert(p);
@@ -52,7 +56,10 @@ Deno.test("wasm structref: nested generic structs", async () => {
     `;
 
   const exports = (await compileToInstance(source, "generic_struct_rect"))
-    .exports as any;
+    .exports as {
+      create_rect: (x1: number, y1: number, x2: number, y2: number) => unknown;
+      get_width: (rect: unknown) => number;
+    };
   const r = exports.create_rect(10, 10, 30, 20);
   assertEquals(exports.get_width(r), 20);
 });

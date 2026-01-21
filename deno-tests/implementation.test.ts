@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals } from "@std/asserts";
 import { compileToInstance } from "./test_helpers.ts";
 
 Deno.test("user implementations work on type aliases", async () => {
@@ -14,7 +14,7 @@ Deno.test("user implementations work on type aliases", async () => {
     `;
 
   const exports = (await compileToInstance(silkCode, "impl_alias"))
-    .exports as any;
+    .exports as { square_meters: (value: number) => number };
   assertEquals(exports.square_meters(5), 25);
 });
 
@@ -31,6 +31,6 @@ Deno.test("user implementations work on struct types", async () => {
     `;
 
   const exports = (await compileToInstance(silkCode, "impl_struct"))
-    .exports as any;
+    .exports as { sum_pair: (value: number) => number };
   assertEquals(exports.sum_pair(3), 7);
 });

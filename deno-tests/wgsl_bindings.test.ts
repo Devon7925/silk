@@ -1,7 +1,4 @@
-import {
-  assertEquals,
-  assertStringIncludes,
-} from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals, assertStringIncludes } from "@std/asserts";
 import { cleanup, compileSilk, tempBase } from "./test_helpers.ts";
 
 const HAS_WEBGPU = Boolean(await navigator.gpu?.requestAdapter());
@@ -114,7 +111,7 @@ Deno.test({
       device.queue.submit([encoder.finish()]);
       await device.queue.onSubmittedWorkDone();
 
-      async function readI32(buffer: GPUBuffer) {
+      const readI32 = async (buffer: GPUBuffer) => {
         const read = device.createBuffer({
           size: 4,
           usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
@@ -128,7 +125,7 @@ Deno.test({
         const value = view.getInt32(0, true);
         read.unmap();
         return value;
-      }
+      };
 
       const [valueA, valueB, sum] = await Promise.all([
         readI32(boxA),

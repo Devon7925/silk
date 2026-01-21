@@ -1,9 +1,4 @@
-import {
-  dirname,
-  fromFileUrl,
-  join,
-  toFileUrl,
-} from "https://deno.land/std/path/mod.ts";
+import { dirname, fromFileUrl, join, toFileUrl } from "@std/path";
 
 export const ROOT_DIR = fromFileUrl(new URL("..", import.meta.url));
 export const FIXTURES_DIR = join(ROOT_DIR, "fixtures");

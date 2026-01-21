@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals } from "@std/asserts";
 import {
   cleanup,
   cleanupBase,
@@ -44,7 +44,8 @@ Deno.test("inline asm works in wasm exports", async () => {
   const { basePath } = await compileBaseOrThrow(silkCode, "inline_asm_wasm");
   const wasmPath = basePath + ".wasm";
   try {
-    const exports = (await loadWasm(wasmPath)).exports as any;
+    const exports = (await loadWasm(wasmPath))
+      .exports as { answer: () => number };
     assertEquals(exports.answer(), 42);
   } finally {
     await cleanupBase(basePath, [".silk", ".wasm"]);
@@ -64,7 +65,8 @@ Deno.test("inline asm supports multi-instruction arithmetic in wasm exports", as
   );
   const wasmPath = basePath + ".wasm";
   try {
-    const exports = (await loadWasm(wasmPath)).exports as any;
+    const exports = (await loadWasm(wasmPath))
+      .exports as { compute: () => number };
     assertEquals(exports.compute(), 36);
   } finally {
     await cleanupBase(basePath, [".silk", ".wasm"]);
@@ -84,7 +86,8 @@ Deno.test("inline asm supports comparisons in wasm exports", async () => {
   );
   const wasmPath = basePath + ".wasm";
   try {
-    const exports = (await loadWasm(wasmPath)).exports as any;
+    const exports = (await loadWasm(wasmPath))
+      .exports as { is_seven: () => number };
     assertEquals(exports.is_seven(), 1);
   } finally {
     await cleanupBase(basePath, [".silk", ".wasm"]);
@@ -104,7 +107,8 @@ Deno.test("inline asm can participate in argument arithmetic", async () => {
   );
   const wasmPath = basePath + ".wasm";
   try {
-    const exports = (await loadWasm(wasmPath)).exports as any;
+    const exports = (await loadWasm(wasmPath))
+      .exports as { add_one: (value: number) => number };
     assertEquals(exports.add_one(41), 42);
   } finally {
     await cleanupBase(basePath, [".silk", ".wasm"]);
@@ -125,7 +129,8 @@ Deno.test("inline asm supports local.get and local.set", async () => {
   );
   const wasmPath = basePath + ".wasm";
   try {
-    const exports = (await loadWasm(wasmPath)).exports as any;
+    const exports = (await loadWasm(wasmPath))
+      .exports as { add_one_asm: (value: number) => number };
     assertEquals(exports.add_one_asm(41), 42);
   } finally {
     await cleanupBase(basePath, [".silk", ".wasm"]);
@@ -160,7 +165,7 @@ Deno.test("js output can call wasm output from the same silk file", async () => 
   } finally {
     await cleanup([silkPath, jsPath, wasmPath]);
     try {
-      delete (globalThis as any).__silk_wasm_instance;
+      delete (globalThis as Record<string, unknown>).__silk_wasm_instance;
     } catch {
       // ignore
     }

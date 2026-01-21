@@ -1,4 +1,4 @@
-import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
+import { assertEquals } from "@std/asserts";
 import { cleanup, compileToWasm } from "./test_helpers.ts";
 
 async function compileToInstance(code: string, prefix: string) {
@@ -22,7 +22,9 @@ Deno.test("allows indexing mutable arrays with dynamic indices", async () => {
     "arrays_dynamic_indices",
   );
   try {
-    const { array_value } = instance.exports as any;
+    const { array_value } = instance.exports as {
+      array_value: (idx: number) => number;
+    };
     assertEquals(array_value(1), 27);
   } finally {
     await cleanup([silkPath, wasmPath]);
@@ -42,7 +44,7 @@ Deno.test("supports constant index reads", async () => {
     "arrays_const_index",
   );
   try {
-    const { read_const } = instance.exports as any;
+    const { read_const } = instance.exports as { read_const: () => number };
     assertEquals(read_const(), 16);
   } finally {
     await cleanup([silkPath, wasmPath]);
@@ -62,7 +64,9 @@ Deno.test("allows arrays of tuples", async () => {
     "arrays_tuples",
   );
   try {
-    const { tuple_at } = instance.exports as any;
+    const { tuple_at } = instance.exports as {
+      tuple_at: (idx: number) => number;
+    };
     assertEquals(tuple_at(2), 5);
   } finally {
     await cleanup([silkPath, wasmPath]);
@@ -82,7 +86,9 @@ Deno.test("supports nested array indexing", async () => {
     "arrays_nested",
   );
   try {
-    const { matrix_get } = instance.exports as any;
+    const { matrix_get } = instance.exports as {
+      matrix_get: (row: number, col: number) => number;
+    };
     assertEquals(matrix_get(1, 0), 3);
   } finally {
     await cleanup([silkPath, wasmPath]);

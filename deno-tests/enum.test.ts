@@ -2,7 +2,7 @@ import {
   assertEquals,
   assertNotEquals,
   assertStringIncludes,
-} from "https://deno.land/std/testing/asserts.ts";
+} from "@std/asserts";
 import {
   cleanup,
   compileSilk,
@@ -41,7 +41,7 @@ Deno.test("enum construction and matching", async () => {
     `;
 
   const exports = (await compileToInstance(silkCode, "enum_match"))
-    .exports as any;
+    .exports as { unwrap_or_zero: (value: number) => number };
   assertEquals(exports.unwrap_or_zero(3), 3);
   assertEquals(exports.unwrap_or_zero(-2), 0);
 });
@@ -81,7 +81,7 @@ Deno.test("enum intrinsic can be aliased", async () => {
     `;
 
   const exports = (await compileToInstance(silkCode, "enum_alias"))
-    .exports as any;
+    .exports as { as_bool: (flag: number) => number };
   assertEquals(exports.as_bool(1), 1);
   assertEquals(exports.as_bool(-1), 0);
 });
@@ -113,6 +113,6 @@ Deno.test("enum patterns respect variant enum types", async () => {
     `;
 
   const exports = (await compileToInstance(silkCode, "enum_variant"))
-    .exports as any;
+    .exports as { check: () => number };
   assertEquals(exports.check(), 0);
 });
