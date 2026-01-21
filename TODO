@@ -20,7 +20,8 @@ param |> match {
 }
 ```
 
-* [ ] mutable borrow
+* [ ] pointers
+* [ ] borrowing
 
 * [x] Traits
 * [x] User implementation
@@ -46,8 +47,8 @@ param |> match {
 
 * [ ] macros
 
-* [ ] Remove wasm-encoder library dependency
+* [x] Remove wasm-encoder library dependency
 * [ ] Conduct bun tests through wasm binary instead of platform binary
 * [ ] Bootstrap
 
-* [ ] Remove bound variables in function call during interpretation
+* [ ] Fix context used for function call interpretaion (Should use function creation context instead of function call context)
