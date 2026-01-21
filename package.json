@@ -1,7 +1,0 @@
-{
-  "name": "silk-cli",
-  "private": true,
-  "dependencies": {
-    "@types/node": "^25.0.9"
-  }
-}

@@ -1,5 +1,3 @@
 {
-  "test": {
-    "exclude": ["bun-tests/"]
-  }
+  "test": {}
 }
