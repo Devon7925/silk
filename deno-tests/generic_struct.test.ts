@@ -2,7 +2,7 @@ import { assert, assertEquals } from "https://deno.land/std/testing/asserts.ts";
 import { compileToInstance } from "./test_helpers.ts";
 
 Deno.test("wasm structref: passing and returning generic structs", async () => {
-    const source = `
+  const source = `
     Point := (ty: type) => (
         { x = ty, y = ty }
     );
@@ -20,17 +20,18 @@ Deno.test("wasm structref: passing and returning generic structs", async () => {
     );
     `;
 
-    const exports = (await compileToInstance(source, "generic_struct_point")).exports as any;
+  const exports = (await compileToInstance(source, "generic_struct_point"))
+    .exports as any;
 
-    const p = exports.create_point(10, 20);
-    assert(p);
+  const p = exports.create_point(10, 20);
+  assert(p);
 
-    assertEquals(exports.get_x(p), 10);
-    assertEquals(exports.get_y(p), 20);
+  assertEquals(exports.get_x(p), 10);
+  assertEquals(exports.get_y(p), 20);
 });
 
 Deno.test("wasm structref: nested generic structs", async () => {
-    const source = `
+  const source = `
     Point := (ty: type) => (
         { x = ty, y = ty }
     );
@@ -50,7 +51,8 @@ Deno.test("wasm structref: nested generic structs", async () => {
     );
     `;
 
-    const exports = (await compileToInstance(source, "generic_struct_rect")).exports as any;
-    const r = exports.create_rect(10, 10, 30, 20);
-    assertEquals(exports.get_width(r), 20);
+  const exports = (await compileToInstance(source, "generic_struct_rect"))
+    .exports as any;
+  const r = exports.create_rect(10, 10, 30, 20);
+  assertEquals(exports.get_width(r), 20);
 });

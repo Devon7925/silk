@@ -2,7 +2,7 @@ import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
 import { compileToInstance } from "./test_helpers.ts";
 
 Deno.test("generic enum: Option<T>", async () => {
-    const source = `
+  const source = `
     Option := (T: type) => (
         enum { Some = T, None = {} }
     );
@@ -22,13 +22,14 @@ Deno.test("generic enum: Option<T>", async () => {
     );
     `;
 
-    const exports = (await compileToInstance(source, "generic_enum_option")).exports as any;
-    assertEquals(exports.unwrap_or_zero(10), 10);
-    assertEquals(exports.unwrap_or_zero(-5), 0);
+  const exports = (await compileToInstance(source, "generic_enum_option"))
+    .exports as any;
+  assertEquals(exports.unwrap_or_zero(10), 10);
+  assertEquals(exports.unwrap_or_zero(-5), 0);
 });
 
 Deno.test("generic enum: nested generics", async () => {
-    const source = `
+  const source = `
     Option := (T: type) => (
         enum { Some = T, None = {} }
     );
@@ -47,6 +48,7 @@ Deno.test("generic enum: nested generics", async () => {
     );
     `;
 
-    const exports = (await compileToInstance(source, "generic_enum_nested")).exports as any;
-    assertEquals(exports.check(42), 42);
+  const exports = (await compileToInstance(source, "generic_enum_nested"))
+    .exports as any;
+  assertEquals(exports.check(42), 42);
 });

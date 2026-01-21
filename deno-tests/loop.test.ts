@@ -2,7 +2,7 @@ import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
 import { compileToInstance } from "./test_helpers.ts";
 
 Deno.test("loop can compute factorial", async () => {
-    const silkCode = `
+  const silkCode = `
     (export wasm) factorial := (limit: i32) => (
         mut acc := 1;
         mut iter := limit;
@@ -18,12 +18,13 @@ Deno.test("loop can compute factorial", async () => {
     {};
     `;
 
-    const exports = (await compileToInstance(silkCode, "loop_factorial")).exports as any;
-    assertEquals(exports.factorial(5), 120);
+  const exports = (await compileToInstance(silkCode, "loop_factorial"))
+    .exports as any;
+  assertEquals(exports.factorial(5), 120);
 });
 
 Deno.test("loop break returns value", async () => {
-    const silkCode = `
+  const silkCode = `
     (export wasm) first_non_positive := (start: i32) => (
         mut current := start;
         loop (
@@ -36,7 +37,8 @@ Deno.test("loop break returns value", async () => {
     {};
     `;
 
-    const exports = (await compileToInstance(silkCode, "loop_break_value")).exports as any;
-    assertEquals(exports.first_non_positive(3), 0);
-    assertEquals(exports.first_non_positive(-2), -2);
+  const exports = (await compileToInstance(silkCode, "loop_break_value"))
+    .exports as any;
+  assertEquals(exports.first_non_positive(3), 0);
+  assertEquals(exports.first_non_positive(-2), -2);
 });

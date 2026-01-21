@@ -2,18 +2,19 @@ import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
 import { compileToInstance } from "./test_helpers.ts";
 
 Deno.test("let as expression", async () => {
-    const silkCode = `
+  const silkCode = `
     (export wasm) let_as_expr := (x: i32) => (
         y := x // binding succeeds, so it resolves to true
     );
     {}
     `;
-    const exports = (await compileToInstance(silkCode, "if_let_expr")).exports as any;
-    assertEquals(exports.let_as_expr(5), 1);
+  const exports = (await compileToInstance(silkCode, "if_let_expr"))
+    .exports as any;
+  assertEquals(exports.let_as_expr(5), 1);
 });
 
 Deno.test("let in if condition", async () => {
-    const silkCode = `
+  const silkCode = `
     (export wasm) let_as_expr := (x: i32) => (
         if y := x then (
             y
@@ -23,12 +24,13 @@ Deno.test("let in if condition", async () => {
     );
     {}
     `;
-    const exports = (await compileToInstance(silkCode, "if_let_cond")).exports as any;
-    assertEquals(exports.let_as_expr(5), 5);
+  const exports = (await compileToInstance(silkCode, "if_let_cond"))
+    .exports as any;
+  assertEquals(exports.let_as_expr(5), 5);
 });
 
 Deno.test("refutable let in if condition", async () => {
-    const silkCode = `
+  const silkCode = `
     (export wasm) let_as_expr := (x: i32) => (
         if { 5, y } := { x, x + 5 } then (
             y
@@ -38,13 +40,14 @@ Deno.test("refutable let in if condition", async () => {
     );
     {}
     `;
-    const exports = (await compileToInstance(silkCode, "if_let_refutable")).exports as any;
-    assertEquals(exports.let_as_expr(5), 10);
-    assertEquals(exports.let_as_expr(6), 0);
+  const exports = (await compileToInstance(silkCode, "if_let_refutable"))
+    .exports as any;
+  assertEquals(exports.let_as_expr(5), 10);
+  assertEquals(exports.let_as_expr(6), 0);
 });
 
 Deno.test("let chain with boolean condition", async () => {
-    const silkCode = `
+  const silkCode = `
     Option := enum { Some = i32, None = {} };
     (export wasm) check := (x: i32) => (
         foo := Option::Some(x);
@@ -56,13 +59,14 @@ Deno.test("let chain with boolean condition", async () => {
     );
     {}
     `;
-    const exports = (await compileToInstance(silkCode, "if_let_bool_chain")).exports as any;
-    assertEquals(exports.check(5), 1);
-    assertEquals(exports.check(4), 0);
+  const exports = (await compileToInstance(silkCode, "if_let_bool_chain"))
+    .exports as any;
+  assertEquals(exports.check(5), 1);
+  assertEquals(exports.check(4), 0);
 });
 
 Deno.test("let chain with multiple lets", async () => {
-    const silkCode = `
+  const silkCode = `
     Level2 := enum { Some = i32, None = {} };
     Level1 := enum { Some = Level2, None = {} };
     
@@ -76,13 +80,14 @@ Deno.test("let chain with multiple lets", async () => {
     );
     {}
     `;
-    const exports = (await compileToInstance(silkCode, "if_let_multi_chain")).exports as any;
-    assertEquals(exports.check(10), 10);
-    assertEquals(exports.check(-10), 0);
+  const exports = (await compileToInstance(silkCode, "if_let_multi_chain"))
+    .exports as any;
+  assertEquals(exports.check(10), 10);
+  assertEquals(exports.check(-10), 0);
 });
 
 Deno.test("if let with multiple unwraps", async () => {
-    const silkCode = `
+  const silkCode = `
     Level2 := enum { Some = i32, None = {} };
     Level1 := enum { Some = Level2, None = {} };
     
@@ -96,7 +101,8 @@ Deno.test("if let with multiple unwraps", async () => {
     );
     {}
     `;
-    const exports = (await compileToInstance(silkCode, "if_let_multi_unwrap")).exports as any;
-    assertEquals(exports.check(10), 10);
-    assertEquals(exports.check(-10), 0);
+  const exports = (await compileToInstance(silkCode, "if_let_multi_unwrap"))
+    .exports as any;
+  assertEquals(exports.check(10), 10);
+  assertEquals(exports.check(-10), 0);
 });

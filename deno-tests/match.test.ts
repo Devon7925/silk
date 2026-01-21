@@ -2,7 +2,7 @@ import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
 import { compileToInstance } from "./test_helpers.ts";
 
 Deno.test("match literal number", async () => {
-    const code = `
+  const code = `
       (export wasm) main := {} => (
         x := 10;
         x |> match {
@@ -13,12 +13,13 @@ Deno.test("match literal number", async () => {
       );
       {}
     `;
-    const exports = (await compileToInstance(code, "match_literal")).exports as any;
-    assertEquals(exports.main(), 1);
+  const exports = (await compileToInstance(code, "match_literal"))
+    .exports as any;
+  assertEquals(exports.main(), 1);
 });
 
 Deno.test("match literal number else", async () => {
-    const code = `
+  const code = `
       (export wasm) main := {} => (
         x := 30;
         x |> match {
@@ -29,12 +30,13 @@ Deno.test("match literal number else", async () => {
       );
       {}
     `;
-    const exports = (await compileToInstance(code, "match_literal_else")).exports as any;
-    assertEquals(exports.main(), 3);
+  const exports = (await compileToInstance(code, "match_literal_else"))
+    .exports as any;
+  assertEquals(exports.main(), 3);
 });
 
 Deno.test("match boolean", async () => {
-    const code = `
+  const code = `
       (export wasm) main := {} => (
         x := true;
         x |> match {
@@ -44,12 +46,13 @@ Deno.test("match boolean", async () => {
       );
       {}
     `;
-    const exports = (await compileToInstance(code, "match_boolean")).exports as any;
-    assertEquals(exports.main(), 1);
+  const exports = (await compileToInstance(code, "match_boolean"))
+    .exports as any;
+  assertEquals(exports.main(), 1);
 });
 
 Deno.test("match enum variant without payload", async () => {
-    const code = `
+  const code = `
       Color := enum { Red = {}, Green = {}, Blue = {} };
 
       (export wasm) main := {} => (
@@ -62,12 +65,13 @@ Deno.test("match enum variant without payload", async () => {
       );
       {}
     `;
-    const exports = (await compileToInstance(code, "match_enum_simple")).exports as any;
-    assertEquals(exports.main(), 2);
+  const exports = (await compileToInstance(code, "match_enum_simple"))
+    .exports as any;
+  assertEquals(exports.main(), 2);
 });
 
 Deno.test("match enum variant with payload", async () => {
-    const code = `
+  const code = `
       Result := enum { Ok = i32, Err = i32 };
 
       (export wasm) main := {} => (
@@ -79,12 +83,13 @@ Deno.test("match enum variant with payload", async () => {
       );
       {}
     `;
-    const exports = (await compileToInstance(code, "match_enum_payload")).exports as any;
-    assertEquals(exports.main(), 42);
+  const exports = (await compileToInstance(code, "match_enum_payload"))
+    .exports as any;
+  assertEquals(exports.main(), 42);
 });
 
 Deno.test("match enum variant with payload else", async () => {
-    const code = `
+  const code = `
       Result := enum { Ok = i32, Err = i32 };
 
       (export wasm) main := {} => (
@@ -96,12 +101,13 @@ Deno.test("match enum variant with payload else", async () => {
       );
       {}
     `;
-    const exports = (await compileToInstance(code, "match_enum_else")).exports as any;
-    assertEquals(exports.main(), 0);
+  const exports = (await compileToInstance(code, "match_enum_else"))
+    .exports as any;
+  assertEquals(exports.main(), 0);
 });
 
 Deno.test("match with block bodies", async () => {
-    const code = `
+  const code = `
       (export wasm) main := {} => (
         x := 1;
         x |> match {
@@ -114,6 +120,6 @@ Deno.test("match with block bodies", async () => {
       );
       {}
     `;
-    const exports = (await compileToInstance(code, "match_block")).exports as any;
-    assertEquals(exports.main(), 3);
+  const exports = (await compileToInstance(code, "match_block")).exports as any;
+  assertEquals(exports.main(), 3);
 });

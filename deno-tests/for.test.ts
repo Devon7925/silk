@@ -20,7 +20,7 @@ make_range := (limit: i32) => (
 `;
 
 Deno.test("for loops sum ranges", async () => {
-    const silkCode = `
+  const silkCode = `
     ${iteratorHelpers}
     (export wasm) sum_range := (limit: i32) => (
         mut acc := 0;
@@ -32,13 +32,14 @@ Deno.test("for loops sum ranges", async () => {
     {};
     `;
 
-    const { sum_range } = (await compileToInstance(silkCode, "for_sum_range")).exports as any;
-    assertEquals(sum_range(0), 0);
-    assertEquals(sum_range(5), 10);
+  const { sum_range } = (await compileToInstance(silkCode, "for_sum_range"))
+    .exports as any;
+  assertEquals(sum_range(0), 0);
+  assertEquals(sum_range(5), 10);
 });
 
 Deno.test("for loops support struct patterns", async () => {
-    const silkCode = `
+  const silkCode = `
     PairIter := { value = i32, limit = i32 } @ {
         iter_ty = { left = i32, right = i32 },
         next = (mut self: { value = i32, limit = i32 }) => (
@@ -65,13 +66,14 @@ Deno.test("for loops support struct patterns", async () => {
     {};
     `;
 
-    const { sum_pairs } = (await compileToInstance(silkCode, "for_struct_patterns")).exports as any;
-    assertEquals(sum_pairs(0), 0);
-    assertEquals(sum_pairs(3), 9);
+  const { sum_pairs } =
+    (await compileToInstance(silkCode, "for_struct_patterns")).exports as any;
+  assertEquals(sum_pairs(0), 0);
+  assertEquals(sum_pairs(3), 9);
 });
 
 Deno.test("for loops parse iterator calls with arguments", async () => {
-    const silkCode = `
+  const silkCode = `
     ${iteratorHelpers}
     (export wasm) sum_plus_one := (limit: i32) => (
         mut acc := 0;
@@ -83,7 +85,8 @@ Deno.test("for loops parse iterator calls with arguments", async () => {
     {};
     `;
 
-    const { sum_plus_one } = (await compileToInstance(silkCode, "for_call_argument")).exports as any;
-    assertEquals(sum_plus_one(0), 0);
-    assertEquals(sum_plus_one(4), 10);
+  const { sum_plus_one } =
+    (await compileToInstance(silkCode, "for_call_argument")).exports as any;
+  assertEquals(sum_plus_one(0), 0);
+  assertEquals(sum_plus_one(4), 10);
 });

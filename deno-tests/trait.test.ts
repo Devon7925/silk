@@ -2,7 +2,7 @@ import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
 import { compileToInstance } from "./test_helpers.ts";
 
 Deno.test("trait constraints enforce implementations for generic helpers", async () => {
-    const silkCode = `
+  const silkCode = `
     Adder := (T: type) => (
         { add = (T) -> ((T) -> T) }
     );
@@ -20,12 +20,13 @@ Deno.test("trait constraints enforce implementations for generic helpers", async
     );
     `;
 
-    const exports = (await compileToInstance(silkCode, "trait_generic")).exports as any;
-    assertEquals(exports.add_meter_pair(3), 7);
+  const exports = (await compileToInstance(silkCode, "trait_generic"))
+    .exports as any;
+  assertEquals(exports.add_meter_pair(3), 7);
 });
 
 Deno.test("trait implementations work for multiple types and structs", async () => {
-    const silkCode = `
+  const silkCode = `
     Adder := (T: type) => (
         { add = (T) -> ((T) -> T) }
     );
@@ -68,8 +69,9 @@ Deno.test("trait implementations work for multiple types and structs", async () 
     );
     `;
 
-    const exports = (await compileToInstance(silkCode, "trait_multi")).exports as any;
-    assertEquals(exports.add_meter(3), 7);
-    assertEquals(exports.add_second(5), 14);
-    assertEquals(exports.add_pair_struct(1), 4);
+  const exports = (await compileToInstance(silkCode, "trait_multi"))
+    .exports as any;
+  assertEquals(exports.add_meter(3), 7);
+  assertEquals(exports.add_second(5), 14);
+  assertEquals(exports.add_pair_struct(1), 4);
 });

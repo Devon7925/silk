@@ -2,7 +2,7 @@ import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
 import { compileToInstance } from "./test_helpers.ts";
 
 Deno.test("user implementations work on type aliases", async () => {
-    const silkCode = `
+  const silkCode = `
     Meters := i32 @ {
         square = (self: i32) => self * self,
     };
@@ -13,12 +13,13 @@ Deno.test("user implementations work on type aliases", async () => {
     );
     `;
 
-    const exports = (await compileToInstance(silkCode, "impl_alias")).exports as any;
-    assertEquals(exports.square_meters(5), 25);
+  const exports = (await compileToInstance(silkCode, "impl_alias"))
+    .exports as any;
+  assertEquals(exports.square_meters(5), 25);
 });
 
 Deno.test("user implementations work on struct types", async () => {
-    const silkCode = `
+  const silkCode = `
     Pair := { first = i32, second = i32 } @ {
         sum = (self: { first = i32, second = i32 }) => self.first + self.second,
     };
@@ -29,6 +30,7 @@ Deno.test("user implementations work on struct types", async () => {
     );
     `;
 
-    const exports = (await compileToInstance(silkCode, "impl_struct")).exports as any;
-    assertEquals(exports.sum_pair(3), 7);
+  const exports = (await compileToInstance(silkCode, "impl_struct"))
+    .exports as any;
+  assertEquals(exports.sum_pair(3), 7);
 });
