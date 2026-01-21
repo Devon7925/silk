@@ -794,6 +794,10 @@ fn pattern_object_accessors(pattern: &BindingPattern) -> Option<Vec<String>> {
         }
     }
 
+    fn is_positional_field(name: &str, position: usize) -> bool {
+        name.parse::<usize>().ok() == Some(position)
+    }
+
     fn walk(pattern: &BindingPattern, prefix: &str, out: &mut Vec<String>) -> bool {
         match pattern {
             BindingPattern::Identifier(_, _) => {
@@ -801,9 +805,13 @@ fn pattern_object_accessors(pattern: &BindingPattern) -> Option<Vec<String>> {
                 true
             }
             BindingPattern::Struct(fields, _) => {
-                for (field_name, field_pattern) in fields {
-                    let access_name =
-                        extract_simple_name(field_pattern).unwrap_or_else(|| field_name.name.clone());
+                for (idx, (field_name, field_pattern)) in fields.iter().enumerate() {
+                    let access_name = if is_positional_field(&field_name.name, idx) {
+                        extract_simple_name(field_pattern)
+                            .unwrap_or_else(|| field_name.name.clone())
+                    } else {
+                        field_name.name.clone()
+                    };
                     let next = field_accessor(prefix, &access_name);
                     if !walk(field_pattern, &next, out) {
                         return false;

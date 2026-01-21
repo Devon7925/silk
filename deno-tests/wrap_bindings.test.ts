@@ -40,6 +40,40 @@ Deno.test("wraps wasm export for js", async () => {
   }
 });
 
+Deno.test("wraps wasm export for js with named and nested patterns", async () => {
+  const silkCode = `
+    (export wasm) (wrap js) sum_named := {alpha = first: i32, beta = second: i32} => (
+        first + second
+    );
+    (export wasm) (wrap js) sum_nested := {
+        left = {x = lx: i32, y = ly: i32},
+        right = {x = rx: i32, y = ry: i32}
+    } => (
+        lx + ly + rx + ry
+    );
+    {}
+  `;
+
+  const { basePath } = await compileBaseOrThrow(
+    silkCode,
+    "wrap_js_nested_patterns",
+  );
+  const jsPath = basePath + ".js";
+  try {
+    const module = await importJsModule(jsPath);
+    assertEquals(await module.sum_named({ alpha: 10, beta: 32 }), 42);
+    assertEquals(
+      await module.sum_nested({
+        left: { x: 1, y: 2 },
+        right: { x: 3, y: 4 },
+      }),
+      10,
+    );
+  } finally {
+    await cleanupBase(basePath, [".silk", ".js"]);
+  }
+});
+
 Deno.test("wraps wasm globals for js", async () => {
   const silkCode = `
     (export wasm) (wrap js) answer: i32 := 42;
