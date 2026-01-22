@@ -116,6 +116,9 @@ enum Task {
         span: SourceSpan,
         ids: Vec<Identifier>,
     },
+    BuildArrayRepeat {
+        span: SourceSpan,
+    },
     BuildOperation {
         span: SourceSpan,
         operator: String,
@@ -415,6 +418,11 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                             tasks.push(Task::Expr(expr, scope.clone()));
                         }
                     }
+                    ExpressionKind::ArrayRepeat { value, count } => {
+                        tasks.push(Task::BuildArrayRepeat { span });
+                        tasks.push(Task::Expr(*count, scope.clone()));
+                        tasks.push(Task::Expr(*value, scope));
+                    }
                     ExpressionKind::IntrinsicType(ty) => {
                         results.push(Value::Expr(
                             ExpressionKind::IntrinsicType(ty).with_span(span),
@@ -703,6 +711,17 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 }
                 fields.reverse();
                 results.push(Value::Expr(ExpressionKind::Struct(fields).with_span(span)));
+            }
+            Task::BuildArrayRepeat { span } => {
+                let count = pop_expr(&mut results);
+                let value = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::ArrayRepeat {
+                        value: Box::new(value),
+                        count: Box::new(count),
+                    }
+                    .with_span(span),
+                ));
             }
             Task::BuildOperation { span, operator } => {
                 let right = pop_expr(&mut results);

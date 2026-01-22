@@ -1,5 +1,5 @@
-import { assertEquals } from "@std/asserts";
-import { cleanup, compileToWasm } from "./test_helpers.ts";
+import { assertEquals, assertStringIncludes } from "@std/asserts";
+import { cleanup, compileSilk, compileToWasm, tempBase } from "./test_helpers.ts";
 
 async function compileToInstance(code: string, prefix: string) {
   const { wasmPath, silkPath } = await compileToWasm(code, prefix);
@@ -92,5 +92,44 @@ Deno.test("supports nested array indexing", async () => {
     assertEquals(matrix_get(1, 0), 3);
   } finally {
     await cleanup([silkPath, wasmPath]);
+  }
+});
+
+Deno.test("supports array repeat syntax", async () => {
+  const silkCode = `
+(export wasm) repeat_at := (idx: i32) => (
+    values := {9; 4};
+    values(idx)
+);
+`;
+
+  const { instance, wasmPath, silkPath } = await compileToInstance(
+    silkCode,
+    "arrays_repeat",
+  );
+  try {
+    const { repeat_at } = instance.exports as { repeat_at: (idx: number) => number };
+    assertEquals(repeat_at(2), 9);
+  } finally {
+    await cleanup([silkPath, wasmPath]);
+  }
+});
+
+Deno.test("rejects non-const array repeat length", async () => {
+  const silkCode = `
+(export wasm) bad_repeat := (n: i32) => (
+    values := {1; n};
+    values(0)
+);
+`;
+
+  const basePath = tempBase("arrays_repeat_error");
+  const outputPath = basePath + ".wasm";
+  const { code, stderr, silkPath } = await compileSilk(silkCode, outputPath);
+  try {
+    assertEquals(code, 1);
+    assertStringIncludes(stderr, "Array repetition length must be a const expression");
+  } finally {
+    await cleanup([silkPath, outputPath]);
   }
 });

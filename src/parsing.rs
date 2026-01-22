@@ -253,6 +253,10 @@ pub enum ExpressionKind {
         return_type: Box<Expression>,
     },
     Struct(Vec<(Identifier, Expression)>),
+    ArrayRepeat {
+        value: Box<Expression>,
+        count: Box<Expression>,
+    },
     Literal(ExpressionLiteral),
     Identifier(Identifier),
     Operation {
@@ -630,6 +634,13 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
                     }
                     context.tasks.push(PrettyTask::WriteStatic("{ "));
                 }
+                ExpressionKind::ArrayRepeat { value, count } => {
+                    context.tasks.push(PrettyTask::WriteStatic(" }"));
+                    context.tasks.push(PrettyTask::Expr(count));
+                    context.tasks.push(PrettyTask::WriteStatic("; "));
+                    context.tasks.push(PrettyTask::Expr(value));
+                    context.tasks.push(PrettyTask::WriteStatic("{ "));
+                }
                 ExpressionKind::Literal(lit) => {
                     context
                         .tasks
@@ -873,6 +884,7 @@ enum StructState {
     Start,
     ExpectField,
     ExpectCommaOrEnd,
+    ExpectRepeatLength,
 }
 
 struct StructFrame<'a> {
@@ -881,6 +893,7 @@ struct StructFrame<'a> {
     tuple_index: usize,
     pending_field: Option<Identifier>,
     state: StructState,
+    repeat_value: Option<Expression>,
 }
 
 impl<'a> StructFrame<'a> {
@@ -891,6 +904,7 @@ impl<'a> StructFrame<'a> {
             tuple_index: 0,
             pending_field: None,
             state: StructState::Start,
+            repeat_value: None,
         }
     }
 }
@@ -1357,16 +1371,52 @@ impl<'a> Parser<'a> {
                 }
                 Frame::Struct(mut struct_frame) => {
                     if let Some(expr) = completed_expr.take() {
-                        let Some(identifier) = struct_frame.pending_field.take() else {
-                            return Err(diagnostic_here(
-                                self.source,
-                                self.remaining,
-                                1,
-                                "Expected struct field value",
-                            ));
-                        };
-                        struct_frame.items.push((identifier, expr));
-                        struct_frame.state = StructState::ExpectCommaOrEnd;
+                        match struct_frame.state {
+                            StructState::ExpectRepeatLength => {
+                                let repeat_value =
+                                    struct_frame.repeat_value.take().ok_or_else(|| {
+                                        diagnostic_at_eof(
+                                            self.source,
+                                            "Expected array repeat value",
+                                        )
+                                    })?;
+                                self.remaining = parse_optional_whitespace(self.remaining);
+                                let Some(rest) = self.remaining.strip_prefix('}') else {
+                                    return Err(diagnostic_here(
+                                        self.source,
+                                        self.remaining,
+                                        1,
+                                        "Expected } after array repeat length",
+                                    ));
+                                };
+                                self.remaining = rest;
+                                let span = consumed_span(
+                                    self.source,
+                                    struct_frame.start_slice,
+                                    rest,
+                                );
+                                completed_expr = Some(
+                                    ExpressionKind::ArrayRepeat {
+                                        value: Box::new(repeat_value),
+                                        count: Box::new(expr),
+                                    }
+                                    .with_span(span),
+                                );
+                                continue 'parse;
+                            }
+                            _ => {
+                                let Some(identifier) = struct_frame.pending_field.take() else {
+                                    return Err(diagnostic_here(
+                                        self.source,
+                                        self.remaining,
+                                        1,
+                                        "Expected struct field value",
+                                    ));
+                                };
+                                struct_frame.items.push((identifier, expr));
+                                struct_frame.state = StructState::ExpectCommaOrEnd;
+                            }
+                        }
                     }
 
                     loop {
@@ -1432,6 +1482,33 @@ impl<'a> Parser<'a> {
                                     continue 'parse;
                                 }
 
+                                if let Some(rest) = self.remaining.strip_prefix(';') {
+                                    if struct_frame.items.len() != 1
+                                        || struct_frame
+                                            .items
+                                            .first()
+                                            .is_some_and(|(id, _)| id.name != "0")
+                                    {
+                                        return Err(diagnostic_here(
+                                            self.source,
+                                            self.remaining,
+                                            1,
+                                            "Array repeat syntax requires a single unnamed value",
+                                        ));
+                                    }
+
+                                    let (_, repeat_value) = struct_frame
+                                        .items
+                                        .pop()
+                                        .expect("Expected repeat value");
+                                    struct_frame.repeat_value = Some(repeat_value);
+                                    struct_frame.state = StructState::ExpectRepeatLength;
+                                    self.remaining = rest;
+                                    frames.push(Frame::Struct(struct_frame));
+                                    frames.push(Frame::Expr(ExprFrame::new(0)));
+                                    continue 'parse;
+                                }
+
                                 let Some(rest) = self.remaining.strip_prefix(',') else {
                                     return Err(diagnostic_here(
                                         self.source,
@@ -1443,6 +1520,14 @@ impl<'a> Parser<'a> {
                                 self.remaining = rest;
                                 struct_frame.state = StructState::ExpectField;
                                 continue;
+                            }
+                            StructState::ExpectRepeatLength => {
+                                return Err(diagnostic_here(
+                                    self.source,
+                                    self.remaining,
+                                    1,
+                                    "Expected array repeat length",
+                                ));
                             }
                         }
                     }

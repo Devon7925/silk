@@ -305,6 +305,37 @@ pub fn expression_to_intermediate(
                             stack.push(Frame::Enter(field_expr));
                         }
                     }
+                    ExpressionKind::ArrayRepeat { value, count } => {
+                        let ExpressionKind::Literal(ExpressionLiteral::Number(count)) = count.kind
+                        else {
+                            panic!("Array repetition length must be a const i32 value");
+                        };
+                        if count < 0 {
+                            panic!("Array repetition length must be non-negative");
+                        }
+                        let mut fields = Vec::with_capacity(count as usize);
+                        for idx in 0..count {
+                            fields.push((Identifier::new(idx.to_string()), (*value).clone()));
+                        }
+                        let field_ids = fields.iter().map(|(id, _)| id.clone()).collect();
+                        let struct_expr =
+                            ExpressionKind::Struct(fields.clone()).with_span(span);
+                        let array_fields = match builder.expression_value_type(&struct_expr) {
+                            IntermediateType::Array {
+                                field_names,
+                                element,
+                                ..
+                            } => Some((field_names, *element)),
+                            _ => None,
+                        };
+                        stack.push(Frame::FinishStruct {
+                            field_ids,
+                            array_fields,
+                        });
+                        for (_, field_expr) in fields.into_iter().rev() {
+                            stack.push(Frame::Enter(field_expr));
+                        }
+                    }
                     ExpressionKind::Literal(lit) => match lit {
                         ExpressionLiteral::String(bytes) => {
                             let items = bytes
@@ -1025,6 +1056,10 @@ impl IntermediateBuilder {
         enum Frame {
             Enter(Expression),
             FinishStruct(Vec<String>),
+            FinishArrayRepeat {
+                count: usize,
+                field_names: Vec<String>,
+            },
             FinishArrayIndex,
         }
 
@@ -1061,6 +1096,24 @@ impl IntermediateBuilder {
                         for (_, field_expr) in fields.into_iter().rev() {
                             stack.push(Frame::Enter(field_expr));
                         }
+                    }
+                    ExpressionKind::ArrayRepeat { value, count } => {
+                        let ExpressionKind::Literal(ExpressionLiteral::Number(count)) = count.kind
+                        else {
+                            panic!("Array repetition length must be a const i32 value");
+                        };
+                        if count < 0 {
+                            panic!("Array repetition length must be non-negative");
+                        }
+                        let count_usize = count as usize;
+                        let field_names = (0..count_usize)
+                            .map(|index| index.to_string())
+                            .collect();
+                        stack.push(Frame::FinishArrayRepeat {
+                            count: count_usize,
+                            field_names,
+                        });
+                        stack.push(Frame::Enter(*value));
                     }
                     ExpressionKind::ArrayIndex { array, .. } => {
                         stack.push(Frame::FinishArrayIndex);
@@ -1126,6 +1179,14 @@ impl IntermediateBuilder {
                             .collect();
                         values.push(IntermediateType::Struct(fields));
                     }
+                }
+                Frame::FinishArrayRepeat { count, field_names } => {
+                    let element = values.pop().expect("Missing array repeat element type");
+                    values.push(IntermediateType::Array {
+                        element: Box::new(element),
+                        length: count,
+                        field_names,
+                    });
                 }
                 Frame::FinishArrayIndex => {
                     let array_type = values.pop().expect("Missing array type");

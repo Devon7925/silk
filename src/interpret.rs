@@ -698,6 +698,9 @@ fn apply_type_bindings(expr: &Expression, bindings: &HashMap<String, Expression>
         FunctionType {
             span: SourceSpan,
         },
+        ArrayRepeat {
+            span: SourceSpan,
+        },
         ArrayIndex {
             span: SourceSpan,
         },
@@ -731,6 +734,11 @@ fn apply_type_bindings(expr: &Expression, bindings: &HashMap<String, Expression>
                     for (_, value) in items.into_iter().rev() {
                         stack.push(Frame::Enter(value));
                     }
+                }
+                ExpressionKind::ArrayRepeat { value, count } => {
+                    stack.push(Frame::ArrayRepeat { span: expr.span });
+                    stack.push(Frame::Enter(*count));
+                    stack.push(Frame::Enter(*value));
                 }
                 ExpressionKind::BoxType(inner) => {
                     stack.push(Frame::BoxType { span: expr.span });
@@ -779,6 +787,17 @@ fn apply_type_bindings(expr: &Expression, bindings: &HashMap<String, Expression>
                 evaluated.reverse();
                 let items = identifiers.into_iter().zip(evaluated.into_iter()).collect();
                 results.push(Expression::new(ExpressionKind::Struct(items), span));
+            }
+            Frame::ArrayRepeat { span } => {
+                let count = results.pop().unwrap();
+                let value = results.pop().unwrap();
+                results.push(Expression::new(
+                    ExpressionKind::ArrayRepeat {
+                        value: Box::new(value),
+                        count: Box::new(count),
+                    },
+                    span,
+                ));
             }
             Frame::BoxType { span } => {
                 let inner = results.pop().unwrap();
@@ -1002,6 +1021,9 @@ pub fn interpret_expression(
         Struct {
             span: SourceSpan,
             identifiers: Vec<Identifier>,
+        },
+        ArrayRepeat {
+            span: SourceSpan,
         },
         FunctionType {
             span: SourceSpan,
@@ -1290,6 +1312,11 @@ pub fn interpret_expression(
                         for (_, value_expr) in items.into_iter().rev() {
                             stack.push(Frame::Eval(value_expr));
                         }
+                    }
+                    ExpressionKind::ArrayRepeat { value, count } => {
+                        stack.push(Frame::ArrayRepeat { span });
+                        stack.push(Frame::Eval(*count));
+                        stack.push(Frame::Eval(*value));
                     }
                     ExpressionKind::FunctionType {
                         parameter,
@@ -1655,6 +1682,38 @@ pub fn interpret_expression(
                 }
                 evaluated.reverse();
                 let items = identifiers.into_iter().zip(evaluated.into_iter()).collect();
+                values.push(Expression::new(ExpressionKind::Struct(items), span));
+            }
+            Frame::ArrayRepeat { span } => {
+                let count_expr = values.pop().unwrap();
+                let value_expr = values.pop().unwrap();
+
+                if !is_resolved_constant(&count_expr) {
+                    return Err(diagnostic(
+                        "Array repetition length must be a const expression",
+                        count_expr.span(),
+                    ));
+                }
+
+                let ExpressionKind::Literal(ExpressionLiteral::Number(count)) = count_expr.kind
+                else {
+                    return Err(diagnostic(
+                        "Array repetition length must be a const i32 value",
+                        count_expr.span(),
+                    ));
+                };
+
+                if count < 0 {
+                    return Err(diagnostic(
+                        "Array repetition length must be non-negative",
+                        count_expr.span(),
+                    ));
+                }
+
+                let mut items = Vec::with_capacity(count as usize);
+                for idx in 0..count {
+                    items.push((Identifier::new(idx.to_string()), value_expr.clone()));
+                }
                 values.push(Expression::new(ExpressionKind::Struct(items), span));
             }
             Frame::FunctionType { span } => {
@@ -2773,6 +2832,10 @@ pub(crate) fn get_type_of_expression(
             span: SourceSpan,
             identifiers: Vec<Identifier>,
         },
+        ArrayRepeat {
+            span: SourceSpan,
+            count: i32,
+        },
         Block {
             span: SourceSpan,
             expressions: Vec<Expression>,
@@ -3117,6 +3180,30 @@ pub(crate) fn get_type_of_expression(
                             stack.push(Frame::Enter(field_expr, context.clone()));
                         }
                     }
+                    ExpressionKind::ArrayRepeat { value, count } => {
+                        let count_span = count.span();
+                        let ExpressionKind::Literal(ExpressionLiteral::Number(count_value)) =
+                            count.kind
+                        else {
+                            return Err(diagnostic(
+                                "Array repetition length must be a const expression",
+                                count_span,
+                            ));
+                        };
+
+                        if count_value < 0 {
+                            return Err(diagnostic(
+                                "Array repetition length must be non-negative",
+                                count_span,
+                            ));
+                        }
+
+                        stack.push(Frame::ArrayRepeat {
+                            span,
+                            count: count_value,
+                        });
+                        stack.push(Frame::Enter(*value, context));
+                    }
                     ExpressionKind::FunctionType { .. } => {
                         results.push(
                             ExpressionKind::IntrinsicType(IntrinsicType::Type).with_span(span),
@@ -3228,6 +3315,14 @@ pub(crate) fn get_type_of_expression(
                     .into_iter()
                     .zip(struct_items.into_iter())
                     .collect();
+                results.push(Expression::new(ExpressionKind::Struct(struct_items), span));
+            }
+            Frame::ArrayRepeat { span, count } => {
+                let value_type = results.pop().unwrap();
+                let mut struct_items = Vec::with_capacity(count as usize);
+                for idx in 0..count {
+                    struct_items.push((Identifier::new(idx.to_string()), value_type.clone()));
+                }
                 results.push(Expression::new(ExpressionKind::Struct(struct_items), span));
             }
             Frame::Block {
@@ -3808,6 +3903,11 @@ pub fn expression_does_diverge(expr: &Expression, possibility: bool, in_inner_lo
                     stack.push(Frame::Exit(Combine::Any(1)));
                     stack.push(Frame::Enter(code, in_inner_loop));
                 }
+                ExpressionKind::ArrayRepeat { value, count } => {
+                    stack.push(Frame::Exit(Combine::Any(2)));
+                    stack.push(Frame::Enter(count, in_inner_loop));
+                    stack.push(Frame::Enter(value, in_inner_loop));
+                }
                 ExpressionKind::Literal(_)
                 | ExpressionKind::Identifier(_)
                 | ExpressionKind::IntrinsicType(_)
@@ -3976,6 +4076,11 @@ pub fn expression_exports(expr: &Expression) -> bool {
                 }) => {
                     stack.push(Frame::ExitExpr(ExprCombine::Any(1)));
                     stack.push(Frame::EnterExpr(code));
+                }
+                ExpressionKind::ArrayRepeat { value, count } => {
+                    stack.push(Frame::ExitExpr(ExprCombine::Any(2)));
+                    stack.push(Frame::EnterExpr(count));
+                    stack.push(Frame::EnterExpr(value));
                 }
                 ExpressionKind::Literal(_)
                 | ExpressionKind::Identifier(_)
@@ -4853,6 +4958,10 @@ fn fold_expression<T, U: Fn(&Expression, T) -> T>(
                 for (_, field_expr) in items.iter().rev() {
                     stack.push(field_expr);
                 }
+            }
+            ExpressionKind::ArrayRepeat { value, count } => {
+                stack.push(count);
+                stack.push(value);
             }
             ExpressionKind::Operation { left, right, .. } => {
                 stack.push(right);
@@ -6291,6 +6400,10 @@ fn is_resolved_constant(expr: &Expression) -> bool {
                     stack.push(value_expr);
                 }
             }
+            ExpressionKind::ArrayRepeat { value, count } => {
+                stack.push(count);
+                stack.push(value);
+            }
             ExpressionKind::AttachImplementation {
                 type_expr,
                 implementation,
@@ -6358,6 +6471,16 @@ fn is_resolved_const_function_expression(expr: &Expression, function_context: &C
                         context: frame.context.clone(),
                     });
                 }
+            }
+            ExpressionKind::ArrayRepeat { value, count } => {
+                stack.push(Frame {
+                    expr: count,
+                    context: frame.context.clone(),
+                });
+                stack.push(Frame {
+                    expr: value,
+                    context: frame.context.clone(),
+                });
             }
             ExpressionKind::AttachImplementation {
                 type_expr,
