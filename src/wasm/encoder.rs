@@ -774,6 +774,8 @@ pub enum Instruction<'a> {
     LocalTee(u32),
     I32Load(MemArg),
     I32Load8U(MemArg),
+    I32Store(MemArg),
+    I32Store8(MemArg),
     I32Const(i32),
     I32Eqz,
     I32Eq,
@@ -862,6 +864,14 @@ impl Encode for Instruction<'_> {
             }
             Instruction::I32Load8U(memarg) => {
                 sink.push(0x2D);
+                memarg.encode(sink);
+            }
+            Instruction::I32Store(memarg) => {
+                sink.push(0x36);
+                memarg.encode(sink);
+            }
+            Instruction::I32Store8(memarg) => {
+                sink.push(0x3A);
                 memarg.encode(sink);
             }
             Instruction::I32Const(value) => {

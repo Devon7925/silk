@@ -114,3 +114,42 @@ Deno.test("exports boxed globals as distinct memories", async () => {
     await cleanup([silkPath, wasmPath]);
   }
 });
+
+Deno.test("copies boxed u8 array host data to boxed u32 array", async () => {
+  const silkCode = `
+    (export wasm) source: Box({u8, u8, u8, u8}) := {0, 0, 0, 0};
+    (export wasm) mut target: Box({i32, i32, i32, i32}) := {0, 0, 0, 0};
+    (export wasm) copy_box := {} => (
+      for i in 0..4 do (
+        target(i) = source(i);
+      )
+    );
+    {}
+  `;
+
+  const { wasmPath, silkPath } = await compileToWasm(
+    silkCode,
+    "wasm_bindings_box_copy",
+  );
+  try {
+    const bytes = await Deno.readFile(wasmPath);
+    const { instance } = await WebAssembly.instantiate(bytes);
+    const { source, target, copy_box } = instance.exports as {
+      source: WebAssembly.Memory;
+      target: WebAssembly.Memory;
+      copy_box: () => void;
+    };
+    assertInstanceOf(source, WebAssembly.Memory);
+    assertInstanceOf(target, WebAssembly.Memory);
+
+    const sourceView = new Uint8Array(source.buffer, 0, 4);
+    sourceView.set([5, 6, 7, 8]);
+
+    copy_box();
+
+    const targetView = new Uint32Array(target.buffer, 0, 4);
+    assertEquals([...targetView], [5, 6, 7, 8]);
+  } finally {
+    await cleanup([silkPath, wasmPath]);
+  }
+});

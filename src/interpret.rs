@@ -568,7 +568,19 @@ fn types_equivalent(left: &ExpressionKind, right: &ExpressionKind) -> bool {
 }
 
 fn homogeneous_struct_element_type(ty: &Expression, context: &Context) -> Option<Expression> {
-    let ExpressionKind::Struct(fields) = &ty.kind else {
+    let mut current = resolve_type_alias_expression(ty, context);
+    loop {
+        match &current.kind {
+            ExpressionKind::BoxType(inner) => {
+                current = resolve_type_alias_expression(inner, context);
+            }
+            ExpressionKind::AttachImplementation { type_expr, .. } => {
+                current = resolve_type_alias_expression(type_expr, context);
+            }
+            _ => break,
+        }
+    }
+    let ExpressionKind::Struct(fields) = &current.kind else {
         return None;
     };
     let (_, first_type) = fields.first()?;
@@ -1484,12 +1496,14 @@ pub fn interpret_expression(
                 }
                 let value_is_constant =
                     is_resolved_constant(&value) || function_contains_compile_time_data(&value);
+                let is_exported = pattern_has_export_annotation(&interpreted_pattern)?;
+                let has_box_type = pattern_contains_box_type(&interpreted_pattern, context);
                 let (bound_success, preserve_behavior) = bind_pattern_from_value(
                     interpreted_pattern.clone(),
                     &value,
                     context,
                     Vec::new(),
-                    if value_is_constant {
+                    if value_is_constant && !(is_exported && has_box_type) {
                         PreserveBehavior::Inline
                     } else {
                         PreserveBehavior::PreserveUsage
@@ -2337,9 +2351,23 @@ pub fn interpret_expression(
                     }
                 }
 
-                if let Ok(function_type) = get_type_of_expression(&function_value, context)
-                    && homogeneous_struct_element_type(&function_type, context).is_some()
-                {
+                let mut inferred_array_type = None;
+                if let Ok(function_type) = get_type_of_expression(&function_value, context) {
+                    inferred_array_type = Some(function_type);
+                } else if let ExpressionKind::Identifier(ident) = &function_value.kind {
+                    if let Some((binding_ctx, _)) = context.get_identifier(ident)
+                        && let Ok(Some(bound_type)) = binding_ctx.get_bound_type(context)
+                    {
+                        inferred_array_type = Some(bound_type);
+                    }
+                }
+
+                if let Some(function_type) = inferred_array_type {
+                    let base_type = match &function_type.kind {
+                        ExpressionKind::BoxType(inner) => inner.as_ref(),
+                        _ => &function_type,
+                    };
+                    if homogeneous_struct_element_type(base_type, context).is_some() {
                     let index_type = get_type_of_expression(&argument_value, context)?;
                     let expected_index = ExpressionKind::IntrinsicType(IntrinsicType::I32);
                     if !types_equivalent(&index_type.kind, &expected_index) {
@@ -2389,6 +2417,7 @@ pub fn interpret_expression(
                         .with_span(span),
                     );
                     continue;
+                    }
                 }
 
                 let effective_function =
@@ -3439,8 +3468,42 @@ pub(crate) fn get_type_of_expression(
                         continue;
                     }
                 }
+                let array_type = match &evaluated_function_type.kind {
+                    ExpressionKind::BoxType(inner) => inner.as_ref(),
+                    _ => &evaluated_function_type,
+                };
                 if let Some(mut element_type) =
-                    homogeneous_struct_element_type(&evaluated_function_type, &context)
+                    homogeneous_struct_element_type(array_type, &context)
+                {
+                    let expected_index = ExpressionKind::IntrinsicType(IntrinsicType::I32);
+                    if !types_equivalent(&argument_type.kind, &expected_index) {
+                        return Err(diagnostic("Array index must be an i32 value", span));
+                    }
+
+                    if let ExpressionKind::IntrinsicType(intrinsic) = &element_type.kind {
+                        element_type = match intrinsic {
+                            IntrinsicType::I32 => resolve_intrinsic_type("i32", span, &context)?,
+                            IntrinsicType::U8 => resolve_intrinsic_type("u8", span, &context)?,
+                            IntrinsicType::Boolean => {
+                                resolve_intrinsic_type("bool", span, &context)?
+                            }
+                            IntrinsicType::Target => {
+                                resolve_intrinsic_type("target", span, &context)?
+                            }
+                            IntrinsicType::Type => resolve_intrinsic_type("type", span, &context)?,
+                            IntrinsicType::BindingAnnotation => {
+                                resolve_intrinsic_type("binding_annotation", span, &context)?
+                            }
+                        };
+                    }
+                    results.push(element_type);
+                    continue;
+                }
+                if let ExpressionKind::Identifier(ident) = &function_expr.kind
+                    && let Some((binding_ctx, _)) = context.get_identifier(ident)
+                    && let Ok(Some(bound_type)) = binding_ctx.get_bound_type(&context)
+                    && let Some(mut element_type) =
+                        homogeneous_struct_element_type(&bound_type, &context)
                 {
                     let expected_index = ExpressionKind::IntrinsicType(IntrinsicType::I32);
                     if !types_equivalent(&argument_type.kind, &expected_index) {
@@ -3534,7 +3597,12 @@ pub(crate) fn get_type_of_expression(
                     return Err(diagnostic("Array index must be an i32 value", span));
                 }
 
-                let Some(mut element_type) = homogeneous_struct_element_type(&array_type, &context)
+                let base_array_type = match &array_type.kind {
+                    ExpressionKind::BoxType(inner) => inner.as_ref(),
+                    _ => &array_type,
+                };
+                let Some(mut element_type) =
+                    homogeneous_struct_element_type(base_array_type, &context)
                 else {
                     return Err(diagnostic("Attempted to index a non-array value", span));
                 };
@@ -5020,11 +5088,55 @@ fn get_lvalue_type(
     context: &Context,
     span: SourceSpan,
 ) -> Result<Expression, Diagnostic> {
+    get_lvalue_type_inner(target, context, span, false)
+}
+
+fn pattern_has_export_annotation(pattern: &BindingPattern) -> Result<bool, Diagnostic> {
+    let mut stack = vec![pattern];
+    while let Some(current) = stack.pop() {
+        match current {
+            BindingPattern::Identifier(..) | BindingPattern::Literal(..) => {}
+            BindingPattern::Struct(items, _) => {
+                for (_, pat) in items {
+                    stack.push(pat);
+                }
+            }
+            BindingPattern::EnumVariant { payload, .. } => {
+                if let Some(payload) = payload {
+                    stack.push(payload.as_ref());
+                }
+            }
+            BindingPattern::TypeHint(inner, ..) => {
+                stack.push(inner.as_ref());
+            }
+            BindingPattern::Annotated { pattern, annotations, .. } => {
+                for annotation in annotations {
+                    if matches!(
+                        binding_annotation_from_value(annotation.clone())?,
+                        BindingAnnotation::Export(..)
+                    ) {
+                        return Ok(true);
+                    }
+                }
+                stack.push(pattern.as_ref());
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn get_lvalue_type_inner(
+    target: &LValue,
+    context: &Context,
+    span: SourceSpan,
+    allow_box: bool,
+) -> Result<Expression, Diagnostic> {
     ensure_lvalue_mutable(target, context, span)?;
     fn resolve_identifier_type(
         identifier: &Identifier,
         target_span: SourceSpan,
         context: &Context,
+        allow_box: bool,
     ) -> Result<Expression, Diagnostic> {
         let (binding_ctx, _) = context.get_identifier(identifier).ok_or_else(|| {
             diagnostic(
@@ -5043,7 +5155,7 @@ fn get_lvalue_type(
             )),
         }?;
 
-        if type_expression_contains_box(&ty, context) {
+        if !allow_box && type_expression_contains_box(&ty, context) {
             return Err(diagnostic(
                 format!("Cannot assign to boxed identifier: {}", identifier.name),
                 target_span,
@@ -5055,14 +5167,14 @@ fn get_lvalue_type(
 
     match target {
         LValue::Identifier(identifier, target_span) => {
-            resolve_identifier_type(identifier, *target_span, context)
+            resolve_identifier_type(identifier, *target_span, context, allow_box)
         }
         LValue::TypePropertyAccess {
             object,
             property,
             span: prop_span,
         } => {
-            let current_type = get_lvalue_type(object, context, *prop_span)?;
+            let current_type = get_lvalue_type_inner(object, context, *prop_span, false)?;
             let Expression {
                 kind: ExpressionKind::Struct(fields),
                 ..
@@ -5096,8 +5208,14 @@ fn get_lvalue_type(
                 })
         }
         LValue::ArrayIndex { array, index, span } => {
-            let array_type = get_lvalue_type(array, context, *span)?;
-            let Some(element_type) = homogeneous_struct_element_type(&array_type, context) else {
+            let array_type = get_lvalue_type_inner(array, context, *span, true)?;
+            let base_array_type = match &array_type.kind {
+                ExpressionKind::BoxType(inner) => inner.as_ref().clone(),
+                _ => array_type.clone(),
+            };
+            let Some(element_type) =
+                homogeneous_struct_element_type(&base_array_type, context)
+            else {
                 return Err(diagnostic("Indexing requires an array type", *span));
             };
             let index_type = get_type_of_expression(index, context)?;

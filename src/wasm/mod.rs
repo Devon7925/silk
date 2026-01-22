@@ -8,9 +8,9 @@ use self::encoder::{
     StructType, SubType, TypeSection, ValType,
 };
 use self::types::{
-    BoxContext, BoxRegistry, ControlFrame, LoopContext, MatchCounter, TypeContext, WasmExports,
-    WasmFunctionDef, WasmFunctionExport, WasmFunctionImport, WasmFunctionParam, WasmGlobalExport,
-    WasmType,
+    BoxContext, BoxInfo, BoxRegistry, ControlFrame, LoopContext, MatchCounter, TypeContext,
+    WasmExports, WasmFunctionDef, WasmFunctionExport, WasmFunctionImport, WasmFunctionParam,
+    WasmGlobalExport, WasmType,
 };
 use self::types::{
     format_wasm_type, intermediate_type_to_wasm, memarg, pages_for_size, record_box_binding,
@@ -106,6 +106,8 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
     let mut export_section = ExportSection::new();
     let mut code_section = CodeSection::new();
     let mut box_registry = BoxRegistry::default();
+    let mut global_box_bindings: std::collections::HashMap<String, BoxInfo> =
+        std::collections::HashMap::new();
 
     let mut type_ctx = TypeContext::new();
 
@@ -125,6 +127,11 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
                 type_ctx.get_or_register_type(param.ty.clone());
             }
             locals_types.insert(param.name.clone(), param.ty.clone());
+        }
+        for global in &exports.globals {
+            if matches!(global.ty, WasmType::Box { .. }) {
+                locals_types.insert(global.name.clone(), global.ty.clone());
+            }
         }
         if !matches!(
             function.return_type,
@@ -146,6 +153,14 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
             WasmType::I32 | WasmType::U8 | WasmType::Box { .. }
         ) {
             type_ctx.get_or_register_type(global.ty.clone());
+        }
+        if let WasmType::Box { element } = &global.ty {
+            if !matches!(
+                element.as_ref(),
+                WasmType::I32 | WasmType::U8 | WasmType::Box { .. }
+            ) {
+                type_ctx.get_or_register_type(element.as_ref().clone());
+            }
         }
     }
 
@@ -252,7 +267,9 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
                 } => (value.as_ref(), element_type),
                 other => (other, element.as_ref()),
             };
-            box_registry.register_box(init_value, element_type, Some(global.name.clone()))?;
+            let info =
+                box_registry.register_box(init_value, element_type, Some(global.name.clone()))?;
+            global_box_bindings.insert(global.name.clone(), info);
             continue;
         }
         let init_expr = const_expr_for_global(&global.init, &global.ty)?;
@@ -276,6 +293,11 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
         for (j, param) in function.params.iter().enumerate() {
             local_indices.insert(param.name.clone(), j as u32);
             locals_types.insert(param.name.clone(), param.ty.clone());
+        }
+        for global in &exports.globals {
+            if matches!(global.ty, WasmType::Box { .. }) {
+                locals_types.insert(global.name.clone(), global.ty.clone());
+            }
         }
 
         let mut match_counter = MatchCounter::default();
@@ -307,6 +329,9 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
 
         let mut match_counter = MatchCounter::default();
         let mut box_ctx = BoxContext::default();
+        for (name, info) in &global_box_bindings {
+            box_ctx.bindings.insert(name.clone(), info.clone());
+        }
         emit_expression(
             &function.body,
             &local_indices,
@@ -1524,7 +1549,18 @@ fn collect_locals(
                 stack.push(&binding.expr);
             }
             IntermediateKind::Assignment { target, expr } => {
-                ensure_lvalue_local(target, locals_types, SourceSpan::default())?;
+                let mut allow_non_local = false;
+                if let IntermediateLValue::ArrayIndex { array, .. } = target {
+                    let array_expr = lvalue_to_intermediate(array.as_ref());
+                    let array_type =
+                        infer_type(&array_expr, locals_types, function_return_types)?;
+                    if matches!(array_type, WasmType::Box { .. }) {
+                        allow_non_local = true;
+                    }
+                }
+                if !allow_non_local {
+                    ensure_lvalue_local(target, locals_types, SourceSpan::default())?;
+                }
                 collect_lvalue_exprs(target, &mut stack);
                 stack.push(expr);
             }
@@ -2092,13 +2128,33 @@ fn emit_expression(
                         let array_expr = lvalue_to_intermediate(array.as_ref());
                         let array_type =
                             infer_type(&array_expr, locals_types, function_return_types)?;
-                        if matches!(array_type, WasmType::Box { .. }) {
-                            return Err(Diagnostic::new("Index assignment on boxed array")
-                                .with_span(SourceSpan::default()));
-                        }
-                        let WasmType::Array { element, .. } = &array_type else {
-                            return Err(Diagnostic::new("Index assignment on non-array type")
-                                .with_span(SourceSpan::default()));
+                        let resolved_box =
+                            resolve_box_expr(&array_expr, box_ctx, box_registry).ok();
+                        let (element, boxed_memory) = match &array_type {
+                            WasmType::Array { element, .. } => (
+                                element.clone(),
+                                resolved_box.map(|info| info.memory_index),
+                            ),
+                            WasmType::Box { element } => match element.as_ref() {
+                                WasmType::Array { element, .. } => {
+                                    let info = if let Some(info) = resolved_box {
+                                        info
+                                    } else {
+                                        resolve_box_expr(&array_expr, box_ctx, box_registry)?
+                                    };
+                                    (element.clone(), Some(info.memory_index))
+                                }
+                                _ => {
+                                    return Err(Diagnostic::new(
+                                        "Index assignment on non-array type",
+                                    )
+                                    .with_span(SourceSpan::default()));
+                                }
+                            },
+                            _ => {
+                                return Err(Diagnostic::new("Index assignment on non-array type")
+                                    .with_span(SourceSpan::default()));
+                            }
                         };
 
                         let index_type =
@@ -2108,18 +2164,51 @@ fn emit_expression(
                                 .with_span(SourceSpan::default()));
                         }
 
-                        let type_index = type_ctx
-                            .get_type_index(&array_type)
-                            .expect("Type should be registered");
                         let full_target_expr = lvalue_to_intermediate(&target);
-                        tasks.push(EmitTask::Eval(full_target_expr));
-                        tasks.push(EmitTask::Instr(Instruction::ArraySet(type_index)));
-                        tasks.push(EmitTask::EvalWithType {
-                            expr: (*value).clone(),
-                            expected: (**element).clone(),
-                        });
-                        tasks.push(EmitTask::EvalValue((**index).clone()));
-                        tasks.push(EmitTask::Eval(array_expr));
+                        if let Some(memory_index) = boxed_memory {
+                            let element_size = wasm_type_size(&element) as i32;
+                            let temp_local = box_temp_local.ok_or_else(|| {
+                                Diagnostic::new(
+                                    "Boxed array assignment requires a temporary local"
+                                        .to_string(),
+                                )
+                                .with_span(SourceSpan::default())
+                            })?;
+                            let store_instr = match element.as_ref() {
+                                WasmType::U8 => Instruction::I32Store8(memarg(0, 0, memory_index)),
+                                WasmType::I32 => Instruction::I32Store(memarg(0, 2, memory_index)),
+                                _ => {
+                                    return Err(Diagnostic::new(
+                                        "Boxed array assignment only supports i32 or u8 elements"
+                                            .to_string(),
+                                    )
+                                    .with_span(SourceSpan::default()));
+                                }
+                            };
+                            tasks.push(EmitTask::Eval(full_target_expr));
+                            tasks.push(EmitTask::Instr(store_instr));
+                            tasks.push(EmitTask::EvalWithType {
+                                expr: (*value).clone(),
+                                expected: (*element).clone(),
+                            });
+                            tasks.push(EmitTask::Instr(Instruction::LocalGet(temp_local)));
+                            tasks.push(EmitTask::Instr(Instruction::LocalSet(temp_local)));
+                            tasks.push(EmitTask::Instr(Instruction::I32Mul));
+                            tasks.push(EmitTask::Instr(Instruction::I32Const(element_size)));
+                            tasks.push(EmitTask::EvalValue((**index).clone()));
+                        } else {
+                            let type_index = type_ctx
+                                .get_type_index(&array_type)
+                                .expect("Type should be registered");
+                            tasks.push(EmitTask::Eval(full_target_expr));
+                            tasks.push(EmitTask::Instr(Instruction::ArraySet(type_index)));
+                            tasks.push(EmitTask::EvalWithType {
+                                expr: (*value).clone(),
+                                expected: (*element).clone(),
+                            });
+                            tasks.push(EmitTask::EvalValue((**index).clone()));
+                            tasks.push(EmitTask::Eval(array_expr));
+                        }
                     }
                 },
                 IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
