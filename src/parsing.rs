@@ -764,18 +764,18 @@ fn pretty_print_task(task: PrettyTask<'_>) -> String {
                     context.tasks.push(PrettyTask::WriteStatic(": "));
                     context.tasks.push(PrettyTask::Pattern(inner));
                 }
-            BindingPattern::Annotated {
-                annotations,
-                pattern,
-                ..
-            } => {
-                context.tasks.push(PrettyTask::Pattern(pattern));
-                for annotation in annotations.iter().rev() {
-                    context.tasks.push(PrettyTask::WriteStatic(") "));
-                    context.tasks.push(PrettyTask::Expr(annotation));
-                    context.tasks.push(PrettyTask::WriteStatic("("));
+                BindingPattern::Annotated {
+                    annotations,
+                    pattern,
+                    ..
+                } => {
+                    context.tasks.push(PrettyTask::Pattern(pattern));
+                    for annotation in annotations.iter().rev() {
+                        context.tasks.push(PrettyTask::WriteStatic(") "));
+                        context.tasks.push(PrettyTask::Expr(annotation));
+                        context.tasks.push(PrettyTask::WriteStatic("("));
+                    }
                 }
-            }
             },
         }
     }
@@ -1390,11 +1390,8 @@ impl<'a> Parser<'a> {
                                     ));
                                 };
                                 self.remaining = rest;
-                                let span = consumed_span(
-                                    self.source,
-                                    struct_frame.start_slice,
-                                    rest,
-                                );
+                                let span =
+                                    consumed_span(self.source, struct_frame.start_slice, rest);
                                 completed_expr = Some(
                                     ExpressionKind::ArrayRepeat {
                                         value: Box::new(repeat_value),
@@ -1497,10 +1494,8 @@ impl<'a> Parser<'a> {
                                         ));
                                     }
 
-                                    let (_, repeat_value) = struct_frame
-                                        .items
-                                        .pop()
-                                        .expect("Expected repeat value");
+                                    let (_, repeat_value) =
+                                        struct_frame.items.pop().expect("Expected repeat value");
                                     struct_frame.repeat_value = Some(repeat_value);
                                     struct_frame.state = StructState::ExpectRepeatLength;
                                     self.remaining = rest;
@@ -1686,10 +1681,10 @@ impl<'a> Parser<'a> {
                                 };
                                 let iterator_span = iterator_expr.span();
                                 let iter_binding_pattern = BindingPattern::Annotated {
-                                    annotations: vec![ExpressionKind::Identifier(
-                                        Identifier::new("mut"),
-                                    )
-                                    .with_span(iterator_span)],
+                                    annotations: vec![
+                                        ExpressionKind::Identifier(Identifier::new("mut"))
+                                            .with_span(iterator_span),
+                                    ],
                                     pattern: Box::new(BindingPattern::Identifier(
                                         iterator_identifier.clone(),
                                         iterator_span,
@@ -2712,8 +2707,7 @@ fn extract_binding_annotations_from_expression(
     if let ExpressionKind::FunctionCall { function, argument } = &expression.kind
         && matches!(function.kind, ExpressionKind::FunctionCall { .. })
     {
-        let mut annotations =
-            extract_binding_annotations_from_expression((**function).clone())?;
+        let mut annotations = extract_binding_annotations_from_expression((**function).clone())?;
         annotations.push((**argument).clone());
         return Ok(annotations);
     }

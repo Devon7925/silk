@@ -91,17 +91,25 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
         output.push_str("    return Number(wgsl.slice(start, end));\n");
         output.push_str("  };\n");
         output.push_str("  const inputArray = inputValues.length ? (inputValues instanceof Int32Array ? inputValues : new Int32Array(inputValues)) : null;\n");
-        output.push_str("  const inBinding = inputArray ? findBinding(\"silk_in_\" + entryPoint) : null;\n");
-        output.push_str("  const outBinding = outputCount ? findBinding(\"silk_out_\" + entryPoint) : null;\n");
+        output.push_str(
+            "  const inBinding = inputArray ? findBinding(\"silk_in_\" + entryPoint) : null;\n",
+        );
+        output.push_str(
+            "  const outBinding = outputCount ? findBinding(\"silk_out_\" + entryPoint) : null;\n",
+        );
         output.push_str("  const makeStorage = (count) => device.createBuffer({ size: Math.max(16, count * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });\n");
         output.push_str("  const input = inputArray ? makeStorage(inputArray.length) : null;\n");
         output.push_str("  const output = outputCount ? makeStorage(outputCount) : null;\n");
         output.push_str("  if (input) device.queue.writeBuffer(input, 0, inputArray);\n");
-        output.push_str("  if (output) device.queue.writeBuffer(output, 0, new Int32Array(outputCount));\n");
+        output.push_str(
+            "  if (output) device.queue.writeBuffer(output, 0, new Int32Array(outputCount));\n",
+        );
         output.push_str("  const entries = [];\n");
         output.push_str("  if (input && inBinding !== null) entries.push({ binding: inBinding, resource: { buffer: input } });\n");
         output.push_str("  if (output && outBinding !== null) entries.push({ binding: outBinding, resource: { buffer: output } });\n");
-        output.push_str("  const bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries });\n");
+        output.push_str(
+            "  const bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries });\n",
+        );
         output.push_str("  const encoder = device.createCommandEncoder();\n");
         output.push_str("  const pass = encoder.beginComputePass();\n");
         output.push_str("  pass.setPipeline(pipeline);\n");
@@ -113,7 +121,9 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
         output.push_str("  if (!outputCount) { return undefined; }\n");
         output.push_str("  const read = device.createBuffer({ size: Math.max(16, outputCount * 4), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });\n");
         output.push_str("  const copy = device.createCommandEncoder();\n");
-        output.push_str("  copy.copyBufferToBuffer(output, 0, read, 0, Math.max(16, outputCount * 4));\n");
+        output.push_str(
+            "  copy.copyBufferToBuffer(output, 0, read, 0, Math.max(16, outputCount * 4));\n",
+        );
         output.push_str("  device.queue.submit([copy.finish()]);\n");
         output.push_str("  await device.queue.onSubmittedWorkDone();\n");
         output.push_str("  await read.mapAsync(GPUMapMode.READ);\n");
@@ -126,13 +136,16 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
         output.push_str("  if (typeof SharedArrayBuffer === \"undefined\" || typeof Atomics === \"undefined\" || typeof Atomics.wait !== \"function\" || typeof Worker === \"undefined\") {\n");
         output.push_str("    throw new Error(\"Synchronous WGSL wrapper requires SharedArrayBuffer, Atomics.wait, and Worker support.\");\n");
         output.push_str("  }\n");
-        output.push_str("  const sab = new SharedArrayBuffer(Math.max(8, (outputCount + 1) * 4));\n");
+        output
+            .push_str("  const sab = new SharedArrayBuffer(Math.max(8, (outputCount + 1) * 4));\n");
         output.push_str("  const view = new Int32Array(sab);\n");
         output.push_str("  const wgslUrl = new URL(import.meta.url);\n");
         output.push_str("  wgslUrl.pathname = wgslUrl.pathname.replace(/\\.js$/, \".wgsl\");\n");
         output.push_str("  const workerSrc = `\n");
         output.push_str("    onmessage = async (e) => {\n");
-        output.push_str("      const { entryPoint, inputValues, outputCount, wgslUrl, sab } = e.data;\n");
+        output.push_str(
+            "      const { entryPoint, inputValues, outputCount, wgslUrl, sab } = e.data;\n",
+        );
         output.push_str("      const view = new Int32Array(sab);\n");
         output.push_str("      try {\n");
         output.push_str("        const wgsl = await fetch(wgslUrl).then((res) => res.text());\n");
@@ -158,7 +171,9 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
         output.push_str("        const inBinding = inputArray ? findBinding(\"silk_in_\" + entryPoint) : null;\n");
         output.push_str("        const outBinding = outputCount ? findBinding(\"silk_out_\" + entryPoint) : null;\n");
         output.push_str("        const makeStorage = (count) => device.createBuffer({ size: Math.max(16, count * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });\n");
-        output.push_str("        const input = inputArray ? makeStorage(inputArray.length) : null;\n");
+        output.push_str(
+            "        const input = inputArray ? makeStorage(inputArray.length) : null;\n",
+        );
         output.push_str("        const output = outputCount ? makeStorage(outputCount) : null;\n");
         output.push_str("        if (input) device.queue.writeBuffer(input, 0, inputArray);\n");
         output.push_str("        if (output) device.queue.writeBuffer(output, 0, new Int32Array(outputCount));\n");
@@ -182,7 +197,9 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
         output.push_str("          await device.queue.onSubmittedWorkDone();\n");
         output.push_str("          await read.mapAsync(GPUMapMode.READ);\n");
         output.push_str("          const data = new Int32Array(read.getMappedRange());\n");
-        output.push_str("          for (let i = 0; i < outputCount; i++) { view[1 + i] = data[i]; }\n");
+        output.push_str(
+            "          for (let i = 0; i < outputCount; i++) { view[1 + i] = data[i]; }\n",
+        );
         output.push_str("          read.unmap();\n");
         output.push_str("        }\n");
         output.push_str("        Atomics.store(view, 0, 1);\n");
@@ -201,7 +218,9 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
         output.push_str("  if (view[0] === 2) {\n");
         output.push_str("    throw new Error(\"wgsl wrapper failed\");\n");
         output.push_str("  }\n");
-        output.push_str("  return outputCount ? new Int32Array(view.slice(1, 1 + outputCount)) : undefined;\n");
+        output.push_str(
+            "  return outputCount ? new Int32Array(view.slice(1, 1 + outputCount)) : undefined;\n",
+        );
         output.push_str("}\n");
     }
 
@@ -233,14 +252,11 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
                             TargetLiteral::WgslTarget => format!("__silk_js_wrap_{}", wrap.name),
                             TargetLiteral::WasmTarget => wrap.name.clone(),
                         };
-                        output.push_str(&format!(
-                            "    {}: () => {},\n",
-                            import_name, call_target
-                        ));
+                        output.push_str(&format!("    {}: () => {},\n", import_name, call_target));
                     }
                 }
             }
-                output.push_str("  } };\n");
+            output.push_str("  } };\n");
             output.push_str("}\n");
             output.push_str("const __silk_wasm_imports_internal = __silk_build_wasm_imports();\n");
         } else {
@@ -253,7 +269,9 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
         output.push_str("  wasmUrl.pathname = wasmUrl.pathname.replace(/\\.js$/, \".wasm\");\n");
         output.push_str("  __silk_wasm_promise = fetch(wasmUrl)\n");
         output.push_str("    .then((res) => res.arrayBuffer())\n");
-        output.push_str("    .then((bytes) => WebAssembly.instantiate(bytes, __silk_wasm_imports_internal))\n");
+        output.push_str(
+            "    .then((bytes) => WebAssembly.instantiate(bytes, __silk_wasm_imports_internal))\n",
+        );
         output.push_str("    .then((result) => {\n");
         output.push_str("      __silk_wasm_exports = result.instance.exports;\n");
         output.push_str("      return __silk_wasm_exports;\n");
@@ -287,12 +305,9 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
     for wrap in &js_wrappers {
         match wrap.export_type {
             IntermediateExportType::Function => {
-                let function = intermediate
-                    .functions
-                    .get(wrap.index)
-                    .ok_or_else(|| {
-                        Diagnostic::new("Missing function for js wrapper".to_string())
-                    })?;
+                let function = intermediate.functions.get(wrap.index).ok_or_else(|| {
+                    Diagnostic::new("Missing function for js wrapper".to_string())
+                })?;
                 let input_slots = wgsl_value_slots(function.input_type.as_ref());
                 let output_slots = wgsl_value_slots(function.return_type.as_ref());
                 let input_codec = if input_slots > 0 {
@@ -383,24 +398,22 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
                     TargetLiteral::JSTarget => {}
                 }
             }
-            IntermediateExportType::Global => {
-                match wrap.source_target {
-                    TargetLiteral::WasmTarget => {
-                        output.push_str(&format!("export const {} = async () => {{\n", wrap.name));
-                        output.push_str("  const wasm = await __silk_load_wasm();\n");
-                        output.push_str(&format!("  const value = wasm.{};\n", wrap.name));
-                        output.push_str(
+            IntermediateExportType::Global => match wrap.source_target {
+                TargetLiteral::WasmTarget => {
+                    output.push_str(&format!("export const {} = async () => {{\n", wrap.name));
+                    output.push_str("  const wasm = await __silk_load_wasm();\n");
+                    output.push_str(&format!("  const value = wasm.{};\n", wrap.name));
+                    output.push_str(
                             "  return value && typeof value === \"object\" && \"value\" in value ? value.value : value;\n",
                         );
-                        output.push_str("};\n");
-                    }
-                    _ => {
-                        return Err(Diagnostic::new(
-                            "wrap annotation does not support globals for js target".to_string(),
-                        ));
-                    }
+                    output.push_str("};\n");
                 }
-            }
+                _ => {
+                    return Err(Diagnostic::new(
+                        "wrap annotation does not support globals for js target".to_string(),
+                    ));
+                }
+            },
         }
     }
 
@@ -527,8 +540,7 @@ impl WgslCodecRegistry {
         let unpack = format!("__silk_unpack_{}", self.next_id);
         self.next_id += 1;
         let slots = wgsl_value_slots(ty);
-        self.declarations
-            .push(wgsl_pack_function(&pack, ty, slots));
+        self.declarations.push(wgsl_pack_function(&pack, ty, slots));
         self.declarations
             .push(wgsl_unpack_function(&unpack, ty, slots));
         let names = WgslCodecNames { pack, unpack };
@@ -560,9 +572,9 @@ fn wgsl_value_slots(ty: &IntermediateType) -> usize {
             .iter()
             .map(|(_, field_ty)| wgsl_value_slots(field_ty))
             .sum(),
-        IntermediateType::Array { element, length, .. } => {
-            length.saturating_mul(wgsl_value_slots(element))
-        }
+        IntermediateType::Array {
+            element, length, ..
+        } => length.saturating_mul(wgsl_value_slots(element)),
     }
 }
 
@@ -926,8 +938,9 @@ fn compile_expression(
         },
         IntermediateKind::InlineAssembly { target, code } => {
             if *target != TargetLiteral::JSTarget {
-                return Ok("(() => { throw new Error(\"inline asm target mismatch\"); })()"
-                    .to_string());
+                return Ok(
+                    "(() => { throw new Error(\"inline asm target mismatch\"); })()".to_string(),
+                );
             }
             let source = String::from_utf8(code.clone())
                 .map_err(|_| Diagnostic::new("asm string must be valid UTF-8"))?;

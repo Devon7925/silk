@@ -1,5 +1,10 @@
 import { assertEquals, assertStringIncludes } from "@std/asserts";
-import { cleanup, compileSilk, compileToWasm, tempBase } from "./test_helpers.ts";
+import {
+  cleanup,
+  compileSilk,
+  compileToWasm,
+  tempBase,
+} from "./test_helpers.ts";
 
 async function compileToInstance(code: string, prefix: string) {
   const { wasmPath, silkPath } = await compileToWasm(code, prefix);
@@ -108,7 +113,9 @@ Deno.test("supports array repeat syntax", async () => {
     "arrays_repeat",
   );
   try {
-    const { repeat_at } = instance.exports as { repeat_at: (idx: number) => number };
+    const { repeat_at } = instance.exports as {
+      repeat_at: (idx: number) => number;
+    };
     assertEquals(repeat_at(2), 9);
   } finally {
     await cleanup([silkPath, wasmPath]);
@@ -128,7 +135,10 @@ Deno.test("rejects non-const array repeat length", async () => {
   const { code, stderr, silkPath } = await compileSilk(silkCode, outputPath);
   try {
     assertEquals(code, 1);
-    assertStringIncludes(stderr, "Array repetition length must be a const expression");
+    assertStringIncludes(
+      stderr,
+      "Array repetition length must be a const expression",
+    );
   } finally {
     await cleanup([silkPath, outputPath]);
   }

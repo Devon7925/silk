@@ -92,8 +92,8 @@ impl BoxRegistry {
 #[derive(Default)]
 pub(super) struct BoxContext {
     pub(super) bindings: std::collections::HashMap<String, BoxInfo>,
-    pub(super)
-        struct_fields: std::collections::HashMap<String, std::collections::HashMap<String, BoxInfo>>,
+    pub(super) struct_fields:
+        std::collections::HashMap<String, std::collections::HashMap<String, BoxInfo>>,
     pub(super) array_elements: std::collections::HashMap<String, Vec<BoxInfo>>,
 }
 

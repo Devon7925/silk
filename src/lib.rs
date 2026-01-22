@@ -77,8 +77,13 @@ pub fn compile(
         || intermediate.wrappers.iter().any(|w| {
             matches!(
                 (w.wrap_target.clone(), w.source_target.clone()),
-                (parsing::TargetLiteral::WasmTarget, parsing::TargetLiteral::JSTarget)
-                    | (parsing::TargetLiteral::WasmTarget, parsing::TargetLiteral::WgslTarget)
+                (
+                    parsing::TargetLiteral::WasmTarget,
+                    parsing::TargetLiteral::JSTarget
+                ) | (
+                    parsing::TargetLiteral::WasmTarget,
+                    parsing::TargetLiteral::WgslTarget
+                )
             )
         })
     {

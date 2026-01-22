@@ -78,7 +78,6 @@ fn ensure_lvalue_local(
     }
 }
 
-
 pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Diagnostic> {
     let exports = collect_wasm_exports(intermediate)?;
     if exports.imports.is_empty() && exports.functions.is_empty() && exports.globals.is_empty() {
@@ -166,7 +165,10 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
 
     for import in &exports.imports {
         for param in &import.params {
-            if !matches!(param.ty, WasmType::I32 | WasmType::U8 | WasmType::Box { .. }) {
+            if !matches!(
+                param.ty,
+                WasmType::I32 | WasmType::U8 | WasmType::Box { .. }
+            ) {
                 type_ctx.get_or_register_type(param.ty.clone());
             }
         }
@@ -408,11 +410,7 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
     }
     let import_count = exports.imports.len() as u32;
     for (import_index, import) in exports.imports.iter().enumerate() {
-        export_section.export(
-            &import.export_name,
-            ExportKind::Func,
-            import_index as u32,
-        );
+        export_section.export(&import.export_name, ExportKind::Func, import_index as u32);
     }
     for export in &exports.functions {
         export_section.export(
@@ -508,10 +506,10 @@ fn collect_wasm_exports(intermediate: &IntermediateResult) -> Result<WasmExports
                 });
             }
             IntermediateExportType::Global => {
-                return Err(
-                    Diagnostic::new("wrap annotation does not support globals for wasm target")
-                        .with_span(SourceSpan::default()),
-                );
+                return Err(Diagnostic::new(
+                    "wrap annotation does not support globals for wasm target",
+                )
+                .with_span(SourceSpan::default()));
             }
         }
     }
@@ -874,7 +872,9 @@ fn parse_inline_wasm(code: &str) -> Result<Vec<Instruction<'static>>, Diagnostic
             }
             "i32.div_s" => {
                 if parts.next().is_some() {
-                    return Err(Diagnostic::new("asm i32.div_s takes no operands".to_string()));
+                    return Err(Diagnostic::new(
+                        "asm i32.div_s takes no operands".to_string(),
+                    ));
                 }
                 instructions.push(Instruction::I32DivS);
             }
@@ -892,25 +892,33 @@ fn parse_inline_wasm(code: &str) -> Result<Vec<Instruction<'static>>, Diagnostic
             }
             "i32.lt_s" => {
                 if parts.next().is_some() {
-                    return Err(Diagnostic::new("asm i32.lt_s takes no operands".to_string()));
+                    return Err(Diagnostic::new(
+                        "asm i32.lt_s takes no operands".to_string(),
+                    ));
                 }
                 instructions.push(Instruction::I32LtS);
             }
             "i32.gt_s" => {
                 if parts.next().is_some() {
-                    return Err(Diagnostic::new("asm i32.gt_s takes no operands".to_string()));
+                    return Err(Diagnostic::new(
+                        "asm i32.gt_s takes no operands".to_string(),
+                    ));
                 }
                 instructions.push(Instruction::I32GtS);
             }
             "i32.le_s" => {
                 if parts.next().is_some() {
-                    return Err(Diagnostic::new("asm i32.le_s takes no operands".to_string()));
+                    return Err(Diagnostic::new(
+                        "asm i32.le_s takes no operands".to_string(),
+                    ));
                 }
                 instructions.push(Instruction::I32LeS);
             }
             "i32.ge_s" => {
                 if parts.next().is_some() {
-                    return Err(Diagnostic::new("asm i32.ge_s takes no operands".to_string()));
+                    return Err(Diagnostic::new(
+                        "asm i32.ge_s takes no operands".to_string(),
+                    ));
                 }
                 instructions.push(Instruction::I32GeS);
             }
@@ -1559,8 +1567,7 @@ fn collect_locals(
                 let mut allow_non_local = false;
                 if let IntermediateLValue::ArrayIndex { array, .. } = target {
                     let array_expr = lvalue_to_intermediate(array.as_ref());
-                    let array_type =
-                        infer_type(&array_expr, locals_types, function_return_types)?;
+                    let array_type = infer_type(&array_expr, locals_types, function_return_types)?;
                     if matches!(array_type, WasmType::Box { .. }) {
                         allow_non_local = true;
                     }
@@ -2056,8 +2063,7 @@ fn emit_expression(
                     IntermediateLValue::TypePropertyAccess {
                         object, property, ..
                     } => {
-                        if let IntermediateLValue::ArrayIndex { array, index, .. } =
-                            object.as_ref()
+                        if let IntermediateLValue::ArrayIndex { array, index, .. } = object.as_ref()
                         {
                             let array_expr = lvalue_to_intermediate(array.as_ref());
                             let array_type =
@@ -2084,12 +2090,9 @@ fn emit_expression(
                                         .with_span(SourceSpan::default())
                                     })?;
                                     let element_size = wasm_type_size(element) as i32;
-                                    let memory_index = resolve_box_expr(
-                                        &array_expr,
-                                        box_ctx,
-                                        box_registry,
-                                    )?
-                                    .memory_index;
+                                    let memory_index =
+                                        resolve_box_expr(&array_expr, box_ctx, box_registry)?
+                                            .memory_index;
 
                                     let (field_offset, field_type) = match element.as_ref() {
                                         WasmType::Struct(fields) => {
@@ -2168,13 +2171,13 @@ fn emit_expression(
                                         expected: field_type,
                                     });
                                     tasks.push(EmitTask::Instr(Instruction::I32Add));
-                                    tasks.push(EmitTask::Instr(Instruction::I32Const(
-                                        field_offset,
-                                    )));
+                                    tasks
+                                        .push(EmitTask::Instr(Instruction::I32Const(field_offset)));
                                     tasks.push(EmitTask::Instr(Instruction::LocalGet(temp_local)));
                                     tasks.push(EmitTask::Instr(Instruction::LocalSet(temp_local)));
                                     tasks.push(EmitTask::Instr(Instruction::I32Mul));
-                                    tasks.push(EmitTask::Instr(Instruction::I32Const(element_size)));
+                                    tasks
+                                        .push(EmitTask::Instr(Instruction::I32Const(element_size)));
                                     tasks.push(EmitTask::EvalValue((**index).clone()));
                                     continue;
                                 }
@@ -2266,10 +2269,9 @@ fn emit_expression(
                         let resolved_box =
                             resolve_box_expr(&array_expr, box_ctx, box_registry).ok();
                         let (element, boxed_memory) = match &array_type {
-                            WasmType::Array { element, .. } => (
-                                element.clone(),
-                                resolved_box.map(|info| info.memory_index),
-                            ),
+                            WasmType::Array { element, .. } => {
+                                (element.clone(), resolved_box.map(|info| info.memory_index))
+                            }
                             WasmType::Box { element } => match element.as_ref() {
                                 WasmType::Array { element, .. } => {
                                     let info = if let Some(info) = resolved_box {
@@ -2304,8 +2306,7 @@ fn emit_expression(
                             let element_size = wasm_type_size(&element) as i32;
                             let temp_local = box_temp_local.ok_or_else(|| {
                                 Diagnostic::new(
-                                    "Boxed array assignment requires a temporary local"
-                                        .to_string(),
+                                    "Boxed array assignment requires a temporary local".to_string(),
                                 )
                                 .with_span(SourceSpan::default())
                             })?;
@@ -2356,18 +2357,10 @@ fn emit_expression(
                                             })?;
                                         let field_store = match field_type {
                                             WasmType::U8 => {
-                                                Instruction::I32Store8(memarg(
-                                                    0,
-                                                    0,
-                                                    memory_index,
-                                                ))
+                                                Instruction::I32Store8(memarg(0, 0, memory_index))
                                             }
                                             WasmType::I32 | WasmType::Box { .. } => {
-                                                Instruction::I32Store(memarg(
-                                                    0,
-                                                    2,
-                                                    memory_index,
-                                                ))
+                                                Instruction::I32Store(memarg(0, 2, memory_index))
                                             }
                                             _ => {
                                                 return Err(Diagnostic::new(
@@ -2392,7 +2385,8 @@ fn emit_expression(
                                     }
                                     tasks.push(EmitTask::Instr(Instruction::LocalSet(base_local)));
                                     tasks.push(EmitTask::Instr(Instruction::I32Mul));
-                                    tasks.push(EmitTask::Instr(Instruction::I32Const(element_size)));
+                                    tasks
+                                        .push(EmitTask::Instr(Instruction::I32Const(element_size)));
                                     tasks.push(EmitTask::EvalValue((**index).clone()));
                                     continue;
                                 }
@@ -2409,8 +2403,7 @@ fn emit_expression(
                                         .with_span(SourceSpan::default())
                                     })?;
                                     let field_size = wasm_type_size(field_element) as i32;
-                                    let mut resolved_fields =
-                                        Vec::with_capacity(field_names.len());
+                                    let mut resolved_fields = Vec::with_capacity(field_names.len());
                                     match value.as_ref() {
                                         IntermediateKind::ArrayLiteral {
                                             items,
@@ -2464,18 +2457,10 @@ fn emit_expression(
                                     }
                                     let field_store = match field_element.as_ref() {
                                         WasmType::U8 => {
-                                            Instruction::I32Store8(memarg(
-                                                0,
-                                                0,
-                                                memory_index,
-                                            ))
+                                            Instruction::I32Store8(memarg(0, 0, memory_index))
                                         }
                                         WasmType::I32 | WasmType::Box { .. } => {
-                                            Instruction::I32Store(memarg(
-                                                0,
-                                                2,
-                                                memory_index,
-                                            ))
+                                            Instruction::I32Store(memarg(0, 2, memory_index))
                                         }
                                         _ => {
                                             return Err(Diagnostic::new(
@@ -2486,7 +2471,8 @@ fn emit_expression(
                                         }
                                     };
                                     tasks.push(EmitTask::Eval(full_target_expr));
-                                    for (field_expr, field_offset) in resolved_fields.into_iter().rev()
+                                    for (field_expr, field_offset) in
+                                        resolved_fields.into_iter().rev()
                                     {
                                         tasks.push(EmitTask::Instr(field_store.clone()));
                                         tasks.push(EmitTask::EvalWithType {
@@ -2503,7 +2489,8 @@ fn emit_expression(
                                     }
                                     tasks.push(EmitTask::Instr(Instruction::LocalSet(base_local)));
                                     tasks.push(EmitTask::Instr(Instruction::I32Mul));
-                                    tasks.push(EmitTask::Instr(Instruction::I32Const(element_size)));
+                                    tasks
+                                        .push(EmitTask::Instr(Instruction::I32Const(element_size)));
                                     tasks.push(EmitTask::EvalValue((**index).clone()));
                                     continue;
                                 }
@@ -2552,9 +2539,9 @@ fn emit_expression(
                         tasks.push(EmitTask::Instr(Instruction::I32Const(0)));
                         tasks.push(EmitTask::Instr(Instruction::Else));
                         tasks.push(EmitTask::EvalValue((*right).clone()));
-                        tasks.push(EmitTask::Instr(Instruction::If(
-                            BlockType::Result(ValType::I32),
-                        )));
+                        tasks.push(EmitTask::Instr(Instruction::If(BlockType::Result(
+                            ValType::I32,
+                        ))));
                         tasks.push(EmitTask::PushControl(ControlFrame::If));
                         tasks.push(EmitTask::EvalValue((*left).clone()));
                     }
@@ -2564,9 +2551,9 @@ fn emit_expression(
                         tasks.push(EmitTask::EvalValue((*right).clone()));
                         tasks.push(EmitTask::Instr(Instruction::Else));
                         tasks.push(EmitTask::Instr(Instruction::I32Const(1)));
-                        tasks.push(EmitTask::Instr(Instruction::If(
-                            BlockType::Result(ValType::I32),
-                        )));
+                        tasks.push(EmitTask::Instr(Instruction::If(BlockType::Result(
+                            ValType::I32,
+                        ))));
                         tasks.push(EmitTask::PushControl(ControlFrame::If));
                         tasks.push(EmitTask::EvalValue((*left).clone()));
                     }
@@ -2696,8 +2683,7 @@ fn emit_expression(
                     let loop_result_type =
                         determine_loop_result_type(&body, locals_types, function_return_types)?;
                     if let Some(result_type) = loop_result_type {
-                        let block_type =
-                            BlockType::Result(result_type.to_val_type(type_ctx));
+                        let block_type = BlockType::Result(result_type.to_val_type(type_ctx));
                         let body_produces_value = expression_produces_value(
                             &body,
                             locals_types,
@@ -2716,9 +2702,7 @@ fn emit_expression(
                             tasks.push(EmitTask::Instr(Instruction::Drop));
                         }
                         tasks.push(EmitTask::Eval((*body).clone()));
-                        tasks.push(EmitTask::Instr(Instruction::Loop(
-                            BlockType::Empty,
-                        )));
+                        tasks.push(EmitTask::Instr(Instruction::Loop(BlockType::Empty)));
                         tasks.push(EmitTask::PushLoopContext {
                             result_type: Some(result_type.clone()),
                         });
@@ -2740,9 +2724,7 @@ fn emit_expression(
                             tasks.push(EmitTask::Instr(Instruction::Drop));
                         }
                         tasks.push(EmitTask::Eval((*body).clone()));
-                        tasks.push(EmitTask::Instr(Instruction::Loop(
-                            BlockType::Empty,
-                        )));
+                        tasks.push(EmitTask::Instr(Instruction::Loop(BlockType::Empty)));
                         tasks.push(EmitTask::PushControl(ControlFrame::Loop));
                     }
                 }

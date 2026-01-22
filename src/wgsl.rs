@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 
 use crate::{
@@ -7,7 +6,9 @@ use crate::{
         IntermediateBinding, IntermediateExportType, IntermediateIntrinsicOperation,
         IntermediateKind, IntermediateLValue, IntermediateResult, IntermediateType,
     },
-    parsing::{BinaryIntrinsicOperator, BindingPattern, ExpressionLiteral, Identifier, TargetLiteral},
+    parsing::{
+        BinaryIntrinsicOperator, BindingPattern, ExpressionLiteral, Identifier, TargetLiteral,
+    },
 };
 
 #[derive(Clone, Debug)]
@@ -117,7 +118,9 @@ impl TypeRegistry {
                     self.struct_name(fields)
                 }
             }
-            IntermediateType::Array { element, length, .. } => {
+            IntermediateType::Array {
+                element, length, ..
+            } => {
                 format!("array<{}, {}>", self.wgsl_type(element), length)
             }
         }
@@ -236,7 +239,10 @@ impl WgslModuleBuilder {
         let type_name = self.type_registry.box_wrapper_name(element_type);
         self.register_binding(name.clone(), type_name);
         self.box_types.insert(name.clone(), element_type.clone());
-        self.box_inits.push(BoxInit { name, expr: init_expr });
+        self.box_inits.push(BoxInit {
+            name,
+            expr: init_expr,
+        });
         Ok(())
     }
 
@@ -355,7 +361,7 @@ impl<'a> FunctionCompiler<'a> {
                     _ => {
                         return Err(Diagnostic::new(
                             "Struct pattern used on non-struct type".to_string(),
-                        ))
+                        ));
                     }
                 };
                 for (position, (field_id, field_pattern)) in fields.iter().enumerate() {
@@ -557,25 +563,23 @@ impl<'a> FunctionCompiler<'a> {
                             .find(|(name, _)| name == property)
                             .map(|(_, ty)| ty.clone())
                             .ok_or_else(|| {
-                                Diagnostic::new(format!(
-                                    "Field `{}` not found in struct",
-                                    property
-                                ))
+                                Diagnostic::new(format!("Field `{}` not found in struct", property))
                             })?;
                         Ok(WgslValue {
                             expr: format!("{}.{}", object_expr, property),
                             ty: WgslValueType::from_intermediate(&field_type),
                         })
                     }
-                    WgslValueType::Array(IntermediateType::Array { element, field_names, .. }) => {
+                    WgslValueType::Array(IntermediateType::Array {
+                        element,
+                        field_names,
+                        ..
+                    }) => {
                         let index = field_names
                             .iter()
                             .position(|name| name == property)
                             .ok_or_else(|| {
-                                Diagnostic::new(format!(
-                                    "Field `{}` not found in array",
-                                    property
-                                ))
+                                Diagnostic::new(format!("Field `{}` not found in array", property))
                             })?;
                         Ok(WgslValue {
                             expr: format!("{}[{}]", object_expr, index),
@@ -593,10 +597,12 @@ impl<'a> FunctionCompiler<'a> {
                 let index_value = self.unbox_value(index_value);
                 let (array_expr, array_type) = self.unbox_value(array_value).split();
                 match array_type {
-                    WgslValueType::Array(IntermediateType::Array { element, .. }) => Ok(WgslValue {
-                        expr: format!("{}[{}]", array_expr, index_value.expr),
-                        ty: WgslValueType::from_intermediate(element.as_ref()),
-                    }),
+                    WgslValueType::Array(IntermediateType::Array { element, .. }) => {
+                        Ok(WgslValue {
+                            expr: format!("{}[{}]", array_expr, index_value.expr),
+                            ty: WgslValueType::from_intermediate(element.as_ref()),
+                        })
+                    }
                     _ => Err(Diagnostic::new("Indexing on non-array type".to_string())),
                 }
             }
@@ -654,7 +660,9 @@ impl<'a> FunctionCompiler<'a> {
                     BinaryIntrinsicOperator::I32Multiply => {
                         format!("({} * {})", left_expr, right_expr)
                     }
-                    BinaryIntrinsicOperator::I32Divide => format!("({} / {})", left_expr, right_expr),
+                    BinaryIntrinsicOperator::I32Divide => {
+                        format!("({} / {})", left_expr, right_expr)
+                    }
                     BinaryIntrinsicOperator::I32Equal => {
                         format!("({} == {})", left_expr, right_expr)
                     }
@@ -832,16 +840,12 @@ impl<'a> FunctionCompiler<'a> {
         identifier: &Identifier,
     ) -> Result<(String, WgslValueType), Diagnostic> {
         if let Some(alias) = self.box_aliases.get(&identifier.name) {
-            let ty = self
-                .builder
-                .box_types
-                .get(alias)
-                .ok_or_else(|| {
-                    Diagnostic::new(format!(
-                        "Unknown boxed identifier `{}` in wgsl backend",
-                        alias
-                    ))
-                })?;
+            let ty = self.builder.box_types.get(alias).ok_or_else(|| {
+                Diagnostic::new(format!(
+                    "Unknown boxed identifier `{}` in wgsl backend",
+                    alias
+                ))
+            })?;
             return Ok((
                 alias.clone(),
                 WgslValueType::Box(Box::new(WgslValueType::from_intermediate(ty))),
@@ -891,10 +895,7 @@ impl<'a> FunctionCompiler<'a> {
                             .find(|(name, _)| name == property)
                             .map(|(_, ty)| ty.clone())
                             .ok_or_else(|| {
-                                Diagnostic::new(format!(
-                                    "Field `{}` not found in struct",
-                                    property
-                                ))
+                                Diagnostic::new(format!("Field `{}` not found in struct", property))
                             })?;
                         Ok((
                             format!("{}.{}", obj_expr, property),
@@ -979,13 +980,17 @@ fn compile_const_value(
             IntermediateKind::Literal(ExpressionLiteral::Boolean(val)) => {
                 Ok(if *val { "1" } else { "0" }.to_string())
             }
-            IntermediateKind::Literal(ExpressionLiteral::Char(val)) => Ok((*val as i32).to_string()),
+            IntermediateKind::Literal(ExpressionLiteral::Char(val)) => {
+                Ok((*val as i32).to_string())
+            }
             _ => Err(Diagnostic::new(
                 "Box allocation requires a constant i32 value".to_string(),
             )),
         },
         IntermediateType::U8 => match value {
-            IntermediateKind::Literal(ExpressionLiteral::Char(val)) => Ok((*val as i32).to_string()),
+            IntermediateKind::Literal(ExpressionLiteral::Char(val)) => {
+                Ok((*val as i32).to_string())
+            }
             IntermediateKind::Literal(ExpressionLiteral::Number(val)) => Ok(val.to_string()),
             _ => Err(Diagnostic::new(
                 "Box allocation requires a constant u8 value".to_string(),
@@ -1178,10 +1183,7 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
                 "  let result = silk_fn_{}({});\n",
                 function_index, param_expr
             ));
-            output.push_str(&format!(
-                "  {}.value = result;\n",
-                output_binding.name
-            ));
+            output.push_str(&format!("  {}.value = result;\n", output_binding.name));
         } else {
             output.push_str(&format!(
                 "  let silk_unused = silk_fn_{}({});\n",

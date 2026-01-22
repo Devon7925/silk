@@ -192,7 +192,12 @@ fn resolve_binding_annotations(
 
 fn annotated_mutable(annotations: &[Expression]) -> bool {
     for annotation in annotations {
-        if matches!(annotation.kind, ExpressionKind::Literal(ExpressionLiteral::BindingAnnotation(BindingAnnotationLiteral::Mut))) {
+        if matches!(
+            annotation.kind,
+            ExpressionKind::Literal(ExpressionLiteral::BindingAnnotation(
+                BindingAnnotationLiteral::Mut
+            ))
+        ) {
             return true;
         }
     }
@@ -1195,12 +1200,7 @@ pub fn interpret_expression(
                     }
                     ExpressionKind::Identifier(identifier) => {
                         if let Some((binding, annotations)) = context.get_identifier(&identifier) {
-                            ensure_binding_target_access(
-                                &identifier,
-                                annotations,
-                                context,
-                                span,
-                            )?;
+                            ensure_binding_target_access(&identifier, annotations, context, span)?;
                             match &binding {
                                 BindingContext::Bound(
                                     value,
@@ -1414,21 +1414,21 @@ pub fn interpret_expression(
                     stack.push(Frame::PatternStart(*inner));
                     stack.push(Frame::Eval(*type_expr));
                 }
-            BindingPattern::Annotated {
-                annotations,
-                pattern,
-                span,
-            } => {
-                stack.push(Frame::PatternAnnotated {
+                BindingPattern::Annotated {
+                    annotations,
+                    pattern,
                     span,
-                    annotation_count: annotations.len(),
-                });
-                stack.push(Frame::PatternStart(*pattern));
-                for annotation in annotations.into_iter().rev() {
-                    stack.push(Frame::Eval(annotation));
+                } => {
+                    stack.push(Frame::PatternAnnotated {
+                        span,
+                        annotation_count: annotations.len(),
+                    });
+                    stack.push(Frame::PatternStart(*pattern));
+                    for annotation in annotations.into_iter().rev() {
+                        stack.push(Frame::Eval(annotation));
+                    }
                 }
-            }
-        },
+            },
             Frame::PatternStruct { span, identifiers } => {
                 let mut interpreted = Vec::with_capacity(identifiers.len());
                 for _ in 0..identifiers.len() {
@@ -2054,7 +2054,9 @@ pub fn interpret_expression(
                         let body = ExpressionKind::IntrinsicOperation(
                             IntrinsicOperation::InlineAssembly {
                                 target,
-                                code: Box::new(ExpressionKind::Identifier(code_identifier).with_span(span)),
+                                code: Box::new(
+                                    ExpressionKind::Identifier(code_identifier).with_span(span),
+                                ),
                             },
                         )
                         .with_span(span);
@@ -2071,8 +2073,7 @@ pub fn interpret_expression(
             }
             Frame::InlineAssembly { span, target } => {
                 let evaluated_code = values.pop().unwrap();
-                let ExpressionKind::Literal(ExpressionLiteral::String(code)) =
-                    evaluated_code.kind
+                let ExpressionKind::Literal(ExpressionLiteral::String(code)) = evaluated_code.kind
                 else {
                     return Err(diagnostic(
                         "asm expects a string literal",
@@ -2112,7 +2113,8 @@ pub fn interpret_expression(
                     ExpressionKind::IntrinsicOperation(IntrinsicOperation::InlineAssembly {
                         target,
                         code: Box::new(
-                            ExpressionKind::Literal(ExpressionLiteral::String(code)).with_span(span),
+                            ExpressionKind::Literal(ExpressionLiteral::String(code))
+                                .with_span(span),
                         ),
                     })
                     .with_span(span),
@@ -2427,55 +2429,55 @@ pub fn interpret_expression(
                         _ => &function_type,
                     };
                     if homogeneous_struct_element_type(base_type, context).is_some() {
-                    let index_type = get_type_of_expression(&argument_value, context)?;
-                    let expected_index = ExpressionKind::IntrinsicType(IntrinsicType::I32);
-                    if !types_equivalent(&index_type.kind, &expected_index) {
-                        return Err(diagnostic("Array index must be an i32 value", span));
-                    }
+                        let index_type = get_type_of_expression(&argument_value, context)?;
+                        let expected_index = ExpressionKind::IntrinsicType(IntrinsicType::I32);
+                        if !types_equivalent(&index_type.kind, &expected_index) {
+                            return Err(diagnostic("Array index must be an i32 value", span));
+                        }
 
-                    if let (
-                        ExpressionKind::Literal(ExpressionLiteral::String(bytes)),
-                        ExpressionKind::Literal(ExpressionLiteral::Number(index)),
-                    ) = (&function_value.kind, &argument_value.kind)
-                    {
-                        if *index < 0 {
+                        if let (
+                            ExpressionKind::Literal(ExpressionLiteral::String(bytes)),
+                            ExpressionKind::Literal(ExpressionLiteral::Number(index)),
+                        ) = (&function_value.kind, &argument_value.kind)
+                        {
+                            if *index < 0 {
+                                return Err(diagnostic("Array index out of range", span));
+                            }
+                            let index = *index as usize;
+                            if let Some(value) = bytes.get(index) {
+                                values.push(
+                                    ExpressionKind::Literal(ExpressionLiteral::Char(*value))
+                                        .with_span(span),
+                                );
+                                continue;
+                            }
                             return Err(diagnostic("Array index out of range", span));
                         }
-                        let index = *index as usize;
-                        if let Some(value) = bytes.get(index) {
-                            values.push(
-                                ExpressionKind::Literal(ExpressionLiteral::Char(*value))
-                                    .with_span(span),
-                            );
-                            continue;
-                        }
-                        return Err(diagnostic("Array index out of range", span));
-                    }
 
-                    if let (
-                        ExpressionKind::Struct(fields),
-                        ExpressionKind::Literal(ExpressionLiteral::Number(index)),
-                    ) = (&function_value.kind, &argument_value.kind)
-                    {
-                        if *index < 0 {
+                        if let (
+                            ExpressionKind::Struct(fields),
+                            ExpressionKind::Literal(ExpressionLiteral::Number(index)),
+                        ) = (&function_value.kind, &argument_value.kind)
+                        {
+                            if *index < 0 {
+                                return Err(diagnostic("Array index out of range", span));
+                            }
+                            let index = *index as usize;
+                            if let Some((_, value)) = fields.get(index) {
+                                values.push(value.clone());
+                                continue;
+                            }
                             return Err(diagnostic("Array index out of range", span));
                         }
-                        let index = *index as usize;
-                        if let Some((_, value)) = fields.get(index) {
-                            values.push(value.clone());
-                            continue;
-                        }
-                        return Err(diagnostic("Array index out of range", span));
-                    }
 
-                    values.push(
-                        ExpressionKind::ArrayIndex {
-                            array: Box::new(function_value),
-                            index: Box::new(argument_value),
-                        }
-                        .with_span(span),
-                    );
-                    continue;
+                        values.push(
+                            ExpressionKind::ArrayIndex {
+                                array: Box::new(function_value),
+                                index: Box::new(argument_value),
+                            }
+                            .with_span(span),
+                        );
+                        continue;
                     }
                 }
 
@@ -3284,19 +3286,31 @@ pub(crate) fn get_type_of_expression(
                         _,
                         UnaryIntrinsicOperator::BindingAnnotationExportFromTarget,
                     )) => {
-                        results.push(resolve_intrinsic_type("binding_annotation", span, &context)?);
+                        results.push(resolve_intrinsic_type(
+                            "binding_annotation",
+                            span,
+                            &context,
+                        )?);
                     }
                     ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
                         _,
                         UnaryIntrinsicOperator::BindingAnnotationTargetFromTarget,
                     )) => {
-                        results.push(resolve_intrinsic_type("binding_annotation", span, &context)?);
+                        results.push(resolve_intrinsic_type(
+                            "binding_annotation",
+                            span,
+                            &context,
+                        )?);
                     }
                     ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
                         _,
                         UnaryIntrinsicOperator::BindingAnnotationWrapFromTarget,
                     )) => {
-                        results.push(resolve_intrinsic_type("binding_annotation", span, &context)?);
+                        results.push(resolve_intrinsic_type(
+                            "binding_annotation",
+                            span,
+                            &context,
+                        )?);
                     }
                     ExpressionKind::IntrinsicOperation(IntrinsicOperation::InlineAssembly {
                         ..
@@ -3898,7 +3912,8 @@ pub fn expression_does_diverge(expr: &Expression, possibility: bool, in_inner_lo
                     stack.push(Frame::Enter(operand, in_inner_loop));
                 }
                 ExpressionKind::IntrinsicOperation(IntrinsicOperation::InlineAssembly {
-                    code, ..
+                    code,
+                    ..
                 }) => {
                     stack.push(Frame::Exit(Combine::Any(1)));
                     stack.push(Frame::Enter(code, in_inner_loop));
@@ -4072,7 +4087,8 @@ pub fn expression_exports(expr: &Expression) -> bool {
                     stack.push(Frame::EnterExpr(operand));
                 }
                 ExpressionKind::IntrinsicOperation(IntrinsicOperation::InlineAssembly {
-                    code, ..
+                    code,
+                    ..
                 }) => {
                     stack.push(Frame::ExitExpr(ExprCombine::Any(1)));
                     stack.push(Frame::EnterExpr(code));
@@ -5227,7 +5243,11 @@ fn pattern_has_export_annotation(pattern: &BindingPattern) -> Result<bool, Diagn
             BindingPattern::TypeHint(inner, ..) => {
                 stack.push(inner.as_ref());
             }
-            BindingPattern::Annotated { pattern, annotations, .. } => {
+            BindingPattern::Annotated {
+                pattern,
+                annotations,
+                ..
+            } => {
                 for annotation in annotations {
                     if matches!(
                         binding_annotation_from_value(annotation.clone())?,
@@ -5331,8 +5351,7 @@ fn get_lvalue_type_inner(
                 ExpressionKind::BoxType(inner) => inner.as_ref().clone(),
                 _ => array_type.clone(),
             };
-            let Some(element_type) =
-                homogeneous_struct_element_type(&base_array_type, context)
+            let Some(element_type) = homogeneous_struct_element_type(&base_array_type, context)
             else {
                 return Err(diagnostic("Indexing requires an array type", *span));
             };
@@ -5892,10 +5911,11 @@ fn bind_pattern_blanks_for_const(
                         (BindingContext::UnboundWithType(type_expr), Vec::new()),
                     );
                 } else {
-                    context.bindings.last_mut().unwrap().insert(
-                        identifier,
-                        (BindingContext::UnboundWithoutType, Vec::new()),
-                    );
+                    context
+                        .bindings
+                        .last_mut()
+                        .unwrap()
+                        .insert(identifier, (BindingContext::UnboundWithoutType, Vec::new()));
                 }
             }
             BindingPattern::Literal(_, _) => {}
@@ -6185,10 +6205,12 @@ fn bind_pattern_from_value(
                 } => {
                     let resolved_annotations = resolve_binding_annotations(annotations, context)?;
                     let mut new_preserve_behavior = preserve_behavior;
-                    if resolved_annotations
-                        .iter()
-                        .any(|ann| matches!(ann, BindingAnnotation::Export(_, _) | BindingAnnotation::Wrap(_, _)))
-                    {
+                    if resolved_annotations.iter().any(|ann| {
+                        matches!(
+                            ann,
+                            BindingAnnotation::Export(_, _) | BindingAnnotation::Wrap(_, _)
+                        )
+                    }) {
                         new_preserve_behavior =
                             new_preserve_behavior.max(PreserveBehavior::PreserveBinding);
                     }
@@ -7012,7 +7034,9 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
             BindingContext::Bound(
                 ExpressionKind::AttachImplementation {
                     type_expr: Box::new(intrinsic_type_expr(IntrinsicType::BindingAnnotation)),
-                    implementation: Box::new(ExpressionKind::Struct(vec![]).with_span(dummy_span())),
+                    implementation: Box::new(
+                        ExpressionKind::Struct(vec![]).with_span(dummy_span()),
+                    ),
                 }
                 .with_span(dummy_span()),
                 PreserveBehavior::Inline,
