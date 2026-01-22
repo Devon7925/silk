@@ -1600,13 +1600,16 @@ fn collect_locals(
                     stack.push(item);
                 }
             }
+            IntermediateKind::BoxAlloc { value, .. } => {
+                stack.push(value);
+            }
             IntermediateKind::FunctionCall { function, argument } => {
                 let callee = functions.get(*function).ok_or_else(|| {
                     Diagnostic::new("Unknown function call target".to_string())
                         .with_span(SourceSpan::default())
                 })?;
                 let arg_type = intermediate_type_to_wasm(&callee.input_type);
-                let temp_local_name = match_counter.next_name();
+                let temp_local_name = match_counter.temp_for_function(*function);
                 locals.push((temp_local_name.clone(), arg_type.clone()));
                 locals_types.insert(temp_local_name, arg_type);
                 stack.push(argument);
@@ -2750,11 +2753,11 @@ fn emit_expression(
                     })?;
 
                     let arg_type = infer_type(&argument, locals_types, function_return_types)?;
-                    let temp_local_name = match_counter.next_name();
+                    let temp_local_name = match_counter.temp_for_function(function);
                     let temp_local_index = locals
                         .get(&temp_local_name)
                         .copied()
-                        .expect("Temp local should exist");
+                        .unwrap_or_else(|| panic!("Temp local should exist: {}", temp_local_name));
 
                     let temp_identifier =
                         IntermediateKind::Identifier(Identifier::new(temp_local_name));

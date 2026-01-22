@@ -37,12 +37,17 @@ pub(super) struct LoopContext {
 #[derive(Default)]
 pub(super) struct MatchCounter {
     next_id: usize,
+    call_temps: std::collections::HashMap<usize, String>,
 }
 
 impl MatchCounter {
-    pub(super) fn next_name(&mut self) -> String {
+    pub(super) fn temp_for_function(&mut self, function_index: usize) -> String {
+        if let Some(name) = self.call_temps.get(&function_index) {
+            return name.clone();
+        }
         let name = format!("__match_temp_{}", self.next_id);
         self.next_id += 1;
+        self.call_temps.insert(function_index, name.clone());
         name
     }
 }

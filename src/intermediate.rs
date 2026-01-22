@@ -255,7 +255,10 @@ pub fn expression_to_intermediate(
                             else {
                                 panic!("Inline assembly expects a string literal");
                             };
-                            values.push(IntermediateKind::InlineAssembly { target, code: bytes });
+                            values.push(IntermediateKind::InlineAssembly {
+                                target,
+                                code: bytes,
+                            });
                         }
                     },
                     ExpressionKind::Match { value, branches } => {
@@ -318,8 +321,7 @@ pub fn expression_to_intermediate(
                             fields.push((Identifier::new(idx.to_string()), (*value).clone()));
                         }
                         let field_ids = fields.iter().map(|(id, _)| id.clone()).collect();
-                        let struct_expr =
-                            ExpressionKind::Struct(fields.clone()).with_span(span);
+                        let struct_expr = ExpressionKind::Struct(fields.clone()).with_span(span);
                         let array_fields = match builder.expression_value_type(&struct_expr) {
                             IntermediateType::Array {
                                 field_names,
@@ -766,10 +768,9 @@ impl IntermediateBuilder {
             let export_targets = export_targets(annotations);
             let wrap_targets = wrap_targets(annotations);
             let is_function = matches!(value.kind, ExpressionKind::Function { .. });
-            let should_materialize =
-                *preserve_behavior != PreserveBehavior::Inline
-                    || !export_targets.is_empty()
-                    || !wrap_targets.is_empty();
+            let should_materialize = *preserve_behavior != PreserveBehavior::Inline
+                || !export_targets.is_empty()
+                || !wrap_targets.is_empty();
             let export_target_for_wrap = if wrap_targets.is_empty() {
                 None
             } else {
@@ -1106,9 +1107,7 @@ impl IntermediateBuilder {
                             panic!("Array repetition length must be non-negative");
                         }
                         let count_usize = count as usize;
-                        let field_names = (0..count_usize)
-                            .map(|index| index.to_string())
-                            .collect();
+                        let field_names = (0..count_usize).map(|index| index.to_string()).collect();
                         stack.push(Frame::FinishArrayRepeat {
                             count: count_usize,
                             field_names,

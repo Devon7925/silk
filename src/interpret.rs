@@ -4511,6 +4511,15 @@ pub(crate) fn get_trait_prop_of_type(
                     span,
                 ));
             }
+            ExpressionKind::IntrinsicType(_) => {
+                if let Some(field) = find_matching_impl_field(current, trait_prop, context) {
+                    return Ok((field, TraitPropSource::ImplementationField));
+                }
+                return Err(diagnostic(
+                    format!("Missing field {} on type", trait_prop),
+                    span,
+                ));
+            }
             ExpressionKind::AttachImplementation {
                 type_expr,
                 implementation,
@@ -5649,6 +5658,7 @@ fn apply_assignment(
     span: SourceSpan,
     context: &mut Context,
 ) -> Result<Expression, Diagnostic> {
+    let target = interpret_lvalue(target, context)?;
     ensure_lvalue_mutable(&target, context, span)?;
 
     let value_type = get_type_of_expression(&value, context).ok();
@@ -5675,6 +5685,29 @@ fn apply_assignment(
         },
         span,
     ))
+}
+
+fn interpret_lvalue(target: LValue, context: &mut Context) -> Result<LValue, Diagnostic> {
+    match target {
+        LValue::Identifier(..) => Ok(target),
+        LValue::TypePropertyAccess {
+            object,
+            property,
+            span,
+        } => Ok(LValue::TypePropertyAccess {
+            object: Box::new(interpret_lvalue(*object, context)?),
+            property,
+            span,
+        }),
+        LValue::ArrayIndex { array, index, span } => {
+            let interpreted_index = interpret_expression(*index, context)?;
+            Ok(LValue::ArrayIndex {
+                array: Box::new(interpret_lvalue(*array, context)?),
+                index: Box::new(interpreted_index),
+                span,
+            })
+        }
+    }
 }
 
 fn pattern_has_mutable_annotation(pattern: &BindingPattern) -> bool {
