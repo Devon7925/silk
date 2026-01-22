@@ -321,6 +321,12 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
             &mut local_indices,
             function.params.len(),
         );
+        let box_base_local = ensure_box_temp_local(
+            &mut locals,
+            &mut locals_types,
+            &mut local_indices,
+            function.params.len(),
+        );
 
         let mut func = Function::new(locals.iter().map(|ty| (1, ty.to_val_type(&type_ctx))));
 
@@ -347,6 +353,7 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
             &mut box_ctx,
             &mut box_registry,
             Some(box_temp_local),
+            Some(box_base_local),
             function_index_offset,
         )?;
 
@@ -1825,6 +1832,7 @@ fn emit_expression(
     box_ctx: &mut BoxContext,
     box_registry: &mut BoxRegistry,
     box_temp_local: Option<u32>,
+    box_base_local: Option<u32>,
     function_index_offset: u32,
 ) -> Result<(), Diagnostic> {
     enum EmitTask<'a> {
@@ -2045,6 +2053,130 @@ fn emit_expression(
                     IntermediateLValue::TypePropertyAccess {
                         object, property, ..
                     } => {
+                        if let IntermediateLValue::ArrayIndex { array, index, .. } =
+                            object.as_ref()
+                        {
+                            let array_expr = lvalue_to_intermediate(array.as_ref());
+                            let array_type =
+                                infer_type(&array_expr, locals_types, function_return_types)?;
+                            if let WasmType::Box { element } = array_type {
+                                if let WasmType::Array { element, .. } = element.as_ref() {
+                                    let index_type = infer_type(
+                                        index.as_ref(),
+                                        locals_types,
+                                        function_return_types,
+                                    )?;
+                                    if strip_box_type(&index_type) != &WasmType::I32 {
+                                        return Err(Diagnostic::new(
+                                            "Array index must be i32".to_string(),
+                                        )
+                                        .with_span(SourceSpan::default()));
+                                    }
+
+                                    let temp_local = box_temp_local.ok_or_else(|| {
+                                        Diagnostic::new(
+                                            "Boxed array assignment requires a temporary local"
+                                                .to_string(),
+                                        )
+                                        .with_span(SourceSpan::default())
+                                    })?;
+                                    let element_size = wasm_type_size(element) as i32;
+                                    let memory_index = resolve_box_expr(
+                                        &array_expr,
+                                        box_ctx,
+                                        box_registry,
+                                    )?
+                                    .memory_index;
+
+                                    let (field_offset, field_type) = match element.as_ref() {
+                                        WasmType::Struct(fields) => {
+                                            let sorted_fields = sorted_wasm_fields(fields);
+                                            let mut offset = 0i32;
+                                            let mut field_offset: Option<i32> = None;
+                                            let mut field_type: Option<WasmType> = None;
+                                            for (name, ty) in &sorted_fields {
+                                                if name == property {
+                                                    field_offset = Some(offset);
+                                                    field_type = Some(ty.clone());
+                                                    break;
+                                                }
+                                                offset = offset
+                                                    .saturating_add(wasm_type_size(ty) as i32);
+                                            }
+                                            (
+                                                field_offset.ok_or_else(|| {
+                                                    Diagnostic::new(format!(
+                                                        "Field `{}` not found in struct",
+                                                        property
+                                                    ))
+                                                    .with_span(SourceSpan::default())
+                                                })?,
+                                                field_type.expect("Field type missing"),
+                                            )
+                                        }
+                                        WasmType::Array {
+                                            element: field_element,
+                                            field_names,
+                                            ..
+                                        } => {
+                                            let field_index = field_names
+                                                .iter()
+                                                .position(|name| name == property)
+                                                .ok_or_else(|| {
+                                                    Diagnostic::new(format!(
+                                                        "Field `{}` not found in array",
+                                                        property
+                                                    ))
+                                                    .with_span(SourceSpan::default())
+                                                })?;
+                                            let field_offset = field_index as i32
+                                                * wasm_type_size(field_element) as i32;
+                                            (field_offset, (**field_element).clone())
+                                        }
+                                        _ => {
+                                            return Err(Diagnostic::new(
+                                                "Property assignment on non-struct type"
+                                                    .to_string(),
+                                            )
+                                            .with_span(SourceSpan::default()));
+                                        }
+                                    };
+
+                                    let store_instr = match field_type {
+                                        WasmType::U8 => {
+                                            Instruction::I32Store8(memarg(0, 0, memory_index))
+                                        }
+                                        WasmType::I32 | WasmType::Box { .. } => {
+                                            Instruction::I32Store(memarg(0, 2, memory_index))
+                                        }
+                                        _ => {
+                                            return Err(Diagnostic::new(
+                                                "Boxed struct field assignment only supports i32 or u8 fields"
+                                                    .to_string(),
+                                            )
+                                            .with_span(SourceSpan::default()));
+                                        }
+                                    };
+                                    let full_target_expr = lvalue_to_intermediate(&target);
+                                    tasks.push(EmitTask::Eval(full_target_expr));
+                                    tasks.push(EmitTask::Instr(store_instr));
+                                    tasks.push(EmitTask::EvalWithType {
+                                        expr: (*value).clone(),
+                                        expected: field_type,
+                                    });
+                                    tasks.push(EmitTask::Instr(Instruction::I32Add));
+                                    tasks.push(EmitTask::Instr(Instruction::I32Const(
+                                        field_offset,
+                                    )));
+                                    tasks.push(EmitTask::Instr(Instruction::LocalGet(temp_local)));
+                                    tasks.push(EmitTask::Instr(Instruction::LocalSet(temp_local)));
+                                    tasks.push(EmitTask::Instr(Instruction::I32Mul));
+                                    tasks.push(EmitTask::Instr(Instruction::I32Const(element_size)));
+                                    tasks.push(EmitTask::EvalValue((**index).clone()));
+                                    continue;
+                                }
+                            }
+                        }
                         let object_expr = lvalue_to_intermediate(object);
                         let object_type =
                             infer_type(&object_expr, locals_types, function_return_types)?;
@@ -2176,7 +2308,202 @@ fn emit_expression(
                             })?;
                             let store_instr = match element.as_ref() {
                                 WasmType::U8 => Instruction::I32Store8(memarg(0, 0, memory_index)),
-                                WasmType::I32 => Instruction::I32Store(memarg(0, 2, memory_index)),
+                                WasmType::I32 | WasmType::Box { .. } => {
+                                    Instruction::I32Store(memarg(0, 2, memory_index))
+                                }
+                                WasmType::Struct(fields) => {
+                                    let struct_values = match value.as_ref() {
+                                        IntermediateKind::Struct(items) => items,
+                                        _ => {
+                                            return Err(Diagnostic::new(
+                                                "Boxed struct array assignment requires a struct literal"
+                                                    .to_string(),
+                                            )
+                                            .with_span(SourceSpan::default()));
+                                        }
+                                    };
+                                    let base_local = box_base_local.ok_or_else(|| {
+                                        Diagnostic::new(
+                                            "Boxed array assignment requires a temporary local"
+                                                .to_string(),
+                                        )
+                                        .with_span(SourceSpan::default())
+                                    })?;
+                                    let sorted_fields = sorted_wasm_fields(fields);
+                                    let mut field_offsets = Vec::with_capacity(sorted_fields.len());
+                                    let mut offset = 0i32;
+                                    for (name, ty) in sorted_fields.iter() {
+                                        field_offsets.push((name.clone(), ty.clone(), offset));
+                                        offset = offset.saturating_add(wasm_type_size(ty) as i32);
+                                    }
+                                    tasks.push(EmitTask::Eval(full_target_expr));
+                                    for (name, field_type, field_offset) in
+                                        field_offsets.into_iter().rev()
+                                    {
+                                        let field_expr = struct_values
+                                            .iter()
+                                            .find(|(id, _)| id.name == name)
+                                            .map(|(_, expr)| expr.clone())
+                                            .ok_or_else(|| {
+                                                Diagnostic::new(format!(
+                                                    "Missing field `{}` in struct literal",
+                                                    name
+                                                ))
+                                                .with_span(SourceSpan::default())
+                                            })?;
+                                        let field_store = match field_type {
+                                            WasmType::U8 => {
+                                                Instruction::I32Store8(memarg(
+                                                    0,
+                                                    0,
+                                                    memory_index,
+                                                ))
+                                            }
+                                            WasmType::I32 | WasmType::Box { .. } => {
+                                                Instruction::I32Store(memarg(
+                                                    0,
+                                                    2,
+                                                    memory_index,
+                                                ))
+                                            }
+                                            _ => {
+                                                return Err(Diagnostic::new(
+                                                    "Boxed struct array assignment only supports i32 or u8 fields"
+                                                        .to_string(),
+                                                )
+                                                .with_span(SourceSpan::default()));
+                                            }
+                                        };
+                                        tasks.push(EmitTask::Instr(field_store));
+                                        tasks.push(EmitTask::EvalWithType {
+                                            expr: field_expr,
+                                            expected: field_type,
+                                        });
+                                        tasks.push(EmitTask::Instr(Instruction::I32Add));
+                                        tasks.push(EmitTask::Instr(Instruction::I32Const(
+                                            field_offset,
+                                        )));
+                                        tasks.push(EmitTask::Instr(Instruction::LocalGet(
+                                            base_local,
+                                        )));
+                                    }
+                                    tasks.push(EmitTask::Instr(Instruction::LocalSet(base_local)));
+                                    tasks.push(EmitTask::Instr(Instruction::I32Mul));
+                                    tasks.push(EmitTask::Instr(Instruction::I32Const(element_size)));
+                                    tasks.push(EmitTask::EvalValue((**index).clone()));
+                                    continue;
+                                }
+                                WasmType::Array {
+                                    element: field_element,
+                                    field_names,
+                                    ..
+                                } => {
+                                    let base_local = box_base_local.ok_or_else(|| {
+                                        Diagnostic::new(
+                                            "Boxed array assignment requires a temporary local"
+                                                .to_string(),
+                                        )
+                                        .with_span(SourceSpan::default())
+                                    })?;
+                                    let field_size = wasm_type_size(field_element) as i32;
+                                    let mut resolved_fields =
+                                        Vec::with_capacity(field_names.len());
+                                    match value.as_ref() {
+                                        IntermediateKind::ArrayLiteral {
+                                            items,
+                                            field_names: literal_names,
+                                            ..
+                                        } => {
+                                            for (idx, name) in field_names.iter().enumerate() {
+                                                let field_expr = if literal_names.is_empty() {
+                                                    items.get(idx).cloned()
+                                                } else {
+                                                    literal_names
+                                                        .iter()
+                                                        .position(|lit_name| lit_name == name)
+                                                        .and_then(|pos| items.get(pos).cloned())
+                                                }
+                                                .ok_or_else(|| {
+                                                    Diagnostic::new(format!(
+                                                        "Missing field `{}` in struct literal",
+                                                        name
+                                                    ))
+                                                    .with_span(SourceSpan::default())
+                                                })?;
+                                                let field_offset = idx as i32 * field_size;
+                                                resolved_fields.push((field_expr, field_offset));
+                                            }
+                                        }
+                                        IntermediateKind::Struct(items) => {
+                                            for (idx, name) in field_names.iter().enumerate() {
+                                                let field_expr = items
+                                                    .iter()
+                                                    .find(|(id, _)| id.name == *name)
+                                                    .map(|(_, expr)| expr.clone())
+                                                    .ok_or_else(|| {
+                                                        Diagnostic::new(format!(
+                                                            "Missing field `{}` in struct literal",
+                                                            name
+                                                        ))
+                                                        .with_span(SourceSpan::default())
+                                                    })?;
+                                                let field_offset = idx as i32 * field_size;
+                                                resolved_fields.push((field_expr, field_offset));
+                                            }
+                                        }
+                                        _ => {
+                                            return Err(Diagnostic::new(
+                                                "Boxed struct array assignment requires a struct literal"
+                                                    .to_string(),
+                                            )
+                                            .with_span(SourceSpan::default()));
+                                        }
+                                    }
+                                    let field_store = match field_element.as_ref() {
+                                        WasmType::U8 => {
+                                            Instruction::I32Store8(memarg(
+                                                0,
+                                                0,
+                                                memory_index,
+                                            ))
+                                        }
+                                        WasmType::I32 | WasmType::Box { .. } => {
+                                            Instruction::I32Store(memarg(
+                                                0,
+                                                2,
+                                                memory_index,
+                                            ))
+                                        }
+                                        _ => {
+                                            return Err(Diagnostic::new(
+                                                "Boxed struct array assignment only supports i32 or u8 fields"
+                                                    .to_string(),
+                                            )
+                                            .with_span(SourceSpan::default()));
+                                        }
+                                    };
+                                    tasks.push(EmitTask::Eval(full_target_expr));
+                                    for (field_expr, field_offset) in resolved_fields.into_iter().rev()
+                                    {
+                                        tasks.push(EmitTask::Instr(field_store.clone()));
+                                        tasks.push(EmitTask::EvalWithType {
+                                            expr: field_expr,
+                                            expected: (**field_element).clone(),
+                                        });
+                                        tasks.push(EmitTask::Instr(Instruction::I32Add));
+                                        tasks.push(EmitTask::Instr(Instruction::I32Const(
+                                            field_offset,
+                                        )));
+                                        tasks.push(EmitTask::Instr(Instruction::LocalGet(
+                                            base_local,
+                                        )));
+                                    }
+                                    tasks.push(EmitTask::Instr(Instruction::LocalSet(base_local)));
+                                    tasks.push(EmitTask::Instr(Instruction::I32Mul));
+                                    tasks.push(EmitTask::Instr(Instruction::I32Const(element_size)));
+                                    tasks.push(EmitTask::EvalValue((**index).clone()));
+                                    continue;
+                                }
                                 _ => {
                                     return Err(Diagnostic::new(
                                         "Boxed array assignment only supports i32 or u8 elements"

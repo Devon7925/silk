@@ -2516,11 +2516,19 @@ fn expression_to_lvalue(expression: Expression) -> Result<LValue, Diagnostic> {
                     continue;
                 }
                 let array = expression_to_lvalue(*function)?;
-                return Ok(LValue::ArrayIndex {
+                let mut lvalue = LValue::ArrayIndex {
                     array: Box::new(array),
                     index: argument,
                     span,
-                });
+                };
+                for (property, access_span) in properties.into_iter().rev() {
+                    lvalue = LValue::TypePropertyAccess {
+                        object: Box::new(lvalue),
+                        property,
+                        span: access_span,
+                    };
+                }
+                return Ok(lvalue);
             }
             _ => return Err(Diagnostic::new("Invalid binding pattern expression").with_span(span)),
         }

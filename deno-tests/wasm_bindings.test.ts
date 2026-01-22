@@ -153,3 +153,82 @@ Deno.test("copies boxed u8 array host data to boxed u32 array", async () => {
     await cleanup([silkPath, wasmPath]);
   }
 });
+
+Deno.test("copies boxed u8 array host data to boxed u32 struct array individually", async () => {
+  const silkCode = `
+    (export wasm) source: Box({u8; 4}) := {0; 4};
+    (export wasm) mut target: Box({{a = i32, b = i32}; 2}) := {{a = 0, b = 0}; 2};
+    (export wasm) copy_box := {} => (
+      for i in 0..2 do (
+        target(i).a = source(2*i);
+        target(i).b = source(2*i + 1);
+      )
+    );
+    {}
+  `;
+
+  const { wasmPath, silkPath } = await compileToWasm(
+    silkCode,
+    "wasm_bindings_box_copy",
+  );
+  try {
+    const bytes = await Deno.readFile(wasmPath);
+    const { instance } = await WebAssembly.instantiate(bytes);
+    const { source, target, copy_box } = instance.exports as {
+      source: WebAssembly.Memory;
+      target: WebAssembly.Memory;
+      copy_box: () => void;
+    };
+    assertInstanceOf(source, WebAssembly.Memory);
+    assertInstanceOf(target, WebAssembly.Memory);
+
+    const sourceView = new Uint8Array(source.buffer, 0, 4);
+    sourceView.set([5, 6, 7, 8]);
+
+    copy_box();
+
+    const targetView = new Uint32Array(target.buffer, 0, 4);
+    assertEquals([...targetView], [5, 6, 7, 8]);
+  } finally {
+    await cleanup([silkPath, wasmPath]);
+  }
+});
+
+Deno.test("copies boxed u8 array host data to boxed u32 struct array as group", async () => {
+  const silkCode = `
+    (export wasm) source: Box({u8; 4}) := {0; 4};
+    (export wasm) mut target: Box({{a = i32, b = i32}; 2}) := {{a = 0, b = 0}; 2};
+    (export wasm) copy_box := {} => (
+      for i in 0..2 do (
+        target(i) = {a = source(2*i), b = source(2*i + 1)};
+      )
+    );
+    {}
+  `;
+
+  const { wasmPath, silkPath } = await compileToWasm(
+    silkCode,
+    "wasm_bindings_box_copy",
+  );
+  try {
+    const bytes = await Deno.readFile(wasmPath);
+    const { instance } = await WebAssembly.instantiate(bytes);
+    const { source, target, copy_box } = instance.exports as {
+      source: WebAssembly.Memory;
+      target: WebAssembly.Memory;
+      copy_box: () => void;
+    };
+    assertInstanceOf(source, WebAssembly.Memory);
+    assertInstanceOf(target, WebAssembly.Memory);
+
+    const sourceView = new Uint8Array(source.buffer, 0, 4);
+    sourceView.set([5, 6, 7, 8]);
+
+    copy_box();
+
+    const targetView = new Uint32Array(target.buffer, 0, 4);
+    assertEquals([...targetView], [5, 6, 7, 8]);
+  } finally {
+    await cleanup([silkPath, wasmPath]);
+  }
+});
