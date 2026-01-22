@@ -117,8 +117,8 @@ Deno.test("exports boxed globals as distinct memories", async () => {
 
 Deno.test("copies boxed u8 array host data to boxed u32 array", async () => {
   const silkCode = `
-    (export wasm) source: Box({u8, u8, u8, u8}) := {0, 0, 0, 0};
-    (export wasm) mut target: Box({i32, i32, i32, i32}) := {0, 0, 0, 0};
+    (export wasm) source: Box({u8; 4}) := {0; 4};
+    (export wasm) mut target: Box({i32; 4}) := {0; 4};
     (export wasm) copy_box := {} => (
       for i in 0..4 do (
         target(i) = source(i);
