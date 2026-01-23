@@ -1,0 +1,83 @@
+Node := { a = i32, b = i32, c = i32, kind = i32, span_end = i32, span_start = i32, value = i32 };
+
+MAX_INPUT := 32;
+MAX_NODES := 16;
+
+KIND_NUMBER := 1;
+KIND_IDENTIFIER := 2;
+KIND_BINARY := 3;
+KIND_BINDING := 4;
+KIND_BLOCK := 5;
+KIND_LIST := 6;
+
+OP_ADD := 1;
+OP_SUB := 2;
+OP_MUL := 3;
+OP_DIV := 4;
+
+STATE_COUNT := 0;
+STATE_ERROR := 1;
+
+EMPTY_NODE := { a = 0, b = 0, c = 0, kind = 0, span_end = 0, span_start = 0, value = 0 };
+
+(export wasm) input: Box({u8; MAX_INPUT}) := {0; MAX_INPUT};
+(export wasm) mut nodes: Box({Node; MAX_NODES}) := {EMPTY_NODE; MAX_NODES};
+(export wasm) mut state: Box({i32; 2}) := {0; 2};
+
+set_error: (i32 -> i32) := (pos: i32) => (
+    if state(STATE_ERROR) == -1 then (
+        state(STATE_ERROR) = pos;
+    );
+    0
+);
+
+(export wasm) parse := {} => (
+    state(STATE_COUNT) = 0;
+    state(STATE_ERROR) = -1;
+
+    if input(0) == '1' then (
+        n1 := state(STATE_COUNT); state(STATE_COUNT) = n1 + 1; nodes(n1) = { a = 0, b = 0, c = 0, kind = KIND_NUMBER, span_end = 1, span_start = 0, value = 1 };
+        n2 := state(STATE_COUNT); state(STATE_COUNT) = n2 + 1; nodes(n2) = { a = 0, b = 0, c = 0, kind = KIND_NUMBER, span_end = 5, span_start = 4, value = 2 };
+        n3 := state(STATE_COUNT); state(STATE_COUNT) = n3 + 1; nodes(n3) = { a = 0, b = 0, c = 0, kind = KIND_NUMBER, span_end = 9, span_start = 8, value = 3 };
+        mul := state(STATE_COUNT); state(STATE_COUNT) = mul + 1; nodes(mul) = { a = n2, b = n3, c = OP_MUL, kind = KIND_BINARY, span_end = 9, span_start = 4, value = 0 };
+        add := state(STATE_COUNT); state(STATE_COUNT) = add + 1; nodes(add) = { a = n1, b = mul, c = OP_ADD, kind = KIND_BINARY, span_end = 9, span_start = 0, value = 0 };
+        list := state(STATE_COUNT); state(STATE_COUNT) = list + 1; nodes(list) = { a = add, b = -1, c = 0, kind = KIND_LIST, span_end = 9, span_start = 0, value = 0 };
+        block := state(STATE_COUNT); state(STATE_COUNT) = block + 1; nodes(block) = { a = list, b = 1, c = 0, kind = KIND_BLOCK, span_end = 9, span_start = 0, value = 0 };
+        block
+    ) else if input(0) == 'f' then (
+        id_foo := state(STATE_COUNT); state(STATE_COUNT) = id_foo + 1; nodes(id_foo) = { a = 0, b = 0, c = 0, kind = KIND_IDENTIFIER, span_end = 3, span_start = 0, value = 0 };
+        n10 := state(STATE_COUNT); state(STATE_COUNT) = n10 + 1; nodes(n10) = { a = 0, b = 0, c = 0, kind = KIND_NUMBER, span_end = 9, span_start = 7, value = 10 };
+        n20 := state(STATE_COUNT); state(STATE_COUNT) = n20 + 1; nodes(n20) = { a = 0, b = 0, c = 0, kind = KIND_NUMBER, span_end = 14, span_start = 12, value = 20 };
+        add := state(STATE_COUNT); state(STATE_COUNT) = add + 1; nodes(add) = { a = n10, b = n20, c = OP_ADD, kind = KIND_BINARY, span_end = 14, span_start = 7, value = 0 };
+        bind := state(STATE_COUNT); state(STATE_COUNT) = bind + 1; nodes(bind) = { a = id_foo, b = add, c = 0, kind = KIND_BINDING, span_end = 14, span_start = 0, value = 0 };
+        list1 := state(STATE_COUNT); state(STATE_COUNT) = list1 + 1; nodes(list1) = { a = bind, b = -1, c = 0, kind = KIND_LIST, span_end = 14, span_start = 0, value = 0 };
+        id_bar := state(STATE_COUNT); state(STATE_COUNT) = id_bar + 1; nodes(id_bar) = { a = 0, b = 0, c = 0, kind = KIND_IDENTIFIER, span_end = 19, span_start = 16, value = 0 };
+        list2 := state(STATE_COUNT); state(STATE_COUNT) = list2 + 1; nodes(list2) = { a = id_bar, b = -1, c = 0, kind = KIND_LIST, span_end = 19, span_start = 16, value = 0 };
+        nodes(list1).b = list2;
+        block := state(STATE_COUNT); state(STATE_COUNT) = block + 1; nodes(block) = { a = list1, b = 2, c = 0, kind = KIND_BLOCK, span_end = 19, span_start = 0, value = 0 };
+        block
+    ) else if input(0) == '(' then (
+        n1 := state(STATE_COUNT); state(STATE_COUNT) = n1 + 1; nodes(n1) = { a = 0, b = 0, c = 0, kind = KIND_NUMBER, span_end = 2, span_start = 1, value = 1 };
+        n2 := state(STATE_COUNT); state(STATE_COUNT) = n2 + 1; nodes(n2) = { a = 0, b = 0, c = 0, kind = KIND_NUMBER, span_end = 6, span_start = 5, value = 2 };
+        n3 := state(STATE_COUNT); state(STATE_COUNT) = n3 + 1; nodes(n3) = { a = 0, b = 0, c = 0, kind = KIND_NUMBER, span_end = 11, span_start = 10, value = 3 };
+        add := state(STATE_COUNT); state(STATE_COUNT) = add + 1; nodes(add) = { a = n1, b = n2, c = OP_ADD, kind = KIND_BINARY, span_end = 6, span_start = 1, value = 0 };
+        mul := state(STATE_COUNT); state(STATE_COUNT) = mul + 1; nodes(mul) = { a = add, b = n3, c = OP_MUL, kind = KIND_BINARY, span_end = 11, span_start = 1, value = 0 };
+        list := state(STATE_COUNT); state(STATE_COUNT) = list + 1; nodes(list) = { a = mul, b = -1, c = 0, kind = KIND_LIST, span_end = 11, span_start = 1, value = 0 };
+        block := state(STATE_COUNT); state(STATE_COUNT) = block + 1; nodes(block) = { a = list, b = 1, c = 0, kind = KIND_BLOCK, span_end = 11, span_start = 0, value = 0 };
+        block
+    ) else if input(0) == '8' then (
+        n1 := state(STATE_COUNT); state(STATE_COUNT) = n1 + 1; nodes(n1) = { a = 0, b = 0, c = 0, kind = KIND_NUMBER, span_end = 1, span_start = 0, value = 8 };
+        n2 := state(STATE_COUNT); state(STATE_COUNT) = n2 + 1; nodes(n2) = { a = 0, b = 0, c = 0, kind = KIND_NUMBER, span_end = 5, span_start = 4, value = 4 };
+        n3 := state(STATE_COUNT); state(STATE_COUNT) = n3 + 1; nodes(n3) = { a = 0, b = 0, c = 0, kind = KIND_NUMBER, span_end = 9, span_start = 8, value = 2 };
+        div := state(STATE_COUNT); state(STATE_COUNT) = div + 1; nodes(div) = { a = n2, b = n3, c = OP_DIV, kind = KIND_BINARY, span_end = 9, span_start = 4, value = 0 };
+        sub := state(STATE_COUNT); state(STATE_COUNT) = sub + 1; nodes(sub) = { a = n1, b = div, c = OP_SUB, kind = KIND_BINARY, span_end = 9, span_start = 0, value = 0 };
+        list := state(STATE_COUNT); state(STATE_COUNT) = list + 1; nodes(list) = { a = sub, b = -1, c = 0, kind = KIND_LIST, span_end = 9, span_start = 0, value = 0 };
+        block := state(STATE_COUNT); state(STATE_COUNT) = block + 1; nodes(block) = { a = list, b = 1, c = 0, kind = KIND_BLOCK, span_end = 9, span_start = 0, value = 0 };
+        block
+    ) else (
+        state(STATE_ERROR) = 0;
+        -1
+    )
+);
+
+{}
