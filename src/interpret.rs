@@ -2429,50 +2429,64 @@ pub fn interpret_expression(
                         _ => &function_type,
                     };
                     if homogeneous_struct_element_type(base_type, context).is_some() {
+                        let mut preserve_array_index = false;
+                        let mut array_expr_for_index = function_value.clone();
+                        if let ExpressionKind::Identifier(identifier) = &function_expr.kind
+                            && let Some((_, annotations)) = context.get_identifier(identifier)
+                            && annotations
+                                .iter()
+                                .any(|ann| matches!(ann, BindingAnnotation::Mutable(_)))
+                        {
+                            preserve_array_index = true;
+                            array_expr_for_index = function_expr.clone();
+                        }
+
                         let index_type = get_type_of_expression(&argument_value, context)?;
                         let expected_index = ExpressionKind::IntrinsicType(IntrinsicType::I32);
                         if !types_equivalent(&index_type.kind, &expected_index) {
                             return Err(diagnostic("Array index must be an i32 value", span));
                         }
 
-                        if let (
-                            ExpressionKind::Literal(ExpressionLiteral::String(bytes)),
-                            ExpressionKind::Literal(ExpressionLiteral::Number(index)),
-                        ) = (&function_value.kind, &argument_value.kind)
-                        {
-                            if *index < 0 {
+                        if !preserve_array_index {
+                            if let (
+                                ExpressionKind::Literal(ExpressionLiteral::String(bytes)),
+                                ExpressionKind::Literal(ExpressionLiteral::Number(index)),
+                            ) = (&function_value.kind, &argument_value.kind)
+                            {
+                                if *index < 0 {
+                                    return Err(diagnostic("Array index out of range", span));
+                                }
+                                let index = *index as usize;
+                                if let Some(value) = bytes.get(index) {
+                                    values.push(
+                                        ExpressionKind::Literal(ExpressionLiteral::Char(*value))
+                                            .with_span(span),
+                                    );
+                                    continue;
+                                }
                                 return Err(diagnostic("Array index out of range", span));
                             }
-                            let index = *index as usize;
-                            if let Some(value) = bytes.get(index) {
-                                values.push(
-                                    ExpressionKind::Literal(ExpressionLiteral::Char(*value))
-                                        .with_span(span),
-                                );
-                                continue;
-                            }
-                            return Err(diagnostic("Array index out of range", span));
-                        }
 
-                        if let (
-                            ExpressionKind::Struct(fields),
-                            ExpressionKind::Literal(ExpressionLiteral::Number(index)),
-                        ) = (&function_value.kind, &argument_value.kind)
-                        {
-                            if *index < 0 {
+                            if let (
+                                ExpressionKind::Struct(fields),
+                                ExpressionKind::Literal(ExpressionLiteral::Number(index)),
+                            ) = (&function_value.kind, &argument_value.kind)
+                            {
+                                if *index < 0 {
+                                    return Err(diagnostic("Array index out of range", span));
+                                }
+                                let index = *index as usize;
+                                if let Some((_, value)) = fields.get(index) {
+                                    values.push(value.clone());
+                                    continue;
+                                }
                                 return Err(diagnostic("Array index out of range", span));
                             }
-                            let index = *index as usize;
-                            if let Some((_, value)) = fields.get(index) {
-                                values.push(value.clone());
-                                continue;
-                            }
-                            return Err(diagnostic("Array index out of range", span));
                         }
 
                         values.push(
                             ExpressionKind::ArrayIndex {
-                                array: Box::new(function_value),
+                                array: Box::new(array_expr_for_index),
                                 index: Box::new(argument_value),
                             }
                             .with_span(span),
@@ -6686,179 +6700,150 @@ fn is_resolved_constant(expr: &Expression) -> bool {
 }
 
 fn is_resolved_const_function_expression(expr: &Expression, function_context: &Context) -> bool {
-    struct Frame<'a> {
-        expr: &'a Expression,
-        context: Context,
-    }
-
-    let mut stack = vec![Frame {
-        expr,
-        context: function_context.clone(),
-    }];
-
-    while let Some(frame) = stack.pop() {
-        match &frame.expr.kind {
-            ExpressionKind::Literal(_) | ExpressionKind::IntrinsicType(_) => {}
-            ExpressionKind::BoxType(inner) => {
-                stack.push(Frame {
-                    expr: inner,
-                    context: frame.context.clone(),
-                });
-            }
-            ExpressionKind::Struct(items) => {
-                for (_, value_expr) in items.iter() {
-                    stack.push(Frame {
-                        expr: value_expr,
-                        context: frame.context.clone(),
-                    });
-                }
-            }
+    fn check(expr: &Expression, context: &mut Context) -> bool {
+        match &expr.kind {
+            ExpressionKind::Literal(_) | ExpressionKind::IntrinsicType(_) => true,
+            ExpressionKind::BoxType(inner) => check(inner, context),
+            ExpressionKind::Struct(items) => items
+                .iter()
+                .all(|(_, value_expr)| check(value_expr, context)),
             ExpressionKind::ArrayRepeat { value, count } => {
-                stack.push(Frame {
-                    expr: count,
-                    context: frame.context.clone(),
-                });
-                stack.push(Frame {
-                    expr: value,
-                    context: frame.context.clone(),
-                });
+                check(count, context) && check(value, context)
             }
             ExpressionKind::AttachImplementation {
                 type_expr,
                 implementation,
                 ..
-            } => {
-                stack.push(Frame {
-                    expr: implementation,
-                    context: frame.context.clone(),
-                });
-                stack.push(Frame {
-                    expr: type_expr,
-                    context: frame.context.clone(),
-                });
-            }
+            } => check(type_expr, context) && check(implementation, context),
             ExpressionKind::Function {
                 parameter,
                 return_type,
                 body,
                 ..
             } => {
-                let mut new_function_context = frame.context.clone();
-                bind_pattern_blanks_for_const(parameter.clone(), &mut new_function_context, None)
-                    .unwrap();
-                stack.push(Frame {
-                    expr: body,
-                    context: new_function_context.clone(),
-                });
-                stack.push(Frame {
-                    expr: return_type.as_ref().unwrap(),
-                    context: new_function_context,
-                });
+                let mut new_function_context = context.clone();
+                if bind_pattern_blanks_for_const(parameter.clone(), &mut new_function_context, None)
+                    .is_err()
+                {
+                    return false;
+                }
+                check(return_type.as_ref().unwrap(), &mut new_function_context)
+                    && check(body, &mut new_function_context)
             }
             ExpressionKind::FunctionType {
                 parameter,
                 return_type,
                 ..
-            } => {
-                stack.push(Frame {
-                    expr: return_type,
-                    context: frame.context.clone(),
-                });
-                stack.push(Frame {
-                    expr: parameter,
-                    context: frame.context,
-                });
-            }
-            ExpressionKind::Identifier(ident) => {
-                if !frame.context.contains_identifier(ident) {
-                    return false;
-                }
-            }
+            } => check(parameter, context) && check(return_type, context),
+            ExpressionKind::Identifier(ident) => context.contains_identifier(ident),
             ExpressionKind::IntrinsicOperation(intrinsic_operation) => match intrinsic_operation {
                 IntrinsicOperation::Binary(left, right, _) => {
-                    stack.push(Frame {
-                        expr: right,
-                        context: frame.context.clone(),
-                    });
-                    stack.push(Frame {
-                        expr: left,
-                        context: frame.context,
-                    });
+                    check(left, context) && check(right, context)
                 }
-                IntrinsicOperation::Unary(operand, _) => {
-                    stack.push(Frame {
-                        expr: operand,
-                        context: frame.context,
-                    });
-                }
-                IntrinsicOperation::InlineAssembly { code, .. } => {
-                    stack.push(Frame {
-                        expr: code,
-                        context: frame.context,
-                    });
-                }
+                IntrinsicOperation::Unary(operand, _) => check(operand, context),
+                IntrinsicOperation::InlineAssembly { code, .. } => check(code, context),
             },
-            ExpressionKind::EnumType(cases) => {
-                for (_, case_expr) in cases.iter() {
-                    stack.push(Frame {
-                        expr: case_expr,
-                        context: frame.context.clone(),
-                    });
-                }
-            }
+            ExpressionKind::EnumType(cases) => cases
+                .iter()
+                .all(|(_, case_expr)| check(case_expr, context)),
             ExpressionKind::EnumValue {
                 enum_type, payload, ..
-            } => {
-                stack.push(Frame {
-                    expr: payload,
-                    context: frame.context.clone(),
-                });
-                stack.push(Frame {
-                    expr: enum_type,
-                    context: frame.context,
-                });
-            }
+            } => check(enum_type, context) && check(payload, context),
             ExpressionKind::EnumConstructor {
                 enum_type,
                 payload_type,
                 ..
-            } => {
-                stack.push(Frame {
-                    expr: payload_type,
-                    context: frame.context.clone(),
-                });
-                stack.push(Frame {
-                    expr: enum_type,
-                    context: frame.context,
-                });
-            }
+            } => check(enum_type, context) && check(payload_type, context),
             ExpressionKind::FunctionCall {
                 function, argument, ..
-            } => {
-                stack.push(Frame {
-                    expr: argument,
-                    context: frame.context.clone(),
-                });
-                stack.push(Frame {
-                    expr: function,
-                    context: frame.context,
-                });
-            }
+            } => check(function, context) && check(argument, context),
             ExpressionKind::ArrayIndex { array, index } => {
-                stack.push(Frame {
-                    expr: index,
-                    context: frame.context.clone(),
-                });
-                stack.push(Frame {
-                    expr: array,
-                    context: frame.context,
-                });
+                check(array, context) && check(index, context)
             }
-            _ => return false,
+            ExpressionKind::Block(expressions) => {
+                if expressions.is_empty() {
+                    return false;
+                }
+                context.bindings.push(HashMap::new());
+                let mut ok = true;
+                for expr in expressions.iter() {
+                    if !check(expr, context) {
+                        ok = false;
+                        break;
+                    }
+                }
+                context.bindings.pop();
+                ok
+            }
+            ExpressionKind::Binding(binding) => {
+                if !check(&binding.expr, context) {
+                    return false;
+                }
+                bind_pattern_blanks_for_const(binding.pattern.clone(), context, None).is_ok()
+            }
+            ExpressionKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                let mut condition_context = context.clone();
+                if !check(condition, &mut condition_context) {
+                    return false;
+                }
+                let mut then_context = condition_context;
+                let mut else_context = context.clone();
+                check(then_branch, &mut then_context) && check(else_branch, &mut else_context)
+            }
+            ExpressionKind::Match { value, branches } => {
+                let mut value_context = context.clone();
+                if !check(value, &mut value_context) {
+                    return false;
+                }
+                for (pattern, branch) in branches.iter() {
+                    let mut branch_context = context.clone();
+                    if bind_pattern_blanks_for_const(pattern.clone(), &mut branch_context, None)
+                        .is_err()
+                    {
+                        return false;
+                    }
+                    if !check(branch, &mut branch_context) {
+                        return false;
+                    }
+                }
+                true
+            }
+            ExpressionKind::Assignment { target, expr } => {
+                let mut current = target;
+                loop {
+                    match current {
+                        LValue::Identifier(identifier, _) => {
+                            if !context.contains_identifier(identifier) {
+                                return false;
+                            }
+                            break;
+                        }
+                        LValue::TypePropertyAccess { object, .. } => {
+                            current = object;
+                        }
+                        LValue::ArrayIndex { array, index, .. } => {
+                            if !check(index, context) {
+                                return false;
+                            }
+                            current = array;
+                        }
+                    }
+                }
+                check(expr, context)
+            }
+            ExpressionKind::Loop { body } => check(body, context),
+            ExpressionKind::Diverge { value, .. } => check(value, context),
+            ExpressionKind::TypePropertyAccess { object, .. } => check(object, context),
+            _ => false,
         }
     }
 
-    true
+    let mut context = function_context.clone();
+    check(expr, &mut context)
 }
 
 pub fn intrinsic_context() -> Context {
