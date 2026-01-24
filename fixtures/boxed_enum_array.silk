@@ -1,0 +1,5 @@
+Kind := enum { Empty = {} };
+Node := { kind = Kind };
+EMPTY_NODE := { kind = Kind::Empty };
+(export wasm) mut nodes: Box({Node; 1}) := {EMPTY_NODE; 1};
+{}

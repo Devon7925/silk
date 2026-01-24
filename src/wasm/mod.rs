@@ -78,6 +78,120 @@ fn ensure_lvalue_local(
     }
 }
 
+fn resolve_inline_constants(
+    expr: &IntermediateKind,
+    inline_bindings: &std::collections::HashMap<String, IntermediateKind>,
+) -> IntermediateKind {
+    match expr {
+        IntermediateKind::Identifier(identifier) => inline_bindings
+            .get(&identifier.name)
+            .cloned()
+            .unwrap_or_else(|| IntermediateKind::Identifier(identifier.clone())),
+        IntermediateKind::Struct(items) => IntermediateKind::Struct(
+            items
+                .iter()
+                .map(|(id, value)| {
+                    (
+                        id.clone(),
+                        resolve_inline_constants(value, inline_bindings),
+                    )
+                })
+                .collect(),
+        ),
+        IntermediateKind::ArrayLiteral {
+            items,
+            element_type,
+            field_names,
+        } => IntermediateKind::ArrayLiteral {
+            items: items
+                .iter()
+                .map(|item| resolve_inline_constants(item, inline_bindings))
+                .collect(),
+            element_type: element_type.clone(),
+            field_names: field_names.clone(),
+        },
+        IntermediateKind::BoxAlloc { value, element_type } => IntermediateKind::BoxAlloc {
+            value: Box::new(resolve_inline_constants(value, inline_bindings)),
+            element_type: element_type.clone(),
+        },
+        IntermediateKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => IntermediateKind::If {
+            condition: Box::new(resolve_inline_constants(condition, inline_bindings)),
+            then_branch: Box::new(resolve_inline_constants(then_branch, inline_bindings)),
+            else_branch: Box::new(resolve_inline_constants(else_branch, inline_bindings)),
+        },
+        IntermediateKind::Assignment { target, expr } => IntermediateKind::Assignment {
+            target: target.clone(),
+            expr: Box::new(resolve_inline_constants(expr, inline_bindings)),
+        },
+        IntermediateKind::FunctionCall { function, argument } => IntermediateKind::FunctionCall {
+            function: *function,
+            argument: Box::new(resolve_inline_constants(argument, inline_bindings)),
+        },
+        IntermediateKind::ArrayIndex { array, index } => IntermediateKind::ArrayIndex {
+            array: Box::new(resolve_inline_constants(array, inline_bindings)),
+            index: Box::new(resolve_inline_constants(index, inline_bindings)),
+        },
+        IntermediateKind::TypePropertyAccess { object, property } => {
+            IntermediateKind::TypePropertyAccess {
+                object: Box::new(resolve_inline_constants(object, inline_bindings)),
+                property: property.clone(),
+            }
+        }
+        IntermediateKind::Binding(binding) => IntermediateKind::Binding(Box::new(
+            IntermediateBinding {
+                identifier: binding.identifier.clone(),
+                binding_type: binding.binding_type.clone(),
+                expr: resolve_inline_constants(&binding.expr, inline_bindings),
+            },
+        )),
+        IntermediateKind::Block(items) => IntermediateKind::Block(
+            items
+                .iter()
+                .map(|item| resolve_inline_constants(item, inline_bindings))
+                .collect(),
+        ),
+        IntermediateKind::Diverge {
+            value,
+            divergance_type,
+        } => IntermediateKind::Diverge {
+            value: Box::new(resolve_inline_constants(value, inline_bindings)),
+            divergance_type: divergance_type.clone(),
+        },
+        IntermediateKind::Loop { body } => IntermediateKind::Loop {
+            body: Box::new(resolve_inline_constants(body, inline_bindings)),
+        },
+        IntermediateKind::IntrinsicOperation(op) => IntermediateKind::IntrinsicOperation(
+            match op {
+                IntermediateIntrinsicOperation::Binary(left, right, operator) => {
+                    IntermediateIntrinsicOperation::Binary(
+                        Box::new(resolve_inline_constants(left, inline_bindings)),
+                        Box::new(resolve_inline_constants(right, inline_bindings)),
+                        operator.clone(),
+                    )
+                }
+                IntermediateIntrinsicOperation::Unary(operand, operator) => {
+                    IntermediateIntrinsicOperation::Unary(
+                        Box::new(resolve_inline_constants(operand, inline_bindings)),
+                        operator.clone(),
+                    )
+                }
+            },
+        ),
+        IntermediateKind::InlineAssembly { target, code } => {
+            IntermediateKind::InlineAssembly {
+                target: target.clone(),
+                code: code.clone(),
+            }
+        }
+        IntermediateKind::Literal(literal) => IntermediateKind::Literal(literal.clone()),
+        IntermediateKind::Unreachable => IntermediateKind::Unreachable,
+    }
+}
+
 pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Diagnostic> {
     let exports = collect_wasm_exports(intermediate)?;
     if exports.imports.is_empty() && exports.functions.is_empty() && exports.globals.is_empty() {
@@ -269,8 +383,13 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
                 } => (value.as_ref(), element_type),
                 other => (other, element.as_ref()),
             };
-            let info =
-                box_registry.register_box(init_value, element_type, Some(global.name.clone()))?;
+            let resolved_init =
+                resolve_inline_constants(init_value, &intermediate.inline_bindings);
+            let info = box_registry.register_box(
+                &resolved_init,
+                element_type,
+                Some(global.name.clone()),
+            )?;
             global_box_bindings.insert(global.name.clone(), info);
             continue;
         }
@@ -1826,6 +1945,100 @@ fn emit_load_from_memory(
     Ok(())
 }
 
+fn collect_boxed_store_leaves(
+    value: &IntermediateKind,
+    ty: &WasmType,
+    base_offset: i32,
+) -> Result<Vec<(IntermediateKind, WasmType, i32)>, Diagnostic> {
+    fn struct_field_expr(
+        value: &IntermediateKind,
+        name: &str,
+    ) -> Result<IntermediateKind, Diagnostic> {
+        match value {
+            IntermediateKind::Struct(items) => items
+                .iter()
+                .find(|(id, _)| id.name == name)
+                .map(|(_, expr)| expr.clone())
+                .ok_or_else(|| {
+                    Diagnostic::new(format!("Missing field `{}` in struct literal", name))
+                        .with_span(SourceSpan::default())
+                }),
+            _ => Ok(IntermediateKind::TypePropertyAccess {
+                object: Box::new(value.clone()),
+                property: name.to_string(),
+            }),
+        }
+    }
+
+    fn array_element_expr(
+        value: &IntermediateKind,
+        idx: usize,
+        field_names: &[String],
+    ) -> Result<IntermediateKind, Diagnostic> {
+        match value {
+            IntermediateKind::ArrayLiteral {
+                items,
+                field_names: literal_names,
+                ..
+            } => {
+                let element = if literal_names.is_empty() {
+                    items.get(idx).cloned()
+                } else {
+                    literal_names
+                        .iter()
+                        .position(|name| name == &field_names[idx])
+                        .and_then(|pos| items.get(pos).cloned())
+                }
+                .ok_or_else(|| {
+                    Diagnostic::new(format!(
+                        "Missing field `{}` in struct literal",
+                        field_names[idx]
+                    ))
+                    .with_span(SourceSpan::default())
+                })?;
+                Ok(element)
+            }
+            _ => Ok(IntermediateKind::ArrayIndex {
+                array: Box::new(value.clone()),
+                index: Box::new(IntermediateKind::Literal(ExpressionLiteral::Number(
+                    idx as i32,
+                ))),
+            }),
+        }
+    }
+
+    let mut results = Vec::new();
+    match ty {
+        WasmType::I32 | WasmType::U8 | WasmType::Box { .. } => {
+            results.push((value.clone(), ty.clone(), base_offset));
+        }
+        WasmType::Struct(fields) => {
+            let sorted_fields = sorted_wasm_fields(fields);
+            let mut offset = base_offset;
+            for (name, field_ty) in sorted_fields {
+                let field_expr = struct_field_expr(value, &name)?;
+                let mut nested = collect_boxed_store_leaves(&field_expr, &field_ty, offset)?;
+                results.append(&mut nested);
+                offset = offset.saturating_add(wasm_type_size(&field_ty) as i32);
+            }
+        }
+        WasmType::Array {
+            element,
+            length,
+            field_names,
+        } => {
+            let element_size = wasm_type_size(element) as i32;
+            for idx in 0..*length {
+                let element_expr = array_element_expr(value, idx, field_names)?;
+                let offset = base_offset.saturating_add(idx as i32 * element_size);
+                let mut nested = collect_boxed_store_leaves(&element_expr, element, offset)?;
+                results.append(&mut nested);
+            }
+        }
+    }
+    Ok(results)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_expression(
     expr: &IntermediateKind,
@@ -2310,152 +2523,46 @@ fn emit_expression(
                                 )
                                 .with_span(SourceSpan::default())
                             })?;
-                            let store_instr = match element.as_ref() {
-                                WasmType::U8 => Instruction::I32Store8(memarg(0, 0, memory_index)),
-                                WasmType::I32 | WasmType::Box { .. } => {
-                                    Instruction::I32Store(memarg(0, 2, memory_index))
-                                }
-                                WasmType::Struct(fields) => {
-                                    let struct_values = match value.as_ref() {
-                                        IntermediateKind::Struct(items) => items,
-                                        _ => {
-                                            return Err(Diagnostic::new(
-                                                "Boxed struct array assignment requires a struct literal"
-                                                    .to_string(),
-                                            )
-                                            .with_span(SourceSpan::default()));
-                                        }
-                                    };
-                                    let base_local = box_base_local.ok_or_else(|| {
-                                        Diagnostic::new(
-                                            "Boxed array assignment requires a temporary local"
-                                                .to_string(),
-                                        )
-                                        .with_span(SourceSpan::default())
-                                    })?;
-                                    let sorted_fields = sorted_wasm_fields(fields);
-                                    let mut field_offsets = Vec::with_capacity(sorted_fields.len());
-                                    let mut offset = 0i32;
-                                    for (name, ty) in sorted_fields.iter() {
-                                        field_offsets.push((name.clone(), ty.clone(), offset));
-                                        offset = offset.saturating_add(wasm_type_size(ty) as i32);
+                            let element_type = (*element).clone();
+                            if matches!(
+                                element_type,
+                                WasmType::U8 | WasmType::I32 | WasmType::Box { .. }
+                            ) {
+                                let store_instr = match element_type {
+                                    WasmType::U8 => {
+                                        Instruction::I32Store8(memarg(0, 0, memory_index))
                                     }
-                                    tasks.push(EmitTask::Eval(full_target_expr));
-                                    for (name, field_type, field_offset) in
-                                        field_offsets.into_iter().rev()
-                                    {
-                                        let field_expr = struct_values
-                                            .iter()
-                                            .find(|(id, _)| id.name == name)
-                                            .map(|(_, expr)| expr.clone())
-                                            .ok_or_else(|| {
-                                                Diagnostic::new(format!(
-                                                    "Missing field `{}` in struct literal",
-                                                    name
-                                                ))
-                                                .with_span(SourceSpan::default())
-                                            })?;
-                                        let field_store = match field_type {
-                                            WasmType::U8 => {
-                                                Instruction::I32Store8(memarg(0, 0, memory_index))
-                                            }
-                                            WasmType::I32 | WasmType::Box { .. } => {
-                                                Instruction::I32Store(memarg(0, 2, memory_index))
-                                            }
-                                            _ => {
-                                                return Err(Diagnostic::new(
-                                                    "Boxed struct array assignment only supports i32 or u8 fields"
-                                                        .to_string(),
-                                                )
-                                                .with_span(SourceSpan::default()));
-                                            }
-                                        };
-                                        tasks.push(EmitTask::Instr(field_store));
-                                        tasks.push(EmitTask::EvalWithType {
-                                            expr: field_expr,
-                                            expected: field_type,
-                                        });
-                                        tasks.push(EmitTask::Instr(Instruction::I32Add));
-                                        tasks.push(EmitTask::Instr(Instruction::I32Const(
-                                            field_offset,
-                                        )));
-                                        tasks.push(EmitTask::Instr(Instruction::LocalGet(
-                                            base_local,
-                                        )));
+                                    WasmType::I32 | WasmType::Box { .. } => {
+                                        Instruction::I32Store(memarg(0, 2, memory_index))
                                     }
-                                    tasks.push(EmitTask::Instr(Instruction::LocalSet(base_local)));
-                                    tasks.push(EmitTask::Instr(Instruction::I32Mul));
-                                    tasks
-                                        .push(EmitTask::Instr(Instruction::I32Const(element_size)));
-                                    tasks.push(EmitTask::EvalValue((**index).clone()));
-                                    continue;
-                                }
-                                WasmType::Array {
-                                    element: field_element,
-                                    field_names,
-                                    ..
-                                } => {
-                                    let base_local = box_base_local.ok_or_else(|| {
-                                        Diagnostic::new(
-                                            "Boxed array assignment requires a temporary local"
-                                                .to_string(),
-                                        )
-                                        .with_span(SourceSpan::default())
-                                    })?;
-                                    let field_size = wasm_type_size(field_element) as i32;
-                                    let mut resolved_fields = Vec::with_capacity(field_names.len());
-                                    match value.as_ref() {
-                                        IntermediateKind::ArrayLiteral {
-                                            items,
-                                            field_names: literal_names,
-                                            ..
-                                        } => {
-                                            for (idx, name) in field_names.iter().enumerate() {
-                                                let field_expr = if literal_names.is_empty() {
-                                                    items.get(idx).cloned()
-                                                } else {
-                                                    literal_names
-                                                        .iter()
-                                                        .position(|lit_name| lit_name == name)
-                                                        .and_then(|pos| items.get(pos).cloned())
-                                                }
-                                                .ok_or_else(|| {
-                                                    Diagnostic::new(format!(
-                                                        "Missing field `{}` in struct literal",
-                                                        name
-                                                    ))
-                                                    .with_span(SourceSpan::default())
-                                                })?;
-                                                let field_offset = idx as i32 * field_size;
-                                                resolved_fields.push((field_expr, field_offset));
-                                            }
-                                        }
-                                        IntermediateKind::Struct(items) => {
-                                            for (idx, name) in field_names.iter().enumerate() {
-                                                let field_expr = items
-                                                    .iter()
-                                                    .find(|(id, _)| id.name == *name)
-                                                    .map(|(_, expr)| expr.clone())
-                                                    .ok_or_else(|| {
-                                                        Diagnostic::new(format!(
-                                                            "Missing field `{}` in struct literal",
-                                                            name
-                                                        ))
-                                                        .with_span(SourceSpan::default())
-                                                    })?;
-                                                let field_offset = idx as i32 * field_size;
-                                                resolved_fields.push((field_expr, field_offset));
-                                            }
-                                        }
-                                        _ => {
-                                            return Err(Diagnostic::new(
-                                                "Boxed struct array assignment requires a struct literal"
-                                                    .to_string(),
-                                            )
-                                            .with_span(SourceSpan::default()));
-                                        }
-                                    }
-                                    let field_store = match field_element.as_ref() {
+                                    _ => unreachable!("non-leaf element type checked above"),
+                                };
+                                tasks.push(EmitTask::Eval(full_target_expr));
+                                tasks.push(EmitTask::Instr(store_instr));
+                                tasks.push(EmitTask::EvalWithType {
+                                    expr: (*value).clone(),
+                                    expected: element_type,
+                                });
+                                tasks.push(EmitTask::Instr(Instruction::LocalGet(temp_local)));
+                                tasks.push(EmitTask::Instr(Instruction::LocalSet(temp_local)));
+                                tasks.push(EmitTask::Instr(Instruction::I32Mul));
+                                tasks.push(EmitTask::Instr(Instruction::I32Const(element_size)));
+                                tasks.push(EmitTask::EvalValue((**index).clone()));
+                            } else {
+                                let base_local = box_base_local.ok_or_else(|| {
+                                    Diagnostic::new(
+                                        "Boxed array assignment requires a temporary local"
+                                            .to_string(),
+                                    )
+                                    .with_span(SourceSpan::default())
+                                })?;
+                                let store_fields =
+                                    collect_boxed_store_leaves(value.as_ref(), &element_type, 0)?;
+                                tasks.push(EmitTask::Eval(full_target_expr));
+                                for (field_expr, field_type, field_offset) in
+                                    store_fields.into_iter().rev()
+                                {
+                                    let field_store = match field_type {
                                         WasmType::U8 => {
                                             Instruction::I32Store8(memarg(0, 0, memory_index))
                                         }
@@ -2470,49 +2577,23 @@ fn emit_expression(
                                             .with_span(SourceSpan::default()));
                                         }
                                     };
-                                    tasks.push(EmitTask::Eval(full_target_expr));
-                                    for (field_expr, field_offset) in
-                                        resolved_fields.into_iter().rev()
-                                    {
-                                        tasks.push(EmitTask::Instr(field_store.clone()));
-                                        tasks.push(EmitTask::EvalWithType {
-                                            expr: field_expr,
-                                            expected: (**field_element).clone(),
-                                        });
-                                        tasks.push(EmitTask::Instr(Instruction::I32Add));
-                                        tasks.push(EmitTask::Instr(Instruction::I32Const(
-                                            field_offset,
-                                        )));
-                                        tasks.push(EmitTask::Instr(Instruction::LocalGet(
-                                            base_local,
-                                        )));
-                                    }
-                                    tasks.push(EmitTask::Instr(Instruction::LocalSet(base_local)));
-                                    tasks.push(EmitTask::Instr(Instruction::I32Mul));
-                                    tasks
-                                        .push(EmitTask::Instr(Instruction::I32Const(element_size)));
-                                    tasks.push(EmitTask::EvalValue((**index).clone()));
-                                    continue;
+                                    tasks.push(EmitTask::Instr(field_store));
+                                    tasks.push(EmitTask::EvalWithType {
+                                        expr: field_expr,
+                                        expected: field_type,
+                                    });
+                                    tasks.push(EmitTask::Instr(Instruction::I32Add));
+                                    tasks.push(EmitTask::Instr(Instruction::I32Const(
+                                        field_offset,
+                                    )));
+                                    tasks.push(EmitTask::Instr(Instruction::LocalGet(base_local)));
                                 }
-                                _ => {
-                                    return Err(Diagnostic::new(
-                                        "Boxed array assignment only supports i32 or u8 elements"
-                                            .to_string(),
-                                    )
-                                    .with_span(SourceSpan::default()));
-                                }
-                            };
-                            tasks.push(EmitTask::Eval(full_target_expr));
-                            tasks.push(EmitTask::Instr(store_instr));
-                            tasks.push(EmitTask::EvalWithType {
-                                expr: (*value).clone(),
-                                expected: (*element).clone(),
-                            });
-                            tasks.push(EmitTask::Instr(Instruction::LocalGet(temp_local)));
-                            tasks.push(EmitTask::Instr(Instruction::LocalSet(temp_local)));
-                            tasks.push(EmitTask::Instr(Instruction::I32Mul));
-                            tasks.push(EmitTask::Instr(Instruction::I32Const(element_size)));
-                            tasks.push(EmitTask::EvalValue((**index).clone()));
+                                tasks.push(EmitTask::Instr(Instruction::LocalSet(base_local)));
+                                tasks.push(EmitTask::Instr(Instruction::I32Mul));
+                                tasks.push(EmitTask::Instr(Instruction::I32Const(element_size)));
+                                tasks.push(EmitTask::EvalValue((**index).clone()));
+                                continue;
+                            }
                         } else {
                             let type_index = type_ctx
                                 .get_type_index(&array_type)

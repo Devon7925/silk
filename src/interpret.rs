@@ -2484,7 +2484,11 @@ pub fn interpret_expression(
                 let effective_function =
                     if let ExpressionKind::Identifier(ident) = &function_value.kind {
                         context.get_identifier(ident).and_then(|b| match &b.0 {
-                            BindingContext::Bound(v, _, _) => Some(v.clone()),
+                            BindingContext::Bound(
+                                v,
+                                PreserveBehavior::Inline | PreserveBehavior::PreserveBinding,
+                                _,
+                            ) => Some(v.clone()),
                             _ => None,
                         })
                     } else {
@@ -2514,18 +2518,42 @@ pub fn interpret_expression(
                         let mut used = identifiers_used(&body);
                         let created = identifiers_created_or_modified(&body);
                         used.retain(|id| !bound.contains(id) && !created.contains(id));
-                        !used.is_empty()
+                        if used.is_empty() {
+                            false
+                        } else if let ExpressionKind::Identifier(identifier) = &function_value.kind
+                        {
+                            let binding_scope = context
+                                .bindings
+                                .iter()
+                                .enumerate()
+                                .rev()
+                                .find_map(|(idx, scope)| {
+                                    scope.contains_key(identifier).then_some(idx)
+                                });
+                            binding_scope.map_or(true, |idx| idx > 1)
+                        } else {
+                            true
+                        }
                     };
                     let parameter_is_mutable = pattern_has_mutable_annotation(&parameter);
+                    let body_is_const = if argument_is_const {
+                        let mut const_context = Context::empty();
+                        const_context.bindings.push(HashMap::new());
+                        let _ =
+                            bind_pattern_blanks_for_const(parameter.clone(), &mut const_context, None);
+                        is_resolved_const_function_expression(&body, &const_context)
+                    } else {
+                        false
+                    };
                     let mut should_inline = returns_compile_time_type
                         || pattern_is_compile_time
-                        || argument_is_const
+                        || (argument_is_const && body_is_const)
                         || returns_function_value
                         || captures_outer_scope;
                     if parameter_is_mutable
                         && !returns_compile_time_type
                         && !pattern_is_compile_time
-                        && !argument_is_const
+                        && !(argument_is_const && body_is_const)
                     {
                         should_inline = false;
                     }
@@ -4210,6 +4238,159 @@ fn expression_contains_external_mutation(expr: &Expression, context: &Context) -
             return true;
         }
     }
+    fn function_has_assignment(expr: &Expression) -> bool {
+        fold_expression(expr, false, &|current_expr, found| {
+            found || matches!(current_expr.kind, ExpressionKind::Assignment { .. })
+        })
+    }
+
+    let mut stack = vec![expr];
+    while let Some(expr) = stack.pop() {
+        if let ExpressionKind::FunctionCall { function, argument } = &expr.kind {
+            let resolved_function = match &function.kind {
+                ExpressionKind::Function { .. } => Some(function.as_ref()),
+                ExpressionKind::Identifier(identifier) => context.get_identifier(identifier).and_then(
+                    |(binding, _)| match binding {
+                        BindingContext::Bound(value, _, _) => Some(value),
+                        _ => None,
+                    },
+                ),
+                _ => None,
+            };
+
+            if let Some(function_value) = resolved_function {
+                if let ExpressionKind::Function { body, .. } = &function_value.kind
+                    && function_has_assignment(body)
+                {
+                    return true;
+                }
+            } else {
+                return true;
+            }
+
+            stack.push(argument);
+            stack.push(function);
+            continue;
+        }
+
+        match &expr.kind {
+            ExpressionKind::IntrinsicType(..)
+            | ExpressionKind::Literal(..)
+            | ExpressionKind::Identifier(..) => {}
+            ExpressionKind::BoxType(inner) => {
+                stack.push(inner);
+            }
+            ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(left, right, ..)) => {
+                stack.push(right);
+                stack.push(left);
+            }
+            ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(operand, ..)) => {
+                stack.push(operand);
+            }
+            ExpressionKind::IntrinsicOperation(IntrinsicOperation::InlineAssembly { code, .. }) => {
+                stack.push(code);
+            }
+            ExpressionKind::EnumType(items) => {
+                for (_, field_expr) in items.iter().rev() {
+                    stack.push(field_expr);
+                }
+            }
+            ExpressionKind::Match {
+                value, branches, ..
+            } => {
+                for (_, branch) in branches.iter().rev() {
+                    stack.push(branch);
+                }
+                stack.push(value);
+            }
+            ExpressionKind::EnumValue {
+                enum_type, payload, ..
+            } => {
+                stack.push(payload);
+                stack.push(enum_type);
+            }
+            ExpressionKind::EnumConstructor {
+                enum_type,
+                payload_type,
+                ..
+            } => {
+                stack.push(payload_type);
+                stack.push(enum_type);
+            }
+            ExpressionKind::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                stack.push(else_branch);
+                stack.push(then_branch);
+                stack.push(condition);
+            }
+            ExpressionKind::AttachImplementation {
+                type_expr,
+                implementation,
+                ..
+            } => {
+                stack.push(implementation);
+                stack.push(type_expr);
+            }
+            ExpressionKind::Function {
+                return_type, body, ..
+            } => {
+                stack.push(body);
+                if let Some(ret_type) = return_type {
+                    stack.push(ret_type);
+                }
+            }
+            ExpressionKind::FunctionType {
+                parameter,
+                return_type,
+                ..
+            } => {
+                stack.push(return_type);
+                stack.push(parameter);
+            }
+            ExpressionKind::Struct(items) => {
+                for (_, field_expr) in items.iter().rev() {
+                    stack.push(field_expr);
+                }
+            }
+            ExpressionKind::ArrayRepeat { value, count } => {
+                stack.push(count);
+                stack.push(value);
+            }
+            ExpressionKind::Operation { left, right, .. } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            ExpressionKind::Assignment { expr, .. } => {
+                stack.push(expr);
+            }
+            ExpressionKind::FunctionCall { .. } => {}
+            ExpressionKind::ArrayIndex { array, index } => {
+                stack.push(index);
+                stack.push(array);
+            }
+            ExpressionKind::TypePropertyAccess { object, .. } => {
+                stack.push(object);
+            }
+            ExpressionKind::Binding(binding) => {
+                stack.push(&binding.expr);
+            }
+            ExpressionKind::Block(expressions) => {
+                for expr in expressions.iter().rev() {
+                    stack.push(expr);
+                }
+            }
+            ExpressionKind::Diverge { value, .. } => {
+                stack.push(value);
+            }
+            ExpressionKind::Loop { body, .. } => {
+                stack.push(body);
+            }
+        }
+    }
     false
 }
 
@@ -5483,15 +5664,20 @@ fn apply_lvalue_update(
             ));
         };
 
-        let (expected_type, bound_type) = match binding_ctx {
-            BindingContext::Bound(existing, _, bound_type) => (
+        let (expected_type, bound_type, preserve_behavior) = match binding_ctx {
+            BindingContext::Bound(existing, preserve_behavior, bound_type) => (
                 get_type_of_expression(existing, &type_context).ok(),
                 bound_type.clone(),
+                *preserve_behavior,
             ),
             BindingContext::UnboundWithType(expected_ty) => {
-                (Some(expected_ty.clone()), Some(expected_ty.clone()))
+                (
+                    Some(expected_ty.clone()),
+                    Some(expected_ty.clone()),
+                    PreserveBehavior::Inline,
+                )
             }
-            BindingContext::UnboundWithoutType => (None, None),
+            BindingContext::UnboundWithoutType => (None, None, PreserveBehavior::Inline),
         };
 
         if let (Some(expected_ty), Some(actual_ty)) = (&expected_type, &value_type)
@@ -5509,7 +5695,7 @@ fn apply_lvalue_update(
         let binding_type = expected_type.or(value_type);
 
         if is_resolved_constant(&value) {
-            *binding_ctx = BindingContext::Bound(value, PreserveBehavior::Inline, bound_type);
+            *binding_ctx = BindingContext::Bound(value, preserve_behavior, bound_type);
         } else if let Some(binding_ty) = binding_type {
             *binding_ctx = BindingContext::UnboundWithType(binding_ty);
         } else {

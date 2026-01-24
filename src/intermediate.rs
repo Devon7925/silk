@@ -162,18 +162,21 @@ pub struct IntermediateResult {
     pub globals: Vec<IntermediateGlobal>,
     pub exports: Vec<IntermediateExport>,
     pub wrappers: Vec<IntermediateWrap>,
+    pub inline_bindings: HashMap<String, IntermediateKind>,
 }
 
 pub fn context_to_intermediate(context: &Context) -> IntermediateResult {
     let mut builder = IntermediateBuilder::new(context.clone());
     builder.collect_type_aliases(context);
     builder.collect_bindings(context);
+    let inline_bindings = builder.collect_inline_bindings();
 
     IntermediateResult {
         functions: builder.functions,
         globals: builder.globals,
         exports: builder.exports,
         wrappers: builder.wrappers,
+        inline_bindings,
     }
 }
 
@@ -729,6 +732,27 @@ impl IntermediateBuilder {
             enum_context,
             match_temp_counter: 0,
         }
+    }
+
+    fn collect_inline_bindings(&mut self) -> HashMap<String, IntermediateKind> {
+        let mut lowered = HashMap::new();
+        let bindings: Vec<(Identifier, Expression)> = self
+            .enum_context
+            .bindings
+            .iter()
+            .flat_map(|scope| scope.iter())
+            .filter_map(|(id, (binding, _))| match binding {
+                BindingContext::Bound(value, _, _) if is_data_expression(value) => {
+                    Some((id.clone(), value.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        for (identifier, expr) in bindings {
+            let value = expression_to_intermediate(expr, self);
+            lowered.insert(identifier.name.clone(), value);
+        }
+        lowered
     }
 
     fn next_match_temp_identifier(&mut self) -> Identifier {
@@ -1298,11 +1322,34 @@ impl IntermediateBuilder {
                         variant_types.push(values.pop().expect("Missing enum variant type"));
                     }
                     variant_types.reverse();
-                    let payload_fields = variant_names
-                        .into_iter()
-                        .zip(variant_types.into_iter())
-                        .collect();
-                    let payload = IntermediateType::Struct(payload_fields);
+                    let field_names = variant_names;
+                    let first_type = variant_types.first().cloned();
+                    let mut homogeneous = true;
+                    if let Some(first) = &first_type {
+                        for ty in variant_types.iter().skip(1) {
+                            if ty != first {
+                                homogeneous = false;
+                                break;
+                            }
+                        }
+                    } else {
+                        homogeneous = false;
+                    }
+                    let payload = if let Some(first) = first_type
+                        && homogeneous
+                    {
+                        IntermediateType::Array {
+                            element: Box::new(first),
+                            length: variant_types.len(),
+                            field_names: field_names.clone(),
+                        }
+                    } else {
+                        let payload_fields = field_names
+                            .into_iter()
+                            .zip(variant_types.into_iter())
+                            .collect();
+                        IntermediateType::Struct(payload_fields)
+                    };
                     values.push(IntermediateType::Struct(vec![
                         ("payload".to_string(), payload),
                         ("tag".to_string(), IntermediateType::I32),
@@ -1629,6 +1676,36 @@ fn is_type_expression(expr: &Expression) -> bool {
             | ExpressionKind::AttachImplementation { .. }
             | ExpressionKind::FunctionType { .. }
     )
+}
+
+fn is_data_expression(expr: &Expression) -> bool {
+    let mut stack = vec![expr];
+    while let Some(expr) = stack.pop() {
+        match &expr.kind {
+            ExpressionKind::Literal(_) | ExpressionKind::Identifier(_) => {}
+            ExpressionKind::Struct(items) => {
+                for (_, value_expr) in items.iter() {
+                    stack.push(value_expr);
+                }
+            }
+            ExpressionKind::ArrayRepeat { value, count } => {
+                stack.push(count);
+                stack.push(value);
+            }
+            ExpressionKind::ArrayIndex { array, index } => {
+                stack.push(index);
+                stack.push(array);
+            }
+            ExpressionKind::TypePropertyAccess { object, .. } => {
+                stack.push(object);
+            }
+            ExpressionKind::EnumValue { payload, .. } => {
+                stack.push(payload);
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn export_targets(annotations: &[BindingAnnotation]) -> Vec<TargetLiteral> {
