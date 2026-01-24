@@ -2298,7 +2298,7 @@ pub fn interpret_expression(
                 initial_context,
                 iteration_count,
             } => {
-                if iteration_count > 10_000 {
+                if iteration_count > 10 {
                     return Err(diagnostic("Loop did not produce a return value", span));
                 }
 
