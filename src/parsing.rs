@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use crate::diagnostics::{Diagnostic, SourceSpan};
 
@@ -198,11 +200,11 @@ pub enum BinaryIntrinsicOperator {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntrinsicOperation {
-    Binary(Box<Expression>, Box<Expression>, BinaryIntrinsicOperator),
-    Unary(Box<Expression>, UnaryIntrinsicOperator),
+    Binary(Rc<Expression>, Rc<Expression>, BinaryIntrinsicOperator),
+    Unary(Rc<Expression>, UnaryIntrinsicOperator),
     InlineAssembly {
         target: TargetLiteral,
-        code: Box<Expression>,
+        code: Rc<Expression>,
     },
 }
 
@@ -215,97 +217,114 @@ pub enum DivergeExpressionType {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpressionKind {
     IntrinsicType(IntrinsicType),
-    BoxType(Box<Expression>),
+    BoxType(Rc<Expression>),
     IntrinsicOperation(IntrinsicOperation),
     EnumType(Vec<(Identifier, Expression)>),
     Match {
-        value: Box<Expression>,
+        value: Rc<Expression>,
         branches: Vec<(BindingPattern, Expression)>,
     },
     EnumValue {
-        enum_type: Box<Expression>,
+        enum_type: Rc<Expression>,
         variant: Identifier,
         variant_index: usize,
-        payload: Box<Expression>,
+        payload: Rc<Expression>,
     },
     EnumConstructor {
-        enum_type: Box<Expression>,
+        enum_type: Rc<Expression>,
         variant: Identifier,
         variant_index: usize,
-        payload_type: Box<Expression>,
+        payload_type: Rc<Expression>,
     },
     If {
-        condition: Box<Expression>,
-        then_branch: Box<Expression>,
-        else_branch: Box<Expression>,
+        condition: Rc<Expression>,
+        then_branch: Rc<Expression>,
+        else_branch: Rc<Expression>,
     },
     AttachImplementation {
-        type_expr: Box<Expression>,
-        implementation: Box<Expression>,
+        type_expr: Rc<Expression>,
+        implementation: Rc<Expression>,
     },
     Function {
         parameter: BindingPattern,
-        return_type: Option<Box<Expression>>,
-        body: Box<Expression>,
+        return_type: Option<Rc<Expression>>,
+        body: Rc<Expression>,
     },
     FunctionType {
-        parameter: Box<Expression>,
-        return_type: Box<Expression>,
+        parameter: Rc<Expression>,
+        return_type: Rc<Expression>,
     },
     Struct(Vec<(Identifier, Expression)>),
     ArrayRepeat {
-        value: Box<Expression>,
-        count: Box<Expression>,
+        value: Rc<Expression>,
+        count: Rc<Expression>,
     },
     Literal(ExpressionLiteral),
     Identifier(Identifier),
     Operation {
         operator: String,
-        left: Box<Expression>,
-        right: Box<Expression>,
+        left: Rc<Expression>,
+        right: Rc<Expression>,
     },
     Assignment {
         target: LValue,
-        expr: Box<Expression>,
+        expr: Rc<Expression>,
     },
     FunctionCall {
-        function: Box<Expression>,
-        argument: Box<Expression>,
+        function: Rc<Expression>,
+        argument: Rc<Expression>,
     },
     ArrayIndex {
-        array: Box<Expression>,
-        index: Box<Expression>,
+        array: Rc<Expression>,
+        index: Rc<Expression>,
     },
     TypePropertyAccess {
-        object: Box<Expression>,
+        object: Rc<Expression>,
         property: String,
     },
-    Binding(Box<Binding>),
+    Binding(Rc<Binding>),
     Block(Vec<Expression>),
     Diverge {
-        value: Box<Expression>,
+        value: Rc<Expression>,
         divergance_type: DivergeExpressionType,
     },
     Loop {
-        body: Box<Expression>,
+        body: Rc<Expression>,
     },
 }
 
 impl ExpressionKind {
     pub fn with_span(self, span: SourceSpan) -> Expression {
-        Expression { kind: self, span }
+        Expression {
+            kind: self,
+            span,
+            type_cache: RefCell::new(None),
+        }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Expression {
     pub kind: ExpressionKind,
     pub span: SourceSpan,
+    pub type_cache: RefCell<Option<Rc<Expression>>>,
 }
+
+impl PartialEq for Expression {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.span == other.span
+    }
+}
+
+impl Eq for Expression {}
 
 impl Expression {
     pub fn new(kind: ExpressionKind, span: SourceSpan) -> Self {
-        Self { kind, span }
+        Self {
+            kind,
+            span,
+            type_cache: RefCell::new(None),
+        }
     }
 
     pub fn span(&self) -> SourceSpan {
@@ -1394,8 +1413,8 @@ impl<'a> Parser<'a> {
                                     consumed_span(self.source, struct_frame.start_slice, rest);
                                 completed_expr = Some(
                                     ExpressionKind::ArrayRepeat {
-                                        value: Box::new(repeat_value),
-                                        count: Box::new(expr),
+                                        value: Rc::new(repeat_value),
+                                        count: Rc::new(expr),
                                     }
                                     .with_span(span),
                                 );
@@ -1558,9 +1577,9 @@ impl<'a> Parser<'a> {
                                 );
                                 completed_expr = Some(
                                     ExpressionKind::If {
-                                        condition: Box::new(condition),
-                                        then_branch: Box::new(then_branch),
-                                        else_branch: Box::new(expr),
+                                        condition: Rc::new(condition),
+                                        then_branch: Rc::new(then_branch),
+                                        else_branch: Rc::new(expr),
                                     }
                                     .with_span(span),
                                 );
@@ -1633,9 +1652,9 @@ impl<'a> Parser<'a> {
                                 .with_span(SourceSpan::new(span.end(), 0));
                             completed_expr = Some(
                                 ExpressionKind::If {
-                                    condition: Box::new(condition),
-                                    then_branch: Box::new(then_branch),
-                                    else_branch: Box::new(empty_else),
+                                    condition: Rc::new(condition),
+                                    then_branch: Rc::new(then_branch),
+                                    else_branch: Rc::new(empty_else),
                                 }
                                 .with_span(span),
                             );
@@ -1691,12 +1710,11 @@ impl<'a> Parser<'a> {
                                     )),
                                     span: iterator_span,
                                 };
-                                let iter_binding_expr =
-                                    ExpressionKind::Binding(Box::new(Binding {
-                                        pattern: iter_binding_pattern,
-                                        expr: iterator_expr,
-                                    }))
-                                    .with_span(iterator_span);
+                                let iter_binding_expr = ExpressionKind::Binding(Rc::new(Binding {
+                                    pattern: iter_binding_pattern,
+                                    expr: iterator_expr,
+                                }))
+                                .with_span(iterator_span);
                                 let overall_span = consumed_span(
                                     self.source,
                                     for_frame.start_slice,
@@ -1706,18 +1724,18 @@ impl<'a> Parser<'a> {
                                     ExpressionKind::Identifier(iterator_identifier.clone())
                                         .with_span(overall_span);
                                 let iter_ty_access = ExpressionKind::TypePropertyAccess {
-                                    object: Box::new(iter_identifier_expr.clone()),
+                                    object: Rc::new(iter_identifier_expr.clone()),
                                     property: "iter_ty".to_string(),
                                 }
                                 .with_span(overall_span);
                                 let element_pattern =
                                     pattern_expression_to_binding_pattern(pattern_expr.clone())?;
                                 let option_call = ExpressionKind::FunctionCall {
-                                    function: Box::new(
+                                    function: Rc::new(
                                         ExpressionKind::Identifier(Identifier::new("Option"))
                                             .with_span(overall_span),
                                     ),
-                                    argument: Box::new(iter_ty_access),
+                                    argument: Rc::new(iter_ty_access),
                                 }
                                 .with_span(overall_span);
                                 let condition_pattern = BindingPattern::EnumVariant {
@@ -1727,17 +1745,17 @@ impl<'a> Parser<'a> {
                                     span: overall_span,
                                 };
                                 let next_access = ExpressionKind::FunctionCall {
-                                    function: Box::new(
+                                    function: Rc::new(
                                         ExpressionKind::TypePropertyAccess {
-                                            object: Box::new(iter_identifier_expr.clone()),
+                                            object: Rc::new(iter_identifier_expr.clone()),
                                             property: "next".to_string(),
                                         }
                                         .with_span(overall_span),
                                     ),
-                                    argument: Box::new(iter_identifier_expr),
+                                    argument: Rc::new(iter_identifier_expr),
                                 }
                                 .with_span(overall_span);
-                                let condition_expr = ExpressionKind::Binding(Box::new(Binding {
+                                let condition_expr = ExpressionKind::Binding(Rc::new(Binding {
                                     pattern: condition_pattern,
                                     expr: next_access,
                                 }))
@@ -1842,7 +1860,7 @@ impl<'a> Parser<'a> {
                             consumed_span(self.source, loop_frame.start_slice, self.remaining);
                         completed_expr = Some(
                             ExpressionKind::Loop {
-                                body: Box::new(expr),
+                                body: Rc::new(expr),
                             }
                             .with_span(span),
                         );
@@ -1975,7 +1993,7 @@ impl<'a> Parser<'a> {
                             consumed_span(self.source, return_frame.start_slice, self.remaining);
                         completed_expr = Some(
                             ExpressionKind::Diverge {
-                                value: Box::new(expr),
+                                value: Rc::new(expr),
                                 divergance_type: DivergeExpressionType::Return,
                             }
                             .with_span(span),
@@ -2010,7 +2028,7 @@ impl<'a> Parser<'a> {
                                 let empty = Expression::new(ExpressionKind::Struct(vec![]), span);
                                 completed_expr = Some(
                                     ExpressionKind::Diverge {
-                                        value: Box::new(empty),
+                                        value: Rc::new(empty),
                                         divergance_type: DivergeExpressionType::Return,
                                     }
                                     .with_span(span),
@@ -2036,7 +2054,7 @@ impl<'a> Parser<'a> {
                             consumed_span(self.source, break_frame.start_slice, self.remaining);
                         completed_expr = Some(
                             ExpressionKind::Diverge {
-                                value: Box::new(expr),
+                                value: Rc::new(expr),
                                 divergance_type: DivergeExpressionType::Break,
                             }
                             .with_span(span),
@@ -2071,7 +2089,7 @@ impl<'a> Parser<'a> {
                                 let empty = Expression::new(ExpressionKind::Struct(vec![]), span);
                                 completed_expr = Some(
                                     ExpressionKind::Diverge {
-                                        value: Box::new(empty),
+                                        value: Rc::new(empty),
                                         divergance_type: DivergeExpressionType::Break,
                                     }
                                     .with_span(span),
@@ -2119,18 +2137,18 @@ fn finish_block(block_frame: BlockFrame<'_>) -> Expression {
 fn build_while_expression(condition: Expression, body: Expression, span: SourceSpan) -> Expression {
     let condition_span = condition.span();
     let break_expr = ExpressionKind::Diverge {
-        value: Box::new(Expression::new(ExpressionKind::Struct(vec![]), span)),
+        value: Rc::new(Expression::new(ExpressionKind::Struct(vec![]), span)),
         divergance_type: DivergeExpressionType::Break,
     }
     .with_span(condition_span);
     let body_if = ExpressionKind::If {
-        condition: Box::new(condition),
-        then_branch: Box::new(body),
-        else_branch: Box::new(break_expr),
+        condition: Rc::new(condition),
+        then_branch: Rc::new(body),
+        else_branch: Rc::new(break_expr),
     }
     .with_span(condition_span);
     ExpressionKind::Loop {
-        body: Box::new(body_if),
+        body: Rc::new(body_if),
     }
     .with_span(span)
 }
@@ -2155,12 +2173,12 @@ fn reduce_stacks(
             let target = expression_to_lvalue(left)?;
             ExpressionKind::Assignment {
                 target,
-                expr: Box::new(right),
+                expr: Rc::new(right),
             }
         }
         ":=" => {
             let pattern = pattern_expression_to_binding_pattern(left)?;
-            ExpressionKind::Binding(Box::new(Binding {
+            ExpressionKind::Binding(Rc::new(Binding {
                 pattern,
                 expr: right,
             }))
@@ -2170,12 +2188,12 @@ fn reduce_stacks(
             ExpressionKind::Function {
                 parameter: pattern,
                 return_type: None,
-                body: Box::new(right),
+                body: Rc::new(right),
             }
         }
         "->" => ExpressionKind::FunctionType {
-            parameter: Box::new(left),
-            return_type: Box::new(right),
+            parameter: Rc::new(left),
+            return_type: Rc::new(right),
         },
         "::" => {
             let property = match right.kind {
@@ -2191,7 +2209,7 @@ fn reduce_stacks(
                 }
             };
             ExpressionKind::TypePropertyAccess {
-                object: Box::new(left),
+                object: Rc::new(left),
                 property,
             }
         }
@@ -2209,32 +2227,32 @@ fn reduce_stacks(
                 }
             };
             ExpressionKind::FunctionCall {
-                function: Box::new(
+                function: Rc::new(
                     ExpressionKind::TypePropertyAccess {
-                        object: Box::new(left.clone()),
+                        object: Rc::new(left.clone()),
                         property,
                     }
                     .with_span(span),
                 ),
-                argument: Box::new(left),
+                argument: Rc::new(left),
             }
         }
         "" => ExpressionKind::FunctionCall {
-            function: Box::new(left),
-            argument: Box::new(right),
+            function: Rc::new(left),
+            argument: Rc::new(right),
         },
         "|>" => ExpressionKind::FunctionCall {
-            function: Box::new(right),
-            argument: Box::new(left),
+            function: Rc::new(right),
+            argument: Rc::new(left),
         },
         "@" => ExpressionKind::AttachImplementation {
-            type_expr: Box::new(left),
-            implementation: Box::new(right),
+            type_expr: Rc::new(left),
+            implementation: Rc::new(right),
         },
         operator => ExpressionKind::Operation {
             operator: operator.to_string(),
-            left: Box::new(left),
-            right: Box::new(right),
+            left: Rc::new(left),
+            right: Rc::new(right),
         },
     };
     operand_stack.push(Expression::new(processed_operation, span));
@@ -2487,7 +2505,7 @@ fn expression_to_lvalue(expression: Expression) -> Result<LValue, Diagnostic> {
     let mut current = expression;
 
     loop {
-        let Expression { kind, span } = current;
+        let Expression { kind, span, .. } = current;
         match kind {
             ExpressionKind::Identifier(identifier) => {
                 let mut lvalue = LValue::Identifier(identifier, span);
@@ -2502,18 +2520,18 @@ fn expression_to_lvalue(expression: Expression) -> Result<LValue, Diagnostic> {
             }
             ExpressionKind::TypePropertyAccess { object, property } => {
                 properties.push((property, span));
-                current = *object;
+                current = (*object).clone();
             }
             ExpressionKind::FunctionCall { function, argument } => {
-                if let ExpressionKind::TypePropertyAccess { object, property } = function.kind {
-                    properties.push((property, span));
-                    current = *object;
+                if let ExpressionKind::TypePropertyAccess { object, property } = &function.kind {
+                    properties.push((property.clone(), span));
+                    current = object.as_ref().clone();
                     continue;
                 }
-                let array = expression_to_lvalue(*function)?;
+                let array = expression_to_lvalue((*function).clone())?;
                 let mut lvalue = LValue::ArrayIndex {
                     array: Box::new(array),
-                    index: argument,
+                    index: Box::new((*argument).clone()),
                     span,
                 };
                 for (property, access_span) in properties.into_iter().rev() {
@@ -2594,35 +2612,39 @@ fn pattern_expression_to_binding_pattern(
                     } if operator == ":" => {
                         stack.push(PatternBuildFrame::TypeHintFinish {
                             span,
-                            type_expr: *right,
+                            type_expr: right.as_ref().clone(),
                         });
-                        stack.push(PatternBuildFrame::Expr(*left));
+                        stack.push(PatternBuildFrame::Expr(left.as_ref().clone()));
                     }
-                    ExpressionKind::FunctionCall { function, argument } => match *function {
-                        Expression {
-                            kind:
-                                ExpressionKind::TypePropertyAccess {
-                                    object, property, ..
-                                },
-                            ..
-                        } => {
-                            stack.push(PatternBuildFrame::EnumVariantFinish {
-                                span,
-                                enum_type: *object,
-                                variant: Identifier::new(property),
-                                has_payload: true,
-                            });
-                            stack.push(PatternBuildFrame::Expr(*argument));
+                    ExpressionKind::FunctionCall { function, argument } => {
+                        match function.as_ref() {
+                            Expression {
+                                kind:
+                                    ExpressionKind::TypePropertyAccess {
+                                        object, property, ..
+                                    },
+                                ..
+                            } => {
+                                stack.push(PatternBuildFrame::EnumVariantFinish {
+                                    span,
+                                    enum_type: object.as_ref().clone(),
+                                    variant: Identifier::new(property),
+                                    has_payload: true,
+                                });
+                                stack.push(PatternBuildFrame::Expr(argument.as_ref().clone()));
+                            }
+                            other => {
+                                let annotations =
+                                    extract_binding_annotations_from_expression(other.clone())?;
+                                stack
+                                    .push(PatternBuildFrame::AnnotatedFinish { span, annotations });
+                                stack.push(PatternBuildFrame::Expr(argument.as_ref().clone()));
+                            }
                         }
-                        other => {
-                            let annotations = extract_binding_annotations_from_expression(other)?;
-                            stack.push(PatternBuildFrame::AnnotatedFinish { span, annotations });
-                            stack.push(PatternBuildFrame::Expr(*argument));
-                        }
-                    },
+                    }
                     ExpressionKind::TypePropertyAccess { object, property } => {
                         pattern_stack.push(BindingPattern::EnumVariant {
-                            enum_type: object,
+                            enum_type: Box::new(object.as_ref().clone()),
                             variant: Identifier::new(property),
                             payload: None,
                             span,
@@ -2707,8 +2729,9 @@ fn extract_binding_annotations_from_expression(
     if let ExpressionKind::FunctionCall { function, argument } = &expression.kind
         && matches!(function.kind, ExpressionKind::FunctionCall { .. })
     {
-        let mut annotations = extract_binding_annotations_from_expression((**function).clone())?;
-        annotations.push((**argument).clone());
+        let mut annotations =
+            extract_binding_annotations_from_expression(function.as_ref().clone())?;
+        annotations.push(argument.as_ref().clone());
         return Ok(annotations);
     }
     Ok(vec![expression])

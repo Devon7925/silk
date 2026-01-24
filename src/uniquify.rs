@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -152,12 +153,12 @@ enum Task {
     },
     ContinueFunctionParam {
         span: SourceSpan,
-        return_type: Option<Box<Expression>>,
-        body: Box<Expression>,
+        return_type: Option<Rc<Expression>>,
+        body: Rc<Expression>,
     },
     ContinueFunctionReturnType {
         span: SourceSpan,
-        body: Box<Expression>,
+        body: Rc<Expression>,
         parameter: BindingPattern,
         scope: ScopeStack,
     },
@@ -197,15 +198,15 @@ enum Task {
     },
     ContinueIfCondition {
         span: SourceSpan,
-        then_branch: Box<Expression>,
-        else_branch: Box<Expression>,
+        then_branch: Rc<Expression>,
+        else_branch: Rc<Expression>,
         then_scope: ScopeStack,
         else_scope: ScopeStack,
     },
     ContinueIfThen {
         span: SourceSpan,
         condition: Expression,
-        else_branch: Box<Expression>,
+        else_branch: Rc<Expression>,
         else_scope: ScopeStack,
     },
     ContinueIfElse {
@@ -232,7 +233,7 @@ enum Task {
     },
     ContinuePatternTypeHint {
         span: SourceSpan,
-        ty: Box<Expression>,
+        ty: Rc<Expression>,
     },
     ContinuePatternTypeHintExpr {
         span: SourceSpan,
@@ -299,23 +300,23 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                         op,
                     )) => {
                         tasks.push(Task::BuildBinary { span, op });
-                        tasks.push(Task::Expr(*right, scope.clone()));
-                        tasks.push(Task::Expr(*left, scope));
+                        tasks.push(Task::Expr(right.as_ref().clone(), scope.clone()));
+                        tasks.push(Task::Expr(left.as_ref().clone(), scope));
                     }
                     ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(operand, op)) => {
                         tasks.push(Task::BuildUnary { span, op });
-                        tasks.push(Task::Expr(*operand, scope));
+                        tasks.push(Task::Expr(operand.as_ref().clone(), scope));
                     }
                     ExpressionKind::IntrinsicOperation(IntrinsicOperation::InlineAssembly {
                         target,
                         code,
                     }) => {
                         tasks.push(Task::BuildInlineAssembly { span, target });
-                        tasks.push(Task::Expr(*code, scope));
+                        tasks.push(Task::Expr(code.as_ref().clone(), scope));
                     }
                     ExpressionKind::BoxType(inner) => {
                         tasks.push(Task::BuildBoxType { span });
-                        tasks.push(Task::Expr(*inner, scope));
+                        tasks.push(Task::Expr(inner.as_ref().clone(), scope));
                     }
                     ExpressionKind::EnumType(variants) => {
                         let ids = variants.iter().map(|(id, _)| id.clone()).collect();
@@ -331,7 +332,7 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                             outer_scope,
                             branches: branches.into_iter(),
                         });
-                        tasks.push(Task::Expr(*value, scope));
+                        tasks.push(Task::Expr(value.as_ref().clone(), scope));
                     }
                     ExpressionKind::EnumValue {
                         enum_type,
@@ -344,8 +345,8 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                             variant,
                             variant_index,
                         });
-                        tasks.push(Task::Expr(*payload, scope.clone()));
-                        tasks.push(Task::Expr(*enum_type, scope));
+                        tasks.push(Task::Expr(payload.as_ref().clone(), scope.clone()));
+                        tasks.push(Task::Expr(enum_type.as_ref().clone(), scope));
                     }
                     ExpressionKind::EnumConstructor {
                         enum_type,
@@ -358,8 +359,8 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                             variant,
                             variant_index,
                         });
-                        tasks.push(Task::Expr(*payload_type, scope.clone()));
-                        tasks.push(Task::Expr(*enum_type, scope));
+                        tasks.push(Task::Expr(payload_type.as_ref().clone(), scope.clone()));
+                        tasks.push(Task::Expr(enum_type.as_ref().clone(), scope));
                     }
                     ExpressionKind::If {
                         condition,
@@ -377,15 +378,15 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                             then_scope,
                             else_scope,
                         });
-                        tasks.push(Task::Expr(*condition, scope));
+                        tasks.push(Task::Expr(condition.as_ref().clone(), scope));
                     }
                     ExpressionKind::AttachImplementation {
                         type_expr,
                         implementation,
                     } => {
                         tasks.push(Task::BuildAttachImplementation { span });
-                        tasks.push(Task::Expr(*implementation, scope.clone()));
-                        tasks.push(Task::Expr(*type_expr, scope));
+                        tasks.push(Task::Expr(implementation.as_ref().clone(), scope.clone()));
+                        tasks.push(Task::Expr(type_expr.as_ref().clone(), scope));
                     }
                     ExpressionKind::Function {
                         parameter,
@@ -408,8 +409,11 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                         let mut function_type_scope = scope.clone();
                         function_type_scope.push();
                         tasks.push(Task::BuildFunctionType { span });
-                        tasks.push(Task::Expr(*return_type, function_type_scope.clone()));
-                        tasks.push(Task::Expr(*parameter, function_type_scope));
+                        tasks.push(Task::Expr(
+                            return_type.as_ref().clone(),
+                            function_type_scope.clone(),
+                        ));
+                        tasks.push(Task::Expr(parameter.as_ref().clone(), function_type_scope));
                     }
                     ExpressionKind::Struct(fields) => {
                         let ids = fields.iter().map(|(id, _)| id.clone()).collect();
@@ -420,8 +424,8 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                     }
                     ExpressionKind::ArrayRepeat { value, count } => {
                         tasks.push(Task::BuildArrayRepeat { span });
-                        tasks.push(Task::Expr(*count, scope.clone()));
-                        tasks.push(Task::Expr(*value, scope));
+                        tasks.push(Task::Expr(count.as_ref().clone(), scope.clone()));
+                        tasks.push(Task::Expr(value.as_ref().clone(), scope));
                     }
                     ExpressionKind::IntrinsicType(ty) => {
                         results.push(Value::Expr(
@@ -445,36 +449,34 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                         right,
                     } => {
                         tasks.push(Task::BuildOperation { span, operator });
-                        tasks.push(Task::Expr(*right, scope.clone()));
-                        tasks.push(Task::Expr(*left, scope));
+                        tasks.push(Task::Expr(right.as_ref().clone(), scope.clone()));
+                        tasks.push(Task::Expr(left.as_ref().clone(), scope));
                     }
                     ExpressionKind::Assignment { target, expr } => {
                         tasks.push(Task::BuildAssignment { span });
-                        tasks.push(Task::Expr(*expr, scope.clone()));
+                        tasks.push(Task::Expr(expr.as_ref().clone(), scope.clone()));
                         tasks.push(Task::LValue(target, scope));
                     }
                     ExpressionKind::FunctionCall { function, argument } => {
                         tasks.push(Task::BuildFunctionCall { span });
-                        tasks.push(Task::Expr(*argument, scope.clone()));
-                        tasks.push(Task::Expr(*function, scope));
+                        tasks.push(Task::Expr(argument.as_ref().clone(), scope.clone()));
+                        tasks.push(Task::Expr(function.as_ref().clone(), scope));
                     }
                     ExpressionKind::ArrayIndex { array, index } => {
                         tasks.push(Task::BuildArrayIndex { span });
-                        tasks.push(Task::Expr(*index, scope.clone()));
-                        tasks.push(Task::Expr(*array, scope));
+                        tasks.push(Task::Expr(index.as_ref().clone(), scope.clone()));
+                        tasks.push(Task::Expr(array.as_ref().clone(), scope));
                     }
                     ExpressionKind::TypePropertyAccess { object, property } => {
                         tasks.push(Task::BuildTypePropertyAccess { span, property });
-                        tasks.push(Task::Expr(*object, scope));
+                        tasks.push(Task::Expr(object.as_ref().clone(), scope));
                     }
                     ExpressionKind::Binding(binding) => {
                         let mut binding_scope = scope.clone();
                         binding_scope.push();
-                        tasks.push(Task::ContinueBindingPattern {
-                            span,
-                            expr: binding.expr,
-                        });
-                        tasks.push(Task::Pattern(binding.pattern, binding_scope));
+                        let Binding { pattern, expr } = (*binding).clone();
+                        tasks.push(Task::ContinueBindingPattern { span, expr });
+                        tasks.push(Task::Pattern(pattern, binding_scope));
                     }
                     ExpressionKind::Block(expressions) => {
                         results.push(Value::Expr(Expression::new(
@@ -490,13 +492,13 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                             span,
                             divergance_type,
                         });
-                        tasks.push(Task::Expr(*value, scope));
+                        tasks.push(Task::Expr(value.as_ref().clone(), scope));
                     }
                     ExpressionKind::Loop { body } => {
                         let mut loop_scope = scope.clone();
                         loop_scope.push();
                         tasks.push(Task::BuildLoop { span });
-                        tasks.push(Task::Expr(*body, loop_scope));
+                        tasks.push(Task::Expr(body.as_ref().clone(), loop_scope));
                     }
                 }
             }
@@ -547,7 +549,10 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 }
                 BindingPattern::TypeHint(inner, ty, span) => {
                     let inner_scope = scope.clone();
-                    tasks.push(Task::ContinuePatternTypeHint { span, ty });
+                    tasks.push(Task::ContinuePatternTypeHint {
+                        span,
+                        ty: ty.into(),
+                    });
                     tasks.push(Task::Pattern(*inner, inner_scope));
                 }
                 BindingPattern::Annotated {
@@ -603,8 +608,8 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 let left = pop_expr(&mut results);
                 results.push(Value::Expr(
                     ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(
-                        Box::new(left),
-                        Box::new(right),
+                        Rc::new(left),
+                        Rc::new(right),
                         op,
                     ))
                     .with_span(span),
@@ -614,7 +619,7 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 let operand = pop_expr(&mut results);
                 results.push(Value::Expr(
                     ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
-                        Box::new(operand),
+                        Rc::new(operand),
                         op,
                     ))
                     .with_span(span),
@@ -625,7 +630,7 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 results.push(Value::Expr(
                     ExpressionKind::IntrinsicOperation(IntrinsicOperation::InlineAssembly {
                         target,
-                        code: Box::new(code),
+                        code: Rc::new(code),
                     })
                     .with_span(span),
                 ));
@@ -650,10 +655,10 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 let enum_type = pop_expr(&mut results);
                 results.push(Value::Expr(
                     ExpressionKind::EnumValue {
-                        enum_type: Box::new(enum_type),
+                        enum_type: Rc::new(enum_type),
                         variant,
                         variant_index,
-                        payload: Box::new(payload),
+                        payload: Rc::new(payload),
                     }
                     .with_span(span),
                 ));
@@ -667,10 +672,10 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 let enum_type = pop_expr(&mut results);
                 results.push(Value::Expr(
                     ExpressionKind::EnumConstructor {
-                        enum_type: Box::new(enum_type),
+                        enum_type: Rc::new(enum_type),
                         variant,
                         variant_index,
-                        payload_type: Box::new(payload_type),
+                        payload_type: Rc::new(payload_type),
                     }
                     .with_span(span),
                 ));
@@ -680,8 +685,8 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 let type_expr = pop_expr(&mut results);
                 results.push(Value::Expr(
                     ExpressionKind::AttachImplementation {
-                        type_expr: Box::new(type_expr),
-                        implementation: Box::new(implementation),
+                        type_expr: Rc::new(type_expr),
+                        implementation: Rc::new(implementation),
                     }
                     .with_span(span),
                 ));
@@ -691,8 +696,8 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 let parameter = pop_expr(&mut results);
                 results.push(Value::Expr(
                     ExpressionKind::FunctionType {
-                        parameter: Box::new(parameter),
-                        return_type: Box::new(return_type),
+                        parameter: Rc::new(parameter),
+                        return_type: Rc::new(return_type),
                     }
                     .with_span(span),
                 ));
@@ -700,7 +705,7 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
             Task::BuildBoxType { span } => {
                 let inner = pop_expr(&mut results);
                 results.push(Value::Expr(
-                    ExpressionKind::BoxType(Box::new(inner)).with_span(span),
+                    ExpressionKind::BoxType(Rc::new(inner)).with_span(span),
                 ));
             }
             Task::BuildStruct { span, ids } => {
@@ -717,8 +722,8 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 let value = pop_expr(&mut results);
                 results.push(Value::Expr(
                     ExpressionKind::ArrayRepeat {
-                        value: Box::new(value),
-                        count: Box::new(count),
+                        value: Rc::new(value),
+                        count: Rc::new(count),
                     }
                     .with_span(span),
                 ));
@@ -729,8 +734,8 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 results.push(Value::Expr(
                     ExpressionKind::Operation {
                         operator,
-                        left: Box::new(left),
-                        right: Box::new(right),
+                        left: Rc::new(left),
+                        right: Rc::new(right),
                     }
                     .with_span(span),
                 ));
@@ -741,7 +746,7 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 results.push(Value::Expr(
                     ExpressionKind::Assignment {
                         target,
-                        expr: Box::new(expr),
+                        expr: Rc::new(expr),
                     }
                     .with_span(span),
                 ));
@@ -751,8 +756,8 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 let function = pop_expr(&mut results);
                 results.push(Value::Expr(
                     ExpressionKind::FunctionCall {
-                        function: Box::new(function),
-                        argument: Box::new(argument),
+                        function: Rc::new(function),
+                        argument: Rc::new(argument),
                     }
                     .with_span(span),
                 ));
@@ -762,8 +767,8 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 let array = pop_expr(&mut results);
                 results.push(Value::Expr(
                     ExpressionKind::ArrayIndex {
-                        array: Box::new(array),
-                        index: Box::new(index),
+                        array: Rc::new(array),
+                        index: Rc::new(index),
                     }
                     .with_span(span),
                 ));
@@ -772,7 +777,7 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 let object = pop_expr(&mut results);
                 results.push(Value::Expr(
                     ExpressionKind::TypePropertyAccess {
-                        object: Box::new(object),
+                        object: Rc::new(object),
                         property,
                     }
                     .with_span(span),
@@ -785,7 +790,7 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 let value = pop_expr(&mut results);
                 results.push(Value::Expr(
                     ExpressionKind::Diverge {
-                        value: Box::new(value),
+                        value: Rc::new(value),
                         divergance_type,
                     }
                     .with_span(span),
@@ -795,7 +800,7 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 let body = pop_expr(&mut results);
                 results.push(Value::Expr(
                     ExpressionKind::Loop {
-                        body: Box::new(body),
+                        body: Rc::new(body),
                     }
                     .with_span(span),
                 ));
@@ -831,14 +836,14 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                         parameter,
                         scope,
                     });
-                    tasks.push(Task::Expr(*return_type, return_scope));
+                    tasks.push(Task::Expr((*return_type).clone(), return_scope));
                 } else {
                     tasks.push(Task::ContinueFunctionBody {
                         span,
                         parameter,
                         return_type: None,
                     });
-                    tasks.push(Task::Expr(*body, scope));
+                    tasks.push(Task::Expr((*body).clone(), scope));
                 }
             }
             Task::ContinueFunctionReturnType {
@@ -853,7 +858,7 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                     parameter,
                     return_type: Some(return_type),
                 });
-                tasks.push(Task::Expr(*body, scope));
+                tasks.push(Task::Expr((*body).clone(), scope));
             }
             Task::ContinueFunctionBody {
                 span,
@@ -861,12 +866,12 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 return_type,
             } => {
                 let body = pop_expr(&mut results);
-                let return_type = return_type.map(Box::new);
+                let return_type = return_type.map(Rc::new);
                 results.push(Value::Expr(
                     ExpressionKind::Function {
                         parameter,
                         return_type,
-                        body: Box::new(body),
+                        body: Rc::new(body),
                     }
                     .with_span(span),
                 ));
@@ -879,7 +884,7 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
             Task::ContinueBindingExpr { span, pattern } => {
                 let expr = pop_expr(&mut results);
                 results.push(Value::Expr(
-                    ExpressionKind::Binding(Box::new(Binding { pattern, expr })).with_span(span),
+                    ExpressionKind::Binding(Rc::new(Binding { pattern, expr })).with_span(span),
                 ));
             }
             Task::ContinueMatchValue {
@@ -903,7 +908,7 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 } else {
                     results.push(Value::Expr(Expression::new(
                         ExpressionKind::Match {
-                            value: Box::new(value),
+                            value: Rc::new(value),
                             branches: Vec::new(),
                         },
                         span,
@@ -955,7 +960,7 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 } else {
                     results.push(Value::Expr(Expression::new(
                         ExpressionKind::Match {
-                            value: Box::new(value),
+                            value: Rc::new(value),
                             branches: acc,
                         },
                         span,
@@ -976,7 +981,7 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                     else_branch,
                     else_scope,
                 });
-                tasks.push(Task::Expr(*then_branch, then_scope));
+                tasks.push(Task::Expr((*then_branch).clone(), then_scope));
             }
             Task::ContinueIfThen {
                 span,
@@ -990,7 +995,7 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                     condition,
                     then_expr,
                 });
-                tasks.push(Task::Expr(*else_branch, else_scope));
+                tasks.push(Task::Expr((*else_branch).clone(), else_scope));
             }
             Task::ContinueIfElse {
                 span,
@@ -1000,9 +1005,9 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 let else_expr = pop_expr(&mut results);
                 results.push(Value::Expr(
                     ExpressionKind::If {
-                        condition: Box::new(condition),
-                        then_branch: Box::new(then_expr),
-                        else_branch: Box::new(else_expr),
+                        condition: Rc::new(condition),
+                        then_branch: Rc::new(then_expr),
+                        else_branch: Rc::new(else_expr),
                     }
                     .with_span(span),
                 ));
@@ -1081,7 +1086,7 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                     inner,
                     scope: scope.clone(),
                 });
-                tasks.push(Task::Expr(*ty, scope));
+                tasks.push(Task::Expr((*ty).clone(), scope));
             }
             Task::ContinuePatternTypeHintExpr { span, inner, scope } => {
                 let ty = pop_expr(&mut results);

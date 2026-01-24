@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::{
     diagnostics::{Diagnostic, SourceSpan},
@@ -427,14 +428,14 @@ fn range_operator_intrinsic() -> (Identifier, Expression) {
     ])
     .with_span(dummy_span());
     let return_type = ExpressionKind::FunctionType {
-        parameter: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
-        return_type: Box::new(range_type.clone()),
+        parameter: Rc::new(intrinsic_type_expr(IntrinsicType::I32)),
+        return_type: Rc::new(range_type.clone()),
     }
     .with_span(dummy_span());
     let body = ExpressionKind::Function {
         parameter: typed_pattern("other"),
-        return_type: Some(Box::new(range_type.clone())),
-        body: Box::new(
+        return_type: Some(Rc::new(range_type.clone())),
+        body: Rc::new(
             ExpressionKind::Struct(vec![
                 (Identifier::new("current"), identifier_expr("self")),
                 (Identifier::new("end"), identifier_expr("other")),
@@ -448,8 +449,8 @@ fn range_operator_intrinsic() -> (Identifier, Expression) {
         Identifier::new("..".to_string()),
         ExpressionKind::Function {
             parameter: typed_pattern("self"),
-            return_type: Some(Box::new(return_type)),
-            body: Box::new(body),
+            return_type: Some(Rc::new(return_type)),
+            body: Rc::new(body),
         }
         .with_span(dummy_span()),
     )
@@ -742,12 +743,12 @@ fn apply_type_bindings(expr: &Expression, bindings: &HashMap<String, Expression>
                 }
                 ExpressionKind::ArrayRepeat { value, count } => {
                     stack.push(Frame::ArrayRepeat { span: expr.span });
-                    stack.push(Frame::Enter(*count));
-                    stack.push(Frame::Enter(*value));
+                    stack.push(Frame::Enter(count.as_ref().clone()));
+                    stack.push(Frame::Enter(value.as_ref().clone()));
                 }
                 ExpressionKind::BoxType(inner) => {
                     stack.push(Frame::BoxType { span: expr.span });
-                    stack.push(Frame::Enter(*inner));
+                    stack.push(Frame::Enter(inner.as_ref().clone()));
                 }
                 ExpressionKind::EnumType(variants) => {
                     let identifiers = variants.iter().map(|(id, _)| id.clone()).collect();
@@ -764,21 +765,21 @@ fn apply_type_bindings(expr: &Expression, bindings: &HashMap<String, Expression>
                     return_type,
                 } => {
                     stack.push(Frame::FunctionType { span: expr.span });
-                    stack.push(Frame::Enter(*return_type));
-                    stack.push(Frame::Enter(*parameter));
+                    stack.push(Frame::Enter(return_type.as_ref().clone()));
+                    stack.push(Frame::Enter(parameter.as_ref().clone()));
                 }
                 ExpressionKind::ArrayIndex { array, index } => {
                     stack.push(Frame::ArrayIndex { span: expr.span });
-                    stack.push(Frame::Enter(*index));
-                    stack.push(Frame::Enter(*array));
+                    stack.push(Frame::Enter(index.as_ref().clone()));
+                    stack.push(Frame::Enter(array.as_ref().clone()));
                 }
                 ExpressionKind::AttachImplementation {
                     type_expr,
                     implementation,
                 } => {
                     stack.push(Frame::AttachImplementation { span: expr.span });
-                    stack.push(Frame::Enter(*implementation));
-                    stack.push(Frame::Enter(*type_expr));
+                    stack.push(Frame::Enter(implementation.as_ref().clone()));
+                    stack.push(Frame::Enter(type_expr.as_ref().clone()));
                 }
                 other => {
                     results.push(Expression::new(other, expr.span));
@@ -798,8 +799,8 @@ fn apply_type_bindings(expr: &Expression, bindings: &HashMap<String, Expression>
                 let value = results.pop().unwrap();
                 results.push(Expression::new(
                     ExpressionKind::ArrayRepeat {
-                        value: Box::new(value),
-                        count: Box::new(count),
+                        value: Rc::new(value),
+                        count: Rc::new(count),
                     },
                     span,
                 ));
@@ -807,7 +808,7 @@ fn apply_type_bindings(expr: &Expression, bindings: &HashMap<String, Expression>
             Frame::BoxType { span } => {
                 let inner = results.pop().unwrap();
                 results.push(Expression::new(
-                    ExpressionKind::BoxType(Box::new(inner)),
+                    ExpressionKind::BoxType(Rc::new(inner)),
                     span,
                 ));
             }
@@ -825,8 +826,8 @@ fn apply_type_bindings(expr: &Expression, bindings: &HashMap<String, Expression>
                 let parameter = results.pop().unwrap();
                 results.push(
                     ExpressionKind::FunctionType {
-                        parameter: Box::new(parameter),
-                        return_type: Box::new(return_type),
+                        parameter: Rc::new(parameter),
+                        return_type: Rc::new(return_type),
                     }
                     .with_span(span),
                 );
@@ -836,8 +837,8 @@ fn apply_type_bindings(expr: &Expression, bindings: &HashMap<String, Expression>
                 let array = results.pop().unwrap();
                 results.push(
                     ExpressionKind::ArrayIndex {
-                        array: Box::new(array),
-                        index: Box::new(index),
+                        array: Rc::new(array),
+                        index: Rc::new(index),
                     }
                     .with_span(span),
                 );
@@ -847,8 +848,8 @@ fn apply_type_bindings(expr: &Expression, bindings: &HashMap<String, Expression>
                 let type_expr = results.pop().unwrap();
                 results.push(
                     ExpressionKind::AttachImplementation {
-                        type_expr: Box::new(type_expr),
-                        implementation: Box::new(implementation),
+                        type_expr: Rc::new(type_expr),
+                        implementation: Rc::new(implementation),
                     }
                     .with_span(span),
                 );
@@ -969,8 +970,8 @@ fn collect_bindings(expr: &Expression, context: &mut Context) -> Result<(), Diag
                 right,
                 BinaryIntrinsicOperator::BooleanAnd,
             )) => {
-                stack.push(right);
-                stack.push(left);
+                stack.push(right.as_ref());
+                stack.push(left.as_ref());
             }
             _ => {}
         }
@@ -1171,7 +1172,7 @@ pub fn interpret_expression(
                     }
                     ExpressionKind::BoxType(inner) => {
                         stack.push(Frame::BoxType { span });
-                        stack.push(Frame::Eval(*inner));
+                        stack.push(Frame::Eval(inner.as_ref().clone()));
                     }
                     ExpressionKind::Literal(lit) => {
                         values.push(Expression::new(ExpressionKind::Literal(lit), span));
@@ -1181,20 +1182,20 @@ pub fn interpret_expression(
                     }
                     ExpressionKind::Match { value, branches } => {
                         stack.push(Frame::Match { span, branches });
-                        stack.push(Frame::Eval(*value));
+                        stack.push(Frame::Eval(value.as_ref().clone()));
                     }
                     ExpressionKind::If {
                         condition,
                         then_branch,
                         else_branch,
                     } => {
-                        let condition_expr = *condition;
+                        let condition_expr = condition.as_ref().clone();
                         let condition_for_pattern = condition_expr.clone();
                         stack.push(Frame::IfCondition {
                             span,
                             condition_for_pattern,
-                            then_branch: *then_branch,
-                            else_branch: *else_branch,
+                            then_branch: then_branch.as_ref().clone(),
+                            else_branch: else_branch.as_ref().clone(),
                         });
                         stack.push(Frame::Eval(condition_expr));
                     }
@@ -1243,15 +1244,16 @@ pub fn interpret_expression(
                         right,
                     } => {
                         stack.push(Frame::Operation { span, operator });
-                        stack.push(Frame::Eval(*right));
-                        stack.push(Frame::Eval(*left));
+                        stack.push(Frame::Eval(right.as_ref().clone()));
+                        stack.push(Frame::Eval(left.as_ref().clone()));
                     }
                     ExpressionKind::Binding(binding) => {
+                        let Binding { pattern, expr } = (*binding).clone();
                         stack.push(Frame::BindingFinish);
                         stack.push(Frame::BindingExit);
-                        stack.push(Frame::Eval(binding.expr));
+                        stack.push(Frame::Eval(expr));
                         stack.push(Frame::BindingEnter);
-                        stack.push(Frame::PatternStart(binding.pattern));
+                        stack.push(Frame::PatternStart(pattern));
                     }
                     ExpressionKind::Diverge {
                         value,
@@ -1261,49 +1263,52 @@ pub fn interpret_expression(
                             span,
                             divergance_type,
                         });
-                        stack.push(Frame::Eval(*value));
+                        stack.push(Frame::Eval(value.as_ref().clone()));
                     }
                     ExpressionKind::Loop { body } => {
                         let initial_context = context.clone();
                         stack.push(Frame::LoopStart {
                             span,
-                            body: *body,
+                            body: (*body).clone(),
                             initial_context,
                             iteration_count: 0,
                         });
                     }
                     ExpressionKind::Assignment { target, expr } => {
                         stack.push(Frame::Assignment { span, target });
-                        stack.push(Frame::Eval(*expr));
+                        stack.push(Frame::Eval(expr.as_ref().clone()));
                     }
                     ExpressionKind::FunctionCall { function, argument } => {
                         stack.push(Frame::FunctionCall {
                             span,
-                            function_expr: *function.clone(),
-                            argument_expr: *argument.clone(),
+                            function_expr: function.as_ref().clone(),
+                            argument_expr: argument.as_ref().clone(),
                         });
-                        stack.push(Frame::Eval(*argument));
-                        stack.push(Frame::Eval(*function));
+                        stack.push(Frame::Eval(argument.as_ref().clone()));
+                        stack.push(Frame::Eval(function.as_ref().clone()));
                     }
                     ExpressionKind::ArrayIndex { array, index } => {
                         stack.push(Frame::ArrayIndex { span });
-                        stack.push(Frame::Eval(*index));
-                        stack.push(Frame::Eval(*array));
+                        stack.push(Frame::Eval(index.as_ref().clone()));
+                        stack.push(Frame::Eval(array.as_ref().clone()));
                     }
                     ExpressionKind::AttachImplementation {
                         type_expr,
                         implementation,
                     } => {
                         stack.push(Frame::AttachImplementation { span });
-                        stack.push(Frame::Eval(*implementation));
-                        stack.push(Frame::Eval(*type_expr));
+                        stack.push(Frame::Eval(implementation.as_ref().clone()));
+                        stack.push(Frame::Eval(type_expr.as_ref().clone()));
                     }
                     ExpressionKind::Function {
                         parameter,
                         return_type: _,
                         body,
                     } => {
-                        stack.push(Frame::FunctionStart { span, body: *body });
+                        stack.push(Frame::FunctionStart {
+                            span,
+                            body: (*body).clone(),
+                        });
                         stack.push(Frame::PatternStart(parameter));
                     }
                     ExpressionKind::Struct(items) => {
@@ -1315,16 +1320,16 @@ pub fn interpret_expression(
                     }
                     ExpressionKind::ArrayRepeat { value, count } => {
                         stack.push(Frame::ArrayRepeat { span });
-                        stack.push(Frame::Eval(*count));
-                        stack.push(Frame::Eval(*value));
+                        stack.push(Frame::Eval(count.as_ref().clone()));
+                        stack.push(Frame::Eval(value.as_ref().clone()));
                     }
                     ExpressionKind::FunctionType {
                         parameter,
                         return_type,
                     } => {
                         stack.push(Frame::FunctionType { span });
-                        stack.push(Frame::Eval(*return_type));
-                        stack.push(Frame::Eval(*parameter));
+                        stack.push(Frame::Eval(return_type.as_ref().clone()));
+                        stack.push(Frame::Eval(parameter.as_ref().clone()));
                     }
                     ExpressionKind::EnumValue {
                         enum_type,
@@ -1337,8 +1342,8 @@ pub fn interpret_expression(
                             variant,
                             variant_index,
                         });
-                        stack.push(Frame::Eval(*payload));
-                        stack.push(Frame::Eval(*enum_type));
+                        stack.push(Frame::Eval(payload.as_ref().clone()));
+                        stack.push(Frame::Eval(enum_type.as_ref().clone()));
                     }
                     ExpressionKind::EnumConstructor {
                         enum_type,
@@ -1351,28 +1356,28 @@ pub fn interpret_expression(
                             variant,
                             variant_index,
                         });
-                        stack.push(Frame::Eval(*payload_type));
-                        stack.push(Frame::Eval(*enum_type));
+                        stack.push(Frame::Eval(payload_type.as_ref().clone()));
+                        stack.push(Frame::Eval(enum_type.as_ref().clone()));
                     }
                     ExpressionKind::IntrinsicOperation(intrinsic_operation) => {
                         match intrinsic_operation {
                             IntrinsicOperation::Binary(left, right, operator) => {
                                 stack.push(Frame::IntrinsicBinary { span, operator });
-                                stack.push(Frame::Eval(*right));
-                                stack.push(Frame::Eval(*left));
+                                stack.push(Frame::Eval(right.as_ref().clone()));
+                                stack.push(Frame::Eval(left.as_ref().clone()));
                             }
                             IntrinsicOperation::Unary(operand, operator) => {
                                 stack.push(Frame::IntrinsicUnary { span, operator });
-                                stack.push(Frame::Eval(*operand));
+                                stack.push(Frame::Eval(operand.as_ref().clone()));
                             }
                             IntrinsicOperation::InlineAssembly { target, code } => {
                                 stack.push(Frame::InlineAssembly { span, target });
-                                stack.push(Frame::Eval(*code));
+                                stack.push(Frame::Eval(code.as_ref().clone()));
                             }
                         }
                     }
                     ExpressionKind::TypePropertyAccess { object, property } => {
-                        let original_object = *object;
+                        let original_object = (*object).clone();
                         stack.push(Frame::TypePropertyAccess {
                             span,
                             property,
@@ -1537,7 +1542,7 @@ pub fn interpret_expression(
                     },
                     None,
                 )?;
-                let binding_expr = ExpressionKind::Binding(Box::new(Binding {
+                let binding_expr = ExpressionKind::Binding(Rc::new(Binding {
                     pattern: interpreted_pattern,
                     expr: value,
                 }))
@@ -1671,7 +1676,7 @@ pub fn interpret_expression(
             Frame::BoxType { span } => {
                 let inner = values.pop().unwrap();
                 values.push(Expression::new(
-                    ExpressionKind::BoxType(Box::new(inner)),
+                    ExpressionKind::BoxType(Rc::new(inner)),
                     span,
                 ));
             }
@@ -1721,8 +1726,8 @@ pub fn interpret_expression(
                 let parameter = values.pop().unwrap();
                 values.push(
                     ExpressionKind::FunctionType {
-                        parameter: Box::new(parameter),
-                        return_type: Box::new(return_type),
+                        parameter: Rc::new(parameter),
+                        return_type: Rc::new(return_type),
                     }
                     .with_span(span),
                 );
@@ -1736,10 +1741,10 @@ pub fn interpret_expression(
                 let enum_type = values.pop().unwrap();
                 values.push(
                     ExpressionKind::EnumValue {
-                        enum_type: Box::new(enum_type),
+                        enum_type: Rc::new(enum_type),
                         variant,
                         variant_index,
-                        payload: Box::new(payload),
+                        payload: Rc::new(payload),
                     }
                     .with_span(span),
                 );
@@ -1753,10 +1758,10 @@ pub fn interpret_expression(
                 let enum_type = values.pop().unwrap();
                 values.push(
                     ExpressionKind::EnumConstructor {
-                        enum_type: Box::new(enum_type),
+                        enum_type: Rc::new(enum_type),
                         variant,
                         variant_index,
-                        payload_type: Box::new(payload_type),
+                        payload_type: Rc::new(payload_type),
                     }
                     .with_span(span),
                 );
@@ -1766,8 +1771,8 @@ pub fn interpret_expression(
                 let type_expr = values.pop().unwrap();
                 values.push(
                     ExpressionKind::AttachImplementation {
-                        type_expr: Box::new(type_expr),
-                        implementation: Box::new(implementation),
+                        type_expr: Rc::new(type_expr),
+                        implementation: Rc::new(implementation),
                     }
                     .with_span(span),
                 );
@@ -1779,8 +1784,8 @@ pub fn interpret_expression(
                 {
                     values.push(Expression::new(
                         ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(
-                            Box::new(evaluated_left),
-                            Box::new(evaluated_right),
+                            Rc::new(evaluated_left),
+                            Rc::new(evaluated_right),
                             operator,
                         )),
                         span,
@@ -1857,7 +1862,7 @@ pub fn interpret_expression(
                 if !is_resolved_constant(&evaluated_operand) && op_requires_const_argument {
                     values.push(Expression::new(
                         ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
-                            Box::new(evaluated_operand),
+                            Rc::new(evaluated_operand),
                             operator,
                         )),
                         span,
@@ -1887,15 +1892,13 @@ pub fn interpret_expression(
                                     branch_expr.span(),
                                 ));
                             };
-                            match_branches.push((parameter, *body));
+                            match_branches.push((parameter, body.as_ref().clone()));
                         }
 
                         let match_value = Identifier::new("match_value");
                         let parameter = BindingPattern::Identifier(match_value.clone(), span);
                         let match_expr = ExpressionKind::Match {
-                            value: Box::new(
-                                ExpressionKind::Identifier(match_value).with_span(span),
-                            ),
+                            value: Rc::new(ExpressionKind::Identifier(match_value).with_span(span)),
                             branches: match_branches,
                         }
                         .with_span(span);
@@ -1911,8 +1914,8 @@ pub fn interpret_expression(
 
                         ExpressionKind::Function {
                             parameter,
-                            return_type: Some(Box::new(return_type)),
-                            body: Box::new(match_expr),
+                            return_type: Some(Rc::new(return_type)),
+                            body: Rc::new(match_expr),
                         }
                         .with_span(span)
                     }
@@ -1995,7 +1998,7 @@ pub fn interpret_expression(
                         if let ExpressionKind::IntrinsicType(intrinsic) = &resolved.kind {
                             resolved = intrinsic_type_expr(intrinsic.clone());
                         }
-                        ExpressionKind::BoxType(Box::new(resolved)).with_span(span)
+                        ExpressionKind::BoxType(Rc::new(resolved)).with_span(span)
                     }
                     UnaryIntrinsicOperator::BindingAnnotationExportFromTarget => {
                         let ExpressionKind::Literal(ExpressionLiteral::Target(target)) =
@@ -2054,7 +2057,7 @@ pub fn interpret_expression(
                         let body = ExpressionKind::IntrinsicOperation(
                             IntrinsicOperation::InlineAssembly {
                                 target,
-                                code: Box::new(
+                                code: Rc::new(
                                     ExpressionKind::Identifier(code_identifier).with_span(span),
                                 ),
                             },
@@ -2063,8 +2066,8 @@ pub fn interpret_expression(
 
                         ExpressionKind::Function {
                             parameter,
-                            return_type: Some(Box::new(intrinsic_type_expr(IntrinsicType::I32))),
-                            body: Box::new(body),
+                            return_type: Some(Rc::new(intrinsic_type_expr(IntrinsicType::I32))),
+                            body: Rc::new(body),
                         }
                         .with_span(span)
                     }
@@ -2112,7 +2115,7 @@ pub fn interpret_expression(
                 values.push(
                     ExpressionKind::IntrinsicOperation(IntrinsicOperation::InlineAssembly {
                         target,
-                        code: Box::new(
+                        code: Rc::new(
                             ExpressionKind::Literal(ExpressionLiteral::String(code))
                                 .with_span(span),
                         ),
@@ -2124,19 +2127,19 @@ pub fn interpret_expression(
                 let evaluated_right = values.pop().unwrap();
                 let evaluated_left = values.pop().unwrap();
                 let property_access = ExpressionKind::TypePropertyAccess {
-                    object: Box::new(evaluated_left.clone()),
+                    object: Rc::new(evaluated_left.clone()),
                     property: operator,
                 }
                 .with_span(span);
                 let apply_self = ExpressionKind::FunctionCall {
-                    function: Box::new(property_access),
-                    argument: Box::new(evaluated_left),
+                    function: Rc::new(property_access),
+                    argument: Rc::new(evaluated_left),
                 }
                 .with_span(span);
                 stack.push(Frame::Eval(
                     ExpressionKind::FunctionCall {
-                        function: Box::new(apply_self),
-                        argument: Box::new(evaluated_right),
+                        function: Rc::new(apply_self),
+                        argument: Rc::new(evaluated_right),
                     }
                     .with_span(span),
                 ));
@@ -2148,7 +2151,7 @@ pub fn interpret_expression(
                 let evaluated_value = values.pop().unwrap();
                 values.push(
                     ExpressionKind::Diverge {
-                        value: Box::new(evaluated_value),
+                        value: Rc::new(evaluated_value),
                         divergance_type,
                     }
                     .with_span(span),
@@ -2163,7 +2166,7 @@ pub fn interpret_expression(
                 if !is_resolved_constant(&interpreted_value) {
                     values.push(
                         ExpressionKind::Match {
-                            value: Box::new(interpreted_value),
+                            value: Rc::new(interpreted_value),
                             branches,
                         }
                         .with_span(span),
@@ -2274,9 +2277,9 @@ pub fn interpret_expression(
                     }
                 } else {
                     let interpreted = ExpressionKind::If {
-                        condition: Box::new(interpreted_condition),
-                        then_branch: Box::new(interpreted_then),
-                        else_branch: Box::new(interpreted_else),
+                        condition: Rc::new(interpreted_condition),
+                        then_branch: Rc::new(interpreted_then),
+                        else_branch: Rc::new(interpreted_else),
                     }
                     .with_span(span);
                     let possibly_mutated_values = get_possibly_mutated_values(&interpreted);
@@ -2331,7 +2334,7 @@ pub fn interpret_expression(
                             continue;
                         }
                         DivergeExpressionType::Break => {
-                            values.push(*value.clone());
+                            values.push(value.as_ref().clone());
                             continue;
                         }
                     }
@@ -2373,7 +2376,7 @@ pub fn interpret_expression(
                 }
                 values.push(
                     ExpressionKind::Loop {
-                        body: Box::new(interpreted_body),
+                        body: Rc::new(interpreted_body),
                     }
                     .with_span(span),
                 );
@@ -2387,7 +2390,7 @@ pub fn interpret_expression(
                 let function_value = values.pop().unwrap();
 
                 if let ExpressionKind::TypePropertyAccess { object, property } = &function_expr.kind
-                    && argument_expr == **object
+                    && argument_expr == object.as_ref().clone()
                 {
                     let object_type = get_type_of_expression(object, context)?;
                     if let Ok((_, TraitPropSource::StructField)) =
@@ -2403,7 +2406,7 @@ pub fn interpret_expression(
 
                         values.push(
                             ExpressionKind::TypePropertyAccess {
-                                object: Box::new(argument_value),
+                                object: Rc::new(argument_value),
                                 property: property.clone(),
                             }
                             .with_span(span),
@@ -2486,8 +2489,8 @@ pub fn interpret_expression(
 
                         values.push(
                             ExpressionKind::ArrayIndex {
-                                array: Box::new(array_expr_for_index),
-                                index: Box::new(argument_value),
+                                array: Rc::new(array_expr_for_index),
+                                index: Rc::new(argument_value),
                             }
                             .with_span(span),
                         );
@@ -2536,14 +2539,9 @@ pub fn interpret_expression(
                             false
                         } else if let ExpressionKind::Identifier(identifier) = &function_value.kind
                         {
-                            let binding_scope = context
-                                .bindings
-                                .iter()
-                                .enumerate()
-                                .rev()
-                                .find_map(|(idx, scope)| {
-                                    scope.contains_key(identifier).then_some(idx)
-                                });
+                            let binding_scope = context.bindings.iter().enumerate().rev().find_map(
+                                |(idx, scope)| scope.contains_key(identifier).then_some(idx),
+                            );
                             binding_scope.map_or(true, |idx| idx > 1)
                         } else {
                             true
@@ -2553,8 +2551,11 @@ pub fn interpret_expression(
                     let body_is_const = if argument_is_const {
                         let mut const_context = Context::empty();
                         const_context.bindings.push(HashMap::new());
-                        let _ =
-                            bind_pattern_blanks_for_const(parameter.clone(), &mut const_context, None);
+                        let _ = bind_pattern_blanks_for_const(
+                            parameter.clone(),
+                            &mut const_context,
+                            None,
+                        );
                         is_resolved_const_function_expression(&body, &const_context)
                     } else {
                         false
@@ -2585,7 +2586,7 @@ pub fn interpret_expression(
                         let saved_context = context.clone();
                         *context = call_context;
                         stack.push(Frame::InlineCall { saved_context });
-                        stack.push(Frame::Eval(*body));
+                        stack.push(Frame::Eval(body.as_ref().clone()));
                         continue;
                     }
                 }
@@ -2606,7 +2607,7 @@ pub fn interpret_expression(
                             enum_type,
                             variant,
                             variant_index,
-                            payload: Box::new(argument_value),
+                            payload: Rc::new(argument_value),
                         }
                         .with_span(span.merge(&function_value.span)),
                     );
@@ -2617,8 +2618,8 @@ pub fn interpret_expression(
                 } else {
                     values.push(
                         ExpressionKind::FunctionCall {
-                            function: Box::new(function_value),
-                            argument: Box::new(argument_value),
+                            function: Rc::new(function_value),
+                            argument: Rc::new(argument_value),
                         }
                         .with_span(span),
                     );
@@ -2629,8 +2630,8 @@ pub fn interpret_expression(
                 let array = values.pop().unwrap();
                 values.push(
                     ExpressionKind::ArrayIndex {
-                        array: Box::new(array),
-                        index: Box::new(index),
+                        array: Rc::new(array),
+                        index: Rc::new(index),
                     }
                     .with_span(span),
                 );
@@ -2643,7 +2644,7 @@ pub fn interpret_expression(
                     divergance_type: DivergeExpressionType::Return,
                 } = body_value.kind
                 {
-                    values.push(*value);
+                    values.push(value.as_ref().clone());
                 } else {
                     values.push(body_value);
                 }
@@ -2659,8 +2660,8 @@ pub fn interpret_expression(
                 values.push(
                     ExpressionKind::Function {
                         parameter,
-                        return_type: Some(Box::new(return_type)),
-                        body: Box::new(interpreted_body),
+                        return_type: Some(Rc::new(return_type)),
+                        body: Rc::new(interpreted_body),
                     }
                     .with_span(span),
                 );
@@ -2688,20 +2689,20 @@ pub fn interpret_expression(
                     {
                         values.push(
                             ExpressionKind::EnumValue {
-                                enum_type: Box::new(evaluated_object),
+                                enum_type: Rc::new(evaluated_object),
                                 variant: enum_property,
                                 variant_index,
-                                payload: Box::new(ExpressionKind::Struct(vec![]).with_span(span)),
+                                payload: Rc::new(ExpressionKind::Struct(vec![]).with_span(span)),
                             }
                             .with_span(span),
                         );
                     } else {
                         values.push(
                             ExpressionKind::EnumConstructor {
-                                enum_type: Box::new(evaluated_object),
+                                enum_type: Rc::new(evaluated_object),
                                 variant: enum_property,
                                 variant_index,
-                                payload_type: Box::new(payload_type),
+                                payload_type: Rc::new(payload_type),
                             }
                             .with_span(span),
                         );
@@ -2723,7 +2724,7 @@ pub fn interpret_expression(
                 } else {
                     values.push(
                         ExpressionKind::TypePropertyAccess {
-                            object: Box::new(evaluated_object),
+                            object: Rc::new(evaluated_object),
                             property,
                         }
                         .with_span(span),
@@ -2751,6 +2752,9 @@ pub(crate) fn get_type_of_expression(
     expr: &Expression,
     context: &Context,
 ) -> Result<Expression, Diagnostic> {
+    if let Some(ty) = expr.type_cache.borrow().as_ref() {
+        return Ok(ty.as_ref().clone());
+    }
     let resolve_intrinsic_type =
         |name: &str, span: SourceSpan, context: &Context| -> Result<Expression, Diagnostic> {
             let identifier = Identifier::new(name.to_string());
@@ -3015,10 +3019,10 @@ pub(crate) fn get_type_of_expression(
                             target,
                             context: context.clone(),
                         });
-                        stack.push(Frame::Enter(*value_expr, context));
+                        stack.push(Frame::Enter(value_expr.as_ref().clone(), context));
                     }
                     ExpressionKind::Diverge { value, .. } => {
-                        stack.push(Frame::Enter(*value, context));
+                        stack.push(Frame::Enter(value.as_ref().clone(), context));
                     }
                     ExpressionKind::If {
                         condition,
@@ -3029,12 +3033,12 @@ pub(crate) fn get_type_of_expression(
                         collect_bindings(&condition, &mut then_context)?;
                         stack.push(Frame::If {
                             span,
-                            then_branch: *then_branch.clone(),
-                            else_branch: *else_branch.clone(),
+                            then_branch: then_branch.as_ref().clone(),
+                            else_branch: else_branch.as_ref().clone(),
                         });
-                        stack.push(Frame::Enter(*else_branch, context.clone()));
-                        stack.push(Frame::Enter(*then_branch, then_context));
-                        stack.push(Frame::Enter(*condition, context));
+                        stack.push(Frame::Enter(else_branch.as_ref().clone(), context.clone()));
+                        stack.push(Frame::Enter(then_branch.as_ref().clone(), then_context));
+                        stack.push(Frame::Enter(condition.as_ref().clone(), context));
                     }
                     ExpressionKind::Match { value, branches } => {
                         let skip_value_type = match &value.as_ref().kind {
@@ -3060,7 +3064,7 @@ pub(crate) fn get_type_of_expression(
                                 branches,
                                 context: context.clone(),
                             });
-                            stack.push(Frame::Enter(*value, context));
+                            stack.push(Frame::Enter(value.as_ref().clone(), context));
                         }
                     }
                     ExpressionKind::Binding(..) => {
@@ -3080,7 +3084,7 @@ pub(crate) fn get_type_of_expression(
                         );
                     }
                     ExpressionKind::EnumValue { enum_type, .. } => {
-                        results.push(*enum_type);
+                        results.push(enum_type.as_ref().clone());
                     }
                     ExpressionKind::EnumType(_) => {
                         results.push(
@@ -3097,22 +3101,22 @@ pub(crate) fn get_type_of_expression(
                         left,
                         right,
                     } => {
-                        let left_expr = *left.clone();
-                        let right_expr = *right.clone();
+                        let left_expr = left.as_ref().clone();
+                        let right_expr = right.as_ref().clone();
                         let property_access = ExpressionKind::TypePropertyAccess {
-                            object: Box::new(left_expr.clone()),
+                            object: Rc::new(left_expr.clone()),
                             property: operator.clone(),
                         }
                         .with_span(span);
                         let apply_self = ExpressionKind::FunctionCall {
-                            function: Box::new(property_access),
-                            argument: Box::new(left_expr),
+                            function: Rc::new(property_access),
+                            argument: Rc::new(left_expr),
                         }
                         .with_span(span);
                         stack.push(Frame::Enter(
                             ExpressionKind::FunctionCall {
-                                function: Box::new(apply_self),
-                                argument: Box::new(right_expr),
+                                function: Rc::new(apply_self),
+                                argument: Rc::new(right_expr),
                             }
                             .with_span(span),
                             context,
@@ -3142,7 +3146,7 @@ pub(crate) fn get_type_of_expression(
                                 break_values,
                                 use_body: true,
                             });
-                            stack.push(Frame::Enter(*body, context));
+                            stack.push(Frame::Enter(body.as_ref().clone(), context));
                         } else {
                             stack.push(Frame::Loop {
                                 span,
@@ -3158,12 +3162,15 @@ pub(crate) fn get_type_of_expression(
                         let call_context = context.clone();
                         stack.push(Frame::FunctionCall {
                             span,
-                            function_expr: *function.clone(),
-                            argument_expr: *argument.clone(),
+                            function_expr: function.as_ref().clone(),
+                            argument_expr: argument.as_ref().clone(),
                             context: call_context.clone(),
                         });
-                        stack.push(Frame::Enter(*argument, call_context.clone()));
-                        stack.push(Frame::Enter(*function, call_context));
+                        stack.push(Frame::Enter(
+                            argument.as_ref().clone(),
+                            call_context.clone(),
+                        ));
+                        stack.push(Frame::Enter(function.as_ref().clone(), call_context));
                     }
                     ExpressionKind::ArrayIndex { array, index } => {
                         let call_context = context.clone();
@@ -3171,11 +3178,11 @@ pub(crate) fn get_type_of_expression(
                             span,
                             context: call_context.clone(),
                         });
-                        stack.push(Frame::Enter(*index, call_context.clone()));
-                        stack.push(Frame::Enter(*array, call_context));
+                        stack.push(Frame::Enter(index.as_ref().clone(), call_context.clone()));
+                        stack.push(Frame::Enter(array.as_ref().clone(), call_context));
                     }
                     ExpressionKind::TypePropertyAccess { object, property } => {
-                        let object_expr = *object;
+                        let object_expr = (*object).clone();
                         stack.push(Frame::TypePropertyAccess {
                             span,
                             property,
@@ -3197,7 +3204,7 @@ pub(crate) fn get_type_of_expression(
                         }
                     },
                     ExpressionKind::AttachImplementation { type_expr, .. } => {
-                        stack.push(Frame::Enter(*type_expr, context));
+                        stack.push(Frame::Enter(type_expr.as_ref().clone(), context));
                     }
                     ExpressionKind::Function {
                         parameter,
@@ -3211,8 +3218,8 @@ pub(crate) fn get_type_of_expression(
                             resolve_type_alias_expression(return_type.as_ref().unwrap(), &context);
                         results.push(
                             ExpressionKind::FunctionType {
-                                parameter: Box::new(parameter_type),
-                                return_type: Box::new(resolved_return),
+                                parameter: Rc::new(parameter_type),
+                                return_type: Rc::new(resolved_return),
                             }
                             .with_span(span),
                         );
@@ -3246,7 +3253,7 @@ pub(crate) fn get_type_of_expression(
                             span,
                             count: count_value,
                         });
-                        stack.push(Frame::Enter(*value, context));
+                        stack.push(Frame::Enter(value.as_ref().clone(), context));
                     }
                     ExpressionKind::FunctionType { .. } => {
                         results.push(
@@ -3390,15 +3397,16 @@ pub(crate) fn get_type_of_expression(
                 let expr = expressions[index].clone();
                 match expr.kind {
                     ExpressionKind::Binding(binding) => {
+                        let Binding { pattern, expr } = (*binding).clone();
                         let expr_context = context.clone();
                         stack.push(Frame::BlockAfterBinding {
                             span,
                             expressions,
                             context,
                             index,
-                            pattern: binding.pattern,
+                            pattern,
                         });
-                        stack.push(Frame::Enter(binding.expr, expr_context));
+                        stack.push(Frame::Enter(expr, expr_context));
                     }
                     _ => {
                         let expr_context = context.clone();
@@ -3609,7 +3617,7 @@ pub(crate) fn get_type_of_expression(
                 let argument_type = resolve_type_alias_expression(&argument_type, &context);
                 let mut evaluated_function_type = results.pop().unwrap();
                 if let ExpressionKind::TypePropertyAccess { object, property } = &function_expr.kind
-                    && argument_expr == **object
+                    && argument_expr == object.as_ref().clone()
                 {
                     let object_type = get_type_of_expression(object, &context)?;
                     if let Ok((trait_prop, TraitPropSource::StructField)) =
@@ -3693,8 +3701,8 @@ pub(crate) fn get_type_of_expression(
                         &context,
                     );
                     evaluated_function_type = ExpressionKind::FunctionType {
-                        parameter: Box::new(parameter_type),
-                        return_type: Box::new(resolved_return),
+                        parameter: Rc::new(parameter_type),
+                        return_type: Rc::new(resolved_return),
                     }
                     .with_span(evaluated_function_type.span);
                 }
@@ -3790,8 +3798,8 @@ pub(crate) fn get_type_of_expression(
                     } else {
                         results.push(
                             ExpressionKind::FunctionType {
-                                parameter: Box::new(payload_type),
-                                return_type: Box::new(enum_type),
+                                parameter: Rc::new(payload_type),
+                                return_type: Rc::new(enum_type),
                             }
                             .with_span(span),
                         );
@@ -3814,9 +3822,14 @@ pub(crate) fn get_type_of_expression(
         }
     }
 
-    results
-        .pop()
-        .ok_or_else(|| diagnostic("Failed to determine expression type", expr.span()))
+    let result =
+        results
+            .pop()
+            .ok_or_else(|| diagnostic("Failed to determine expression type", expr.span()))?;
+    if expr.type_cache.borrow().is_none() {
+        *expr.type_cache.borrow_mut() = Some(Rc::new(result.clone()));
+    }
+    Ok(result)
 }
 
 pub fn collect_break_values(expr: &Expression) -> Vec<Expression> {
@@ -3826,7 +3839,7 @@ pub fn collect_break_values(expr: &Expression) -> Vec<Expression> {
             divergance_type: DivergeExpressionType::Break,
         } = &current_expr.kind
         {
-            values.push(*value.clone());
+            values.push(value.as_ref().clone());
         }
         values
     })
@@ -4263,12 +4276,12 @@ fn expression_contains_external_mutation(expr: &Expression, context: &Context) -
         if let ExpressionKind::FunctionCall { function, argument } = &expr.kind {
             let resolved_function = match &function.kind {
                 ExpressionKind::Function { .. } => Some(function.as_ref()),
-                ExpressionKind::Identifier(identifier) => context.get_identifier(identifier).and_then(
-                    |(binding, _)| match binding {
+                ExpressionKind::Identifier(identifier) => context
+                    .get_identifier(identifier)
+                    .and_then(|(binding, _)| match binding {
                         BindingContext::Bound(value, _, _) => Some(value),
                         _ => None,
-                    },
-                ),
+                    }),
                 _ => None,
             };
 
@@ -4282,8 +4295,8 @@ fn expression_contains_external_mutation(expr: &Expression, context: &Context) -
                 return true;
             }
 
-            stack.push(argument);
-            stack.push(function);
+            stack.push(argument.as_ref());
+            stack.push(function.as_ref());
             continue;
         }
 
@@ -4292,17 +4305,19 @@ fn expression_contains_external_mutation(expr: &Expression, context: &Context) -
             | ExpressionKind::Literal(..)
             | ExpressionKind::Identifier(..) => {}
             ExpressionKind::BoxType(inner) => {
-                stack.push(inner);
+                stack.push(inner.as_ref());
             }
             ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(left, right, ..)) => {
-                stack.push(right);
-                stack.push(left);
+                stack.push(right.as_ref());
+                stack.push(left.as_ref());
             }
             ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(operand, ..)) => {
-                stack.push(operand);
+                stack.push(operand.as_ref());
             }
-            ExpressionKind::IntrinsicOperation(IntrinsicOperation::InlineAssembly { code, .. }) => {
-                stack.push(code);
+            ExpressionKind::IntrinsicOperation(IntrinsicOperation::InlineAssembly {
+                code, ..
+            }) => {
+                stack.push(code.as_ref());
             }
             ExpressionKind::EnumType(items) => {
                 for (_, field_expr) in items.iter().rev() {
@@ -4315,21 +4330,21 @@ fn expression_contains_external_mutation(expr: &Expression, context: &Context) -
                 for (_, branch) in branches.iter().rev() {
                     stack.push(branch);
                 }
-                stack.push(value);
+                stack.push(value.as_ref());
             }
             ExpressionKind::EnumValue {
                 enum_type, payload, ..
             } => {
-                stack.push(payload);
-                stack.push(enum_type);
+                stack.push(payload.as_ref());
+                stack.push(enum_type.as_ref());
             }
             ExpressionKind::EnumConstructor {
                 enum_type,
                 payload_type,
                 ..
             } => {
-                stack.push(payload_type);
-                stack.push(enum_type);
+                stack.push(payload_type.as_ref());
+                stack.push(enum_type.as_ref());
             }
             ExpressionKind::If {
                 condition,
@@ -4337,24 +4352,24 @@ fn expression_contains_external_mutation(expr: &Expression, context: &Context) -
                 else_branch,
                 ..
             } => {
-                stack.push(else_branch);
-                stack.push(then_branch);
-                stack.push(condition);
+                stack.push(else_branch.as_ref());
+                stack.push(then_branch.as_ref());
+                stack.push(condition.as_ref());
             }
             ExpressionKind::AttachImplementation {
                 type_expr,
                 implementation,
                 ..
             } => {
-                stack.push(implementation);
-                stack.push(type_expr);
+                stack.push(implementation.as_ref());
+                stack.push(type_expr.as_ref());
             }
             ExpressionKind::Function {
                 return_type, body, ..
             } => {
-                stack.push(body);
+                stack.push(body.as_ref());
                 if let Some(ret_type) = return_type {
-                    stack.push(ret_type);
+                    stack.push(ret_type.as_ref());
                 }
             }
             ExpressionKind::FunctionType {
@@ -4362,8 +4377,8 @@ fn expression_contains_external_mutation(expr: &Expression, context: &Context) -
                 return_type,
                 ..
             } => {
-                stack.push(return_type);
-                stack.push(parameter);
+                stack.push(return_type.as_ref());
+                stack.push(parameter.as_ref());
             }
             ExpressionKind::Struct(items) => {
                 for (_, field_expr) in items.iter().rev() {
@@ -4371,23 +4386,23 @@ fn expression_contains_external_mutation(expr: &Expression, context: &Context) -
                 }
             }
             ExpressionKind::ArrayRepeat { value, count } => {
-                stack.push(count);
-                stack.push(value);
+                stack.push(count.as_ref());
+                stack.push(value.as_ref());
             }
             ExpressionKind::Operation { left, right, .. } => {
-                stack.push(right);
-                stack.push(left);
+                stack.push(right.as_ref());
+                stack.push(left.as_ref());
             }
             ExpressionKind::Assignment { expr, .. } => {
-                stack.push(expr);
+                stack.push(expr.as_ref());
             }
             ExpressionKind::FunctionCall { .. } => {}
             ExpressionKind::ArrayIndex { array, index } => {
-                stack.push(index);
-                stack.push(array);
+                stack.push(index.as_ref());
+                stack.push(array.as_ref());
             }
             ExpressionKind::TypePropertyAccess { object, .. } => {
-                stack.push(object);
+                stack.push(object.as_ref());
             }
             ExpressionKind::Binding(binding) => {
                 stack.push(&binding.expr);
@@ -4398,10 +4413,10 @@ fn expression_contains_external_mutation(expr: &Expression, context: &Context) -
                 }
             }
             ExpressionKind::Diverge { value, .. } => {
-                stack.push(value);
+                stack.push(value.as_ref());
             }
             ExpressionKind::Loop { body, .. } => {
-                stack.push(body);
+                stack.push(body.as_ref());
             }
         }
     }
@@ -4457,11 +4472,11 @@ fn type_expression_contains_box(expr: &Expression, context: &Context) -> bool {
                 parameter,
                 return_type,
             } => {
-                stack.push(*parameter.clone());
-                stack.push(*return_type.clone());
+                stack.push(parameter.as_ref().clone());
+                stack.push(return_type.as_ref().clone());
             }
             ExpressionKind::AttachImplementation { type_expr, .. } => {
-                stack.push(*type_expr.clone());
+                stack.push(type_expr.as_ref().clone());
             }
             ExpressionKind::IntrinsicType(_)
             | ExpressionKind::Identifier(_)
@@ -4822,7 +4837,7 @@ fn trait_requirement_from_type_hint(type_expr: &Expression) -> Option<Expression
         } if is_intrinsic_type_expr(type_expr, IntrinsicType::Type)
             && !matches!(implementation.kind, ExpressionKind::Struct(_)) =>
         {
-            Some(*implementation.clone())
+            Some(implementation.as_ref().clone())
         }
         _ => None,
     }
@@ -4969,15 +4984,15 @@ fn resolve_type_alias_expression(expr: &Expression, context: &Context) -> Expres
                 }
                 ExpressionKind::BoxType(inner) => {
                     stack.push(Frame::BoxType { span: expr.span });
-                    stack.push(Frame::Enter(*inner));
+                    stack.push(Frame::Enter(inner.as_ref().clone()));
                 }
                 ExpressionKind::FunctionType {
                     parameter,
                     return_type,
                 } => {
                     stack.push(Frame::FunctionType { span: expr.span });
-                    stack.push(Frame::Enter(*return_type));
-                    stack.push(Frame::Enter(*parameter));
+                    stack.push(Frame::Enter(return_type.as_ref().clone()));
+                    stack.push(Frame::Enter(parameter.as_ref().clone()));
                 }
                 ExpressionKind::EnumType(variants) => {
                     let identifiers = variants.iter().map(|(id, _)| id.clone()).collect();
@@ -4994,8 +5009,8 @@ fn resolve_type_alias_expression(expr: &Expression, context: &Context) -> Expres
                     implementation,
                 } => {
                     stack.push(Frame::AttachImplementation { span: expr.span });
-                    stack.push(Frame::Enter(*implementation));
-                    stack.push(Frame::Enter(*type_expr));
+                    stack.push(Frame::Enter(implementation.as_ref().clone()));
+                    stack.push(Frame::Enter(type_expr.as_ref().clone()));
                 }
                 other => {
                     results.push(Expression::new(other, expr.span));
@@ -5013,7 +5028,7 @@ fn resolve_type_alias_expression(expr: &Expression, context: &Context) -> Expres
             Frame::BoxType { span } => {
                 let inner = results.pop().unwrap();
                 results.push(Expression::new(
-                    ExpressionKind::BoxType(Box::new(inner)),
+                    ExpressionKind::BoxType(Rc::new(inner)),
                     span,
                 ));
             }
@@ -5031,8 +5046,8 @@ fn resolve_type_alias_expression(expr: &Expression, context: &Context) -> Expres
                 let parameter = results.pop().unwrap();
                 results.push(
                     ExpressionKind::FunctionType {
-                        parameter: Box::new(parameter),
-                        return_type: Box::new(return_type),
+                        parameter: Rc::new(parameter),
+                        return_type: Rc::new(return_type),
                     }
                     .with_span(span),
                 );
@@ -5042,8 +5057,8 @@ fn resolve_type_alias_expression(expr: &Expression, context: &Context) -> Expres
                 let type_expr = results.pop().unwrap();
                 results.push(
                     ExpressionKind::AttachImplementation {
-                        type_expr: Box::new(type_expr),
-                        implementation: Box::new(implementation),
+                        type_expr: Rc::new(type_expr),
+                        implementation: Rc::new(implementation),
                     }
                     .with_span(span),
                 );
@@ -5099,19 +5114,19 @@ fn fold_expression<T, U: Fn(&Expression, T) -> T>(
             | ExpressionKind::Literal(..)
             | ExpressionKind::Identifier(..) => {}
             ExpressionKind::BoxType(inner) => {
-                stack.push(inner);
+                stack.push(inner.as_ref());
             }
             ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(left, right, ..)) => {
-                stack.push(right);
-                stack.push(left);
+                stack.push(right.as_ref());
+                stack.push(left.as_ref());
             }
             ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(operand, ..)) => {
-                stack.push(operand);
+                stack.push(operand.as_ref());
             }
             ExpressionKind::IntrinsicOperation(IntrinsicOperation::InlineAssembly {
                 code, ..
             }) => {
-                stack.push(code);
+                stack.push(code.as_ref());
             }
             ExpressionKind::EnumType(items) => {
                 for (_, field_expr) in items.iter().rev() {
@@ -5124,21 +5139,21 @@ fn fold_expression<T, U: Fn(&Expression, T) -> T>(
                 for (_, branch) in branches.iter().rev() {
                     stack.push(branch);
                 }
-                stack.push(value);
+                stack.push(value.as_ref());
             }
             ExpressionKind::EnumValue {
                 enum_type, payload, ..
             } => {
-                stack.push(payload);
-                stack.push(enum_type);
+                stack.push(payload.as_ref());
+                stack.push(enum_type.as_ref());
             }
             ExpressionKind::EnumConstructor {
                 enum_type,
                 payload_type,
                 ..
             } => {
-                stack.push(payload_type);
-                stack.push(enum_type);
+                stack.push(payload_type.as_ref());
+                stack.push(enum_type.as_ref());
             }
             ExpressionKind::If {
                 condition,
@@ -5146,24 +5161,24 @@ fn fold_expression<T, U: Fn(&Expression, T) -> T>(
                 else_branch,
                 ..
             } => {
-                stack.push(else_branch);
-                stack.push(then_branch);
-                stack.push(condition);
+                stack.push(else_branch.as_ref());
+                stack.push(then_branch.as_ref());
+                stack.push(condition.as_ref());
             }
             ExpressionKind::AttachImplementation {
                 type_expr,
                 implementation,
                 ..
             } => {
-                stack.push(implementation);
-                stack.push(type_expr);
+                stack.push(implementation.as_ref());
+                stack.push(type_expr.as_ref());
             }
             ExpressionKind::Function {
                 return_type, body, ..
             } => {
-                stack.push(body);
+                stack.push(body.as_ref());
                 if let Some(ret_type) = return_type {
-                    stack.push(ret_type);
+                    stack.push(ret_type.as_ref());
                 }
             }
             ExpressionKind::FunctionType {
@@ -5171,8 +5186,8 @@ fn fold_expression<T, U: Fn(&Expression, T) -> T>(
                 return_type,
                 ..
             } => {
-                stack.push(return_type);
-                stack.push(parameter);
+                stack.push(return_type.as_ref());
+                stack.push(parameter.as_ref());
             }
             ExpressionKind::Struct(items) => {
                 for (_, field_expr) in items.iter().rev() {
@@ -5180,28 +5195,28 @@ fn fold_expression<T, U: Fn(&Expression, T) -> T>(
                 }
             }
             ExpressionKind::ArrayRepeat { value, count } => {
-                stack.push(count);
-                stack.push(value);
+                stack.push(count.as_ref());
+                stack.push(value.as_ref());
             }
             ExpressionKind::Operation { left, right, .. } => {
-                stack.push(right);
-                stack.push(left);
+                stack.push(right.as_ref());
+                stack.push(left.as_ref());
             }
             ExpressionKind::Assignment { expr, .. } => {
-                stack.push(expr);
+                stack.push(expr.as_ref());
             }
             ExpressionKind::FunctionCall {
                 function, argument, ..
             } => {
-                stack.push(argument);
-                stack.push(function);
+                stack.push(argument.as_ref());
+                stack.push(function.as_ref());
             }
             ExpressionKind::ArrayIndex { array, index } => {
-                stack.push(index);
-                stack.push(array);
+                stack.push(index.as_ref());
+                stack.push(array.as_ref());
             }
             ExpressionKind::TypePropertyAccess { object, .. } => {
-                stack.push(object);
+                stack.push(object.as_ref());
             }
             ExpressionKind::Binding(binding) => {
                 stack.push(&binding.expr);
@@ -5212,10 +5227,10 @@ fn fold_expression<T, U: Fn(&Expression, T) -> T>(
                 }
             }
             ExpressionKind::Diverge { value, .. } => {
-                stack.push(value);
+                stack.push(value.as_ref());
             }
             ExpressionKind::Loop { body, .. } => {
-                stack.push(body);
+                stack.push(body.as_ref());
             }
         }
     }
@@ -5356,6 +5371,7 @@ pub fn interpret_program(
         Expression {
             kind: ExpressionKind::Block(expressions),
             span,
+            ..
         } => interpret_block(expressions, span, context),
         other => interpret_expression(other, context).map(|value| (value, context.clone())),
     }
@@ -5602,6 +5618,7 @@ fn get_lvalue_value(
             let Expression {
                 kind: ExpressionKind::Struct(fields),
                 span: struct_span,
+                ..
             } = object_value
             else {
                 return Err(diagnostic(
@@ -5644,6 +5661,7 @@ fn get_lvalue_value(
             let Expression {
                 kind: ExpressionKind::Struct(fields),
                 span: struct_span,
+                ..
             } = array_value
             else {
                 return Err(diagnostic("Indexing requires an array value", *span));
@@ -5684,13 +5702,11 @@ fn apply_lvalue_update(
                 bound_type.clone(),
                 *preserve_behavior,
             ),
-            BindingContext::UnboundWithType(expected_ty) => {
-                (
-                    Some(expected_ty.clone()),
-                    Some(expected_ty.clone()),
-                    PreserveBehavior::Inline,
-                )
-            }
+            BindingContext::UnboundWithType(expected_ty) => (
+                Some(expected_ty.clone()),
+                Some(expected_ty.clone()),
+                PreserveBehavior::Inline,
+            ),
             BindingContext::UnboundWithoutType => (None, None, PreserveBehavior::Inline),
         };
 
@@ -5803,6 +5819,7 @@ fn apply_lvalue_update(
                 let Expression {
                     kind: ExpressionKind::Struct(fields),
                     span: struct_span,
+                    ..
                 } = current_object
                 else {
                     return Err(diagnostic("Type property access on non-struct value", span));
@@ -5900,7 +5917,7 @@ fn apply_assignment(
     Ok(Expression::new(
         ExpressionKind::Assignment {
             target,
-            expr: Box::new(value),
+            expr: Rc::new(value),
         },
         span,
     ))
@@ -6629,7 +6646,7 @@ fn is_resolved_constant(expr: &Expression) -> bool {
         match &expr.kind {
             ExpressionKind::Literal(_) | ExpressionKind::IntrinsicType(_) => {}
             ExpressionKind::BoxType(inner) => {
-                stack.push(inner);
+                stack.push(inner.as_ref());
             }
             ExpressionKind::EnumType(variants) => {
                 for (_, ty) in variants.iter() {
@@ -6639,16 +6656,16 @@ fn is_resolved_constant(expr: &Expression) -> bool {
             ExpressionKind::EnumValue {
                 enum_type, payload, ..
             } => {
-                stack.push(payload);
-                stack.push(enum_type);
+                stack.push(payload.as_ref());
+                stack.push(enum_type.as_ref());
             }
             ExpressionKind::EnumConstructor {
                 enum_type,
                 payload_type,
                 ..
             } => {
-                stack.push(payload_type);
-                stack.push(enum_type);
+                stack.push(payload_type.as_ref());
+                stack.push(enum_type.as_ref());
             }
             ExpressionKind::Struct(items) => {
                 for (_, value_expr) in items.iter() {
@@ -6656,16 +6673,16 @@ fn is_resolved_constant(expr: &Expression) -> bool {
                 }
             }
             ExpressionKind::ArrayRepeat { value, count } => {
-                stack.push(count);
-                stack.push(value);
+                stack.push(count.as_ref());
+                stack.push(value.as_ref());
             }
             ExpressionKind::AttachImplementation {
                 type_expr,
                 implementation,
                 ..
             } => {
-                stack.push(implementation);
-                stack.push(type_expr);
+                stack.push(implementation.as_ref());
+                stack.push(type_expr.as_ref());
             }
             ExpressionKind::Function {
                 parameter,
@@ -6682,15 +6699,15 @@ fn is_resolved_constant(expr: &Expression) -> bool {
                 if !is_resolved_const_function_expression(body, &new_function_context) {
                     return false;
                 }
-                stack.push(return_type.as_ref().unwrap());
+                stack.push(return_type.as_ref().unwrap().as_ref());
             }
             ExpressionKind::FunctionType {
                 parameter,
                 return_type,
                 ..
             } => {
-                stack.push(return_type);
-                stack.push(parameter);
+                stack.push(return_type.as_ref());
+                stack.push(parameter.as_ref());
             }
             ExpressionKind::Assignment { .. } => return false,
             _ => return false,
@@ -6743,9 +6760,9 @@ fn is_resolved_const_function_expression(expr: &Expression, function_context: &C
                 IntrinsicOperation::Unary(operand, _) => check(operand, context),
                 IntrinsicOperation::InlineAssembly { code, .. } => check(code, context),
             },
-            ExpressionKind::EnumType(cases) => cases
-                .iter()
-                .all(|(_, case_expr)| check(case_expr, context)),
+            ExpressionKind::EnumType(cases) => {
+                cases.iter().all(|(_, case_expr)| check(case_expr, context))
+            }
             ExpressionKind::EnumValue {
                 enum_type, payload, ..
             } => check(enum_type, context) && check(payload, context),
@@ -6864,10 +6881,8 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
         (
             BindingContext::Bound(
                 ExpressionKind::AttachImplementation {
-                    type_expr: Box::new(intrinsic_type_expr(IntrinsicType::Type)),
-                    implementation: Box::new(
-                        ExpressionKind::Struct(vec![]).with_span(dummy_span()),
-                    ),
+                    type_expr: Rc::new(intrinsic_type_expr(IntrinsicType::Type)),
+                    implementation: Rc::new(ExpressionKind::Struct(vec![]).with_span(dummy_span())),
                 }
                 .with_span(dummy_span()),
                 PreserveBehavior::Inline,
@@ -6897,21 +6912,21 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
             Identifier::new(symbol.to_string()),
             ExpressionKind::Function {
                 parameter: typed_pattern("self"),
-                return_type: Some(Box::new(
+                return_type: Some(Rc::new(
                     ExpressionKind::FunctionType {
-                        parameter: Box::new(intrinsic_type_expr(intrinsic.clone())),
-                        return_type: Box::new(intrinsic_type_expr(intrinsic.clone())),
+                        parameter: Rc::new(intrinsic_type_expr(intrinsic.clone())),
+                        return_type: Rc::new(intrinsic_type_expr(intrinsic.clone())),
                     }
                     .with_span(dummy_span()),
                 )),
-                body: Box::new(
+                body: Rc::new(
                     ExpressionKind::Function {
                         parameter: typed_pattern("other"),
-                        return_type: Some(Box::new(intrinsic_type_expr(intrinsic.clone()))),
-                        body: Box::new(
+                        return_type: Some(Rc::new(intrinsic_type_expr(intrinsic.clone()))),
+                        body: Rc::new(
                             ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(
-                                Box::new(identifier_expr("self")),
-                                Box::new(identifier_expr("other")),
+                                Rc::new(identifier_expr("self")),
+                                Rc::new(identifier_expr("other")),
                                 operator,
                             ))
                             .with_span(dummy_span()),
@@ -6929,8 +6944,8 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
         (
             BindingContext::Bound(
                 ExpressionKind::AttachImplementation {
-                    type_expr: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
-                    implementation: Box::new(
+                    type_expr: Rc::new(intrinsic_type_expr(IntrinsicType::I32)),
+                    implementation: Rc::new(
                         ExpressionKind::Struct(vec![
                             numeric_binary_intrinsic(
                                 "+",
@@ -7000,8 +7015,8 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
         (
             BindingContext::Bound(
                 ExpressionKind::AttachImplementation {
-                    type_expr: Box::new(intrinsic_type_expr(IntrinsicType::U8)),
-                    implementation: Box::new(
+                    type_expr: Rc::new(intrinsic_type_expr(IntrinsicType::U8)),
+                    implementation: Rc::new(
                         ExpressionKind::Struct(vec![
                             numeric_binary_intrinsic(
                                 "+",
@@ -7084,21 +7099,21 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
             Identifier::new(symbol.to_string()),
             ExpressionKind::Function {
                 parameter: typed_pattern("self"),
-                return_type: Some(Box::new(Expression::new(
+                return_type: Some(Rc::new(Expression::new(
                     ExpressionKind::FunctionType {
-                        parameter: Box::new(intrinsic_type_expr(IntrinsicType::Boolean)),
-                        return_type: Box::new(intrinsic_type_expr(IntrinsicType::Boolean)),
+                        parameter: Rc::new(intrinsic_type_expr(IntrinsicType::Boolean)),
+                        return_type: Rc::new(intrinsic_type_expr(IntrinsicType::Boolean)),
                     },
                     dummy_span(),
                 ))),
-                body: Box::new(Expression::new(
+                body: Rc::new(Expression::new(
                     ExpressionKind::Function {
                         parameter: typed_pattern("other"),
-                        return_type: Some(Box::new(intrinsic_type_expr(IntrinsicType::Boolean))),
-                        body: Box::new(Expression::new(
+                        return_type: Some(Rc::new(intrinsic_type_expr(IntrinsicType::Boolean))),
+                        body: Rc::new(Expression::new(
                             ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(
-                                Box::new(identifier_expr("self")),
-                                Box::new(identifier_expr("other")),
+                                Rc::new(identifier_expr("self")),
+                                Rc::new(identifier_expr("other")),
                                 operator,
                             )),
                             dummy_span(),
@@ -7116,8 +7131,8 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
         (
             BindingContext::Bound(
                 ExpressionKind::AttachImplementation {
-                    type_expr: Box::new(intrinsic_type_expr(IntrinsicType::Boolean)),
-                    implementation: Box::new(
+                    type_expr: Rc::new(intrinsic_type_expr(IntrinsicType::Boolean)),
+                    implementation: Rc::new(
                         ExpressionKind::Struct(vec![
                             bool_binary_intrinsic("==", BinaryIntrinsicOperator::I32Equal),
                             bool_binary_intrinsic("!=", BinaryIntrinsicOperator::I32NotEqual),
@@ -7204,10 +7219,8 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
         (
             BindingContext::Bound(
                 ExpressionKind::AttachImplementation {
-                    type_expr: Box::new(intrinsic_type_expr(IntrinsicType::BindingAnnotation)),
-                    implementation: Box::new(
-                        ExpressionKind::Struct(vec![]).with_span(dummy_span()),
-                    ),
+                    type_expr: Rc::new(intrinsic_type_expr(IntrinsicType::BindingAnnotation)),
+                    implementation: Rc::new(ExpressionKind::Struct(vec![]).with_span(dummy_span())),
                 }
                 .with_span(dummy_span()),
                 PreserveBehavior::Inline,
@@ -7245,12 +7258,12 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
                         Box::new(intrinsic_type_expr(IntrinsicType::Target)),
                         dummy_span(),
                     ),
-                    return_type: Some(Box::new(intrinsic_type_expr(
+                    return_type: Some(Rc::new(intrinsic_type_expr(
                         IntrinsicType::BindingAnnotation,
                     ))),
-                    body: Box::new(
+                    body: Rc::new(
                         ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
-                            Box::new(identifier_expr("target")),
+                            Rc::new(identifier_expr("target")),
                             UnaryIntrinsicOperator::BindingAnnotationExportFromTarget,
                         ))
                         .with_span(dummy_span()),
@@ -7277,12 +7290,12 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
                         Box::new(intrinsic_type_expr(IntrinsicType::Target)),
                         dummy_span(),
                     ),
-                    return_type: Some(Box::new(intrinsic_type_expr(
+                    return_type: Some(Rc::new(intrinsic_type_expr(
                         IntrinsicType::BindingAnnotation,
                     ))),
-                    body: Box::new(
+                    body: Rc::new(
                         ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
-                            Box::new(identifier_expr("target")),
+                            Rc::new(identifier_expr("target")),
                             UnaryIntrinsicOperator::BindingAnnotationTargetFromTarget,
                         ))
                         .with_span(dummy_span()),
@@ -7309,12 +7322,12 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
                         Box::new(intrinsic_type_expr(IntrinsicType::Target)),
                         dummy_span(),
                     ),
-                    return_type: Some(Box::new(intrinsic_type_expr(
+                    return_type: Some(Rc::new(intrinsic_type_expr(
                         IntrinsicType::BindingAnnotation,
                     ))),
-                    body: Box::new(
+                    body: Rc::new(
                         ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
-                            Box::new(identifier_expr("target")),
+                            Rc::new(identifier_expr("target")),
                             UnaryIntrinsicOperator::BindingAnnotationWrapFromTarget,
                         ))
                         .with_span(dummy_span()),
@@ -7341,16 +7354,16 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
                         Box::new(intrinsic_type_expr(IntrinsicType::Target)),
                         dummy_span(),
                     ),
-                    return_type: Some(Box::new(
+                    return_type: Some(Rc::new(
                         ExpressionKind::FunctionType {
-                            parameter: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
-                            return_type: Box::new(intrinsic_type_expr(IntrinsicType::I32)),
+                            parameter: Rc::new(intrinsic_type_expr(IntrinsicType::I32)),
+                            return_type: Rc::new(intrinsic_type_expr(IntrinsicType::I32)),
                         }
                         .with_span(dummy_span()),
                     )),
-                    body: Box::new(
+                    body: Rc::new(
                         ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
-                            Box::new(identifier_expr("target")),
+                            Rc::new(identifier_expr("target")),
                             UnaryIntrinsicOperator::AssemblyFromTarget,
                         ))
                         .with_span(dummy_span()),
@@ -7377,10 +7390,10 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
                         Box::new(intrinsic_type_expr(IntrinsicType::Type)),
                         dummy_span(),
                     ),
-                    return_type: Some(Box::new(intrinsic_type_expr(IntrinsicType::Type))),
-                    body: Box::new(Expression::new(
+                    return_type: Some(Rc::new(intrinsic_type_expr(IntrinsicType::Type))),
+                    body: Rc::new(Expression::new(
                         ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
-                            Box::new(Expression::new(
+                            Rc::new(Expression::new(
                                 ExpressionKind::Identifier(Identifier::new("struct_arg")),
                                 dummy_span(),
                             )),
@@ -7404,9 +7417,9 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
                 ExpressionKind::Function {
                     parameter: BindingPattern::Identifier(Identifier::new("path"), dummy_span()),
                     return_type: None,
-                    body: Box::new(Expression::new(
+                    body: Rc::new(Expression::new(
                         ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
-                            Box::new(Expression::new(
+                            Rc::new(Expression::new(
                                 ExpressionKind::Identifier(Identifier::new("path")),
                                 dummy_span(),
                             )),
@@ -7432,16 +7445,16 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
                         Identifier::new("branches"),
                         dummy_span(),
                     ),
-                    return_type: Some(Box::new(
+                    return_type: Some(Rc::new(
                         ExpressionKind::FunctionType {
-                            parameter: Box::new(intrinsic_type_expr(IntrinsicType::Type)),
-                            return_type: Box::new(intrinsic_type_expr(IntrinsicType::Type)),
+                            parameter: Rc::new(intrinsic_type_expr(IntrinsicType::Type)),
+                            return_type: Rc::new(intrinsic_type_expr(IntrinsicType::Type)),
                         }
                         .with_span(dummy_span()),
                     )),
-                    body: Box::new(Expression::new(
+                    body: Rc::new(Expression::new(
                         ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
-                            Box::new(Expression::new(
+                            Rc::new(Expression::new(
                                 ExpressionKind::Identifier(Identifier::new("branches")),
                                 dummy_span(),
                             )),
@@ -7471,10 +7484,10 @@ pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Conte
                         Box::new(intrinsic_type_expr(IntrinsicType::Type)),
                         dummy_span(),
                     ),
-                    return_type: Some(Box::new(intrinsic_type_expr(IntrinsicType::Type))),
-                    body: Box::new(Expression::new(
+                    return_type: Some(Rc::new(intrinsic_type_expr(IntrinsicType::Type))),
+                    body: Rc::new(Expression::new(
                         ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
-                            Box::new(Expression::new(
+                            Rc::new(Expression::new(
                                 ExpressionKind::Identifier(Identifier::new("boxed_type")),
                                 dummy_span(),
                             )),
@@ -7618,7 +7631,7 @@ fn test_basic_binding_interpretation() {
     let mut context = intrinsic_context();
 
     let expr = ExpressionKind::Block(vec![
-        ExpressionKind::Binding(Box::new(Binding {
+        ExpressionKind::Binding(Rc::new(Binding {
             pattern: BindingPattern::TypeHint(
                 Box::new(BindingPattern::Identifier(
                     Identifier::new("x"),
@@ -7668,8 +7681,8 @@ fn test_basic_addition_interpretation() {
 
     let expr = ExpressionKind::Operation {
         operator: "+".to_string(),
-        left: Box::new(literal_number_expr(5)),
-        right: Box::new(literal_number_expr(10)),
+        left: Rc::new(literal_number_expr(5)),
+        right: Rc::new(literal_number_expr(10)),
     }
     .with_span(dummy_span());
 

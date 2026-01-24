@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::{
     SourceSpan,
@@ -245,27 +246,27 @@ pub fn expression_to_intermediate(
                     ExpressionKind::IntrinsicOperation(op) => match op {
                         crate::parsing::IntrinsicOperation::Binary(left, right, operator) => {
                             stack.push(Frame::FinishIntrinsicBinary(operator));
-                            stack.push(Frame::Enter(*right));
-                            stack.push(Frame::Enter(*left));
+                            stack.push(Frame::Enter(right.as_ref().clone()));
+                            stack.push(Frame::Enter(left.as_ref().clone()));
                         }
                         crate::parsing::IntrinsicOperation::Unary(operand, operator) => {
                             stack.push(Frame::FinishIntrinsicUnary(operator));
-                            stack.push(Frame::Enter(*operand));
+                            stack.push(Frame::Enter(operand.as_ref().clone()));
                         }
                         crate::parsing::IntrinsicOperation::InlineAssembly { target, code } => {
                             let ExpressionKind::Literal(ExpressionLiteral::String(bytes)) =
-                                code.kind
+                                &code.kind
                             else {
                                 panic!("Inline assembly expects a string literal");
                             };
                             values.push(IntermediateKind::InlineAssembly {
                                 target,
-                                code: bytes,
+                                code: bytes.clone(),
                             });
                         }
                     },
                     ExpressionKind::Match { value, branches } => {
-                        let match_value = *value;
+                        let match_value = (*value).clone();
                         let match_value_type = builder.expression_value_type(&match_value);
                         let temp_identifier = builder.next_match_temp_identifier();
                         let branch_patterns = branches
@@ -288,9 +289,9 @@ pub fn expression_to_intermediate(
                         else_branch,
                     } => {
                         stack.push(Frame::FinishIf);
-                        stack.push(Frame::Enter(*else_branch));
-                        stack.push(Frame::Enter(*then_branch));
-                        stack.push(Frame::Enter(*condition));
+                        stack.push(Frame::Enter(else_branch.as_ref().clone()));
+                        stack.push(Frame::Enter(then_branch.as_ref().clone()));
+                        stack.push(Frame::Enter(condition.as_ref().clone()));
                     }
                     ExpressionKind::Struct(fields) => {
                         let field_ids = fields.iter().map(|(id, _)| id.clone()).collect();
@@ -377,7 +378,7 @@ pub fn expression_to_intermediate(
                     ExpressionKind::Assignment { target, expr } => {
                         let lowered_target = lower_lvalue(target, builder);
                         stack.push(Frame::FinishAssignment(lowered_target));
-                        stack.push(Frame::Enter(*expr));
+                        stack.push(Frame::Enter(expr.as_ref().clone()));
                     }
                     ExpressionKind::FunctionCall { function, argument } => {
                         if let ExpressionKind::EnumConstructor {
@@ -404,7 +405,7 @@ pub fn expression_to_intermediate(
                             {
                                 let function_index = builder.register_function(None, method_expr);
                                 stack.push(Frame::FinishFunctionCall(function_index));
-                                stack.push(Frame::Enter(*argument));
+                                stack.push(Frame::Enter(argument.as_ref().clone()));
                                 continue;
                             }
 
@@ -414,7 +415,7 @@ pub fn expression_to_intermediate(
                                     enum_variant_info(&enum_type, &variant)
                                 {
                                     let enum_value = ExpressionKind::EnumValue {
-                                        enum_type: Box::new(enum_type),
+                                        enum_type: Rc::new(enum_type),
                                         variant,
                                         variant_index,
                                         payload: argument.clone(),
@@ -425,7 +426,7 @@ pub fn expression_to_intermediate(
                                 }
                             }
                         }
-                        let function_index = match *function {
+                        let function_index = match function.as_ref() {
                             Expression {
                                 kind: ExpressionKind::Identifier(identifier),
                                 ..
@@ -440,7 +441,7 @@ pub fn expression_to_intermediate(
                             function_expr @ Expression {
                                 kind: ExpressionKind::Function { .. },
                                 ..
-                            } => builder.register_function(None, function_expr),
+                            } => builder.register_function(None, function_expr.clone()),
                             other => panic!(
                                 "Unsupported function call target in intermediate lowering: {:?}",
                                 other.kind
@@ -448,19 +449,19 @@ pub fn expression_to_intermediate(
                         };
 
                         stack.push(Frame::FinishFunctionCall(function_index));
-                        stack.push(Frame::Enter(*argument));
+                        stack.push(Frame::Enter(argument.as_ref().clone()));
                     }
                     ExpressionKind::ArrayIndex { array, index } => {
                         stack.push(Frame::FinishArrayIndex);
-                        stack.push(Frame::Enter(*index));
-                        stack.push(Frame::Enter(*array));
+                        stack.push(Frame::Enter(index.as_ref().clone()));
+                        stack.push(Frame::Enter(array.as_ref().clone()));
                     }
                     ExpressionKind::TypePropertyAccess { object, property } => {
                         stack.push(Frame::FinishTypePropertyAccess(property));
-                        stack.push(Frame::Enter(*object));
+                        stack.push(Frame::Enter(object.as_ref().clone()));
                     }
                     ExpressionKind::Binding(binding) => {
-                        let Binding { pattern, expr } = *binding;
+                        let Binding { pattern, expr } = (*binding).clone();
                         if let Some(identifier) = binding_identifier(&pattern)
                             && let Some(scope) = builder.enum_context.bindings.last_mut()
                         {
@@ -500,11 +501,11 @@ pub fn expression_to_intermediate(
                         divergance_type,
                     } => {
                         stack.push(Frame::FinishDiverge(divergance_type));
-                        stack.push(Frame::Enter(*value));
+                        stack.push(Frame::Enter(value.as_ref().clone()));
                     }
                     ExpressionKind::Loop { body } => {
                         stack.push(Frame::FinishLoop);
-                        stack.push(Frame::Enter(*body));
+                        stack.push(Frame::Enter(body.as_ref().clone()));
                     }
                     enum_expr @ ExpressionKind::EnumValue { .. } => {
                         if let Some(lowered) = materialize_enum_value(&enum_expr, &span) {
@@ -514,7 +515,7 @@ pub fn expression_to_intermediate(
                         }
                     }
                     ExpressionKind::AttachImplementation { type_expr, .. } => {
-                        stack.push(Frame::Enter(*type_expr));
+                        stack.push(Frame::Enter(type_expr.as_ref().clone()));
                     }
                     ExpressionKind::IntrinsicType(..)
                     | ExpressionKind::BoxType(..)
@@ -917,7 +918,7 @@ impl IntermediateBuilder {
         else {
             panic!("Expected function expression for lowering");
         };
-        let body_expr = *body;
+        let body_expr = (*body).clone();
 
         if let Some(name) = &name
             && let Some(index) = self.function_indices.get(name)
@@ -1136,14 +1137,14 @@ impl IntermediateBuilder {
                             count: count_usize,
                             field_names,
                         });
-                        stack.push(Frame::Enter(*value));
+                        stack.push(Frame::Enter(value.as_ref().clone()));
                     }
                     ExpressionKind::ArrayIndex { array, .. } => {
                         stack.push(Frame::FinishArrayIndex);
-                        stack.push(Frame::Enter(*array));
+                        stack.push(Frame::Enter(array.as_ref().clone()));
                     }
                     ExpressionKind::If { then_branch, .. } => {
-                        stack.push(Frame::Enter(*then_branch));
+                        stack.push(Frame::Enter(then_branch.as_ref().clone()));
                     }
                     ExpressionKind::Block(exprs) => {
                         if let Some(last) = exprs.last() {
@@ -1162,8 +1163,8 @@ impl IntermediateBuilder {
                     ExpressionKind::EnumValue { enum_type, .. }
                     | ExpressionKind::EnumConstructor { enum_type, .. } => {
                         let enum_type = self
-                            .resolve_enum_type_expression(&enum_type)
-                            .unwrap_or(*enum_type);
+                            .resolve_enum_type_expression(enum_type.as_ref())
+                            .unwrap_or(enum_type.as_ref().clone());
                         values.push(self.type_expr_to_intermediate(&enum_type));
                     }
                     _ => values.push(IntermediateType::I32),
@@ -1252,7 +1253,7 @@ impl IntermediateBuilder {
                     }
                     ExpressionKind::BoxType(inner) => {
                         stack.push(Frame::FinishBox);
-                        stack.push(Frame::Enter(*inner));
+                        stack.push(Frame::Enter(inner.as_ref().clone()));
                     }
                     ExpressionKind::Struct(fields) => {
                         let field_names = fields.iter().map(|(id, _)| id.name.clone()).collect();
@@ -1269,7 +1270,7 @@ impl IntermediateBuilder {
                         }
                     }
                     ExpressionKind::AttachImplementation { type_expr, .. } => {
-                        stack.push(Frame::Enter(*type_expr));
+                        stack.push(Frame::Enter(type_expr.as_ref().clone()));
                     }
                     ExpressionKind::EnumType(variants) => {
                         let variant_names =
@@ -1766,7 +1767,7 @@ fn default_value_for_type(ty: &Expression) -> Option<Expression> {
                     }
                 }
                 ExpressionKind::AttachImplementation { type_expr, .. } => {
-                    stack.push(Frame::Enter(*type_expr));
+                    stack.push(Frame::Enter(type_expr.as_ref().clone()));
                 }
                 ExpressionKind::EnumType(variants) => {
                     if variants.is_empty() {
@@ -1817,10 +1818,10 @@ fn default_value_for_type(ty: &Expression) -> Option<Expression> {
                 if let Some(payload) = payload {
                     values.push(Some(
                         ExpressionKind::EnumValue {
-                            enum_type: Box::new(enum_type),
+                            enum_type: Rc::new(enum_type),
                             variant: first_variant,
                             variant_index: 0,
-                            payload: Box::new(payload),
+                            payload: Rc::new(payload),
                         }
                         .with_span(span),
                     ));
@@ -1846,7 +1847,7 @@ fn materialize_enum_value(enum_value: &ExpressionKind, span: &SourceSpan) -> Opt
         let mut payload_fields = Vec::new();
         for (idx, (name, ty)) in variants.iter().enumerate() {
             let value = if idx == *variant_index {
-                *payload.clone()
+                payload.as_ref().clone()
             } else {
                 default_value_for_type(ty)?
             };

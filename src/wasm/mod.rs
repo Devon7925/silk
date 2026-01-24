@@ -90,12 +90,7 @@ fn resolve_inline_constants(
         IntermediateKind::Struct(items) => IntermediateKind::Struct(
             items
                 .iter()
-                .map(|(id, value)| {
-                    (
-                        id.clone(),
-                        resolve_inline_constants(value, inline_bindings),
-                    )
-                })
+                .map(|(id, value)| (id.clone(), resolve_inline_constants(value, inline_bindings)))
                 .collect(),
         ),
         IntermediateKind::ArrayLiteral {
@@ -110,7 +105,10 @@ fn resolve_inline_constants(
             element_type: element_type.clone(),
             field_names: field_names.clone(),
         },
-        IntermediateKind::BoxAlloc { value, element_type } => IntermediateKind::BoxAlloc {
+        IntermediateKind::BoxAlloc {
+            value,
+            element_type,
+        } => IntermediateKind::BoxAlloc {
             value: Box::new(resolve_inline_constants(value, inline_bindings)),
             element_type: element_type.clone(),
         },
@@ -141,13 +139,13 @@ fn resolve_inline_constants(
                 property: property.clone(),
             }
         }
-        IntermediateKind::Binding(binding) => IntermediateKind::Binding(Box::new(
-            IntermediateBinding {
+        IntermediateKind::Binding(binding) => {
+            IntermediateKind::Binding(Box::new(IntermediateBinding {
                 identifier: binding.identifier.clone(),
                 binding_type: binding.binding_type.clone(),
                 expr: resolve_inline_constants(&binding.expr, inline_bindings),
-            },
-        )),
+            }))
+        }
         IntermediateKind::Block(items) => IntermediateKind::Block(
             items
                 .iter()
@@ -164,8 +162,8 @@ fn resolve_inline_constants(
         IntermediateKind::Loop { body } => IntermediateKind::Loop {
             body: Box::new(resolve_inline_constants(body, inline_bindings)),
         },
-        IntermediateKind::IntrinsicOperation(op) => IntermediateKind::IntrinsicOperation(
-            match op {
+        IntermediateKind::IntrinsicOperation(op) => {
+            IntermediateKind::IntrinsicOperation(match op {
                 IntermediateIntrinsicOperation::Binary(left, right, operator) => {
                     IntermediateIntrinsicOperation::Binary(
                         Box::new(resolve_inline_constants(left, inline_bindings)),
@@ -179,14 +177,12 @@ fn resolve_inline_constants(
                         operator.clone(),
                     )
                 }
-            },
-        ),
-        IntermediateKind::InlineAssembly { target, code } => {
-            IntermediateKind::InlineAssembly {
-                target: target.clone(),
-                code: code.clone(),
-            }
+            })
         }
+        IntermediateKind::InlineAssembly { target, code } => IntermediateKind::InlineAssembly {
+            target: target.clone(),
+            code: code.clone(),
+        },
         IntermediateKind::Literal(literal) => IntermediateKind::Literal(literal.clone()),
         IntermediateKind::Unreachable => IntermediateKind::Unreachable,
     }
@@ -383,8 +379,7 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
                 } => (value.as_ref(), element_type),
                 other => (other, element.as_ref()),
             };
-            let resolved_init =
-                resolve_inline_constants(init_value, &intermediate.inline_bindings);
+            let resolved_init = resolve_inline_constants(init_value, &intermediate.inline_bindings);
             let info = box_registry.register_box(
                 &resolved_init,
                 element_type,
@@ -2583,9 +2578,8 @@ fn emit_expression(
                                         expected: field_type,
                                     });
                                     tasks.push(EmitTask::Instr(Instruction::I32Add));
-                                    tasks.push(EmitTask::Instr(Instruction::I32Const(
-                                        field_offset,
-                                    )));
+                                    tasks
+                                        .push(EmitTask::Instr(Instruction::I32Const(field_offset)));
                                     tasks.push(EmitTask::Instr(Instruction::LocalGet(base_local)));
                                 }
                                 tasks.push(EmitTask::Instr(Instruction::LocalSet(base_local)));

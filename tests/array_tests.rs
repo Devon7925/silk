@@ -18,8 +18,8 @@ fn array_indexing_with_mutable_update() {
     });
 
     match expr.kind {
-        ExpressionKind::ArrayIndex { index, .. } => match index.kind {
-            ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 1),
+        ExpressionKind::ArrayIndex { index, .. } => match &index.kind {
+            ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(*value, 1),
             other => panic!("Expected numeric literal index, got {:?}", other),
         },
         other => panic!("Expected array index expression, got {:?}", other),
