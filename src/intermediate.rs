@@ -11,6 +11,20 @@ use crate::{
     },
 };
 
+fn is_tuple_field_names(field_names: &[String]) -> bool {
+    field_names
+        .iter()
+        .enumerate()
+        .all(|(index, name)| *name == index.to_string())
+}
+
+fn normalize_field_names(mut field_names: Vec<String>) -> Vec<String> {
+    if !is_tuple_field_names(&field_names) {
+        field_names.sort();
+    }
+    field_names
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntermediateKind {
     IntrinsicOperation(IntermediateIntrinsicOperation),
@@ -65,7 +79,13 @@ pub enum IntermediateKind {
 
 fn binding_identifier(pattern: &BindingPattern) -> Option<Identifier> {
     match pattern {
-        BindingPattern::Identifier(identifier, _) => Some(identifier.clone()),
+        BindingPattern::Identifier(identifier, _) => {
+            if identifier.name == "_" {
+                None
+            } else {
+                Some(identifier.clone())
+            }
+        }
         BindingPattern::TypeHint(inner, _, _) => binding_identifier(inner),
         BindingPattern::Annotated { pattern, .. } => binding_identifier(pattern),
         _ => None,
@@ -267,7 +287,12 @@ pub fn expression_to_intermediate(
                     },
                     ExpressionKind::Match { value, branches } => {
                         let match_value = (*value).clone();
-                        let match_value_type = builder.expression_value_type(&match_value);
+                        let match_value_type = interpret::get_type_of_expression(
+                            &match_value,
+                            &builder.enum_context,
+                        )
+                        .map(|ty| builder.type_expr_to_intermediate(&ty))
+                        .unwrap_or_else(|_| builder.expression_value_type(&match_value));
                         let temp_identifier = builder.next_match_temp_identifier();
                         let branch_patterns = branches
                             .iter()
@@ -508,7 +533,9 @@ pub fn expression_to_intermediate(
                         stack.push(Frame::Enter(body.as_ref().clone()));
                     }
                     enum_expr @ ExpressionKind::EnumValue { .. } => {
-                        if let Some(lowered) = materialize_enum_value(&enum_expr, &span) {
+                        if let Some(lowered) =
+                            materialize_enum_value(&enum_expr, &span, &builder.type_aliases)
+                        {
                             stack.push(Frame::Enter(lowered));
                         } else {
                             values.push(IntermediateKind::Literal(ExpressionLiteral::Number(0)));
@@ -565,11 +592,31 @@ pub fn expression_to_intermediate(
                 }
                 field_values.reverse();
                 if let Some((field_names, element_type)) = array_fields {
-                    values.push(IntermediateKind::ArrayLiteral {
-                        items: field_values,
-                        element_type,
-                        field_names,
-                    });
+                    if is_tuple_field_names(&field_names) {
+                        values.push(IntermediateKind::ArrayLiteral {
+                            items: field_values,
+                            element_type,
+                            field_names,
+                        });
+                    } else {
+                        let mut by_name = HashMap::new();
+                        for (id, value) in field_ids.into_iter().zip(field_values.into_iter()) {
+                            by_name.insert(id.name, value);
+                        }
+                        let items = field_names
+                            .iter()
+                            .map(|name| {
+                                by_name.remove(name).unwrap_or_else(|| {
+                                    panic!("Missing field {} in array literal", name)
+                                })
+                            })
+                            .collect();
+                        values.push(IntermediateKind::ArrayLiteral {
+                            items,
+                            element_type,
+                            field_names,
+                        });
+                    }
                 } else {
                     let fields = field_ids
                         .into_iter()
@@ -829,30 +876,37 @@ impl IntermediateBuilder {
                 continue;
             }
 
-            if !is_function && !export_targets.is_empty() {
-                let index =
-                    self.register_global(identifier.clone(), value.clone(), bound_type.clone());
-                for target in export_targets {
-                    self.exports.push(IntermediateExport {
-                        target,
-                        name: identifier.name.clone(),
-                        export_type: IntermediateExportType::Global,
-                        index,
-                    });
-                }
-                if let Some(source_target) = export_target_for_wrap.clone() {
-                    for target in &wrap_targets {
-                        if *target == source_target {
-                            continue;
-                        }
-                        self.wrappers.push(IntermediateWrap {
-                            source_target: source_target.clone(),
-                            wrap_target: target.clone(),
+            if !is_function {
+                if !export_targets.is_empty() {
+                    let index = self.register_global(
+                        identifier.clone(),
+                        value.clone(),
+                        bound_type.clone(),
+                    );
+                    for target in export_targets {
+                        self.exports.push(IntermediateExport {
+                            target,
                             name: identifier.name.clone(),
                             export_type: IntermediateExportType::Global,
                             index,
                         });
                     }
+                    if let Some(source_target) = export_target_for_wrap.clone() {
+                        for target in &wrap_targets {
+                            if *target == source_target {
+                                continue;
+                            }
+                            self.wrappers.push(IntermediateWrap {
+                                source_target: source_target.clone(),
+                                wrap_target: target.clone(),
+                                name: identifier.name.clone(),
+                                export_type: IntermediateExportType::Global,
+                                index,
+                            });
+                        }
+                    }
+                } else if *preserve_behavior != PreserveBehavior::Inline {
+                    self.register_global(identifier.clone(), value.clone(), bound_type.clone());
                 }
             }
 
@@ -1034,6 +1088,7 @@ impl IntermediateBuilder {
                     if let Some(first) = first_type
                         && homogeneous
                     {
+                        let field_names = normalize_field_names(field_names);
                         values.push(IntermediateType::Array {
                             element: Box::new(first),
                             length: field_types.len(),
@@ -1096,6 +1151,92 @@ impl IntermediateBuilder {
         while let Some(frame) = stack.pop() {
             match frame {
                 Frame::Enter(expr) => match expr.kind {
+                    ExpressionKind::Identifier(..) | ExpressionKind::FunctionCall { .. } => {
+                        if let Ok(ty_expr) =
+                            interpret::get_type_of_expression(&expr, &self.enum_context)
+                        {
+                            values.push(self.type_expr_to_intermediate(&ty_expr));
+                            continue;
+                        }
+                        // Fall through to heuristic handling if type inference fails.
+                        match expr.kind {
+                            ExpressionKind::Identifier(identifier) => {
+                                if let Some(ty) = self.inline_binding_types.get(&identifier).cloned()
+                                {
+                                    values.push(ty);
+                                } else if let Some(inlined) =
+                                    self.inline_bindings.get(&identifier).cloned()
+                                {
+                                    values.push(self.expression_value_type(&inlined));
+                                } else if let Some((
+                                    BindingContext::Bound(value, _, bound_type),
+                                    _,
+                                )) = self.enum_context.get_identifier(&identifier).cloned()
+                                {
+                                    if let Some(bound_type) = bound_type {
+                                        values.push(self.type_expr_to_intermediate(&bound_type));
+                                    } else {
+                                        values.push(self.expression_value_type(&value));
+                                    }
+                                } else {
+                                    values.push(IntermediateType::I32);
+                                }
+                            }
+                            ExpressionKind::FunctionCall { function, .. } => {
+                                if let ExpressionKind::EnumConstructor { enum_type, .. } =
+                                    &function.kind
+                                {
+                                    let enum_type = self
+                                        .resolve_enum_type_expression(enum_type.as_ref())
+                                        .unwrap_or(enum_type.as_ref().clone());
+                                    values.push(self.type_expr_to_intermediate(&enum_type));
+                                } else if let ExpressionKind::TypePropertyAccess {
+                                    object,
+                                    property,
+                                } = &function.kind
+                                {
+                                    if let Some(enum_type) =
+                                        self.resolve_enum_type_expression(object)
+                                    {
+                                        let variant = Identifier::new(property.clone());
+                                        if enum_variant_info(&enum_type, &variant).is_some() {
+                                            values.push(self.type_expr_to_intermediate(&enum_type));
+                                        } else {
+                                            values.push(IntermediateType::I32);
+                                        }
+                                    } else {
+                                        values.push(IntermediateType::I32);
+                                    }
+                                } else if let ExpressionKind::Identifier(identifier) = &function.kind
+                                {
+                                    if let Some(function_index) =
+                                        self.resolve_function_index(identifier)
+                                    {
+                                        let ty = self
+                                            .functions
+                                            .get(function_index)
+                                            .map(|function| (*function.return_type).clone())
+                                            .unwrap_or(IntermediateType::I32);
+                                        values.push(ty);
+                                    } else {
+                                        values.push(IntermediateType::I32);
+                                    }
+                                } else if matches!(function.kind, ExpressionKind::Function { .. }) {
+                                    let function_index =
+                                        self.register_function(None, (*function).clone());
+                                    let ty = self
+                                        .functions
+                                        .get(function_index)
+                                        .map(|function| (*function.return_type).clone())
+                                        .unwrap_or(IntermediateType::I32);
+                                    values.push(ty);
+                                } else {
+                                    values.push(IntermediateType::I32);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     ExpressionKind::Literal(lit) => {
                         let value = match lit {
                             ExpressionLiteral::Char(_) => IntermediateType::U8,
@@ -1191,6 +1332,7 @@ impl IntermediateBuilder {
                     if let Some(first) = first_type
                         && homogeneous
                     {
+                        let field_names = normalize_field_names(field_names);
                         values.push(IntermediateType::Array {
                             element: Box::new(first),
                             length: field_types.len(),
@@ -1265,6 +1407,16 @@ impl IntermediateBuilder {
                     ExpressionKind::Identifier(identifier) => {
                         if let Some(ty) = self.type_aliases.get(&identifier).cloned() {
                             stack.push(Frame::Enter(ty));
+                        } else if identifier.unique == identifier.name {
+                            if let Some((_, ty)) = self
+                                .type_aliases
+                                .iter()
+                                .find(|(id, _)| id.name == identifier.name)
+                            {
+                                stack.push(Frame::Enter(ty.clone()));
+                            } else {
+                                values.push(IntermediateType::I32);
+                            }
                         } else {
                             values.push(IntermediateType::I32);
                         }
@@ -1304,6 +1456,7 @@ impl IntermediateBuilder {
                     if let Some(first) = first_type
                         && homogeneous
                     {
+                        let field_names = normalize_field_names(field_names);
                         values.push(IntermediateType::Array {
                             element: Box::new(first),
                             length: field_types.len(),
@@ -1323,11 +1476,21 @@ impl IntermediateBuilder {
                         variant_types.push(values.pop().expect("Missing enum variant type"));
                     }
                     variant_types.reverse();
-                    let field_names = variant_names;
-                    let first_type = variant_types.first().cloned();
+                    let mut variant_pairs: Vec<(String, IntermediateType)> = variant_names
+                        .into_iter()
+                        .zip(variant_types.into_iter())
+                        .collect();
+                    if !is_tuple_field_names(
+                        &variant_pairs.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>(),
+                    ) {
+                        variant_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+                    }
+                    let field_names: Vec<String> =
+                        variant_pairs.iter().map(|(name, _)| name.clone()).collect();
+                    let first_type = variant_pairs.first().map(|(_, ty)| ty.clone());
                     let mut homogeneous = true;
                     if let Some(first) = &first_type {
-                        for ty in variant_types.iter().skip(1) {
+                        for (_, ty) in variant_pairs.iter().skip(1) {
                             if ty != first {
                                 homogeneous = false;
                                 break;
@@ -1341,15 +1504,11 @@ impl IntermediateBuilder {
                     {
                         IntermediateType::Array {
                             element: Box::new(first),
-                            length: variant_types.len(),
+                            length: field_names.len(),
                             field_names: field_names.clone(),
                         }
                     } else {
-                        let payload_fields = field_names
-                            .into_iter()
-                            .zip(variant_types.into_iter())
-                            .collect();
-                        IntermediateType::Struct(payload_fields)
+                        IntermediateType::Struct(variant_pairs)
                     };
                     values.push(IntermediateType::Struct(vec![
                         ("payload".to_string(), payload),
@@ -1644,7 +1803,12 @@ impl IntermediateBuilder {
         let mut current = pattern;
         loop {
             match current {
-                BindingPattern::Identifier(identifier, _) => return identifier,
+                BindingPattern::Identifier(identifier, _) => {
+                    if identifier.name == "_" {
+                        return self.next_match_temp_identifier();
+                    }
+                    return identifier;
+                }
                 BindingPattern::Struct { .. } => {
                     panic!(
                         "Struct binding patterns should be lowered via `lower_binding_pattern_match`"
@@ -1703,6 +1867,12 @@ fn is_data_expression(expr: &Expression) -> bool {
             ExpressionKind::EnumValue { payload, .. } => {
                 stack.push(payload);
             }
+            ExpressionKind::FunctionCall { function, argument } => match &function.kind {
+                ExpressionKind::EnumConstructor { .. } => {
+                    stack.push(argument);
+                }
+                _ => return false,
+            },
             _ => return false,
         }
     }
@@ -1734,7 +1904,10 @@ fn wrap_targets(annotations: &[BindingAnnotation]) -> Vec<TargetLiteral> {
     targets
 }
 
-fn default_value_for_type(ty: &Expression) -> Option<Expression> {
+fn default_value_for_type(
+    ty: &Expression,
+    type_aliases: &HashMap<Identifier, Expression>,
+) -> Option<Expression> {
     enum Frame {
         Enter(Expression),
         FinishStruct(Vec<Identifier>, SourceSpan),
@@ -1764,6 +1937,22 @@ fn default_value_for_type(ty: &Expression) -> Option<Expression> {
                     stack.push(Frame::FinishStruct(field_ids, expr.span));
                     for (_, field_ty) in fields.into_iter().rev() {
                         stack.push(Frame::Enter(field_ty));
+                    }
+                }
+                ExpressionKind::Identifier(identifier) => {
+                    if let Some(ty) = type_aliases.get(&identifier).cloned() {
+                        stack.push(Frame::Enter(ty));
+                    } else if identifier.unique == identifier.name {
+                        if let Some((_, ty)) = type_aliases
+                            .iter()
+                            .find(|(id, _)| id.name == identifier.name)
+                        {
+                            stack.push(Frame::Enter(ty.clone()));
+                        } else {
+                            values.push(None);
+                        }
+                    } else {
+                        values.push(None);
                     }
                 }
                 ExpressionKind::AttachImplementation { type_expr, .. } => {
@@ -1835,7 +2024,11 @@ fn default_value_for_type(ty: &Expression) -> Option<Expression> {
     values.pop().unwrap_or(None)
 }
 
-fn materialize_enum_value(enum_value: &ExpressionKind, span: &SourceSpan) -> Option<Expression> {
+fn materialize_enum_value(
+    enum_value: &ExpressionKind,
+    span: &SourceSpan,
+    type_aliases: &HashMap<Identifier, Expression>,
+) -> Option<Expression> {
     if let ExpressionKind::EnumValue {
         enum_type,
         variant: _variant,
@@ -1849,7 +2042,7 @@ fn materialize_enum_value(enum_value: &ExpressionKind, span: &SourceSpan) -> Opt
             let value = if idx == *variant_index {
                 payload.as_ref().clone()
             } else {
-                default_value_for_type(ty)?
+                default_value_for_type(ty, type_aliases)?
             };
             payload_fields.push((Identifier::new(name.name.clone()), value));
         }

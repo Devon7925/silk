@@ -6,28 +6,11 @@ const parserSource = await Deno.readTextFile(
   join(FIXTURES_DIR, "simple_parser.silk"),
 );
 
-const NODE_SIZE = 7;
-const NODE_FIELDS = {
-  a: 0,
-  b: 1,
-  c: 2,
-  kind: 3,
-  span_end: 4,
-  span_start: 5,
-  value: 6,
-} as const;
-
-const KIND_NUMBER = 1;
-const KIND_IDENTIFIER = 2;
-const KIND_BINARY = 3;
-const KIND_BINDING = 4;
-const KIND_BLOCK = 5;
-const KIND_LIST = 6;
-
-const OP_ADD = 1;
-const OP_SUB = 2;
-const OP_MUL = 3;
-const OP_DIV = 4;
+const KIND_LITERAL = 13;
+const KIND_IDENTIFIER = 14;
+const KIND_OPERATION = 15;
+const KIND_BINDING = 20;
+const KIND_BLOCK = 21;
 
 function writeInput(memory: WebAssembly.Memory, text: string) {
   const bytes = new TextEncoder().encode(text);
@@ -37,21 +20,8 @@ function writeInput(memory: WebAssembly.Memory, text: string) {
   view[bytes.length] = 0;
 }
 
-function readNode(view: Int32Array, idx: number) {
-  const base = idx * NODE_SIZE;
-  return {
-    a: view[base + NODE_FIELDS.a],
-    b: view[base + NODE_FIELDS.b],
-    c: view[base + NODE_FIELDS.c],
-    kind: view[base + NODE_FIELDS.kind],
-    span_end: view[base + NODE_FIELDS.span_end],
-    span_start: view[base + NODE_FIELDS.span_start],
-    value: view[base + NODE_FIELDS.value],
-  };
-}
-
-function readSpan(memory: WebAssembly.Memory, start: number, end: number) {
-  const bytes = new Uint8Array(memory.buffer.slice(start, end));
+function readSpan(memory: WebAssembly.Memory, start: number, length: number) {
+  const bytes = new Uint8Array(memory.buffer.slice(start, start + length));
   return new TextDecoder().decode(bytes);
 }
 
@@ -60,6 +30,22 @@ type ParserExports = {
   input: WebAssembly.Memory;
   nodes: WebAssembly.Memory;
   state: WebAssembly.Memory;
+  get_state_error: () => number;
+  get_kind_tag: (idx: number) => number;
+  get_span_start: (idx: number) => number;
+  get_span_length: (idx: number) => number;
+  get_literal_number: (idx: number) => number;
+  get_identifier_start: (idx: number) => number;
+  get_identifier_length: (idx: number) => number;
+  get_operation_left: (idx: number) => number;
+  get_operation_right: (idx: number) => number;
+  get_operation_operator_start: (idx: number) => number;
+  get_operation_operator_length: (idx: number) => number;
+  get_binding_expr: (idx: number) => number;
+  get_binding_name_start: (idx: number) => number;
+  get_binding_name_length: (idx: number) => number;
+  get_block_count: (idx: number) => number;
+  get_block_item: (idx: number, pos: number) => number;
 };
 
 const parserExports = await (async () => {
@@ -81,42 +67,44 @@ async function withParserInstance(
   await fn(parserExports);
 }
 
-const STATE_ERROR = 1;
-
-function readStateError(state: WebAssembly.Memory) {
-  const view = new Int32Array(state.buffer);
-  return view[STATE_ERROR];
-}
-
 Deno.test("wasm parser: parses binary precedence", async () => {
   await withParserInstance((exports) => {
     writeInput(exports.input, "1 + 2 * 3");
     const root = exports.parse();
-    assertEquals(readStateError(exports.state), -1);
+    assertEquals(exports.get_state_error(), -1);
 
-    const nodeView = new Int32Array(exports.nodes.buffer);
-    const rootNode = readNode(nodeView, root);
-    assertEquals(rootNode.kind, KIND_BLOCK);
-    assertEquals(rootNode.b, 1);
+    assertEquals(exports.get_kind_tag(root), KIND_BLOCK);
+    assertEquals(exports.get_block_count(root), 1);
 
-    const listNode = readNode(nodeView, rootNode.a);
-    assertEquals(listNode.kind, KIND_LIST);
+    const exprNode = exports.get_block_item(root, 0);
+    assertEquals(exports.get_kind_tag(exprNode), KIND_OPERATION);
+    assertEquals(
+      readSpan(
+        exports.input,
+        exports.get_operation_operator_start(exprNode),
+        exports.get_operation_operator_length(exprNode),
+      ),
+      "+",
+    );
 
-    const exprNode = readNode(nodeView, listNode.a);
-    assertEquals(exprNode.kind, KIND_BINARY);
-    assertEquals(exprNode.c, OP_ADD);
+    const leftNode = exports.get_operation_left(exprNode);
+    const rightNode = exports.get_operation_right(exprNode);
+    assertEquals(exports.get_kind_tag(leftNode), KIND_LITERAL);
+    assertEquals(exports.get_literal_number(leftNode), 1);
+    assertEquals(exports.get_kind_tag(rightNode), KIND_OPERATION);
+    assertEquals(
+      readSpan(
+        exports.input,
+        exports.get_operation_operator_start(rightNode),
+        exports.get_operation_operator_length(rightNode),
+      ),
+      "*",
+    );
 
-    const leftNode = readNode(nodeView, exprNode.a);
-    const rightNode = readNode(nodeView, exprNode.b);
-    assertEquals(leftNode.kind, KIND_NUMBER);
-    assertEquals(leftNode.value, 1);
-    assertEquals(rightNode.kind, KIND_BINARY);
-    assertEquals(rightNode.c, OP_MUL);
-
-    const rightLeft = readNode(nodeView, rightNode.a);
-    const rightRight = readNode(nodeView, rightNode.b);
-    assertEquals(rightLeft.value, 2);
-    assertEquals(rightRight.value, 3);
+    const rightLeft = exports.get_operation_left(rightNode);
+    const rightRight = exports.get_operation_right(rightNode);
+    assertEquals(exports.get_literal_number(rightLeft), 2);
+    assertEquals(exports.get_literal_number(rightRight), 3);
   });
 });
 
@@ -124,33 +112,42 @@ Deno.test("wasm parser: parses bindings and identifiers", async () => {
   await withParserInstance((exports) => {
     writeInput(exports.input, "foo := 10 + 20; bar");
     const root = exports.parse();
-    assertEquals(readStateError(exports.state), -1);
+    assertEquals(exports.get_state_error(), -1);
 
-    const nodeView = new Int32Array(exports.nodes.buffer);
-    const rootNode = readNode(nodeView, root);
-    assertEquals(rootNode.kind, KIND_BLOCK);
-    assertEquals(rootNode.b, 2);
+    assertEquals(exports.get_kind_tag(root), KIND_BLOCK);
+    assertEquals(exports.get_block_count(root), 2);
 
-    const firstList = readNode(nodeView, rootNode.a);
-    const secondList = readNode(nodeView, firstList.b);
-    assertEquals(firstList.kind, KIND_LIST);
-    assertEquals(secondList.kind, KIND_LIST);
+    const bindingNode = exports.get_block_item(root, 0);
+    const secondExpr = exports.get_block_item(root, 1);
+    assertEquals(exports.get_kind_tag(bindingNode), KIND_BINDING);
 
-    const bindingNode = readNode(nodeView, firstList.a);
-    assertEquals(bindingNode.kind, KIND_BINDING);
-
-    const nameNode = readNode(nodeView, bindingNode.a);
-    assertEquals(nameNode.kind, KIND_IDENTIFIER);
-    assertEquals(readSpan(exports.input, nameNode.span_start, nameNode.span_end), "foo");
-
-    const exprNode = readNode(nodeView, bindingNode.b);
-    assertEquals(exprNode.kind, KIND_BINARY);
-    assertEquals(exprNode.c, OP_ADD);
-
-    const secondExpr = readNode(nodeView, secondList.a);
-    assertEquals(secondExpr.kind, KIND_IDENTIFIER);
     assertEquals(
-      readSpan(exports.input, secondExpr.span_start, secondExpr.span_end),
+      readSpan(
+        exports.input,
+        exports.get_binding_name_start(bindingNode),
+        exports.get_binding_name_length(bindingNode),
+      ),
+      "foo",
+    );
+
+    const exprNode = exports.get_binding_expr(bindingNode);
+    assertEquals(exports.get_kind_tag(exprNode), KIND_OPERATION);
+    assertEquals(
+      readSpan(
+        exports.input,
+        exports.get_operation_operator_start(exprNode),
+        exports.get_operation_operator_length(exprNode),
+      ),
+      "+",
+    );
+
+    assertEquals(exports.get_kind_tag(secondExpr), KIND_IDENTIFIER);
+    assertEquals(
+      readSpan(
+        exports.input,
+        exports.get_identifier_start(secondExpr),
+        exports.get_identifier_length(secondExpr),
+      ),
       "bar",
     );
   });
@@ -160,18 +157,29 @@ Deno.test("wasm parser: respects parentheses", async () => {
   await withParserInstance((exports) => {
     writeInput(exports.input, "(1 + 2) * 3");
     const root = exports.parse();
-    assertEquals(readStateError(exports.state), -1);
+    assertEquals(exports.get_state_error(), -1);
 
-    const nodeView = new Int32Array(exports.nodes.buffer);
-    const rootNode = readNode(nodeView, root);
-    const listNode = readNode(nodeView, rootNode.a);
-    const exprNode = readNode(nodeView, listNode.a);
-    assertEquals(exprNode.kind, KIND_BINARY);
-    assertEquals(exprNode.c, OP_MUL);
+    const exprNode = exports.get_block_item(root, 0);
+    assertEquals(exports.get_kind_tag(exprNode), KIND_OPERATION);
+    assertEquals(
+      readSpan(
+        exports.input,
+        exports.get_operation_operator_start(exprNode),
+        exports.get_operation_operator_length(exprNode),
+      ),
+      "*",
+    );
 
-    const leftNode = readNode(nodeView, exprNode.a);
-    assertEquals(leftNode.kind, KIND_BINARY);
-    assertEquals(leftNode.c, OP_ADD);
+    const leftNode = exports.get_operation_left(exprNode);
+    assertEquals(exports.get_kind_tag(leftNode), KIND_OPERATION);
+    assertEquals(
+      readSpan(
+        exports.input,
+        exports.get_operation_operator_start(leftNode),
+        exports.get_operation_operator_length(leftNode),
+      ),
+      "+",
+    );
   });
 });
 
@@ -179,17 +187,28 @@ Deno.test("wasm parser: parses subtraction and division", async () => {
   await withParserInstance((exports) => {
     writeInput(exports.input, "8 - 4 / 2");
     const root = exports.parse();
-    assertEquals(readStateError(exports.state), -1);
+    assertEquals(exports.get_state_error(), -1);
 
-    const nodeView = new Int32Array(exports.nodes.buffer);
-    const rootNode = readNode(nodeView, root);
-    const listNode = readNode(nodeView, rootNode.a);
-    const exprNode = readNode(nodeView, listNode.a);
-    assertEquals(exprNode.kind, KIND_BINARY);
-    assertEquals(exprNode.c, OP_SUB);
+    const exprNode = exports.get_block_item(root, 0);
+    assertEquals(exports.get_kind_tag(exprNode), KIND_OPERATION);
+    assertEquals(
+      readSpan(
+        exports.input,
+        exports.get_operation_operator_start(exprNode),
+        exports.get_operation_operator_length(exprNode),
+      ),
+      "-",
+    );
 
-    const rightNode = readNode(nodeView, exprNode.b);
-    assertEquals(rightNode.kind, KIND_BINARY);
-    assertEquals(rightNode.c, OP_DIV);
+    const rightNode = exports.get_operation_right(exprNode);
+    assertEquals(exports.get_kind_tag(rightNode), KIND_OPERATION);
+    assertEquals(
+      readSpan(
+        exports.input,
+        exports.get_operation_operator_start(rightNode),
+        exports.get_operation_operator_length(rightNode),
+      ),
+      "/",
+    );
   });
 });

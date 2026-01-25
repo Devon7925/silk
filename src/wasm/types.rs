@@ -1,7 +1,7 @@
 use crate::{
     diagnostics::{Diagnostic, SourceSpan},
     intermediate::{IntermediateBinding, IntermediateKind, IntermediateType},
-    parsing::ExpressionLiteral,
+    parsing::{ExpressionLiteral, Identifier},
 };
 
 use super::encoder::{HeapType, MemArg, RefType, ValType};
@@ -77,7 +77,13 @@ impl BoxRegistry {
         element_type: &IntermediateType,
         export_name: Option<String>,
     ) -> Result<BoxInfo, Diagnostic> {
-        let bytes = encode_box_value(value, element_type)?;
+        let bytes = encode_box_value(value, element_type).map_err(|err| {
+            let name = export_name.clone().unwrap_or_else(|| "<anonymous>".to_string());
+            Diagnostic {
+                message: format!("Box allocation for `{}` failed: {}", name, err.message),
+                span: err.span,
+            }
+        })?;
         let memory_index = self.next_index;
         self.next_index = self.next_index.saturating_add(1);
         self.memories.push(BoxMemory {
@@ -273,6 +279,15 @@ fn encode_box_value(
     value: &IntermediateKind,
     ty: &IntermediateType,
 ) -> Result<Vec<u8>, Diagnostic> {
+    let mut path = Vec::new();
+    encode_box_value_with_path(value, ty, &mut path)
+}
+
+fn encode_box_value_with_path(
+    value: &IntermediateKind,
+    ty: &IntermediateType,
+    path: &mut Vec<String>,
+) -> Result<Vec<u8>, Diagnostic> {
     match ty {
         IntermediateType::I32 => {
             let number = match value {
@@ -312,10 +327,38 @@ fn encode_box_value(
             "Nested box values are not supported in wasm exports".to_string(),
         )),
         IntermediateType::Struct(fields) => {
-            let IntermediateKind::Struct(items) = value else {
-                return Err(Diagnostic::new(
-                    "Box allocation requires a struct value".to_string(),
-                ));
+            let items = match value {
+                IntermediateKind::Struct(items) => items.clone(),
+                IntermediateKind::ArrayLiteral { items, field_names, .. } => {
+                    if items.len() != field_names.len() {
+                        return Err(Diagnostic::new(
+                            "Box allocation requires a struct value".to_string(),
+                        ));
+                    }
+                    let struct_names: std::collections::HashSet<&String> =
+                        fields.iter().map(|(name, _)| name).collect();
+                    let array_names: std::collections::HashSet<&String> =
+                        field_names.iter().collect();
+                    if struct_names.len() != fields.len()
+                        || array_names.len() != field_names.len()
+                        || struct_names != array_names
+                    {
+                        return Err(Diagnostic::new(
+                            "Box allocation requires a struct value".to_string(),
+                        ));
+                    }
+                    field_names
+                        .iter()
+                        .cloned()
+                        .zip(items.iter().cloned())
+                        .map(|(name, expr)| (Identifier::new(name), expr))
+                        .collect()
+                }
+                other => {
+                    return Err(Diagnostic::new(
+                        "Box allocation requires a struct value".to_string(),
+                    ));
+                }
             };
             let mut bytes = Vec::new();
             let sorted_fields = sorted_intermediate_fields(fields);
@@ -327,7 +370,9 @@ fn encode_box_value(
                     .ok_or_else(|| {
                         Diagnostic::new(format!("Missing field {name} in struct value"))
                     })?;
-                bytes.extend(encode_box_value(field_value, field_ty)?);
+                path.push(name.clone());
+                bytes.extend(encode_box_value_with_path(field_value, field_ty, path)?);
+                path.pop();
             }
             Ok(bytes)
         }
@@ -345,8 +390,10 @@ fn encode_box_value(
                 ));
             }
             let mut bytes = Vec::new();
-            for item in items {
-                bytes.extend(encode_box_value(item, element)?);
+            for (index, item) in items.iter().enumerate() {
+                path.push(index.to_string());
+                bytes.extend(encode_box_value_with_path(item, element, path)?);
+                path.pop();
             }
             Ok(bytes)
         }
@@ -712,6 +759,7 @@ pub(super) struct WasmGlobalExport {
     pub(super) ty: WasmType,
     pub(super) init: IntermediateKind,
     pub(super) intermediate_ty: IntermediateType,
+    pub(super) exported: bool,
 }
 
 pub(super) struct WasmExports {

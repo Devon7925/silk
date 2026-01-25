@@ -1,39 +1,186 @@
+StringRef := { length = i32, start = i32 };
+SourceSpan := { length = i32, start = i32 };
+
+Identifier := { name = StringRef, unique = StringRef };
+
+TargetLiteral := enum {
+    JSTarget = {},
+    WasmTarget = {},
+    WgslTarget = {},
+};
+
+BindingAnnotationLiteral := enum {
+    Mut = {},
+    Export = TargetLiteral,
+    Target = TargetLiteral,
+    Wrap = TargetLiteral,
+};
+
+ExpressionLiteral := enum {
+    Number = i32,
+    Boolean = i32,
+    Char = i32,
+    String = StringRef,
+    Target = TargetLiteral,
+    BindingAnnotation = BindingAnnotationLiteral,
+};
+
+IntrinsicType := enum {
+    I32 = {},
+    U8 = {},
+    Boolean = {},
+    Type = {},
+    Target = {},
+    BindingAnnotation = {},
+};
+
+UnaryIntrinsicOperator := enum {
+    BooleanNot = {},
+    EnumFromStruct = {},
+    MatchFromStruct = {},
+    UseFromString = {},
+    BoxFromType = {},
+    BindingAnnotationExportFromTarget = {},
+    BindingAnnotationTargetFromTarget = {},
+    BindingAnnotationWrapFromTarget = {},
+    AssemblyFromTarget = {},
+};
+
+BinaryIntrinsicOperator := enum {
+    I32Add = {},
+    I32Subtract = {},
+    I32Multiply = {},
+    I32Divide = {},
+    I32Equal = {},
+    I32NotEqual = {},
+    I32LessThan = {},
+    I32GreaterThan = {},
+    I32LessThanOrEqual = {},
+    I32GreaterThanOrEqual = {},
+    BooleanAnd = {},
+    BooleanOr = {},
+    BooleanXor = {},
+};
+
+IntrinsicOperation := enum {
+    Binary = { left = i32, right = i32, operator = BinaryIntrinsicOperator },
+    Unary = { operand = i32, operator = UnaryIntrinsicOperator },
+    InlineAssembly = { target = TargetLiteral, code = i32 },
+};
+
+DivergeExpressionType := enum {
+    Return = {},
+    Break = {},
+};
+
+BindingPattern := enum {
+    Identifier = { name = Identifier, span = SourceSpan },
+    Literal = { literal = ExpressionLiteral, span = SourceSpan },
+    Struct = { fields = i32, span = SourceSpan },
+    EnumVariant = { enum_type = i32, variant = Identifier, payload = i32, span = SourceSpan },
+    TypeHint = { pattern = i32, type_expr = i32, span = SourceSpan },
+    Annotated = { annotations = i32, pattern = i32, span = SourceSpan },
+};
+
+LValue := enum {
+    Identifier = { name = Identifier, span = SourceSpan },
+    TypePropertyAccess = { object = i32, property = StringRef, span = SourceSpan },
+    ArrayIndex = { array = i32, index = i32, span = SourceSpan },
+};
+
+Binding := { pattern = BindingPattern, expr = i32 };
+
+ExpressionList := { count = i32, head = i32 };
+
+FunctionTypeInfo := { parameter = i32, return_type = i32 };
+FunctionInfo := { parameter = BindingPattern, return_type = i32, body = i32 };
+EnumValueInfo := { enum_type = i32, variant = Identifier, variant_index = i32, payload = i32 };
+EnumConstructorInfo := { enum_type = i32, variant = Identifier, variant_index = i32, payload_type = i32 };
+IfInfo := { condition = i32, then_branch = i32, else_branch = i32 };
+AttachImplementationInfo := { type_expr = i32, implementation = i32 };
+ArrayRepeatInfo := { value = i32, count = i32 };
+OperationInfo := { operator = StringRef, left = i32, right = i32 };
+AssignmentInfo := { target = LValue, expr = i32 };
+FunctionCallInfo := { function = i32, argument = i32 };
+ArrayIndexInfo := { array = i32, index = i32 };
+TypePropertyAccessInfo := { object = i32, property = StringRef };
+DivergeInfo := { value = i32, divergance_type = DivergeExpressionType };
+LoopInfo := { body = i32 };
+MatchInfo := { value = i32, branches = i32 };
+StructInfo := { fields = i32 };
+EnumTypeInfo := { variants = i32 };
+
 NodeKind := enum {
-    Empty = {},
-    Number = {},
-    Identifier = {},
-    Binary = {},
-    Binding = {},
-    Block = {},
-    List = {},
+    IntrinsicType = IntrinsicType,
+    BoxType = i32,
+    IntrinsicOperation = IntrinsicOperation,
+    EnumType = EnumTypeInfo,
+    Match = MatchInfo,
+    EnumValue = EnumValueInfo,
+    EnumConstructor = EnumConstructorInfo,
+    If = IfInfo,
+    AttachImplementation = AttachImplementationInfo,
+    Function = FunctionInfo,
+    FunctionType = FunctionTypeInfo,
+    Struct = StructInfo,
+    ArrayRepeat = ArrayRepeatInfo,
+    Literal = ExpressionLiteral,
+    Identifier = Identifier,
+    Operation = OperationInfo,
+    Assignment = AssignmentInfo,
+    FunctionCall = FunctionCallInfo,
+    ArrayIndex = ArrayIndexInfo,
+    TypePropertyAccess = TypePropertyAccessInfo,
+    Binding = Binding,
+    Block = ExpressionList,
+    Diverge = DivergeInfo,
+    Loop = LoopInfo,
 };
 
-OpCode := enum {
-    None = {},
-    Add = {},
-    Sub = {},
-    Mul = {},
-    Div = {},
-};
+TypeCache := enum { None = {}, Some = i32 };
+Node := { kind = NodeKind, span = SourceSpan, type_cache = TypeCache };
 
-Node := { a = i32, b = i32, c = OpCode, kind = NodeKind, span_end = i32, span_start = i32, value = i32 };
+ListNode := { next = i32, value = i32 };
 
 MAX_INPUT := 32;
 MAX_NODES := 16;
+MAX_LIST_NODES := 32;
 
-STATE_COUNT := 0;
-STATE_ERROR := 1;
-STATE_CURSOR := 2;
+EMPTY_STRING := { length = 0, start = 0 };
+EMPTY_IDENTIFIER := { name = EMPTY_STRING, unique = EMPTY_STRING };
+EMPTY_SPAN := { length = 0, start = 0 };
+EMPTY_NODE := { kind = NodeKind::Literal(ExpressionLiteral::Number(0)), span = EMPTY_SPAN, type_cache = TypeCache::None };
+EMPTY_LIST_NODE := { next = -1, value = -1 };
 
-EMPTY_NODE := { a = 0, b = 0, c = OpCode::None, kind = NodeKind::Empty, span_end = 0, span_start = 0, value = 0 };
+State := { count = i32, cursor = i32, error = i32, list_count = i32 };
 
 (export wasm) input: Box({u8; MAX_INPUT}) := {0; MAX_INPUT};
 (export wasm) mut nodes: Box({Node; MAX_NODES}) := {EMPTY_NODE; MAX_NODES};
-(export wasm) mut state: Box({i32; 3}) := {0; 3};
+(export wasm) mut state: Box(State) := { count = 0, cursor = 0, error = 0, list_count = 0 };
+
+mut list_nodes: Box({ListNode; MAX_LIST_NODES}) := {EMPTY_LIST_NODE; MAX_LIST_NODES};
+
+make_span := {start: i32, end: i32} => (
+    { start = start, length = end - start }
+);
+
+make_string_ref := {start: i32, length: i32} => (
+    { start = start, length = length }
+);
+
+make_identifier := {start: i32, end: i32} => (
+    len := end - start;
+    str := make_string_ref{start, len};
+    { name = str, unique = str }
+);
+
+span_end := (idx: i32) => (
+    nodes(idx).span.start + nodes(idx).span.length
+);
 
 set_error: (i32 -> i32) := (pos: i32) => (
-    if state(STATE_ERROR) == -1 then (
-        state(STATE_ERROR) = pos;
+    if state.error == -1 then (
+        state.error = pos;
     );
     0
 );
@@ -76,26 +223,24 @@ op_precedence: (u8 -> i32) := (ch: u8) => (
     )
 );
 
-op_code: (u8 -> OpCode) := (ch: u8) => (
-    if ch == '+' then OpCode::Add else (
-        if ch == '-' then OpCode::Sub else (
-            if ch == '*' then OpCode::Mul else OpCode::Div
-        )
-    )
-);
-
-
 skip_ws := (ignored: i32) => (
-    while is_space(input(state(STATE_CURSOR))) == 1 do (
-        state(STATE_CURSOR) = state(STATE_CURSOR) + 1;
+    while is_space(input(state.cursor)) == 1 do (
+        state.cursor = state.cursor + 1;
     );
     0
 );
 
-new_node := (node: Node) => (
-    idx := state(STATE_COUNT);
-    state(STATE_COUNT) = idx + 1;
-    nodes(idx) = node;
+new_node := {kind: NodeKind, span: SourceSpan} => (
+    idx := state.count;
+    state.count = idx + 1;
+    nodes(idx) = { kind = kind, span = span, type_cache = TypeCache::None };
+    idx
+);
+
+new_list_node := {value: i32, next: i32} => (
+    idx := state.list_count;
+    state.list_count = idx + 1;
+    list_nodes(idx) = { next = next, value = value };
     idx
 );
 
@@ -108,87 +253,98 @@ scan_identifier_end := (start: i32) => (
 );
 
 parse_number := (ignored: i32) => (
-    start := state(STATE_CURSOR);
+    start := state.cursor;
     mut value := 0;
-    while is_digit(input(state(STATE_CURSOR))) == 1 do (
-        value = value * 10 + (input(state(STATE_CURSOR)) - '0');
-        state(STATE_CURSOR) = state(STATE_CURSOR) + 1;
+    while is_digit(input(state.cursor)) == 1 do (
+        value = value * 10 + (input(state.cursor) - '0');
+        state.cursor = state.cursor + 1;
     );
-    end := state(STATE_CURSOR);
-    new_node({ a = 0, b = 0, c = OpCode::None, kind = NodeKind::Number, span_end = end, span_start = start, value = value })
+    end := state.cursor;
+    span := make_span{start, end};
+    new_node{NodeKind::Literal(ExpressionLiteral::Number(value)), span}
 );
 
 parse_identifier := (ignored: i32) => (
-    start := state(STATE_CURSOR);
-    while is_ident_char(input(state(STATE_CURSOR))) == 1 do (
-        state(STATE_CURSOR) = state(STATE_CURSOR) + 1;
+    start := state.cursor;
+    while is_ident_char(input(state.cursor)) == 1 do (
+        state.cursor = state.cursor + 1;
     );
-    end := state(STATE_CURSOR);
-    new_node({ a = 0, b = 0, c = OpCode::None, kind = NodeKind::Identifier, span_end = end, span_start = start, value = 0 })
+    end := state.cursor;
+    identifier := make_identifier{start, end};
+    span := make_span{start, end};
+    new_node{NodeKind::Identifier(identifier), span}
 );
 
 parse_basic_operand := (ignored: i32) => (
     skip_ws(0);
-    ch := input(state(STATE_CURSOR));
+    ch := input(state.cursor);
     if is_digit(ch) == 1 then (
         parse_number(0)
     ) else if is_alpha(ch) == 1 then (
         parse_identifier(0)
     ) else (
-        set_error(state(STATE_CURSOR));
+        set_error(state.cursor);
         -1
     )
 );
 
+new_operation := {left: i32, right: i32, op_pos: i32} => (
+    op_ref := make_string_ref{op_pos, 1};
+    span := make_span{nodes(left).span.start, span_end(right)};
+    new_node{NodeKind::Operation({ operator = op_ref, left = left, right = right }), span}
+);
+
 parse_paren_expr := (ignored: i32) => (
-    state(STATE_CURSOR) = state(STATE_CURSOR) + 1;
+    state.cursor = state.cursor + 1;
     left := parse_basic_operand(0);
     if left == -1 then -1 else (
         skip_ws(0);
-        op1 := input(state(STATE_CURSOR));
+        op1_pos := state.cursor;
+        op1 := input(state.cursor);
         if op_precedence(op1) == 0 then (
-            if input(state(STATE_CURSOR)) == ')' then (
-                state(STATE_CURSOR) = state(STATE_CURSOR) + 1;
+            if input(state.cursor) == ')' then (
+                state.cursor = state.cursor + 1;
                 left
             ) else (
-                set_error(state(STATE_CURSOR));
+                set_error(state.cursor);
                 -1
             )
         ) else (
-            state(STATE_CURSOR) = state(STATE_CURSOR) + 1;
+            state.cursor = state.cursor + 1;
             right := parse_basic_operand(0);
             if right == -1 then -1 else (
                 skip_ws(0);
-                op2 := input(state(STATE_CURSOR));
+                op2_pos := state.cursor;
+                op2 := input(state.cursor);
                 if op_precedence(op2) > 0 then (
-                    state(STATE_CURSOR) = state(STATE_CURSOR) + 1;
+                    state.cursor = state.cursor + 1;
                     right2 := parse_basic_operand(0);
                     if right2 == -1 then -1 else (
                         mut combined := -1;
                         if op_precedence(op2) > op_precedence(op1) then (
-                            rhs := new_node({ a = right, b = right2, c = op_code(op2), kind = NodeKind::Binary, span_end = nodes(right2).span_end, span_start = nodes(right).span_start, value = 0 });
-                            combined = new_node({ a = left, b = rhs, c = op_code(op1), kind = NodeKind::Binary, span_end = nodes(right2).span_end, span_start = nodes(left).span_start, value = 0 });
+                            rhs := new_operation{right, right2, op2_pos};
+                            combined = new_operation{left, rhs, op1_pos};
                         ) else (
-                            lhs := new_node({ a = left, b = right, c = op_code(op1), kind = NodeKind::Binary, span_end = nodes(right).span_end, span_start = nodes(left).span_start, value = 0 });
-                            combined = new_node({ a = lhs, b = right2, c = op_code(op2), kind = NodeKind::Binary, span_end = nodes(right2).span_end, span_start = nodes(lhs).span_start, value = 0 });
+                            lhs := new_operation{left, right, op1_pos};
+                            combined = new_operation{lhs, right2, op2_pos};
                         );
                         skip_ws(0);
-                        if input(state(STATE_CURSOR)) == ')' then (
-                            state(STATE_CURSOR) = state(STATE_CURSOR) + 1;
+                        if input(state.cursor) == ')' then (
+                            state.cursor = state.cursor + 1;
                             combined
                         ) else (
-                            set_error(state(STATE_CURSOR));
+                            set_error(state.cursor);
                             -1
                         )
                     )
                 ) else (
-                    combined := new_node({ a = left, b = right, c = op_code(op1), kind = NodeKind::Binary, span_end = nodes(right).span_end, span_start = nodes(left).span_start, value = 0 });
+                    combined := new_operation{left, right, op1_pos};
                     skip_ws(0);
-                    if input(state(STATE_CURSOR)) == ')' then (
-                        state(STATE_CURSOR) = state(STATE_CURSOR) + 1;
+                    if input(state.cursor) == ')' then (
+                        state.cursor = state.cursor + 1;
                         combined
                     ) else (
-                        set_error(state(STATE_CURSOR));
+                        set_error(state.cursor);
                         -1
                     )
                 )
@@ -199,7 +355,7 @@ parse_paren_expr := (ignored: i32) => (
 
 parse_operand := (ignored: i32) => (
     skip_ws(0);
-    if input(state(STATE_CURSOR)) == '(' then (
+    if input(state.cursor) == '(' then (
         parse_paren_expr(0)
     ) else (
         parse_basic_operand(0)
@@ -210,31 +366,33 @@ parse_expr := (ignored: i32) => (
     left := parse_operand(0);
     if left == -1 then -1 else (
         skip_ws(0);
-        op1 := input(state(STATE_CURSOR));
+        op1_pos := state.cursor;
+        op1 := input(state.cursor);
         if op_precedence(op1) == 0 then (
             left
         ) else (
-            state(STATE_CURSOR) = state(STATE_CURSOR) + 1;
+            state.cursor = state.cursor + 1;
             right := parse_operand(0);
             if right == -1 then -1 else (
                 skip_ws(0);
-                op2 := input(state(STATE_CURSOR));
+                op2_pos := state.cursor;
+                op2 := input(state.cursor);
                 if op_precedence(op2) > 0 then (
-                    state(STATE_CURSOR) = state(STATE_CURSOR) + 1;
+                    state.cursor = state.cursor + 1;
                     right2 := parse_operand(0);
                     if right2 == -1 then -1 else (
                         mut combined := -1;
                         if op_precedence(op2) > op_precedence(op1) then (
-                            rhs := new_node({ a = right, b = right2, c = op_code(op2), kind = NodeKind::Binary, span_end = nodes(right2).span_end, span_start = nodes(right).span_start, value = 0 });
-                            combined = new_node({ a = left, b = rhs, c = op_code(op1), kind = NodeKind::Binary, span_end = nodes(right2).span_end, span_start = nodes(left).span_start, value = 0 });
+                            rhs := new_operation{right, right2, op2_pos};
+                            combined = new_operation{left, rhs, op1_pos};
                         ) else (
-                            lhs := new_node({ a = left, b = right, c = op_code(op1), kind = NodeKind::Binary, span_end = nodes(right).span_end, span_start = nodes(left).span_start, value = 0 });
-                            combined = new_node({ a = lhs, b = right2, c = op_code(op2), kind = NodeKind::Binary, span_end = nodes(right2).span_end, span_start = nodes(lhs).span_start, value = 0 });
+                            lhs := new_operation{left, right, op1_pos};
+                            combined = new_operation{lhs, right2, op2_pos};
                         );
                         combined
                     )
                 ) else (
-                    new_node({ a = left, b = right, c = op_code(op1), kind = NodeKind::Binary, span_end = nodes(right).span_end, span_start = nodes(left).span_start, value = 0 })
+                    new_operation{left, right, op1_pos}
                 )
             )
         )
@@ -243,7 +401,7 @@ parse_expr := (ignored: i32) => (
 
 parse_statement := (ignored: i32) => (
     skip_ws(0);
-    start := state(STATE_CURSOR);
+    start := state.cursor;
     if is_alpha(input(start)) == 1 then (
         id_end := scan_identifier_end(start);
         mut look := id_end;
@@ -252,19 +410,23 @@ parse_statement := (ignored: i32) => (
         );
         if input(look) == ':' then (
             if input(look + 1) == '=' then (
-                state(STATE_CURSOR) = start;
+                state.cursor = start;
                 name := parse_identifier(0);
-                state(STATE_CURSOR) = look + 2;
+                state.cursor = look + 2;
                 expr := parse_expr(0);
                 if expr == -1 then -1 else (
-                    new_node({ a = name, b = expr, c = OpCode::None, kind = NodeKind::Binding, span_end = nodes(expr).span_end, span_start = start, value = 0 })
+                    name_span := make_span{start, id_end};
+                    name_id := make_identifier{start, id_end};
+                    binding := { pattern = BindingPattern::Identifier({ name = name_id, span = name_span }), expr = expr };
+                    span := make_span{start, span_end(expr)};
+                    new_node{NodeKind::Binding(binding), span}
                 )
             ) else (
-                state(STATE_CURSOR) = start;
+                state.cursor = start;
                 parse_expr(0)
             )
         ) else (
-            state(STATE_CURSOR) = start;
+            state.cursor = start;
             parse_expr(0)
         )
     ) else (
@@ -274,51 +436,184 @@ parse_statement := (ignored: i32) => (
 
 parse_block := (ignored: i32) => (
     skip_ws(0);
-    if input(state(STATE_CURSOR)) == 0 then (
-        set_error(state(STATE_CURSOR));
+    if input(state.cursor) == 0 then (
+        set_error(state.cursor);
         -1
     ) else (
-        first_expr := parse_statement(0);
-        if first_expr == -1 then -1 else (
-            first_list := new_node({ a = first_expr, b = -1, c = OpCode::None, kind = NodeKind::List, span_end = nodes(first_expr).span_end, span_start = nodes(first_expr).span_start, value = 0 });
-            mut count := 1;
-            mut current := first_list;
+        mut count := 0;
+        mut head := -1;
+        mut tail := -1;
+        mut last_expr := -1;
+        expr := parse_statement(0);
+        if expr == -1 then -1 else (
+            head = new_list_node{expr, -1};
+            tail = head;
+            last_expr = expr;
+            count = 1;
             skip_ws(0);
-            while input(state(STATE_CURSOR)) == ';' do (
-                state(STATE_CURSOR) = state(STATE_CURSOR) + 1;
+            while input(state.cursor) == ';' do (
+                state.cursor = state.cursor + 1;
                 skip_ws(0);
                 next_expr := parse_statement(0);
                 if next_expr == -1 then (
-                    state(STATE_CURSOR) = state(STATE_CURSOR);
+                    state.cursor = state.cursor;
                 ) else (
-                    next_list := new_node({ a = next_expr, b = -1, c = OpCode::None, kind = NodeKind::List, span_end = nodes(next_expr).span_end, span_start = nodes(next_expr).span_start, value = 0 });
-                    nodes(current).b = next_list;
-                    current = next_list;
+                    next_node := new_list_node{next_expr, -1};
+                    list_nodes(tail).next = next_node;
+                    tail = next_node;
+                    last_expr = next_expr;
                     count = count + 1;
                 );
                 skip_ws(0);
             );
-            block_end := nodes(current).span_end;
-            new_node({ a = first_list, b = count, c = OpCode::None, kind = NodeKind::Block, span_end = block_end, span_start = 0, value = 0 })
+            list := { count = count, head = head };
+            span := make_span{0, span_end(last_expr)};
+            new_node{NodeKind::Block(list), span}
         )
     )
 );
 
 (export wasm) parse := {} => (
-    state(STATE_COUNT) = 0;
-    state(STATE_ERROR) = -1;
-    state(STATE_CURSOR) = 0;
+    state.count = 0;
+    state.list_count = 0;
+    state.error = -1;
+    state.cursor = 0;
 
     root := parse_block(0);
     skip_ws(0);
-    if state(STATE_ERROR) != -1 then (
+    if state.error != -1 then (
         -1
-    ) else if input(state(STATE_CURSOR)) != 0 then (
-        set_error(state(STATE_CURSOR));
+    ) else if input(state.cursor) != 0 then (
+        set_error(state.cursor);
         -1
     ) else (
         root
     )
+);
+
+(export wasm) get_state_error := {} => (
+    state.error
+);
+
+(export wasm) get_kind_tag := (idx: i32) => (
+    kind := nodes(idx).kind;
+    if NodeKind::IntrinsicType(_) := kind then 0 else (
+        if NodeKind::BoxType(_) := kind then 1 else (
+            if NodeKind::IntrinsicOperation(_) := kind then 2 else (
+                if NodeKind::EnumType(_) := kind then 3 else (
+                    if NodeKind::Match(_) := kind then 4 else (
+                        if NodeKind::EnumValue(_) := kind then 5 else (
+                            if NodeKind::EnumConstructor(_) := kind then 6 else (
+                                if NodeKind::If(_) := kind then 7 else (
+                                    if NodeKind::AttachImplementation(_) := kind then 8 else (
+                                        if NodeKind::Function(_) := kind then 9 else (
+                                            if NodeKind::FunctionType(_) := kind then 10 else (
+                                                if NodeKind::Struct(_) := kind then 11 else (
+                                                    if NodeKind::ArrayRepeat(_) := kind then 12 else (
+                                                        if NodeKind::Literal(_) := kind then 13 else (
+                                                            if NodeKind::Identifier(_) := kind then 14 else (
+                                                                if NodeKind::Operation(_) := kind then 15 else (
+                                                                    if NodeKind::Assignment(_) := kind then 16 else (
+                                                                        if NodeKind::FunctionCall(_) := kind then 17 else (
+                                                                            if NodeKind::ArrayIndex(_) := kind then 18 else (
+                                                                                if NodeKind::TypePropertyAccess(_) := kind then 19 else (
+                                                                                    if NodeKind::Binding(_) := kind then 20 else (
+                                                                                        if NodeKind::Block(_) := kind then 21 else (
+                                                                                            if NodeKind::Diverge(_) := kind then 22 else 23
+                                                                                        )
+                                                                                    )
+                                                                                )
+                                                                            )
+                                                                        )
+                                                                    )
+                                                                )
+                                                            )
+                                                        )
+                                                    )
+                                                )
+                                            )
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    )
+);
+
+(export wasm) get_span_start := (idx: i32) => (
+    nodes(idx).span.start
+);
+
+(export wasm) get_span_length := (idx: i32) => (
+    nodes(idx).span.length
+);
+
+(export wasm) get_literal_number := (idx: i32) => (
+    if NodeKind::Literal(ExpressionLiteral::Number(value)) := nodes(idx).kind then value else -1
+);
+
+(export wasm) get_identifier_start := (idx: i32) => (
+    if NodeKind::Identifier(id) := nodes(idx).kind then id.name.start else -1
+);
+
+(export wasm) get_identifier_length := (idx: i32) => (
+    if NodeKind::Identifier(id) := nodes(idx).kind then id.name.length else 0
+);
+
+(export wasm) get_operation_left := (idx: i32) => (
+    if NodeKind::Operation(op) := nodes(idx).kind then op.left else -1
+);
+
+(export wasm) get_operation_right := (idx: i32) => (
+    if NodeKind::Operation(op) := nodes(idx).kind then op.right else -1
+);
+
+(export wasm) get_operation_operator_start := (idx: i32) => (
+    if NodeKind::Operation(op) := nodes(idx).kind then op.operator.start else -1
+);
+
+(export wasm) get_operation_operator_length := (idx: i32) => (
+    if NodeKind::Operation(op) := nodes(idx).kind then op.operator.length else 0
+);
+
+(export wasm) get_binding_expr := (idx: i32) => (
+    if NodeKind::Binding(binding) := nodes(idx).kind then binding.expr else -1
+);
+
+(export wasm) get_binding_name_start := (idx: i32) => (
+    if NodeKind::Binding(binding) := nodes(idx).kind then (
+        if BindingPattern::Identifier(info) := binding.pattern then info.name.name.start else -1
+    ) else -1
+);
+
+(export wasm) get_binding_name_length := (idx: i32) => (
+    if NodeKind::Binding(binding) := nodes(idx).kind then (
+        if BindingPattern::Identifier(info) := binding.pattern then info.name.name.length else 0
+    ) else 0
+);
+
+(export wasm) get_block_count := (idx: i32) => (
+    if NodeKind::Block(list) := nodes(idx).kind then list.count else 0
+);
+
+(export wasm) get_block_item := {idx: i32, pos: i32} => (
+    if NodeKind::Block(list) := nodes(idx).kind then (
+        mut current := list.head;
+        mut i := 0;
+        while i < pos do (
+            if current == -1 then (
+                i = pos;
+            ) else (
+                current = list_nodes(current).next;
+                i = i + 1;
+            );
+        );
+        if current == -1 then -1 else list_nodes(current).value
+    ) else -1
 );
 
 {}

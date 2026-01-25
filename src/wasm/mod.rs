@@ -430,6 +430,11 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
                 locals.push(ty.clone());
             }
         }
+        for ty in &locals {
+            if !matches!(ty, WasmType::I32 | WasmType::U8 | WasmType::Box { .. }) {
+                type_ctx.get_or_register_type(ty.clone());
+            }
+        }
 
         let box_temp_local = ensure_box_temp_local(
             &mut locals,
@@ -533,13 +538,15 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
             export.index as u32 + import_count,
         );
     }
-    let mut global_export_index = 0;
+    let mut global_index = 0;
     for global in &exports.globals {
         if matches!(global.ty, WasmType::Box { .. }) {
             continue;
         }
-        export_section.export(&global.name, ExportKind::Global, global_export_index as u32);
-        global_export_index += 1;
+        if global.exported {
+            export_section.export(&global.name, ExportKind::Global, global_index as u32);
+        }
+        global_index += 1;
     }
     for memory in &box_registry.memories {
         if let Some(name) = &memory.export_name {
@@ -559,6 +566,7 @@ fn collect_wasm_exports(intermediate: &IntermediateResult) -> Result<WasmExports
     let mut imports = Vec::new();
     let mut functions = Vec::new();
     let mut globals = Vec::new();
+    let mut exported_globals = std::collections::HashSet::new();
 
     for export in &intermediate.exports {
         if export.target != TargetLiteral::WasmTarget {
@@ -580,19 +588,14 @@ fn collect_wasm_exports(intermediate: &IntermediateResult) -> Result<WasmExports
                 });
             }
             IntermediateExportType::Global => {
-                let global = intermediate.globals.get(export.index).ok_or_else(|| {
+                let _global = intermediate.globals.get(export.index).ok_or_else(|| {
                     Diagnostic::new(format!(
                         "Export `{}` references unknown global index {}",
                         export.name, export.index
                     ))
                     .with_span(SourceSpan::default())
                 })?;
-                globals.push(WasmGlobalExport {
-                    name: global.name.clone(),
-                    ty: intermediate_type_to_wasm(&global.ty),
-                    init: global.value.clone(),
-                    intermediate_ty: global.ty.clone(),
-                });
+                exported_globals.insert(export.index);
             }
         }
     }
@@ -630,6 +633,16 @@ fn collect_wasm_exports(intermediate: &IntermediateResult) -> Result<WasmExports
 
     imports.sort_by(|a, b| a.export_name.cmp(&b.export_name));
     functions.sort_by(|a, b| a.name.cmp(&b.name));
+    for (index, global) in intermediate.globals.iter().enumerate() {
+        globals.push(WasmGlobalExport {
+            name: global.name.clone(),
+            ty: intermediate_type_to_wasm(&global.ty),
+            init: global.value.clone(),
+            intermediate_ty: global.ty.clone(),
+            exported: exported_globals.contains(&index),
+        });
+    }
+
     globals.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(WasmExports {
         imports,
@@ -2150,14 +2163,12 @@ fn emit_expression(
                     }
                     other => {
                         if !wasm_types_equivalent(&expr_type, &other) {
-                            return Err(
-                                Diagnostic::new(format!(
-                                    "Expression type does not match expected type: expected `{}`, got `{}`",
-                                    format_wasm_type(&other),
-                                    format_wasm_type(&expr_type)
-                                ))
-                                .with_span(SourceSpan::default()),
-                            );
+                            return Err(Diagnostic::new(format!(
+                                "Expression type does not match expected type: expected `{}`, got `{}`",
+                                format_wasm_type(&other),
+                                format_wasm_type(&expr_type),
+                            ))
+                            .with_span(SourceSpan::default()));
                         }
                         if let WasmType::Box { element } = &expr_type {
                             let box_info = resolve_box_expr(&expr, box_ctx, box_registry)?;
@@ -2395,6 +2406,251 @@ fn emit_expression(
                         let object_type =
                             infer_type(&object_expr, locals_types, function_return_types)?;
                         match &object_type {
+                            WasmType::Box { element } => match element.as_ref() {
+                                WasmType::Struct(fields) => {
+                                    let mut offset = 0i32;
+                                    let mut field_type: Option<WasmType> = None;
+                                    for (name, ty) in sorted_wasm_fields(fields) {
+                                        if name == *property {
+                                            field_type = Some(ty.clone());
+                                            break;
+                                        }
+                                        offset = offset
+                                            .saturating_add(wasm_type_size(&ty) as i32);
+                                    }
+                                    let field_type = field_type.ok_or_else(|| {
+                                        Diagnostic::new(format!(
+                                            "Field `{}` not found in struct",
+                                            property
+                                        ))
+                                        .with_span(SourceSpan::default())
+                                    })?;
+                                    let memory_index =
+                                        resolve_box_expr(&object_expr, box_ctx, box_registry)?
+                                            .memory_index;
+                                    let full_target_expr = lvalue_to_intermediate(&target);
+
+                                    if matches!(
+                                        &field_type,
+                                        WasmType::U8 | WasmType::I32 | WasmType::Box { .. }
+                                    ) {
+                                        let temp_local = box_temp_local.ok_or_else(|| {
+                                            Diagnostic::new(
+                                                "Boxed struct assignment requires a temporary local"
+                                                    .to_string(),
+                                            )
+                                            .with_span(SourceSpan::default())
+                                        })?;
+                                        let store_instr = match &field_type {
+                                            WasmType::U8 => Instruction::I32Store8(memarg(
+                                                0,
+                                                0,
+                                                memory_index,
+                                            )),
+                                            WasmType::I32 | WasmType::Box { .. } => {
+                                                Instruction::I32Store(memarg(0, 2, memory_index))
+                                            }
+                                            _ => unreachable!(
+                                                "non-leaf boxed struct assignment checked above"
+                                            ),
+                                        };
+                                        tasks.push(EmitTask::Eval(full_target_expr));
+                                        tasks.push(EmitTask::Instr(store_instr));
+                                        tasks.push(EmitTask::EvalWithType {
+                                            expr: (*value).clone(),
+                                            expected: field_type.clone(),
+                                        });
+                                        tasks.push(EmitTask::Instr(Instruction::I32Add));
+                                        tasks.push(EmitTask::Instr(Instruction::I32Const(offset)));
+                                        tasks.push(EmitTask::Instr(Instruction::LocalGet(
+                                            temp_local,
+                                        )));
+                                        tasks.push(EmitTask::Instr(Instruction::LocalSet(
+                                            temp_local,
+                                        )));
+                                        tasks.push(EmitTask::Instr(Instruction::I32Const(0)));
+                                    } else {
+                                        let base_local = box_base_local.ok_or_else(|| {
+                                            Diagnostic::new(
+                                                "Boxed struct assignment requires a temporary local"
+                                                    .to_string(),
+                                            )
+                                            .with_span(SourceSpan::default())
+                                        })?;
+                                        let store_fields =
+                                            collect_boxed_store_leaves(value.as_ref(), &field_type, offset)?;
+                                        tasks.push(EmitTask::Eval(full_target_expr));
+                                        for (field_expr, field_type, field_offset) in
+                                            store_fields.into_iter().rev()
+                                        {
+                                            let field_store = match field_type {
+                                                WasmType::U8 => Instruction::I32Store8(memarg(
+                                                    0,
+                                                    0,
+                                                    memory_index,
+                                                )),
+                                                WasmType::I32 | WasmType::Box { .. } => {
+                                                    Instruction::I32Store(memarg(
+                                                        0,
+                                                        2,
+                                                        memory_index,
+                                                    ))
+                                                }
+                                                _ => {
+                                                    return Err(Diagnostic::new(
+                                                        "Boxed struct assignment only supports i32 or u8 fields"
+                                                            .to_string(),
+                                                    )
+                                                    .with_span(SourceSpan::default()));
+                                                }
+                                            };
+                                            tasks.push(EmitTask::Instr(field_store));
+                                            tasks.push(EmitTask::EvalWithType {
+                                                expr: field_expr,
+                                                expected: field_type,
+                                            });
+                                            tasks.push(EmitTask::Instr(Instruction::I32Add));
+                                            tasks.push(EmitTask::Instr(Instruction::I32Const(
+                                                field_offset,
+                                            )));
+                                            tasks.push(EmitTask::Instr(Instruction::LocalGet(
+                                                base_local,
+                                            )));
+                                        }
+                                        tasks.push(EmitTask::Instr(Instruction::LocalSet(
+                                            base_local,
+                                        )));
+                                        tasks.push(EmitTask::Instr(Instruction::I32Const(0)));
+                                    }
+                                }
+                                WasmType::Array {
+                                    element,
+                                    field_names,
+                                    ..
+                                } => {
+                                    let field_index = field_names
+                                        .iter()
+                                        .position(|name| name == property)
+                                        .ok_or_else(|| {
+                                            Diagnostic::new(format!(
+                                                "Field `{}` not found in array",
+                                                property
+                                            ))
+                                            .with_span(SourceSpan::default())
+                                        })?;
+                                    let field_offset =
+                                        (field_index * wasm_type_size(element)) as i32;
+                                    let field_type = (**element).clone();
+                                    let memory_index =
+                                        resolve_box_expr(&object_expr, box_ctx, box_registry)?
+                                            .memory_index;
+                                    let full_target_expr = lvalue_to_intermediate(&target);
+
+                                    if matches!(
+                                        &field_type,
+                                        WasmType::U8 | WasmType::I32 | WasmType::Box { .. }
+                                    ) {
+                                        let temp_local = box_temp_local.ok_or_else(|| {
+                                            Diagnostic::new(
+                                                "Boxed array assignment requires a temporary local"
+                                                    .to_string(),
+                                            )
+                                            .with_span(SourceSpan::default())
+                                        })?;
+                                        let store_instr = match &field_type {
+                                            WasmType::U8 => Instruction::I32Store8(memarg(
+                                                0,
+                                                0,
+                                                memory_index,
+                                            )),
+                                            WasmType::I32 | WasmType::Box { .. } => {
+                                                Instruction::I32Store(memarg(0, 2, memory_index))
+                                            }
+                                            _ => unreachable!(
+                                                "non-leaf boxed array assignment checked above"
+                                            ),
+                                        };
+                                        tasks.push(EmitTask::Eval(full_target_expr));
+                                        tasks.push(EmitTask::Instr(store_instr));
+                                        tasks.push(EmitTask::EvalWithType {
+                                            expr: (*value).clone(),
+                                            expected: field_type.clone(),
+                                        });
+                                        tasks.push(EmitTask::Instr(Instruction::I32Add));
+                                        tasks.push(EmitTask::Instr(Instruction::I32Const(
+                                            field_offset,
+                                        )));
+                                        tasks.push(EmitTask::Instr(Instruction::LocalGet(
+                                            temp_local,
+                                        )));
+                                        tasks.push(EmitTask::Instr(Instruction::LocalSet(
+                                            temp_local,
+                                        )));
+                                        tasks.push(EmitTask::Instr(Instruction::I32Const(0)));
+                                    } else {
+                                        let base_local = box_base_local.ok_or_else(|| {
+                                            Diagnostic::new(
+                                                "Boxed array assignment requires a temporary local"
+                                                    .to_string(),
+                                            )
+                                            .with_span(SourceSpan::default())
+                                        })?;
+                                        let store_fields = collect_boxed_store_leaves(
+                                            value.as_ref(),
+                                            &field_type,
+                                            field_offset,
+                                        )?;
+                                        tasks.push(EmitTask::Eval(full_target_expr));
+                                        for (field_expr, field_type, field_offset) in
+                                            store_fields.into_iter().rev()
+                                        {
+                                            let field_store = match field_type {
+                                                WasmType::U8 => Instruction::I32Store8(memarg(
+                                                    0,
+                                                    0,
+                                                    memory_index,
+                                                )),
+                                                WasmType::I32 | WasmType::Box { .. } => {
+                                                    Instruction::I32Store(memarg(
+                                                        0,
+                                                        2,
+                                                        memory_index,
+                                                    ))
+                                                }
+                                                _ => {
+                                                    return Err(Diagnostic::new(
+                                                        "Boxed array assignment only supports i32 or u8 fields"
+                                                            .to_string(),
+                                                    )
+                                                    .with_span(SourceSpan::default()));
+                                                }
+                                            };
+                                            tasks.push(EmitTask::Instr(field_store));
+                                            tasks.push(EmitTask::EvalWithType {
+                                                expr: field_expr,
+                                                expected: field_type,
+                                            });
+                                            tasks.push(EmitTask::Instr(Instruction::I32Add));
+                                            tasks.push(EmitTask::Instr(Instruction::I32Const(
+                                                field_offset,
+                                            )));
+                                            tasks.push(EmitTask::Instr(Instruction::LocalGet(
+                                                base_local,
+                                            )));
+                                        }
+                                        tasks.push(EmitTask::Instr(Instruction::LocalSet(
+                                            base_local,
+                                        )));
+                                        tasks.push(EmitTask::Instr(Instruction::I32Const(0)));
+                                    }
+                                }
+                                _ => {
+                                    return Err(Diagnostic::new(
+                                        "Property assignment on non-struct type".to_string(),
+                                    )
+                                    .with_span(SourceSpan::default()));
+                                }
+                            },
                             WasmType::Struct(fields) => {
                                 let (field_index, field_type) = fields
                                     .iter()
@@ -2459,12 +2715,6 @@ fn emit_expression(
                             WasmType::I32 | WasmType::U8 => {
                                 return Err(Diagnostic::new(
                                     "Property assignment on non-struct type".to_string(),
-                                )
-                                .with_span(SourceSpan::default()));
-                            }
-                            WasmType::Box { .. } => {
-                                return Err(Diagnostic::new(
-                                    "Property assignment on boxed value".to_string(),
                                 )
                                 .with_span(SourceSpan::default()));
                             }

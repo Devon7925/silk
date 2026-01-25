@@ -478,6 +478,13 @@ fn ensure_boolean_condition(
     Ok(())
 }
 
+fn is_tuple_struct(items: &[(Identifier, Expression)]) -> bool {
+    items
+        .iter()
+        .enumerate()
+        .all(|(index, (id, _))| id.name == index.to_string())
+}
+
 fn types_equivalent(left: &ExpressionKind, right: &ExpressionKind) -> bool {
     let mut stack = vec![(left, right)];
     while let Some((left, right)) = stack.pop() {
@@ -520,11 +527,21 @@ fn types_equivalent(left: &ExpressionKind, right: &ExpressionKind) -> bool {
                 if a_items.len() != b_items.len() {
                     return false;
                 }
-                for ((a_id, a_expr), (b_id, b_expr)) in a_items.iter().zip(b_items.iter()) {
-                    if a_id.name != b_id.name {
-                        return false;
+                let left_tuple = is_tuple_struct(a_items);
+                let right_tuple = is_tuple_struct(b_items);
+                if left_tuple || right_tuple {
+                    for ((_, a_expr), (_, b_expr)) in a_items.iter().zip(b_items.iter()) {
+                        stack.push((&a_expr.kind, &b_expr.kind));
                     }
-                    stack.push((&a_expr.kind, &b_expr.kind));
+                } else {
+                    for (a_id, a_expr) in a_items.iter() {
+                        let Some((_, b_expr)) =
+                            b_items.iter().find(|(b_id, _)| b_id.name == a_id.name)
+                        else {
+                            return false;
+                        };
+                        stack.push((&a_expr.kind, &b_expr.kind));
+                    }
                 }
             }
             (
@@ -628,13 +645,24 @@ fn collect_type_bindings(
                 if pattern_items.len() != value_items.len() {
                     return false;
                 }
-                for ((pattern_id, pattern_expr), (value_id, value_expr)) in
-                    pattern_items.iter().zip(value_items.iter())
-                {
-                    if pattern_id.name != value_id.name {
-                        return false;
+                let pattern_tuple = is_tuple_struct(pattern_items);
+                let value_tuple = is_tuple_struct(value_items);
+                if pattern_tuple || value_tuple {
+                    for ((_, pattern_expr), (_, value_expr)) in
+                        pattern_items.iter().zip(value_items.iter())
+                    {
+                        stack.push((pattern_expr, value_expr));
                     }
-                    stack.push((pattern_expr, value_expr));
+                } else {
+                    for (pattern_id, pattern_expr) in pattern_items.iter() {
+                        let Some((_, value_expr)) = value_items
+                            .iter()
+                            .find(|(value_id, _)| value_id.name == pattern_id.name)
+                        else {
+                            return false;
+                        };
+                        stack.push((pattern_expr, value_expr));
+                    }
                 }
             }
             (
@@ -5523,11 +5551,16 @@ fn get_lvalue_type_inner(
             property,
             span: prop_span,
         } => {
-            let current_type = get_lvalue_type_inner(object, context, *prop_span, false)?;
+            let current_type = get_lvalue_type_inner(object, context, *prop_span, true)?;
+            let resolved_type = match current_type.kind {
+                ExpressionKind::BoxType(inner) => (*inner).clone(),
+                _ => current_type,
+            };
+            let resolved_type = resolve_type_alias_expression(&resolved_type, context);
             let Expression {
                 kind: ExpressionKind::Struct(fields),
                 ..
-            } = current_type
+            } = resolved_type
             else {
                 return Err(diagnostic(
                     "Type property access on non-struct type",
