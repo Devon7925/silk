@@ -354,7 +354,7 @@ fn encode_box_value_with_path(
                         .map(|(name, expr)| (Identifier::new(name), expr))
                         .collect()
                 }
-                other => {
+                _ => {
                     return Err(Diagnostic::new(
                         "Box allocation requires a struct value".to_string(),
                     ));
@@ -377,23 +377,60 @@ fn encode_box_value_with_path(
             Ok(bytes)
         }
         IntermediateType::Array {
-            element, length, ..
+            element,
+            length,
+            field_names,
         } => {
-            let IntermediateKind::ArrayLiteral { items, .. } = value else {
-                return Err(Diagnostic::new(
-                    "Box allocation requires an array value".to_string(),
-                ));
-            };
-            if items.len() != *length {
-                return Err(Diagnostic::new(
-                    "Box allocation array length mismatch".to_string(),
-                ));
-            }
             let mut bytes = Vec::new();
-            for (index, item) in items.iter().enumerate() {
-                path.push(index.to_string());
-                bytes.extend(encode_box_value_with_path(item, element, path)?);
-                path.pop();
+            match value {
+                IntermediateKind::ArrayLiteral { items, .. } => {
+                    if items.len() != *length {
+                        return Err(Diagnostic::new(
+                            "Box allocation array length mismatch".to_string(),
+                        ));
+                    }
+                    for (index, item) in items.iter().enumerate() {
+                        path.push(index.to_string());
+                        bytes.extend(encode_box_value_with_path(item, element, path)?);
+                        path.pop();
+                    }
+                }
+                IntermediateKind::Struct(items) => {
+                    if items.len() != *length || field_names.len() != *length {
+                        return Err(Diagnostic::new(
+                            "Box allocation array length mismatch".to_string(),
+                        ));
+                    }
+                    let struct_names: std::collections::HashSet<&String> =
+                        items.iter().map(|(id, _)| &id.name).collect();
+                    let array_names: std::collections::HashSet<&String> =
+                        field_names.iter().collect();
+                    if struct_names.len() != items.len()
+                        || array_names.len() != field_names.len()
+                        || struct_names != array_names
+                    {
+                        return Err(Diagnostic::new(
+                            "Box allocation requires an array value".to_string(),
+                        ));
+                    }
+                    for (index, name) in field_names.iter().enumerate() {
+                        let item = items
+                            .iter()
+                            .find(|(id, _)| id.name == *name)
+                            .map(|(_, expr)| expr)
+                            .ok_or_else(|| {
+                                Diagnostic::new(format!("Missing field {name} in array value"))
+                            })?;
+                        path.push(index.to_string());
+                        bytes.extend(encode_box_value_with_path(item, element, path)?);
+                        path.pop();
+                    }
+                }
+                _ => {
+                    return Err(Diagnostic::new(
+                        "Box allocation requires an array value".to_string(),
+                    ));
+                }
             }
             Ok(bytes)
         }

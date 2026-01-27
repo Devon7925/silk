@@ -7572,6 +7572,7 @@ fn add_builtin_library(context: &mut Context) {
     let expression = uniquify::uniquify_program(expression);
     context.bindings.push(HashMap::new());
     interpret_library_expression(expression, context).expect("Failed to interpret builtin library");
+    alias_builtin_bindings(context);
 }
 
 fn interpret_library_expression(expr: Expression, context: &mut Context) -> Result<(), Diagnostic> {
@@ -7589,6 +7590,26 @@ fn interpret_library_expression(expr: Expression, context: &mut Context) -> Resu
             interpret_expression(other, context)?;
             Ok(())
         }
+    }
+}
+
+fn alias_builtin_bindings(context: &mut Context) {
+    let Some(scope) = context.bindings.last_mut() else {
+        return;
+    };
+    let aliases: Vec<(Identifier, (BindingContext, Vec<BindingAnnotation>))> = scope
+        .iter()
+        .filter_map(|(identifier, binding)| {
+            if identifier.unique == identifier.name {
+                None
+            } else {
+                Some((Identifier::new(identifier.name.clone()), binding.clone()))
+            }
+        })
+        .collect();
+
+    for (alias, binding) in aliases {
+        scope.entry(alias).or_insert(binding);
     }
 }
 

@@ -142,9 +142,9 @@ Node := { kind = NodeKind, span = SourceSpan, type_cache = TypeCache };
 
 ListNode := { next = i32, value = i32 };
 
-MAX_INPUT := 32;
-MAX_NODES := 16;
-MAX_LIST_NODES := 32;
+MAX_INPUT := 512;
+MAX_NODES := 512;
+MAX_LIST_NODES := 1024;
 
 EMPTY_STRING := { length = 0, start = 0 };
 EMPTY_IDENTIFIER := { name = EMPTY_STRING, unique = EMPTY_STRING };
@@ -186,7 +186,13 @@ set_error: (i32 -> i32) := (pos: i32) => (
 );
 
 is_space: (u8 -> i32) := (ch: u8) => (
-    if ch == ' ' then 1 else 0
+    if ch == ' ' then 1 else (
+        if ch == '\n' then 1 else (
+            if ch == '\r' then 1 else (
+                if ch == '\t' then 1 else 0
+            )
+        )
+    )
 );
 
 is_digit: (u8 -> i32) := (ch: u8) => (
@@ -224,24 +230,55 @@ op_precedence: (u8 -> i32) := (ch: u8) => (
 );
 
 skip_ws := (ignored: i32) => (
-    while is_space(input(state.cursor)) == 1 do (
-        state.cursor = state.cursor + 1;
+    mut done := 0;
+    while done == 0 do (
+        while is_space(input(state.cursor)) == 1 do (
+            state.cursor = state.cursor + 1;
+        );
+        if input(state.cursor) == '/' then (
+            if input(state.cursor + 1) == '/' then (
+                state.cursor = state.cursor + 2;
+                while input(state.cursor) != 0 do (
+                    if input(state.cursor) == '\n' then (
+                        state.cursor = state.cursor + 1;
+                        done = 0;
+                        break;
+                    ) else (
+                        state.cursor = state.cursor + 1;
+                    );
+                );
+            ) else (
+                done = 1;
+            )
+        ) else (
+            done = 1;
+        )
     );
     0
 );
 
 new_node := {kind: NodeKind, span: SourceSpan} => (
     idx := state.count;
-    state.count = idx + 1;
-    nodes(idx) = { kind = kind, span = span, type_cache = TypeCache::None };
-    idx
+    if idx >= MAX_NODES then (
+        set_error(span.start);
+        -1
+    ) else (
+        state.count = idx + 1;
+        nodes(idx) = { kind = kind, span = span, type_cache = TypeCache::None };
+        idx
+    )
 );
 
 new_list_node := {value: i32, next: i32} => (
     idx := state.list_count;
-    state.list_count = idx + 1;
-    list_nodes(idx) = { next = next, value = value };
-    idx
+    if idx >= MAX_LIST_NODES then (
+        set_error(0);
+        -1
+    ) else (
+        state.list_count = idx + 1;
+        list_nodes(idx) = { next = next, value = value };
+        idx
+    )
 );
 
 scan_identifier_end := (start: i32) => (
@@ -252,16 +289,305 @@ scan_identifier_end := (start: i32) => (
     pos
 );
 
+is_keyword_if := (pos: i32) => (
+    if input(pos) == 'i' then (
+        if input(pos + 1) == 'f' then (
+            if is_ident_char(input(pos + 2)) == 1 then 0 else 1
+        ) else 0
+    ) else 0
+);
+
+is_keyword_then := (pos: i32) => (
+    if input(pos) == 't' then (
+        if input(pos + 1) == 'h' then (
+            if input(pos + 2) == 'e' then (
+                if input(pos + 3) == 'n' then (
+                    if is_ident_char(input(pos + 4)) == 1 then 0 else 1
+                ) else 0
+            ) else 0
+        ) else 0
+    ) else 0
+);
+
+is_keyword_else := (pos: i32) => (
+    if input(pos) == 'e' then (
+        if input(pos + 1) == 'l' then (
+            if input(pos + 2) == 's' then (
+                if input(pos + 3) == 'e' then (
+                    if is_ident_char(input(pos + 4)) == 1 then 0 else 1
+                ) else 0
+            ) else 0
+        ) else 0
+    ) else 0
+);
+
+is_keyword_return := (pos: i32) => (
+    if input(pos) == 'r' then (
+        if input(pos + 1) == 'e' then (
+            if input(pos + 2) == 't' then (
+                if input(pos + 3) == 'u' then (
+                    if input(pos + 4) == 'r' then (
+                        if input(pos + 5) == 'n' then (
+                            if is_ident_char(input(pos + 6)) == 1 then 0 else 1
+                        ) else 0
+                    ) else 0
+                ) else 0
+            ) else 0
+        ) else 0
+    ) else 0
+);
+
+is_keyword_break := (pos: i32) => (
+    if input(pos) == 'b' then (
+        if input(pos + 1) == 'r' then (
+            if input(pos + 2) == 'e' then (
+                if input(pos + 3) == 'a' then (
+                    if input(pos + 4) == 'k' then (
+                        if is_ident_char(input(pos + 5)) == 1 then 0 else 1
+                    ) else 0
+                ) else 0
+            ) else 0
+        ) else 0
+    ) else 0
+);
+
+is_keyword_for := (pos: i32) => (
+    if input(pos) == 'f' then (
+        if input(pos + 1) == 'o' then (
+            if input(pos + 2) == 'r' then (
+                if is_ident_char(input(pos + 3)) == 1 then 0 else 1
+            ) else 0
+        ) else 0
+    ) else 0
+);
+
+is_keyword_in := (pos: i32) => (
+    if input(pos) == 'i' then (
+        if input(pos + 1) == 'n' then (
+            if is_ident_char(input(pos + 2)) == 1 then 0 else 1
+        ) else 0
+    ) else 0
+);
+
+is_keyword_while := (pos: i32) => (
+    if input(pos) == 'w' then (
+        if input(pos + 1) == 'h' then (
+            if input(pos + 2) == 'i' then (
+                if input(pos + 3) == 'l' then (
+                    if input(pos + 4) == 'e' then (
+                        if is_ident_char(input(pos + 5)) == 1 then 0 else 1
+                    ) else 0
+                ) else 0
+            ) else 0
+        ) else 0
+    ) else 0
+);
+
+is_keyword_loop := (pos: i32) => (
+    if input(pos) == 'l' then (
+        if input(pos + 1) == 'o' then (
+            if input(pos + 2) == 'o' then (
+                if input(pos + 3) == 'p' then (
+                    if is_ident_char(input(pos + 4)) == 1 then 0 else 1
+                ) else 0
+            ) else 0
+        ) else 0
+    ) else 0
+);
+
+is_keyword_do := (pos: i32) => (
+    if input(pos) == 'd' then (
+        if input(pos + 1) == 'o' then (
+            if is_ident_char(input(pos + 2)) == 1 then 0 else 1
+        ) else 0
+    ) else 0
+);
+
+is_operator_char: (u8 -> i32) := (ch: u8) => (
+    if ch == '+' then 1 else (
+        if ch == '-' then 1 else (
+            if ch == '*' then 1 else (
+                if ch == '/' then 1 else (
+                    if ch == '=' then 1 else (
+                        if ch == '!' then 1 else (
+                            if ch == '<' then 1 else (
+                                if ch == '>' then 1 else (
+                                    if ch == '&' then 1 else (
+                                        if ch == '|' then 1 else (
+                                            if ch == '^' then 1 else (
+                                                if ch == ':' then 1 else (
+                                                    if ch == '.' then 1 else (
+                                                        if ch == '@' then 1 else 0
+                                                    )
+                                                )
+                                            )
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    )
+);
+
+op2_match := {pos: i32, ch1: u8, ch2: u8} => (
+    if input(pos) == ch1 then (
+        if input(pos + 1) == ch2 then 1 else 0
+    ) else 0
+);
+
+scan_operator_len := (pos: i32) => (
+    ch := input(pos);
+    if ch == 0 then -1 else (
+        if ch == ';' then -1 else (
+            if ch == ')' then -1 else (
+                if ch == ',' then -1 else (
+                    if ch == '}' then -1 else (
+                        if ch == ']' then -1 else (
+                            if is_keyword_if(pos) == 1 then -1 else (
+                                if is_keyword_then(pos) == 1 then -1 else (
+                                    if is_keyword_else(pos) == 1 then -1 else (
+                                        if is_keyword_return(pos) == 1 then -1 else (
+                                            if is_keyword_break(pos) == 1 then -1 else (
+                                                if is_keyword_for(pos) == 1 then -1 else (
+                                                    if is_keyword_in(pos) == 1 then -1 else (
+                                                        if is_keyword_while(pos) == 1 then -1 else (
+                                                            if is_keyword_loop(pos) == 1 then -1 else (
+                                                                if is_keyword_do(pos) == 1 then -1 else (
+                                                                    if op2_match{pos, ':', ':'} == 1 then 2 else (
+                                                                        if op2_match{pos, '-', '>'} == 1 then 2 else (
+                                                                            if op2_match{pos, '=', '>'} == 1 then 2 else (
+                                                                                if op2_match{pos, '=', '='} == 1 then 2 else (
+                                                                                    if op2_match{pos, '!', '='} == 1 then 2 else (
+                                                                                        if op2_match{pos, '<', '='} == 1 then 2 else (
+                                                                                            if op2_match{pos, '>', '='} == 1 then 2 else (
+                                                                                                if op2_match{pos, '&', '&'} == 1 then 2 else (
+                                                                                                    if op2_match{pos, '|', '|'} == 1 then 2 else (
+                                                                                                        if op2_match{pos, '|', '>'} == 1 then 2 else (
+                                                                                                            if op2_match{pos, '.', '.'} == 1 then 2 else (
+                                                                                                                if op2_match{pos, ':', '='} == 1 then 2 else (
+                                                                                                                    if is_operator_char(ch) == 1 then 1 else 0
+                                                                                                                )
+                                                                                                            )
+                                                                                                        )
+                                                                                                    )
+                                                                                                )
+                                                                                            )
+                                                                                        )
+                                                                                    )
+                                                                                )
+                                                                            )
+                                                                        )
+                                                                    )
+                                                                )
+                                                            )
+                                                        )
+                                                    )
+                                                )
+                                            )
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    )
+);
+
+op_is0 := (op: StringRef) => (
+    if op.length == 0 then 1 else 0
+);
+
+op_is1 := {op: StringRef, ch: u8} => (
+    if op.length == 1 then (
+        if input(op.start) == ch then 1 else 0
+    ) else 0
+);
+
+op_is2 := {op: StringRef, ch1: u8, ch2: u8} => (
+    if op.length == 2 then (
+        if input(op.start) == ch1 then (
+            if input(op.start + 1) == ch2 then 1 else 0
+        ) else 0
+    ) else 0
+);
+
+op_precedence_ref := (op: StringRef) => (
+    if op_is0(op) == 1 then 8 else (
+        if op_is2{op, ':', ':'} == 1 then 8 else (
+            if op_is1{op, '.'} == 1 then 8 else (
+                if op_is1{op, '@'} == 1 then 8 else (
+                    if op_is1{op, ':'} == 1 then 7 else (
+                        if op_is1{op, '*'} == 1 then 6 else (
+                            if op_is1{op, '/'} == 1 then 6 else (
+                                if op_is1{op, '+'} == 1 then 5 else (
+                                    if op_is1{op, '-'} == 1 then 5 else (
+                                        if op_is2{op, '=', '='} == 1 then 4 else (
+                                            if op_is2{op, '!', '='} == 1 then 4 else (
+                                                if op_is1{op, '<'} == 1 then 4 else (
+                                                    if op_is1{op, '>'} == 1 then 4 else (
+                                                        if op_is2{op, '<', '='} == 1 then 4 else (
+                                                            if op_is2{op, '>', '='} == 1 then 4 else (
+                                                                if op_is2{op, '.', '.'} == 1 then 4 else (
+                                                                    if op_is2{op, '&', '&'} == 1 then 3 else (
+                                                                        if op_is2{op, '|', '|'} == 1 then 2 else (
+                                                                            if op_is1{op, '^'} == 1 then 2 else (
+                                                                                if op_is2{op, '=', '>'} == 1 then 1 else (
+                                                                                    if op_is2{op, '-', '>'} == 1 then 1 else (
+                                                                                        if op_is2{op, '|', '>'} == 1 then 1 else (
+                                                                                            if op_is2{op, ':', '='} == 1 then 0 else (
+                                                                                                if op_is1{op, '='} == 1 then 0 else 5
+                                                                                            )
+                                                                                        )
+                                                                                    )
+                                                                                )
+                                                                            )
+                                                                        )
+                                                                    )
+                                                                )
+                                                            )
+                                                        )
+                                                    )
+                                                )
+                                            )
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    )
+);
+
 parse_number := (ignored: i32) => (
     start := state.cursor;
-    mut value := 0;
-    while is_digit(input(state.cursor)) == 1 do (
-        value = value * 10 + (input(state.cursor) - '0');
+    mut sign := 1;
+    if input(state.cursor) == '-' then (
+        sign = -1;
         state.cursor = state.cursor + 1;
     );
-    end := state.cursor;
-    span := make_span{start, end};
-    new_node{NodeKind::Literal(ExpressionLiteral::Number(value)), span}
+    mut value := 0;
+    if is_digit(input(state.cursor)) == 0 then (
+        set_error(state.cursor);
+        -1
+    ) else (
+        while is_digit(input(state.cursor)) == 1 do (
+            value = value * 10 + (input(state.cursor) - '0');
+            state.cursor = state.cursor + 1;
+        );
+        end := state.cursor;
+        span := make_span{start, end};
+        new_node{NodeKind::Literal(ExpressionLiteral::Number(value * sign)), span}
+    )
 );
 
 parse_identifier := (ignored: i32) => (
@@ -275,18 +601,143 @@ parse_identifier := (ignored: i32) => (
     new_node{NodeKind::Identifier(identifier), span}
 );
 
-parse_basic_operand := (ignored: i32) => (
-    skip_ws(0);
-    ch := input(state.cursor);
-    if is_digit(ch) == 1 then (
-        parse_number(0)
-    ) else if is_alpha(ch) == 1 then (
-        parse_identifier(0)
+parse_boolean_literal := (ignored: i32) => (
+    start := state.cursor;
+    if input(start) == 't' then (
+        if input(start + 1) == 'r' then (
+            if input(start + 2) == 'u' then (
+                if input(start + 3) == 'e' then (
+                    if is_ident_char(input(start + 4)) == 0 then (
+                        state.cursor = start + 4;
+                        span := make_span{start, state.cursor};
+                        new_node{NodeKind::Literal(ExpressionLiteral::Boolean(1)), span}
+                    ) else -1
+                ) else -1
+            ) else -1
+        ) else -1
+    ) else if input(start) == 'f' then (
+        if input(start + 1) == 'a' then (
+            if input(start + 2) == 'l' then (
+                if input(start + 3) == 's' then (
+                    if input(start + 4) == 'e' then (
+                        if is_ident_char(input(start + 5)) == 0 then (
+                            state.cursor = start + 5;
+                            span := make_span{start, state.cursor};
+                            new_node{NodeKind::Literal(ExpressionLiteral::Boolean(0)), span}
+                        ) else -1
+                    ) else -1
+                ) else -1
+            ) else -1
+        ) else -1
     ) else (
-        set_error(state.cursor);
         -1
     )
 );
+
+parse_char_literal := (ignored: i32) => (
+    start := state.cursor;
+    if input(start) != '\'' then -1 else (
+        state.cursor = start + 1;
+        mut value := 0;
+        value = input(state.cursor);
+        if value == '\\' then (
+            state.cursor = state.cursor + 1;
+            esc := input(state.cursor);
+            if esc == 'n' then value = 10 else (
+                if esc == 'r' then value = 13 else (
+                    if esc == 't' then value = 9 else (
+                        if esc == '0' then value = 0 else (
+                            if esc == '\'' then value = 39 else (
+                                if esc == '"' then value = 34 else (
+                                    if esc == '\\' then value = 92 else value
+                                )
+                            )
+                        )
+                    )
+                )
+            );
+        );
+        state.cursor = state.cursor + 1;
+        if input(state.cursor) != '\'' then (
+            set_error(state.cursor);
+            -1
+        ) else (
+            state.cursor = state.cursor + 1;
+            span := make_span{start, state.cursor};
+            new_node{NodeKind::Literal(ExpressionLiteral::Char(value)), span}
+        )
+    )
+);
+
+parse_string_literal := (ignored: i32) => (
+    start := state.cursor;
+    if input(start) != '"' then -1 else (
+        state.cursor = start + 1;
+        content_start := state.cursor;
+        mut done := 0;
+        mut result := -1;
+        while done == 0 do (
+            if input(state.cursor) == 0 then (
+                done = 1;
+            ) else (
+                if input(state.cursor) == '"' then (
+                    content_end := state.cursor;
+                    state.cursor = state.cursor + 1;
+                    span := make_span{start, state.cursor};
+                    str_ref := make_string_ref{content_start, content_end - content_start};
+                    result = new_node{NodeKind::Literal(ExpressionLiteral::String(str_ref)), span};
+                    done = 1;
+                ) else (
+                    if input(state.cursor) == '\\' then (
+                        state.cursor = state.cursor + 1;
+                        if input(state.cursor) != 0 then (
+                            state.cursor = state.cursor + 1;
+                        );
+                    ) else (
+                        state.cursor = state.cursor + 1;
+                    )
+                )
+            )
+        );
+        if result == -1 then (
+            set_error(state.cursor);
+            -1
+        ) else (
+            result
+        )
+    )
+);
+
+parse_literal := (ignored: i32) => (
+    if input(state.cursor) == '\'' then (
+        parse_char_literal(0)
+    ) else (
+        if input(state.cursor) == '"' then (
+            parse_string_literal(0)
+        ) else (
+            if input(state.cursor) == '-' then (
+                if is_digit(input(state.cursor + 1)) == 1 then parse_number(0) else parse_boolean_literal(0)
+            ) else (
+                if is_digit(input(state.cursor)) == 1 then parse_number(0) else parse_boolean_literal(0)
+            )
+        )
+    )
+);
+
+parse_basic_operand_no_group := (ignored: i32) => (
+    skip_ws(0);
+    ch := input(state.cursor);
+    lit := parse_literal(0);
+    if lit != -1 then lit else (
+        if is_alpha(ch) == 1 then (
+            parse_identifier(0)
+        ) else (
+            set_error(state.cursor);
+            -1
+        )
+    )
+);
+
 
 new_operation := {left: i32, right: i32, op_pos: i32} => (
     op_ref := make_string_ref{op_pos, 1};
@@ -294,58 +745,526 @@ new_operation := {left: i32, right: i32, op_pos: i32} => (
     new_node{NodeKind::Operation({ operator = op_ref, left = left, right = right }), span}
 );
 
-parse_paren_expr := (ignored: i32) => (
-    state.cursor = state.cursor + 1;
-    left := parse_basic_operand(0);
+make_empty_struct := (pos: i32) => (
+    span := make_span{pos, pos};
+    new_node{NodeKind::Struct({ fields = -1 }), span}
+);
+
+list_append := {head: i32, value: i32} => (
+    if head == -1 then (
+        new_list_node{value, -1}
+    ) else (
+        mut cur := head;
+        while list_nodes(cur).next != -1 do (
+            cur = list_nodes(cur).next;
+        );
+        new_idx := new_list_node{value, -1};
+        list_nodes(cur).next = new_idx;
+        head
+    )
+);
+
+
+
+extract_binding_annotations := (expr_idx: i32) => (
+    mut current := expr_idx;
+    mut args_head := -1;
+    mut continue := 1;
+    while continue == 1 do (
+        if NodeKind::FunctionCall(info) := nodes(current).kind then (
+            if NodeKind::FunctionCall(_) := nodes(info.function).kind then (
+                args_head = new_list_node{info.argument, args_head};
+                current = info.function;
+            ) else (
+                continue = 0;
+            )
+        ) else (
+            continue = 0;
+        )
+    );
+    mut head := new_list_node{current, -1};
+    mut arg_cur := args_head;
+    while arg_cur != -1 do (
+        head = list_append{head, list_nodes(arg_cur).value};
+        arg_cur = list_nodes(arg_cur).next;
+    );
+    head
+);
+
+pattern_from_expression := (expr_idx: i32) => (
+    span := nodes(expr_idx).span;
+    if NodeKind::Literal(lit) := nodes(expr_idx).kind then (
+        BindingPattern::Literal({ literal = lit, span = span })
+    ) else if NodeKind::Identifier(id) := nodes(expr_idx).kind then (
+        BindingPattern::Identifier({ name = id, span = span })
+    ) else if NodeKind::Struct(info) := nodes(expr_idx).kind then (
+        BindingPattern::Struct({ fields = info.fields, span = span })
+    ) else if NodeKind::Operation(op) := nodes(expr_idx).kind then (
+        if op_is1{op.operator, ':'} == 1 then (
+            BindingPattern::TypeHint({ pattern = op.left, type_expr = op.right, span = span })
+        ) else (
+            BindingPattern::Identifier({ name = EMPTY_IDENTIFIER, span = span })
+        )
+    ) else if NodeKind::TypePropertyAccess(info) := nodes(expr_idx).kind then (
+        variant_id := { name = info.property, unique = info.property };
+        BindingPattern::EnumVariant({ enum_type = info.object, variant = variant_id, payload = -1, span = span })
+    ) else if NodeKind::FunctionCall(call) := nodes(expr_idx).kind then (
+        if NodeKind::TypePropertyAccess(info) := nodes(call.function).kind then (
+            variant_id := { name = info.property, unique = info.property };
+            BindingPattern::EnumVariant({ enum_type = info.object, variant = variant_id, payload = call.argument, span = span })
+        ) else (
+            annotations := extract_binding_annotations(call.function);
+            BindingPattern::Annotated({ annotations = annotations, pattern = call.argument, span = span })
+        )
+    ) else (
+        set_error(span.start);
+        BindingPattern::Identifier({ name = EMPTY_IDENTIFIER, span = span })
+    )
+);
+
+get_property_from_node := (expr_idx: i32) => (
+    if NodeKind::Identifier(id) := nodes(expr_idx).kind then (
+        id.name
+    ) else if NodeKind::Literal(ExpressionLiteral::Number(_)) := nodes(expr_idx).kind then (
+        make_string_ref{nodes(expr_idx).span.start, nodes(expr_idx).span.length}
+    ) else (
+        set_error(nodes(expr_idx).span.start);
+        EMPTY_STRING
+    )
+);
+
+expression_to_lvalue := (expr_idx: i32) => (
+    if NodeKind::Identifier(id) := nodes(expr_idx).kind then (
+        LValue::Identifier({ name = id, span = nodes(expr_idx).span })
+    ) else if NodeKind::TypePropertyAccess(info) := nodes(expr_idx).kind then (
+        LValue::TypePropertyAccess({ object = info.object, property = info.property, span = nodes(expr_idx).span })
+    ) else if NodeKind::FunctionCall(call) := nodes(expr_idx).kind then (
+        LValue::ArrayIndex({ array = call.function, index = call.argument, span = nodes(expr_idx).span })
+    ) else (
+        set_error(nodes(expr_idx).span.start);
+        LValue::Identifier({ name = EMPTY_IDENTIFIER, span = nodes(expr_idx).span })
+    )
+);
+
+new_binary_operation := {left: i32, right: i32, op_ref: StringRef} => (
+    span := make_span{nodes(left).span.start, span_end(right)};
+    if op_is2{op_ref, ':', '='} == 1 then (
+        pattern := pattern_from_expression(left);
+        binding := { pattern = pattern, expr = right };
+        new_node{NodeKind::Binding(binding), span}
+    ) else if op_is1{op_ref, '='} == 1 then (
+        target := expression_to_lvalue(left);
+        assignment := { target = target, expr = right };
+        new_node{NodeKind::Assignment(assignment), span}
+    ) else if op_is2{op_ref, '=', '>'} == 1 then (
+        param := pattern_from_expression(left);
+        func := { parameter = param, return_type = -1, body = right };
+        new_node{NodeKind::Function(func), span}
+    ) else if op_is2{op_ref, '-', '>'} == 1 then (
+        func_ty := { parameter = left, return_type = right };
+        new_node{NodeKind::FunctionType(func_ty), span}
+    ) else if op_is2{op_ref, ':', ':'} == 1 then (
+        prop := get_property_from_node(right);
+        new_node{NodeKind::TypePropertyAccess({ object = left, property = prop }), span}
+    ) else if op_is1{op_ref, '.'} == 1 then (
+        prop := get_property_from_node(right);
+        access := new_node{NodeKind::TypePropertyAccess({ object = left, property = prop }), span};
+        new_node{NodeKind::FunctionCall({ function = access, argument = left }), span}
+    ) else if op_is0(op_ref) == 1 then (
+        new_node{NodeKind::FunctionCall({ function = left, argument = right }), span}
+    ) else if op_is2{op_ref, '|', '>'} == 1 then (
+        new_node{NodeKind::FunctionCall({ function = right, argument = left }), span}
+    ) else if op_is1{op_ref, '@'} == 1 then (
+        new_node{NodeKind::AttachImplementation({ type_expr = left, implementation = right }), span}
+    ) else (
+        new_node{NodeKind::Operation({ operator = op_ref, left = left, right = right }), span}
+    )
+);
+
+parse_expr_prec_no_group := (min_prec: i32) => (
+    left := parse_basic_operand_no_group(0);
     if left == -1 then -1 else (
         skip_ws(0);
-        op1_pos := state.cursor;
-        op1 := input(state.cursor);
-        if op_precedence(op1) == 0 then (
+        op1_len := scan_operator_len(state.cursor);
+        if op1_len == -1 then (
+            left
+        ) else (
+            op1_ref := make_string_ref{state.cursor, op1_len};
+            if op_precedence_ref(op1_ref) < min_prec then (
+                left
+            ) else (
+                if op1_len > 0 then (
+                    state.cursor = state.cursor + op1_len;
+                );
+                right := parse_basic_operand_no_group(0);
+                if right == -1 then -1 else (
+                    skip_ws(0);
+                    op2_len := scan_operator_len(state.cursor);
+                    if op2_len == -1 then (
+                        new_binary_operation{left, right, op1_ref}
+                    ) else (
+                        op2_ref := make_string_ref{state.cursor, op2_len};
+                        if op_precedence_ref(op2_ref) > op_precedence_ref(op1_ref) then (
+                            if op2_len > 0 then (
+                                state.cursor = state.cursor + op2_len;
+                            );
+                            right2 := parse_basic_operand_no_group(0);
+                            if right2 == -1 then -1 else (
+                                rhs := new_binary_operation{right, right2, op2_ref};
+                                new_binary_operation{left, rhs, op1_ref}
+                            )
+                        ) else (
+                            combined := new_binary_operation{left, right, op1_ref};
+                            if op2_len > 0 then (
+                                state.cursor = state.cursor + op2_len;
+                                right2 := parse_basic_operand_no_group(0);
+                                if right2 == -1 then combined else (
+                                    new_binary_operation{combined, right2, op2_ref}
+                                )
+                            ) else (
+                                combined
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    )
+);
+
+parse_paren_expr := (ignored: i32) => (
+    if input(state.cursor) != '(' then -1 else (
+        state.cursor = state.cursor + 1;
+        expr := parse_expr_prec_no_group(0);
+        if expr == -1 then -1 else (
+            skip_ws(0);
             if input(state.cursor) == ')' then (
                 state.cursor = state.cursor + 1;
-                left
+                expr
             ) else (
                 set_error(state.cursor);
                 -1
             )
-        ) else (
+        )
+    )
+);
+
+parse_struct_expr := (ignored: i32) => (
+    start := state.cursor;
+    if input(state.cursor) != '{' then -1 else (
+        state.cursor = state.cursor + 1;
+        skip_ws(0);
+        if input(state.cursor) == '}' then (
             state.cursor = state.cursor + 1;
-            right := parse_basic_operand(0);
-            if right == -1 then -1 else (
+            span := make_span{start, state.cursor};
+            new_node{NodeKind::Struct({ fields = -1 }), span}
+        ) else (
+            mut fields_head := -1;
+            mut field_count := 0;
+            mut done := 0;
+            mut result := -1;
+            while done == 0 do (
                 skip_ws(0);
-                op2_pos := state.cursor;
-                op2 := input(state.cursor);
-                if op_precedence(op2) > 0 then (
-                    state.cursor = state.cursor + 1;
-                    right2 := parse_basic_operand(0);
-                    if right2 == -1 then -1 else (
-                        mut combined := -1;
-                        if op_precedence(op2) > op_precedence(op1) then (
-                            rhs := new_operation{right, right2, op2_pos};
-                            combined = new_operation{left, rhs, op1_pos};
+                mut named := 0;
+                mut name_id := EMPTY_IDENTIFIER;
+                mut name_span := EMPTY_SPAN;
+                if is_alpha(input(state.cursor)) == 1 then (
+                    id_start := state.cursor;
+                    id_end := scan_identifier_end(id_start);
+                    mut look := id_end;
+                    while is_space(input(look)) == 1 do (
+                        look = look + 1;
+                    );
+                    if input(look) == '=' then (
+                        named = 1;
+                        name_id = make_identifier{id_start, id_end};
+                        name_span = make_span{id_start, id_end};
+                        state.cursor = look + 1;
+                    )
+                );
+                mut value_expr := -1;
+                if named == 1 then (
+                    value_expr = parse_expr_prec_no_group(0);
+                ) else (
+                    value_expr = parse_expr_prec_no_group(0);
+                    name_id = EMPTY_IDENTIFIER;
+                    name_span = make_span{state.cursor, state.cursor};
+                );
+                if value_expr == -1 then (
+                    done = 1;
+                ) else (
+                    binding := { pattern = BindingPattern::Identifier({ name = name_id, span = name_span }), expr = value_expr };
+                    span := make_span{start, span_end(value_expr)};
+                    binding_node := new_node{NodeKind::Binding(binding), span};
+                    fields_head = list_append{fields_head, binding_node};
+                    field_count = field_count + 1;
+                    skip_ws(0);
+                    if input(state.cursor) == ';' then (
+                        if field_count != 1 || named == 1 then (
+                            set_error(state.cursor);
+                            done = 1;
                         ) else (
-                            lhs := new_operation{left, right, op1_pos};
-                            combined = new_operation{lhs, right2, op2_pos};
-                        );
-                        skip_ws(0);
-                        if input(state.cursor) == ')' then (
                             state.cursor = state.cursor + 1;
-                            combined
+                            repeat_count := parse_expr_prec_no_group(0);
+                            skip_ws(0);
+                            if input(state.cursor) != '}' then (
+                                set_error(state.cursor);
+                                done = 1;
+                            ) else (
+                                state.cursor = state.cursor + 1;
+                                span := make_span{start, state.cursor};
+                                array_repeat := { value = value_expr, count = repeat_count };
+                                result = new_node{NodeKind::ArrayRepeat(array_repeat), span};
+                                done = 1;
+                            )
+                        )
+                    ) else (
+                        if input(state.cursor) == '}' then (
+                            state.cursor = state.cursor + 1;
+                            done = 1;
+                        ) else if input(state.cursor) == ',' then (
+                            state.cursor = state.cursor + 1;
                         ) else (
                             set_error(state.cursor);
-                            -1
+                            done = 1;
                         )
                     )
-                ) else (
-                    combined := new_operation{left, right, op1_pos};
+                )
+            );
+            if result != -1 then (
+                result
+            ) else (
+                span := make_span{start, state.cursor};
+                new_node{NodeKind::Struct({ fields = fields_head }), span}
+            )
+        )
+    )
+);
+
+parse_if_expr := (ignored: i32) => (
+    start := state.cursor;
+    if is_keyword_if(state.cursor) == 0 then -1 else (
+        state.cursor = state.cursor + 2;
+        skip_ws(0);
+        condition := parse_expr_prec_no_group(0);
+        if condition == -1 then -1 else (
+            skip_ws(0);
+            if is_keyword_then(state.cursor) == 0 then (
+                set_error(state.cursor);
+                -1
+            ) else (
+                state.cursor = state.cursor + 4;
+                skip_ws(0);
+                then_branch := parse_expr_prec_no_group(0);
+                if then_branch == -1 then -1 else (
                     skip_ws(0);
-                    if input(state.cursor) == ')' then (
-                        state.cursor = state.cursor + 1;
-                        combined
+                    mut else_branch := -1;
+                    if is_keyword_else(state.cursor) == 1 then (
+                        state.cursor = state.cursor + 4;
+                        skip_ws(0);
+                        else_branch = parse_expr_prec_no_group(0);
                     ) else (
+                        else_branch = make_empty_struct(state.cursor);
+                    );
+                    span := make_span{start, span_end(then_branch)};
+                    new_node{NodeKind::If({ condition = condition, then_branch = then_branch, else_branch = else_branch }), span}
+                )
+            )
+        )
+    )
+);
+
+parse_loop_expr := (ignored: i32) => (
+    start := state.cursor;
+    if is_keyword_loop(state.cursor) == 0 then -1 else (
+        state.cursor = state.cursor + 4;
+        skip_ws(0);
+        body := parse_paren_expr(0);
+        if body == -1 then -1 else (
+            span := make_span{start, span_end(body)};
+            new_node{NodeKind::Loop({ body = body }), span}
+        )
+    )
+);
+
+parse_while_expr := (ignored: i32) => (
+    start := state.cursor;
+    if is_keyword_while(state.cursor) == 0 then -1 else (
+        state.cursor = state.cursor + 5;
+        skip_ws(0);
+        condition := parse_expr_prec_no_group(0);
+        if condition == -1 then -1 else (
+            skip_ws(0);
+            if is_keyword_do(state.cursor) == 0 then (
+                set_error(state.cursor);
+                -1
+            ) else (
+                state.cursor = state.cursor + 2;
+                skip_ws(0);
+                body := parse_paren_expr(0);
+                if body == -1 then -1 else (
+                    break_node := new_node{NodeKind::Diverge({ value = make_empty_struct(state.cursor), divergance_type = DivergeExpressionType::Break }), make_span{start, start}};
+                    if_node := new_node{NodeKind::If({ condition = condition, then_branch = body, else_branch = break_node }), make_span{start, span_end(body)}};
+                    span := make_span{start, span_end(body)};
+                    new_node{NodeKind::Loop({ body = if_node }), span}
+                )
+            )
+        )
+    )
+);
+
+parse_for_expr := (ignored: i32) => (
+    start := state.cursor;
+    if is_keyword_for(state.cursor) == 0 then -1 else (
+        state.cursor = state.cursor + 3;
+        skip_ws(0);
+        pattern_expr := parse_expr_prec_no_group(0);
+        if pattern_expr == -1 then -1 else (
+            skip_ws(0);
+            if is_keyword_in(state.cursor) == 0 then (
+                set_error(state.cursor);
+                -1
+            ) else (
+                state.cursor = state.cursor + 2;
+                skip_ws(0);
+                iterator_expr := parse_expr_prec_no_group(0);
+                if iterator_expr == -1 then -1 else (
+                    skip_ws(0);
+                    if is_keyword_do(state.cursor) == 0 then (
                         set_error(state.cursor);
                         -1
+                    ) else (
+                        state.cursor = state.cursor + 2;
+                        skip_ws(0);
+                        body := parse_paren_expr(0);
+                        if body == -1 then -1 else (
+                            loop_node := new_node{NodeKind::Loop({ body = body }), make_span{start, span_end(body)}};
+                            pat := pattern_from_expression(pattern_expr);
+                            binding := { pattern = pat, expr = iterator_expr };
+                            binding_node := new_node{NodeKind::Binding(binding), make_span{start, span_end(iterator_expr)}};
+                            mut list_head := new_list_node{binding_node, -1};
+                            list_head = list_append{list_head, loop_node};
+                            list := { count = 2, head = list_head };
+                            span := make_span{start, span_end(loop_node)};
+                            new_node{NodeKind::Block(list), span}
+                        )
+                    )
+                )
+            )
+        )
+    )
+);
+
+parse_return_expr := (ignored: i32) => (
+    start := state.cursor;
+    if is_keyword_return(state.cursor) == 0 then -1 else (
+        state.cursor = state.cursor + 6;
+        skip_ws(0);
+        if input(state.cursor) == 0 || input(state.cursor) == ';' || input(state.cursor) == ')' || input(state.cursor) == '}' || input(state.cursor) == ',' then (
+            value := make_empty_struct(state.cursor);
+            span := make_span{start, span_end(value)};
+            new_node{NodeKind::Diverge({ value = value, divergance_type = DivergeExpressionType::Return }), span}
+        ) else (
+            value := parse_expr_prec_no_group(0);
+            if value == -1 then -1 else (
+                span := make_span{start, span_end(value)};
+                new_node{NodeKind::Diverge({ value = value, divergance_type = DivergeExpressionType::Return }), span}
+            )
+        )
+    )
+);
+
+parse_break_expr := (ignored: i32) => (
+    start := state.cursor;
+    if is_keyword_break(state.cursor) == 0 then -1 else (
+        state.cursor = state.cursor + 5;
+        skip_ws(0);
+        if input(state.cursor) == 0 || input(state.cursor) == ';' || input(state.cursor) == ')' || input(state.cursor) == '}' || input(state.cursor) == ',' then (
+            value := make_empty_struct(state.cursor);
+            span := make_span{start, span_end(value)};
+            new_node{NodeKind::Diverge({ value = value, divergance_type = DivergeExpressionType::Break }), span}
+        ) else (
+            value := parse_expr_prec_no_group(0);
+            if value == -1 then -1 else (
+                span := make_span{start, span_end(value)};
+                new_node{NodeKind::Diverge({ value = value, divergance_type = DivergeExpressionType::Break }), span}
+            )
+        )
+    )
+);
+
+parse_basic_operand := (ignored: i32) => (
+    skip_ws(0);
+    ch := input(state.cursor);
+    if ch == '(' then (
+        parse_paren_expr(0)
+    ) else if ch == '{' then (
+        parse_struct_expr(0)
+    ) else if is_keyword_if(state.cursor) == 1 then (
+        parse_if_expr(0)
+    ) else if is_keyword_for(state.cursor) == 1 then (
+        parse_for_expr(0)
+    ) else if is_keyword_while(state.cursor) == 1 then (
+        parse_while_expr(0)
+    ) else if is_keyword_loop(state.cursor) == 1 then (
+        parse_loop_expr(0)
+    ) else if is_keyword_return(state.cursor) == 1 then (
+        parse_return_expr(0)
+    ) else if is_keyword_break(state.cursor) == 1 then (
+        parse_break_expr(0)
+    ) else (
+        parse_basic_operand_no_group(0)
+    )
+);
+
+parse_operand := (ignored: i32) => (
+    parse_basic_operand(0)
+);
+
+parse_expr_prec := (min_prec: i32) => (
+    left := parse_operand(0);
+    if left == -1 then -1 else (
+        skip_ws(0);
+        op1_len := scan_operator_len(state.cursor);
+        if op1_len == -1 then (
+            left
+        ) else (
+            op1_ref := make_string_ref{state.cursor, op1_len};
+            if op_precedence_ref(op1_ref) < min_prec then (
+                left
+            ) else (
+                if op1_len > 0 then (
+                    state.cursor = state.cursor + op1_len;
+                );
+                right := parse_operand(0);
+                if right == -1 then -1 else (
+                    skip_ws(0);
+                    op2_len := scan_operator_len(state.cursor);
+                    if op2_len == -1 then (
+                        new_binary_operation{left, right, op1_ref}
+                    ) else (
+                        op2_ref := make_string_ref{state.cursor, op2_len};
+                        if op_precedence_ref(op2_ref) > op_precedence_ref(op1_ref) then (
+                            if op2_len > 0 then (
+                                state.cursor = state.cursor + op2_len;
+                            );
+                            right2 := parse_operand(0);
+                            if right2 == -1 then -1 else (
+                                rhs := new_binary_operation{right, right2, op2_ref};
+                                new_binary_operation{left, rhs, op1_ref}
+                            )
+                        ) else (
+                            combined := new_binary_operation{left, right, op1_ref};
+                            if op2_len > 0 then (
+                                state.cursor = state.cursor + op2_len;
+                                right2 := parse_operand(0);
+                                if right2 == -1 then combined else (
+                                    new_binary_operation{combined, right2, op2_ref}
+                                )
+                            ) else (
+                                combined
+                            )
+                        )
                     )
                 )
             )
@@ -354,84 +1273,15 @@ parse_paren_expr := (ignored: i32) => (
 );
 
 parse_operand := (ignored: i32) => (
-    skip_ws(0);
-    if input(state.cursor) == '(' then (
-        parse_paren_expr(0)
-    ) else (
-        parse_basic_operand(0)
-    )
+    parse_basic_operand(0)
 );
 
 parse_expr := (ignored: i32) => (
-    left := parse_operand(0);
-    if left == -1 then -1 else (
-        skip_ws(0);
-        op1_pos := state.cursor;
-        op1 := input(state.cursor);
-        if op_precedence(op1) == 0 then (
-            left
-        ) else (
-            state.cursor = state.cursor + 1;
-            right := parse_operand(0);
-            if right == -1 then -1 else (
-                skip_ws(0);
-                op2_pos := state.cursor;
-                op2 := input(state.cursor);
-                if op_precedence(op2) > 0 then (
-                    state.cursor = state.cursor + 1;
-                    right2 := parse_operand(0);
-                    if right2 == -1 then -1 else (
-                        mut combined := -1;
-                        if op_precedence(op2) > op_precedence(op1) then (
-                            rhs := new_operation{right, right2, op2_pos};
-                            combined = new_operation{left, rhs, op1_pos};
-                        ) else (
-                            lhs := new_operation{left, right, op1_pos};
-                            combined = new_operation{lhs, right2, op2_pos};
-                        );
-                        combined
-                    )
-                ) else (
-                    new_operation{left, right, op1_pos}
-                )
-            )
-        )
-    )
+    parse_expr_prec(0)
 );
 
 parse_statement := (ignored: i32) => (
-    skip_ws(0);
-    start := state.cursor;
-    if is_alpha(input(start)) == 1 then (
-        id_end := scan_identifier_end(start);
-        mut look := id_end;
-        while is_space(input(look)) == 1 do (
-            look = look + 1;
-        );
-        if input(look) == ':' then (
-            if input(look + 1) == '=' then (
-                state.cursor = start;
-                name := parse_identifier(0);
-                state.cursor = look + 2;
-                expr := parse_expr(0);
-                if expr == -1 then -1 else (
-                    name_span := make_span{start, id_end};
-                    name_id := make_identifier{start, id_end};
-                    binding := { pattern = BindingPattern::Identifier({ name = name_id, span = name_span }), expr = expr };
-                    span := make_span{start, span_end(expr)};
-                    new_node{NodeKind::Binding(binding), span}
-                )
-            ) else (
-                state.cursor = start;
-                parse_expr(0)
-            )
-        ) else (
-            state.cursor = start;
-            parse_expr(0)
-        )
-    ) else (
-        parse_expr(0)
-    )
+    parse_expr(0)
 );
 
 parse_block := (ignored: i32) => (
@@ -556,6 +1406,22 @@ parse_block := (ignored: i32) => (
     if NodeKind::Literal(ExpressionLiteral::Number(value)) := nodes(idx).kind then value else -1
 );
 
+(export wasm) get_literal_boolean := (idx: i32) => (
+    if NodeKind::Literal(ExpressionLiteral::Boolean(value)) := nodes(idx).kind then value else -1
+);
+
+(export wasm) get_literal_char := (idx: i32) => (
+    if NodeKind::Literal(ExpressionLiteral::Char(value)) := nodes(idx).kind then value else -1
+);
+
+(export wasm) get_literal_string_start := (idx: i32) => (
+    if NodeKind::Literal(ExpressionLiteral::String(value)) := nodes(idx).kind then value.start else -1
+);
+
+(export wasm) get_literal_string_length := (idx: i32) => (
+    if NodeKind::Literal(ExpressionLiteral::String(value)) := nodes(idx).kind then value.length else 0
+);
+
 (export wasm) get_identifier_start := (idx: i32) => (
     if NodeKind::Identifier(id) := nodes(idx).kind then id.name.start else -1
 );
@@ -582,6 +1448,74 @@ parse_block := (ignored: i32) => (
 
 (export wasm) get_binding_expr := (idx: i32) => (
     if NodeKind::Binding(binding) := nodes(idx).kind then binding.expr else -1
+);
+
+(export wasm) get_binding_pattern_tag := (idx: i32) => (
+    if NodeKind::Binding(binding) := nodes(idx).kind then (
+        if BindingPattern::Identifier(_) := binding.pattern then 0 else (
+            if BindingPattern::Literal(_) := binding.pattern then 1 else (
+                if BindingPattern::Struct(_) := binding.pattern then 2 else (
+                    if BindingPattern::EnumVariant(_) := binding.pattern then 3 else (
+                        if BindingPattern::TypeHint(_) := binding.pattern then 4 else 5
+                    )
+                )
+            )
+        )
+    ) else -1
+);
+
+(export wasm) get_binding_pattern_struct_fields := (idx: i32) => (
+    if NodeKind::Binding(binding) := nodes(idx).kind then (
+        if BindingPattern::Struct(info) := binding.pattern then info.fields else -1
+    ) else -1
+);
+
+(export wasm) get_binding_pattern_typehint_pattern := (idx: i32) => (
+    if NodeKind::Binding(binding) := nodes(idx).kind then (
+        if BindingPattern::TypeHint(info) := binding.pattern then info.pattern else -1
+    ) else -1
+);
+
+(export wasm) get_binding_pattern_typehint_type := (idx: i32) => (
+    if NodeKind::Binding(binding) := nodes(idx).kind then (
+        if BindingPattern::TypeHint(info) := binding.pattern then info.type_expr else -1
+    ) else -1
+);
+
+(export wasm) get_binding_pattern_annotations := (idx: i32) => (
+    if NodeKind::Binding(binding) := nodes(idx).kind then (
+        if BindingPattern::Annotated(info) := binding.pattern then info.annotations else -1
+    ) else -1
+);
+
+(export wasm) get_binding_pattern_annotated_pattern := (idx: i32) => (
+    if NodeKind::Binding(binding) := nodes(idx).kind then (
+        if BindingPattern::Annotated(info) := binding.pattern then info.pattern else -1
+    ) else -1
+);
+
+(export wasm) get_binding_pattern_enum_type := (idx: i32) => (
+    if NodeKind::Binding(binding) := nodes(idx).kind then (
+        if BindingPattern::EnumVariant(info) := binding.pattern then info.enum_type else -1
+    ) else -1
+);
+
+(export wasm) get_binding_pattern_enum_variant_start := (idx: i32) => (
+    if NodeKind::Binding(binding) := nodes(idx).kind then (
+        if BindingPattern::EnumVariant(info) := binding.pattern then info.variant.name.start else -1
+    ) else -1
+);
+
+(export wasm) get_binding_pattern_enum_variant_length := (idx: i32) => (
+    if NodeKind::Binding(binding) := nodes(idx).kind then (
+        if BindingPattern::EnumVariant(info) := binding.pattern then info.variant.name.length else 0
+    ) else 0
+);
+
+(export wasm) get_binding_pattern_enum_payload := (idx: i32) => (
+    if NodeKind::Binding(binding) := nodes(idx).kind then (
+        if BindingPattern::EnumVariant(info) := binding.pattern then info.payload else -1
+    ) else -1
 );
 
 (export wasm) get_binding_name_start := (idx: i32) => (
@@ -614,6 +1548,148 @@ parse_block := (ignored: i32) => (
         );
         if current == -1 then -1 else list_nodes(current).value
     ) else -1
+);
+
+(export wasm) get_list_next := (idx: i32) => (
+    if idx == -1 then -1 else list_nodes(idx).next
+);
+
+(export wasm) get_list_value := (idx: i32) => (
+    if idx == -1 then -1 else list_nodes(idx).value
+);
+
+(export wasm) get_struct_fields := (idx: i32) => (
+    if NodeKind::Struct(info) := nodes(idx).kind then info.fields else -1
+);
+
+(export wasm) get_array_repeat_value := (idx: i32) => (
+    if NodeKind::ArrayRepeat(info) := nodes(idx).kind then info.value else -1
+);
+
+(export wasm) get_array_repeat_count := (idx: i32) => (
+    if NodeKind::ArrayRepeat(info) := nodes(idx).kind then info.count else -1
+);
+
+(export wasm) get_assignment_target_kind := (idx: i32) => (
+    if NodeKind::Assignment(info) := nodes(idx).kind then (
+        if LValue::Identifier(_) := info.target then 0 else (
+            if LValue::TypePropertyAccess(_) := info.target then 1 else 2
+        )
+    ) else -1
+);
+
+(export wasm) get_assignment_target_identifier_start := (idx: i32) => (
+    if NodeKind::Assignment(info) := nodes(idx).kind then (
+        if LValue::Identifier(value) := info.target then value.name.name.start else -1
+    ) else -1
+);
+
+(export wasm) get_assignment_target_identifier_length := (idx: i32) => (
+    if NodeKind::Assignment(info) := nodes(idx).kind then (
+        if LValue::Identifier(value) := info.target then value.name.name.length else 0
+    ) else 0
+);
+
+(export wasm) get_assignment_target_property_start := (idx: i32) => (
+    if NodeKind::Assignment(info) := nodes(idx).kind then (
+        if LValue::TypePropertyAccess(value) := info.target then value.property.start else -1
+    ) else -1
+);
+
+(export wasm) get_assignment_target_property_length := (idx: i32) => (
+    if NodeKind::Assignment(info) := nodes(idx).kind then (
+        if LValue::TypePropertyAccess(value) := info.target then value.property.length else 0
+    ) else 0
+);
+
+(export wasm) get_assignment_target_index_expr := (idx: i32) => (
+    if NodeKind::Assignment(info) := nodes(idx).kind then (
+        if LValue::ArrayIndex(value) := info.target then value.index else -1
+    ) else -1
+);
+
+(export wasm) get_function_param_pattern_tag := (idx: i32) => (
+    if NodeKind::Function(info) := nodes(idx).kind then (
+        if BindingPattern::Identifier(_) := info.parameter then 0 else (
+            if BindingPattern::Literal(_) := info.parameter then 1 else (
+                if BindingPattern::Struct(_) := info.parameter then 2 else (
+                    if BindingPattern::EnumVariant(_) := info.parameter then 3 else (
+                        if BindingPattern::TypeHint(_) := info.parameter then 4 else 5
+                    )
+                )
+            )
+        )
+    ) else -1
+);
+
+(export wasm) get_function_body := (idx: i32) => (
+    if NodeKind::Function(info) := nodes(idx).kind then info.body else -1
+);
+
+(export wasm) get_function_return_type := (idx: i32) => (
+    if NodeKind::Function(info) := nodes(idx).kind then info.return_type else -1
+);
+
+(export wasm) get_function_type_param := (idx: i32) => (
+    if NodeKind::FunctionType(info) := nodes(idx).kind then info.parameter else -1
+);
+
+(export wasm) get_function_type_return := (idx: i32) => (
+    if NodeKind::FunctionType(info) := nodes(idx).kind then info.return_type else -1
+);
+
+(export wasm) get_if_condition := (idx: i32) => (
+    if NodeKind::If(info) := nodes(idx).kind then info.condition else -1
+);
+
+(export wasm) get_if_then := (idx: i32) => (
+    if NodeKind::If(info) := nodes(idx).kind then info.then_branch else -1
+);
+
+(export wasm) get_if_else := (idx: i32) => (
+    if NodeKind::If(info) := nodes(idx).kind then info.else_branch else -1
+);
+
+(export wasm) get_loop_body := (idx: i32) => (
+    if NodeKind::Loop(info) := nodes(idx).kind then info.body else -1
+);
+
+(export wasm) get_diverge_type := (idx: i32) => (
+    if NodeKind::Diverge(info) := nodes(idx).kind then (
+        if DivergeExpressionType::Return := info.divergance_type then 0 else 1
+    ) else -1
+);
+
+(export wasm) get_diverge_value := (idx: i32) => (
+    if NodeKind::Diverge(info) := nodes(idx).kind then info.value else -1
+);
+
+(export wasm) get_function_call_function := (idx: i32) => (
+    if NodeKind::FunctionCall(info) := nodes(idx).kind then info.function else -1
+);
+
+(export wasm) get_function_call_argument := (idx: i32) => (
+    if NodeKind::FunctionCall(info) := nodes(idx).kind then info.argument else -1
+);
+
+(export wasm) get_type_property_access_object := (idx: i32) => (
+    if NodeKind::TypePropertyAccess(info) := nodes(idx).kind then info.object else -1
+);
+
+(export wasm) get_type_property_access_property_start := (idx: i32) => (
+    if NodeKind::TypePropertyAccess(info) := nodes(idx).kind then info.property.start else -1
+);
+
+(export wasm) get_type_property_access_property_length := (idx: i32) => (
+    if NodeKind::TypePropertyAccess(info) := nodes(idx).kind then info.property.length else 0
+);
+
+(export wasm) get_attach_type_expr := (idx: i32) => (
+    if NodeKind::AttachImplementation(info) := nodes(idx).kind then info.type_expr else -1
+);
+
+(export wasm) get_attach_implementation := (idx: i32) => (
+    if NodeKind::AttachImplementation(info) := nodes(idx).kind then info.implementation else -1
 );
 
 {}

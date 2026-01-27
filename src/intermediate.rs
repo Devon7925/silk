@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::{
@@ -16,6 +16,12 @@ fn is_tuple_field_names(field_names: &[String]) -> bool {
         .iter()
         .enumerate()
         .all(|(index, name)| *name == index.to_string())
+}
+
+fn enum_variant_key(field_names: &[String]) -> String {
+    let mut names = field_names.to_vec();
+    names.sort();
+    names.join("\0")
 }
 
 fn normalize_field_names(mut field_names: Vec<String>) -> Vec<String> {
@@ -487,6 +493,64 @@ pub fn expression_to_intermediate(
                     }
                     ExpressionKind::Binding(binding) => {
                         let Binding { pattern, expr } = (*binding).clone();
+                        let payload_binding = if let BindingPattern::EnumVariant {
+                            enum_type,
+                            variant,
+                            payload,
+                            ..
+                        } = &pattern
+                        {
+                            let enum_type = builder
+                                .resolve_enum_type_expression(enum_type)
+                                .unwrap_or(*enum_type.clone());
+                            if let Some((_, payload_type_expr)) =
+                                enum_variant_info(&enum_type, variant)
+                            {
+                                payload
+                                    .as_ref()
+                                    .map(|payload_pattern| (payload_pattern.clone(), payload_type_expr))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
+                        if let Some((payload_pattern, payload_type_expr)) = payload_binding
+                            && let Some(scope) = builder.enum_context.bindings.last_mut()
+                        {
+                            fn insert_payload_binding(
+                                pattern: &BindingPattern,
+                                payload_type_expr: &Expression,
+                                scope: &mut HashMap<
+                                    Identifier,
+                                    (BindingContext, Vec<BindingAnnotation>),
+                                >,
+                            ) {
+                                match pattern {
+                                    BindingPattern::Identifier(identifier, _) => {
+                                        if identifier.name != "_" {
+                                            scope.insert(
+                                                identifier.clone(),
+                                                (
+                                                    BindingContext::UnboundWithType(
+                                                        payload_type_expr.clone(),
+                                                    ),
+                                                    Vec::new(),
+                                                ),
+                                            );
+                                        }
+                                    }
+                                    BindingPattern::TypeHint(inner, _, _)
+                                    | BindingPattern::Annotated { pattern: inner, .. } => {
+                                        insert_payload_binding(inner, payload_type_expr, scope);
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            insert_payload_binding(&payload_pattern, &payload_type_expr, scope);
+                        }
                         if let Some(identifier) = binding_identifier(&pattern)
                             && let Some(scope) = builder.enum_context.bindings.last_mut()
                         {
@@ -764,6 +828,7 @@ pub struct IntermediateBuilder {
     type_aliases: HashMap<Identifier, Expression>,
     enum_context: Context,
     match_temp_counter: usize,
+    enum_variant_keys: Option<HashSet<String>>,
 }
 
 impl IntermediateBuilder {
@@ -779,6 +844,7 @@ impl IntermediateBuilder {
             type_aliases: HashMap::new(),
             enum_context,
             match_temp_counter: 0,
+            enum_variant_keys: None,
         }
     }
 
@@ -809,6 +875,46 @@ impl IntermediateBuilder {
         Identifier::new(name)
     }
 
+    fn enum_variant_keys(&mut self) -> &HashSet<String> {
+        if self.enum_variant_keys.is_none() {
+            let mut keys = HashSet::new();
+            let mut exprs = Vec::new();
+            for scope in &self.enum_context.bindings {
+                for (_, (binding, _)) in scope {
+                    let expr = match binding {
+                        BindingContext::Bound(value, _, _) => Some(value.clone()),
+                        BindingContext::UnboundWithType(type_expr) => Some(type_expr.clone()),
+                        BindingContext::UnboundWithoutType => None,
+                    };
+                    if let Some(expr) = expr {
+                        exprs.push(expr);
+                    }
+                }
+            }
+            let mut context = self.enum_context.clone();
+            for expr in exprs {
+                if let Some(enum_expr) =
+                    interpret::resolve_enum_type_expression(&expr, &mut context)
+                {
+                    if let ExpressionKind::EnumType(variants) = enum_expr.kind {
+                        if variants.is_empty() {
+                            continue;
+                        }
+                        let names = variants
+                            .iter()
+                            .map(|(id, _)| id.name.clone())
+                            .collect::<Vec<_>>();
+                        keys.insert(enum_variant_key(&names));
+                    }
+                }
+            }
+            self.enum_variant_keys = Some(keys);
+        }
+        self.enum_variant_keys
+            .as_ref()
+            .expect("Enum variant keys should be initialized")
+    }
+
     fn collect_type_aliases(&mut self, context: &Context) {
         for scope in &context.bindings {
             for (identifier, (binding, _)) in scope {
@@ -825,6 +931,51 @@ impl IntermediateBuilder {
                 }
             }
         }
+    }
+
+    fn resolve_type_binding(&self, identifier: &Identifier) -> Option<Expression> {
+        if std::env::var("SILK_DEBUG_TYPE_ALIAS").is_ok() && identifier.name == "StringRef" {
+            eprintln!("resolve_type_binding: StringRef");
+        }
+        let resolve_from_binding = |binding: &BindingContext| match binding {
+            BindingContext::Bound(value, _, _) => {
+                if is_type_expression(value) {
+                    Some(value.clone())
+                } else {
+                    None
+                }
+            }
+            BindingContext::UnboundWithType(type_expr) => Some(type_expr.clone()),
+            BindingContext::UnboundWithoutType => None,
+        };
+
+        if let Some((binding, _)) = self.enum_context.get_identifier(identifier) {
+            if let Some(expr) = resolve_from_binding(binding) {
+                if std::env::var("SILK_DEBUG_TYPE_ALIAS").is_ok()
+                    && identifier.name == "StringRef"
+                {
+                    eprintln!("resolve_type_binding: StringRef via get_identifier");
+                }
+                return Some(expr);
+            }
+        }
+
+        for scope in self.enum_context.bindings.iter().rev() {
+            for (id, (binding, _)) in scope {
+                if id.name == identifier.name {
+                    if let Some(expr) = resolve_from_binding(binding) {
+                        if std::env::var("SILK_DEBUG_TYPE_ALIAS").is_ok()
+                            && identifier.name == "StringRef"
+                        {
+                            eprintln!("resolve_type_binding: StringRef via name scan");
+                        }
+                        return Some(expr);
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     fn collect_bindings(&mut self, context: &Context) {
@@ -998,7 +1149,11 @@ impl IntermediateBuilder {
             return_type
                 .as_ref()
                 .map(|ty| self.type_expr_to_intermediate(ty))
-                .unwrap_or_else(|| self.expression_value_type(&body_expr)),
+                .unwrap_or_else(|| {
+                    interpret::get_type_of_expression(&body_expr, &self.enum_context)
+                        .map(|ty| self.type_expr_to_intermediate(&ty))
+                        .unwrap_or_else(|_| self.expression_value_type(&body_expr))
+                }),
         );
         let lowered_body = Box::new(expression_to_intermediate(body_expr, self));
 
@@ -1021,7 +1176,11 @@ impl IntermediateBuilder {
         let ty = bound_type
             .as_ref()
             .map(|ty| self.type_expr_to_intermediate(ty))
-            .unwrap_or_else(|| self.expression_value_type(&value));
+            .unwrap_or_else(|| {
+                interpret::get_type_of_expression(&value, &self.enum_context)
+                    .map(|ty| self.type_expr_to_intermediate(&ty))
+                    .unwrap_or_else(|_| self.expression_value_type(&value))
+            });
         let lowered_value = expression_to_intermediate(value, self);
         let lowered_value = IntermediateBuilder::apply_boxing(lowered_value, &ty);
         let index = self.globals.len();
@@ -1085,14 +1244,12 @@ impl IntermediateBuilder {
                         homogeneous = false;
                     }
 
-                    if let Some(first) = first_type
-                        && homogeneous
-                    {
-                        let field_names = normalize_field_names(field_names);
+                    if let Some(first) = first_type && homogeneous {
+                        let array_field_names = normalize_field_names(field_names);
                         values.push(IntermediateType::Array {
                             element: Box::new(first),
                             length: field_types.len(),
-                            field_names,
+                            field_names: array_field_names,
                         });
                     } else {
                         let fields = field_names
@@ -1106,6 +1263,88 @@ impl IntermediateBuilder {
         }
 
         values.pop().unwrap_or(IntermediateType::I32)
+    }
+
+    fn collect_pattern_type_bindings(
+        &mut self,
+        pattern: &BindingPattern,
+        value_type: &IntermediateType,
+        out: &mut Vec<(Identifier, IntermediateType)>,
+    ) {
+        let mut stack = vec![(pattern.clone(), value_type.clone())];
+
+        while let Some((pattern, value_type)) = stack.pop() {
+            match pattern {
+                BindingPattern::Identifier(identifier, _) => {
+                    if identifier.name != "_" {
+                        out.push((identifier, value_type));
+                    }
+                }
+                BindingPattern::TypeHint(inner, type_expr, _) => {
+                    let ty = self.type_expr_to_intermediate(&type_expr);
+                    stack.push((*inner, ty));
+                }
+                BindingPattern::Annotated { pattern, .. } => {
+                    stack.push((*pattern, value_type));
+                }
+                BindingPattern::Struct(fields, span) => {
+                    let field_types = match value_type {
+                        IntermediateType::Struct(fields) => fields.clone(),
+                        IntermediateType::Array {
+                            element,
+                            field_names,
+                            ..
+                        } => field_names
+                            .iter()
+                            .cloned()
+                            .map(|name| (name, (*element.clone())))
+                            .collect(),
+                        _ => {
+                            panic!(
+                                "Struct pattern used on non-struct type at {:?}",
+                                span
+                            )
+                        }
+                    };
+                    let field_count = fields.len();
+                    for (position, (field_identifier, field_pattern)) in
+                        fields.into_iter().rev().enumerate()
+                    {
+                        let fallback_index = field_count.saturating_sub(position + 1);
+                        let field_type = field_types
+                            .iter()
+                            .find(|(name, _)| name == &field_identifier.name)
+                            .map(|(_, ty)| ty.clone())
+                            .or_else(|| field_types.get(fallback_index).map(|(_, ty)| ty.clone()))
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "Missing field {} in struct pattern at {:?}",
+                                    field_identifier.name, span
+                                )
+                            });
+                        stack.push((field_pattern, field_type));
+                    }
+                }
+                BindingPattern::EnumVariant {
+                    enum_type,
+                    variant,
+                    payload,
+                    ..
+                } => {
+                    let enum_type = self
+                        .resolve_enum_type_expression(&enum_type)
+                        .unwrap_or(*enum_type.clone());
+                    if let Some((_, payload_type_expr)) = enum_variant_info(&enum_type, &variant) {
+                        if let Some(payload_pattern) = payload {
+                            let payload_type =
+                                self.type_expr_to_intermediate(&payload_type_expr);
+                            stack.push((*payload_pattern, payload_type));
+                        }
+                    }
+                }
+                BindingPattern::Literal(_, _) => {}
+            }
+        }
     }
 
     fn infer_binding_type(
@@ -1142,99 +1381,157 @@ impl IntermediateBuilder {
                 field_names: Vec<String>,
             },
             FinishArrayIndex,
+            FinishTypePropertyAccess(String),
+            FinishBinding(BindingPattern),
+            FinishBlock {
+                count: usize,
+                pop_scope: bool,
+            },
+            FinishIf {
+                pop_scope: bool,
+            },
         }
 
         let mut stack = Vec::new();
         let mut values = Vec::new();
+        let mut locals: Vec<HashMap<Identifier, IntermediateType>> = vec![HashMap::new()];
         stack.push(Frame::Enter(expr.clone()));
 
         while let Some(frame) = stack.pop() {
             match frame {
                 Frame::Enter(expr) => match expr.kind {
-                    ExpressionKind::Identifier(..) | ExpressionKind::FunctionCall { .. } => {
+                    ExpressionKind::Identifier(ref identifier) => {
+                        if let Some(ty) = locals
+                            .iter()
+                            .rev()
+                            .find_map(|scope| scope.get(identifier).cloned())
+                        {
+                            values.push(ty);
+                            continue;
+                        }
                         if let Ok(ty_expr) =
                             interpret::get_type_of_expression(&expr, &self.enum_context)
                         {
                             values.push(self.type_expr_to_intermediate(&ty_expr));
                             continue;
                         }
-                        // Fall through to heuristic handling if type inference fails.
-                        match expr.kind {
-                            ExpressionKind::Identifier(identifier) => {
-                                if let Some(ty) = self.inline_binding_types.get(&identifier).cloned()
-                                {
-                                    values.push(ty);
-                                } else if let Some(inlined) =
-                                    self.inline_bindings.get(&identifier).cloned()
-                                {
-                                    values.push(self.expression_value_type(&inlined));
-                                } else if let Some((
-                                    BindingContext::Bound(value, _, bound_type),
-                                    _,
-                                )) = self.enum_context.get_identifier(&identifier).cloned()
-                                {
+                        if let Some(ty) = self.inline_binding_types.get(identifier).cloned() {
+                            values.push(ty);
+                        } else if let Some(inlined) = self.inline_bindings.get(identifier).cloned()
+                        {
+                            values.push(self.expression_value_type(&inlined));
+                        } else if let Some((binding, _)) =
+                            self.enum_context.get_identifier(identifier).cloned()
+                        {
+                            match binding {
+                                BindingContext::Bound(value, _, bound_type) => {
                                     if let Some(bound_type) = bound_type {
                                         values.push(self.type_expr_to_intermediate(&bound_type));
                                     } else {
                                         values.push(self.expression_value_type(&value));
                                     }
-                                } else {
+                                }
+                                BindingContext::UnboundWithType(type_expr) => {
+                                    values.push(self.type_expr_to_intermediate(&type_expr));
+                                }
+                                BindingContext::UnboundWithoutType => {
                                     values.push(IntermediateType::I32);
                                 }
                             }
-                            ExpressionKind::FunctionCall { function, .. } => {
-                                if let ExpressionKind::EnumConstructor { enum_type, .. } =
-                                    &function.kind
-                                {
-                                    let enum_type = self
-                                        .resolve_enum_type_expression(enum_type.as_ref())
-                                        .unwrap_or(enum_type.as_ref().clone());
+                        } else {
+                            values.push(IntermediateType::I32);
+                        }
+                    }
+                    ExpressionKind::FunctionCall { ref function, .. } => {
+                        if let Ok(ty_expr) =
+                            interpret::get_type_of_expression(&expr, &self.enum_context)
+                        {
+                            values.push(self.type_expr_to_intermediate(&ty_expr));
+                            continue;
+                        }
+                        if let ExpressionKind::EnumConstructor { enum_type, .. } = &function.kind
+                        {
+                            let enum_type = self
+                                .resolve_enum_type_expression(enum_type.as_ref())
+                                .unwrap_or(enum_type.as_ref().clone());
+                            values.push(self.type_expr_to_intermediate(&enum_type));
+                        } else if let ExpressionKind::TypePropertyAccess { object, property } =
+                            &function.kind
+                        {
+                            if let Some(enum_type) = self.resolve_enum_type_expression(object) {
+                                let variant = Identifier::new(property.clone());
+                                if enum_variant_info(&enum_type, &variant).is_some() {
                                     values.push(self.type_expr_to_intermediate(&enum_type));
-                                } else if let ExpressionKind::TypePropertyAccess {
-                                    object,
-                                    property,
-                                } = &function.kind
+                                } else {
+                                    values.push(IntermediateType::I32);
+                                }
+                            } else {
+                                values.push(IntermediateType::I32);
+                            }
+                        } else if let ExpressionKind::Identifier(identifier) = &function.kind {
+                            if let Some(function_index) = self.resolve_function_index(identifier) {
+                                let ty = self
+                                    .functions
+                                    .get(function_index)
+                                    .map(|function| (*function.return_type).clone())
+                                    .unwrap_or(IntermediateType::I32);
+                                values.push(ty);
+                            } else if let Some(inlined) =
+                                self.inline_bindings.get(identifier).cloned()
+                            {
+                                if let ExpressionKind::Function {
+                                    return_type,
+                                    body,
+                                    ..
+                                } = &inlined.kind
                                 {
-                                    if let Some(enum_type) =
-                                        self.resolve_enum_type_expression(object)
-                                    {
-                                        let variant = Identifier::new(property.clone());
-                                        if enum_variant_info(&enum_type, &variant).is_some() {
-                                            values.push(self.type_expr_to_intermediate(&enum_type));
-                                        } else {
-                                            values.push(IntermediateType::I32);
-                                        }
-                                    } else {
-                                        values.push(IntermediateType::I32);
-                                    }
-                                } else if let ExpressionKind::Identifier(identifier) = &function.kind
-                                {
-                                    if let Some(function_index) =
-                                        self.resolve_function_index(identifier)
-                                    {
-                                        let ty = self
-                                            .functions
-                                            .get(function_index)
-                                            .map(|function| (*function.return_type).clone())
-                                            .unwrap_or(IntermediateType::I32);
-                                        values.push(ty);
-                                    } else {
-                                        values.push(IntermediateType::I32);
-                                    }
-                                } else if matches!(function.kind, ExpressionKind::Function { .. }) {
-                                    let function_index =
-                                        self.register_function(None, (*function).clone());
-                                    let ty = self
-                                        .functions
-                                        .get(function_index)
-                                        .map(|function| (*function.return_type).clone())
-                                        .unwrap_or(IntermediateType::I32);
+                                    let ty = return_type
+                                        .as_ref()
+                                        .map(|ty| self.type_expr_to_intermediate(ty))
+                                        .unwrap_or_else(|| {
+                                            self.expression_value_type(body.as_ref())
+                                        });
                                     values.push(ty);
                                 } else {
                                     values.push(IntermediateType::I32);
                                 }
+                            } else if let Some((
+                                BindingContext::Bound(value, _, bound_type),
+                                _,
+                            )) = self.enum_context.get_identifier(identifier).cloned()
+                            {
+                                if let Some(bound_type) = bound_type {
+                                    values.push(self.type_expr_to_intermediate(&bound_type));
+                                } else if let ExpressionKind::Function {
+                                    return_type,
+                                    body,
+                                    ..
+                                } = &value.kind
+                                {
+                                    let ty = return_type
+                                        .as_ref()
+                                        .map(|ty| self.type_expr_to_intermediate(ty))
+                                        .unwrap_or_else(|| {
+                                            self.expression_value_type(body.as_ref())
+                                        });
+                                    values.push(ty);
+                                } else {
+                                    values.push(IntermediateType::I32);
+                                }
+                            } else {
+                                values.push(IntermediateType::I32);
                             }
-                            _ => {}
+                        } else if matches!(function.kind, ExpressionKind::Function { .. }) {
+                            let function_index =
+                                self.register_function(None, function.as_ref().clone());
+                            let ty = self
+                                .functions
+                                .get(function_index)
+                                .map(|function| (*function.return_type).clone())
+                                .unwrap_or(IntermediateType::I32);
+                            values.push(ty);
+                        } else {
+                            values.push(IntermediateType::I32);
                         }
                     }
                     ExpressionKind::Literal(lit) => {
@@ -1284,14 +1581,48 @@ impl IntermediateBuilder {
                         stack.push(Frame::FinishArrayIndex);
                         stack.push(Frame::Enter(array.as_ref().clone()));
                     }
-                    ExpressionKind::If { then_branch, .. } => {
+                    ExpressionKind::TypePropertyAccess { object, property } => {
+                        stack.push(Frame::FinishTypePropertyAccess(property));
+                        stack.push(Frame::Enter(object.as_ref().clone()));
+                    }
+                    ExpressionKind::Binding(binding) => {
+                        let Binding { pattern, expr } = (*binding).clone();
+                        stack.push(Frame::FinishBinding(pattern));
+                        stack.push(Frame::Enter(expr));
+                    }
+                    ExpressionKind::If {
+                        condition,
+                        then_branch,
+                        ..
+                    } => {
+                        locals.push(HashMap::new());
+                        stack.push(Frame::FinishIf { pop_scope: true });
                         stack.push(Frame::Enter(then_branch.as_ref().clone()));
+                        let condition_expr = condition.as_ref().clone();
+                        if let ExpressionKind::Block(exprs) = &condition_expr.kind {
+                            stack.push(Frame::FinishBlock {
+                                count: exprs.len(),
+                                pop_scope: false,
+                            });
+                            for expr in exprs.iter().rev() {
+                                stack.push(Frame::Enter(expr.clone()));
+                            }
+                        } else {
+                            stack.push(Frame::Enter(condition_expr));
+                        }
                     }
                     ExpressionKind::Block(exprs) => {
-                        if let Some(last) = exprs.last() {
-                            stack.push(Frame::Enter(last.clone()));
-                        } else {
+                        if exprs.is_empty() {
                             values.push(IntermediateType::I32);
+                        } else {
+                            locals.push(HashMap::new());
+                            stack.push(Frame::FinishBlock {
+                                count: exprs.len(),
+                                pop_scope: true,
+                            });
+                            for expr in exprs.into_iter().rev() {
+                                stack.push(Frame::Enter(expr));
+                            }
                         }
                     }
                     ExpressionKind::Match { branches, .. } => {
@@ -1329,14 +1660,12 @@ impl IntermediateBuilder {
                         homogeneous = false;
                     }
 
-                    if let Some(first) = first_type
-                        && homogeneous
-                    {
-                        let field_names = normalize_field_names(field_names);
+                    if let Some(first) = first_type && homogeneous {
+                        let array_field_names = normalize_field_names(field_names);
                         values.push(IntermediateType::Array {
                             element: Box::new(first),
                             length: field_types.len(),
-                            field_names,
+                            field_names: array_field_names,
                         });
                     } else {
                         let fields = field_names
@@ -1356,11 +1685,99 @@ impl IntermediateBuilder {
                 }
                 Frame::FinishArrayIndex => {
                     let array_type = values.pop().expect("Missing array type");
-                    if let IntermediateType::Array { element, .. } = array_type {
-                        values.push(*element);
-                        continue;
+                    match array_type {
+                        IntermediateType::Array { element, .. } => {
+                            values.push(*element);
+                            continue;
+                        }
+                        IntermediateType::Box { element } => {
+                            if let IntermediateType::Array { element, .. } = *element {
+                                values.push(*element);
+                                continue;
+                            }
+                        }
+                        _ => {}
                     }
                     values.push(IntermediateType::I32);
+                }
+                Frame::FinishTypePropertyAccess(property) => {
+                    let object_type = values.pop().expect("Missing property access object type");
+                    let object_type = match object_type {
+                        IntermediateType::Box { element } => *element,
+                        other => other,
+                    };
+                    match object_type {
+                        IntermediateType::Struct(fields) => {
+                            if let Some((_, ty)) =
+                                fields.iter().find(|(name, _)| name == &property)
+                            {
+                                values.push(ty.clone());
+                            } else {
+                                values.push(IntermediateType::I32);
+                            }
+                        }
+                        IntermediateType::Array {
+                            element,
+                            field_names,
+                            ..
+                        } => {
+                            if field_names.iter().any(|name| name == &property) {
+                                values.push(*element);
+                            } else {
+                                values.push(IntermediateType::I32);
+                            }
+                        }
+                        _ => values.push(IntermediateType::I32),
+                    }
+                }
+                Frame::FinishBinding(pattern) => {
+                    let value_type = values.pop().expect("Missing binding value type");
+                    let mut current = &pattern;
+                    let binding_type = loop {
+                        match current {
+                            BindingPattern::EnumVariant { enum_type, .. } => {
+                                let enum_type = self
+                                    .resolve_enum_type_expression(enum_type)
+                                    .unwrap_or_else(|| *enum_type.clone());
+                                break self.type_expr_to_intermediate(&enum_type);
+                            }
+                            BindingPattern::TypeHint(_, type_expr, _) => {
+                                break self.type_expr_to_intermediate(type_expr);
+                            }
+                            BindingPattern::Annotated { pattern, .. } => {
+                                current = pattern;
+                            }
+                            _ => break value_type.clone(),
+                        }
+                    };
+                    if let Some(scope) = locals.last_mut() {
+                        let mut bindings = Vec::new();
+                        self.collect_pattern_type_bindings(&pattern, &binding_type, &mut bindings);
+                        for (identifier, ty) in bindings {
+                            scope.insert(identifier, ty);
+                        }
+                    }
+                    values.push(IntermediateType::I32);
+                }
+                Frame::FinishBlock { count, pop_scope } => {
+                    let last = values
+                        .pop()
+                        .unwrap_or_else(|| IntermediateType::I32);
+                    for _ in 1..count {
+                        values.pop();
+                    }
+                    if pop_scope {
+                        locals.pop();
+                    }
+                    values.push(last);
+                }
+                Frame::FinishIf { pop_scope } => {
+                    let then_type = values.pop().unwrap_or_else(|| IntermediateType::I32);
+                    values.pop();
+                    if pop_scope {
+                        locals.pop();
+                    }
+                    values.push(then_type);
                 }
             }
         }
@@ -1405,7 +1822,18 @@ impl IntermediateBuilder {
                         }
                     }
                     ExpressionKind::Identifier(identifier) => {
+                        if std::env::var("SILK_DEBUG_TYPE_ALIAS").is_ok() {
+                            eprintln!("type alias lookup: {}", identifier.name);
+                        }
                         if let Some(ty) = self.type_aliases.get(&identifier).cloned() {
+                            if std::env::var("SILK_DEBUG_TYPE_ALIAS").is_ok() {
+                                eprintln!("type alias hit (inline): {}", identifier.name);
+                            }
+                            stack.push(Frame::Enter(ty));
+                        } else if let Some(ty) = self.resolve_type_binding(&identifier) {
+                            if std::env::var("SILK_DEBUG_TYPE_ALIAS").is_ok() {
+                                eprintln!("type alias hit (context): {}", identifier.name);
+                            }
                             stack.push(Frame::Enter(ty));
                         } else if identifier.unique == identifier.name {
                             if let Some((_, ty)) = self
@@ -1413,11 +1841,20 @@ impl IntermediateBuilder {
                                 .iter()
                                 .find(|(id, _)| id.name == identifier.name)
                             {
+                                if std::env::var("SILK_DEBUG_TYPE_ALIAS").is_ok() {
+                                    eprintln!("type alias hit (name): {}", identifier.name);
+                                }
                                 stack.push(Frame::Enter(ty.clone()));
                             } else {
+                                if std::env::var("SILK_DEBUG_TYPE_ALIAS").is_ok() {
+                                    eprintln!("type alias miss: {}", identifier.name);
+                                }
                                 values.push(IntermediateType::I32);
                             }
                         } else {
+                            if std::env::var("SILK_DEBUG_TYPE_ALIAS").is_ok() {
+                                eprintln!("type alias miss: {}", identifier.name);
+                            }
                             values.push(IntermediateType::I32);
                         }
                     }
@@ -1453,14 +1890,12 @@ impl IntermediateBuilder {
                         homogeneous = false;
                     }
 
-                    if let Some(first) = first_type
-                        && homogeneous
-                    {
-                        let field_names = normalize_field_names(field_names);
+                    if let Some(first) = first_type && homogeneous {
+                        let array_field_names = normalize_field_names(field_names);
                         values.push(IntermediateType::Array {
                             element: Box::new(first),
                             length: field_types.len(),
-                            field_names,
+                            field_names: array_field_names,
                         });
                     } else {
                         let fields = field_names

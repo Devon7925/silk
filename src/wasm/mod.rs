@@ -58,7 +58,7 @@ fn ensure_lvalue_local(
     loop {
         match current {
             IntermediateLValue::Identifier(identifier, _) => {
-                return if locals_types.contains_key(&identifier.name) {
+                return if locals_types.contains_key(&identifier.unique) {
                     Ok(())
                 } else {
                     Err(Diagnostic::new(format!(
@@ -225,6 +225,98 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
         .iter()
         .map(|function| intermediate_type_to_wasm(&function.return_type))
         .collect::<Vec<_>>();
+
+    if std::env::var("SILK_DEBUG_STR_USAGE").is_ok() {
+        for function in &all_functions {
+            let mut stack = vec![function.body.clone()];
+            let mut found = false;
+            while let Some(node) = stack.pop() {
+                match node {
+                    IntermediateKind::Identifier(identifier) => {
+                        if identifier.name == "str" {
+                            found = true;
+                            break;
+                        }
+                    }
+                    IntermediateKind::Struct(fields) => {
+                        for (_, value) in fields {
+                            stack.push(value);
+                        }
+                    }
+                    IntermediateKind::ArrayLiteral { items, .. } => {
+                        for value in items {
+                            stack.push(value);
+                        }
+                    }
+                    IntermediateKind::BoxAlloc { value, .. } => {
+                        stack.push(*value);
+                    }
+                    IntermediateKind::Binding(binding) => {
+                        stack.push(binding.expr.clone());
+                    }
+                    IntermediateKind::Block(exprs) => {
+                        for expr in exprs {
+                            stack.push(expr);
+                        }
+                    }
+                    IntermediateKind::If {
+                        condition,
+                        then_branch,
+                        else_branch,
+                    } => {
+                        stack.push(*condition);
+                        stack.push(*then_branch);
+                        stack.push(*else_branch);
+                    }
+                    IntermediateKind::FunctionCall { argument, .. } => {
+                        stack.push(*argument);
+                    }
+                    IntermediateKind::ArrayIndex { array, index } => {
+                        stack.push(*array);
+                        stack.push(*index);
+                    }
+                    IntermediateKind::TypePropertyAccess { object, .. } => {
+                        stack.push(*object);
+                    }
+                    IntermediateKind::Assignment { expr, .. } => {
+                        stack.push(*expr);
+                    }
+                    IntermediateKind::Diverge { value, .. } => {
+                        stack.push(*value);
+                    }
+                    IntermediateKind::Loop { body } => {
+                        stack.push(*body);
+                    }
+                    IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
+                        left,
+                        right,
+                        _,
+                    )) => {
+                        stack.push(*left);
+                        stack.push(*right);
+                    }
+                    IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(
+                        operand,
+                        _,
+                    )) => {
+                        stack.push(*operand);
+                    }
+                    IntermediateKind::InlineAssembly { .. }
+                    | IntermediateKind::Literal(..)
+                    | IntermediateKind::Unreachable => {}
+                }
+            }
+            if found {
+                let params = function
+                    .params
+                    .iter()
+                    .map(|param| param.name.as_str())
+                    .collect::<Vec<_>>();
+                eprintln!("str usage in function params [{}]", params.join(", "));
+                eprintln!("str usage body {:?}", function.body);
+            }
+        }
+    }
 
     for function in &all_functions {
         let mut locals_types = std::collections::HashMap::new();
@@ -405,6 +497,18 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
         let mut locals = Vec::new();
         let mut local_indices = std::collections::HashMap::new();
         let mut locals_types = std::collections::HashMap::new();
+
+        if std::env::var("SILK_DEBUG_LOCALS").is_ok() {
+            let params = function
+                .params
+                .iter()
+                .map(|param| param.name.as_str())
+                .collect::<Vec<_>>();
+            eprintln!("locals: function params [{}]", params.join(", "));
+            if params == ["start", "end"] {
+                eprintln!("locals: function body {:?}", function.body);
+            }
+        }
 
         for (j, param) in function.params.iter().enumerate() {
             local_indices.insert(param.name.clone(), j as u32);
@@ -1165,9 +1269,18 @@ fn infer_type_basic(
                     });
                 }
                 IntermediateKind::Identifier(identifier) => {
-                    let ty = locals_types.get(&identifier.name).cloned().ok_or_else(|| {
-                        Diagnostic::new(format!("Unknown identifier `{}`", identifier.name))
-                            .with_span(SourceSpan::default())
+                    let ty = locals_types
+                        .get(&identifier.unique)
+                        .or_else(|| locals_types.get(&identifier.name))
+                        .cloned()
+                        .ok_or_else(|| {
+                            let mut message = format!("Unknown identifier `{}`", identifier.name);
+                        if std::env::var("SILK_DEBUG_UNKNOWN_IDENTIFIER").is_ok() {
+                            let mut names = locals_types.keys().cloned().collect::<Vec<_>>();
+                            names.sort();
+                            message.push_str(&format!("\nLocals: {}", names.join(", ")));
+                        }
+                        Diagnostic::new(message).with_span(SourceSpan::default())
                     })?;
                     results.push(ty);
                 }
@@ -1385,9 +1498,18 @@ fn infer_type_impl(
                     });
                 }
                 IntermediateKind::Identifier(identifier) => {
-                    let ty = locals_types.get(&identifier.name).cloned().ok_or_else(|| {
-                        Diagnostic::new(format!("Unknown identifier `{}`", identifier.name))
-                            .with_span(SourceSpan::default())
+                    let ty = locals_types
+                        .get(&identifier.unique)
+                        .or_else(|| locals_types.get(&identifier.name))
+                        .cloned()
+                        .ok_or_else(|| {
+                            let mut message = format!("Unknown identifier `{}`", identifier.name);
+                        if std::env::var("SILK_DEBUG_UNKNOWN_IDENTIFIER").is_ok() {
+                            let mut names = locals_types.keys().cloned().collect::<Vec<_>>();
+                            names.sort();
+                            message.push_str(&format!("\nLocals: {}", names.join(", ")));
+                        }
+                        Diagnostic::new(message).with_span(SourceSpan::default())
                     })?;
                     results.push(ty);
                 }
@@ -1614,7 +1736,7 @@ fn extract_function_params(
                 }
             }
             BindingPattern::Identifier(identifier, _) => params.push(WasmFunctionParam {
-                name: identifier.name.clone(),
+                name: identifier.unique.clone(),
                 ty: intermediate_type_to_wasm(&current_type),
             }),
             BindingPattern::Literal(_, span) => {
@@ -1686,7 +1808,7 @@ fn collect_locals(
         match node {
             IntermediateKind::Binding(binding) => {
                 let binding = binding.as_ref();
-                let expr_type = infer_type(&binding.expr, locals_types, function_return_types)?;
+                let expr_type = intermediate_type_to_wasm(&binding.binding_type);
                 collect_locals_for_pattern(binding, expr_type, locals_types, &mut locals)?;
                 stack.push(&binding.expr);
             }
@@ -1697,6 +1819,24 @@ fn collect_locals(
                     let array_type = infer_type(&array_expr, locals_types, function_return_types)?;
                     if matches!(array_type, WasmType::Box { .. }) {
                         allow_non_local = true;
+                    }
+                }
+                if let IntermediateLValue::TypePropertyAccess { object, .. } = target {
+                    let object_expr = lvalue_to_intermediate(object.as_ref());
+                    let object_type =
+                        infer_type(&object_expr, locals_types, function_return_types)?;
+                    if matches!(object_type, WasmType::Box { .. }) {
+                        allow_non_local = true;
+                    }
+                    if !allow_non_local {
+                        if let IntermediateLValue::ArrayIndex { array, .. } = object.as_ref() {
+                            let array_expr = lvalue_to_intermediate(array.as_ref());
+                            let array_type =
+                                infer_type(&array_expr, locals_types, function_return_types)?;
+                            if matches!(array_type, WasmType::Box { .. }) {
+                                allow_non_local = true;
+                            }
+                        }
                     }
                 }
                 if !allow_non_local {
@@ -1782,7 +1922,10 @@ fn collect_locals_for_pattern(
     locals_types: &mut std::collections::HashMap<String, WasmType>,
     locals: &mut Vec<(String, WasmType)>,
 ) -> Result<(), Diagnostic> {
-    let name = binding.identifier.name.clone();
+    let name = binding.identifier.unique.clone();
+    if std::env::var("SILK_DEBUG_LOCALS").is_ok() {
+        eprintln!("locals: insert {}", name);
+    }
     locals.push((name.clone(), expr_type.clone()));
     locals_types.insert(name, expr_type);
     Ok(())
@@ -2163,12 +2306,17 @@ fn emit_expression(
                     }
                     other => {
                         if !wasm_types_equivalent(&expr_type, &other) {
-                            return Err(Diagnostic::new(format!(
+                            let mut message = format!(
                                 "Expression type does not match expected type: expected `{}`, got `{}`",
                                 format_wasm_type(&other),
                                 format_wasm_type(&expr_type),
-                            ))
-                            .with_span(SourceSpan::default()));
+                            );
+                            if std::env::var("SILK_DEBUG_TYPE_MISMATCH").is_ok() {
+                                message.push_str(&format!("\nExpr: {expr:?}"));
+                            }
+                            return Err(
+                                Diagnostic::new(message).with_span(SourceSpan::default()),
+                            );
                         }
                         if let WasmType::Box { element } = &expr_type {
                             let box_info = resolve_box_expr(&expr, box_ctx, box_registry)?;
@@ -2243,7 +2391,7 @@ fn emit_expression(
                     }
                 }
                 IntermediateKind::Identifier(identifier) => {
-                    let local_index = locals.get(&identifier.name).copied().ok_or_else(|| {
+                    let local_index = locals.get(&identifier.unique).copied().ok_or_else(|| {
                         Diagnostic::new(format!(
                             "Identifier `{}` is not a local variable or parameter",
                             identifier.name
@@ -2258,7 +2406,7 @@ fn emit_expression(
                 } => match &target {
                     IntermediateLValue::Identifier(identifier, _) => {
                         let local_index =
-                            locals.get(&identifier.name).copied().ok_or_else(|| {
+                            locals.get(&identifier.unique).copied().ok_or_else(|| {
                                 Diagnostic::new(format!(
                                     "Identifier `{}` is not a local variable or parameter",
                                     identifier.name
@@ -2266,7 +2414,7 @@ fn emit_expression(
                                 .with_span(SourceSpan::default())
                             })?;
                         let target_type =
-                            locals_types.get(&identifier.name).cloned().ok_or_else(|| {
+                            locals_types.get(&identifier.unique).cloned().ok_or_else(|| {
                                 Diagnostic::new(format!(
                                     "Identifier `{}` is not a local variable or parameter",
                                     identifier.name
@@ -3172,7 +3320,7 @@ fn emit_expression(
                 IntermediateKind::Binding(binding) => {
                     let binding = binding.as_ref();
                     record_box_binding(binding, box_ctx, box_registry)?;
-                    let name = binding.identifier.name.clone();
+                    let name = binding.identifier.unique.clone();
                     let local_index = locals
                         .get(&name)
                         .copied()

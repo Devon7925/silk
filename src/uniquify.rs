@@ -45,6 +45,36 @@ fn fresh_identifier(identifier: &Identifier) -> Identifier {
     Identifier::with_unique(identifier.name.clone(), generate_uuid_like())
 }
 
+fn insert_bound_identifiers(scope: &mut ScopeStack, pattern: &BindingPattern) {
+    let mut stack = vec![pattern];
+    while let Some(pattern) = stack.pop() {
+        match pattern {
+            BindingPattern::Identifier(identifier, _) => {
+                if identifier.name != "_" {
+                    scope.insert(identifier.name.clone(), identifier.clone());
+                }
+            }
+            BindingPattern::Struct(items, _) => {
+                for (_, sub_pattern) in items.iter() {
+                    stack.push(sub_pattern);
+                }
+            }
+            BindingPattern::EnumVariant { payload, .. } => {
+                if let Some(payload) = payload {
+                    stack.push(payload);
+                }
+            }
+            BindingPattern::TypeHint(inner, _, _) => {
+                stack.push(inner);
+            }
+            BindingPattern::Annotated { pattern, .. } => {
+                stack.push(pattern);
+            }
+            BindingPattern::Literal(_, _) => {}
+        }
+    }
+}
+
 fn generate_uuid_like() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let count = COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
@@ -151,6 +181,13 @@ enum Task {
     BuildLValueArrayIndex {
         span: SourceSpan,
     },
+    ContinueBlock {
+        span: SourceSpan,
+        expressions: Vec<Expression>,
+        index: usize,
+        scope: ScopeStack,
+        acc: Vec<Expression>,
+    },
     ContinueFunctionParam {
         span: SourceSpan,
         return_type: Option<Rc<Expression>>,
@@ -170,6 +207,7 @@ enum Task {
     ContinueBindingPattern {
         span: SourceSpan,
         expr: Expression,
+        expr_scope: ScopeStack,
     },
     ContinueBindingExpr {
         span: SourceSpan,
@@ -475,14 +513,32 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                         let mut binding_scope = scope.clone();
                         binding_scope.push();
                         let Binding { pattern, expr } = (*binding).clone();
-                        tasks.push(Task::ContinueBindingPattern { span, expr });
+                        tasks.push(Task::ContinueBindingPattern {
+                            span,
+                            expr,
+                            expr_scope: scope,
+                        });
                         tasks.push(Task::Pattern(pattern, binding_scope));
                     }
                     ExpressionKind::Block(expressions) => {
-                        results.push(Value::Expr(Expression::new(
-                            ExpressionKind::Block(expressions),
-                            span,
-                        )));
+                        let mut block_scope = scope.clone();
+                        block_scope.push();
+                        if expressions.is_empty() {
+                            results.push(Value::Expr(Expression::new(
+                                ExpressionKind::Block(Vec::new()),
+                                span,
+                            )));
+                        } else {
+                            let first_expr = expressions[0].clone();
+                            tasks.push(Task::ContinueBlock {
+                                span,
+                                expressions,
+                                index: 0,
+                                scope: block_scope.clone(),
+                                acc: Vec::new(),
+                            });
+                            tasks.push(Task::Expr(first_expr, block_scope));
+                        }
                     }
                     ExpressionKind::Diverge {
                         value,
@@ -876,16 +932,46 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                     .with_span(span),
                 ));
             }
-            Task::ContinueBindingPattern { span, expr } => {
-                let (pattern, scope) = pop_pattern(&mut results);
+            Task::ContinueBindingPattern { span, expr, expr_scope } => {
+                let (pattern, _scope) = pop_pattern(&mut results);
                 tasks.push(Task::ContinueBindingExpr { span, pattern });
-                tasks.push(Task::Expr(expr, scope));
+                tasks.push(Task::Expr(expr, expr_scope));
             }
             Task::ContinueBindingExpr { span, pattern } => {
                 let expr = pop_expr(&mut results);
                 results.push(Value::Expr(
                     ExpressionKind::Binding(Rc::new(Binding { pattern, expr })).with_span(span),
                 ));
+            }
+            Task::ContinueBlock {
+                span,
+                expressions,
+                index,
+                mut scope,
+                mut acc,
+            } => {
+                let expr = pop_expr(&mut results);
+                if let ExpressionKind::Binding(binding) = &expr.kind {
+                    insert_bound_identifiers(&mut scope, &binding.pattern);
+                }
+                acc.push(expr);
+                let next_index = index + 1;
+                if next_index < expressions.len() {
+                    let next_expr = expressions[next_index].clone();
+                    tasks.push(Task::ContinueBlock {
+                        span,
+                        expressions,
+                        index: next_index,
+                        scope: scope.clone(),
+                        acc,
+                    });
+                    tasks.push(Task::Expr(next_expr, scope));
+                } else {
+                    results.push(Value::Expr(Expression::new(
+                        ExpressionKind::Block(acc),
+                        span,
+                    )));
+                }
             }
             Task::ContinueMatchValue {
                 span,
@@ -971,10 +1057,13 @@ fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack) -> Expression 
                 span,
                 then_branch,
                 else_branch,
-                then_scope,
+                mut then_scope,
                 else_scope,
             } => {
                 let condition = pop_expr(&mut results);
+                if let ExpressionKind::Binding(binding) = &condition.kind {
+                    insert_bound_identifiers(&mut then_scope, &binding.pattern);
+                }
                 tasks.push(Task::ContinueIfThen {
                     span,
                     condition,

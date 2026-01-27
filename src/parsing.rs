@@ -80,18 +80,147 @@ impl LValue {
     }
 
     pub fn get_used_identifiers(&self) -> HashSet<Identifier> {
-        let mut current = self;
-        loop {
-            match current {
-                LValue::Identifier(identifier, ..) => {
-                    return HashSet::from([identifier.clone()]);
+        let mut used = HashSet::new();
+        collect_identifiers_from_lvalue(self, &mut used);
+        used
+    }
+}
+
+fn collect_identifiers_from_lvalue(lvalue: &LValue, out: &mut HashSet<Identifier>) {
+    match lvalue {
+        LValue::Identifier(identifier, ..) => {
+            out.insert(identifier.clone());
+        }
+        LValue::TypePropertyAccess { object, .. } => {
+            collect_identifiers_from_lvalue(object, out);
+        }
+        LValue::ArrayIndex { array, index, .. } => {
+            collect_identifiers_from_lvalue(array, out);
+            collect_identifiers_from_expression(index, out);
+        }
+    }
+}
+
+fn collect_identifiers_from_expression(expr: &Expression, out: &mut HashSet<Identifier>) {
+    let mut stack = vec![expr];
+    while let Some(expr) = stack.pop() {
+        match &expr.kind {
+            ExpressionKind::Identifier(identifier) => {
+                out.insert(identifier.clone());
+            }
+            ExpressionKind::IntrinsicType(_) | ExpressionKind::Literal(_) => {}
+            ExpressionKind::BoxType(inner) => {
+                stack.push(inner.as_ref());
+            }
+            ExpressionKind::EnumType(items) => {
+                for (_, field_expr) in items.iter() {
+                    stack.push(field_expr);
                 }
-                LValue::TypePropertyAccess { object, .. } => {
-                    current = object;
+            }
+            ExpressionKind::EnumValue {
+                enum_type, payload, ..
+            } => {
+                stack.push(payload.as_ref());
+                stack.push(enum_type.as_ref());
+            }
+            ExpressionKind::EnumConstructor {
+                enum_type,
+                payload_type,
+                ..
+            } => {
+                stack.push(payload_type.as_ref());
+                stack.push(enum_type.as_ref());
+            }
+            ExpressionKind::FunctionType {
+                parameter,
+                return_type,
+                ..
+            } => {
+                stack.push(return_type.as_ref());
+                stack.push(parameter.as_ref());
+            }
+            ExpressionKind::Function {
+                return_type, body, ..
+            } => {
+                stack.push(body.as_ref());
+                if let Some(ret_type) = return_type {
+                    stack.push(ret_type.as_ref());
                 }
-                LValue::ArrayIndex { array, .. } => {
-                    current = array;
+            }
+            ExpressionKind::AttachImplementation {
+                type_expr,
+                implementation,
+            } => {
+                stack.push(implementation.as_ref());
+                stack.push(type_expr.as_ref());
+            }
+            ExpressionKind::IntrinsicOperation(intrinsic_operation) => match intrinsic_operation {
+                IntrinsicOperation::Binary(left, right, _) => {
+                    stack.push(right.as_ref());
+                    stack.push(left.as_ref());
                 }
+                IntrinsicOperation::Unary(operand, _) => {
+                    stack.push(operand.as_ref());
+                }
+                IntrinsicOperation::InlineAssembly { code, .. } => {
+                    stack.push(code.as_ref());
+                }
+            },
+            ExpressionKind::Struct(items) => {
+                for (_, value_expr) in items.iter() {
+                    stack.push(value_expr);
+                }
+            }
+            ExpressionKind::ArrayRepeat { value, count } => {
+                stack.push(count.as_ref());
+                stack.push(value.as_ref());
+            }
+            ExpressionKind::Operation { left, right, .. } => {
+                stack.push(right.as_ref());
+                stack.push(left.as_ref());
+            }
+            ExpressionKind::Assignment { expr, .. } => {
+                stack.push(expr.as_ref());
+            }
+            ExpressionKind::FunctionCall { function, argument } => {
+                stack.push(argument.as_ref());
+                stack.push(function.as_ref());
+            }
+            ExpressionKind::ArrayIndex { array, index } => {
+                stack.push(index.as_ref());
+                stack.push(array.as_ref());
+            }
+            ExpressionKind::TypePropertyAccess { object, .. } => {
+                stack.push(object.as_ref());
+            }
+            ExpressionKind::Binding(binding) => {
+                stack.push(&binding.expr);
+            }
+            ExpressionKind::Block(expressions) => {
+                for expr in expressions.iter() {
+                    stack.push(expr);
+                }
+            }
+            ExpressionKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                stack.push(else_branch.as_ref());
+                stack.push(then_branch.as_ref());
+                stack.push(condition.as_ref());
+            }
+            ExpressionKind::Match { value, branches } => {
+                for (_, branch) in branches.iter() {
+                    stack.push(branch);
+                }
+                stack.push(value.as_ref());
+            }
+            ExpressionKind::Diverge { value, .. } => {
+                stack.push(value.as_ref());
+            }
+            ExpressionKind::Loop { body } => {
+                stack.push(body.as_ref());
             }
         }
     }
