@@ -545,6 +545,40 @@ fn types_equivalent(left: &ExpressionKind, right: &ExpressionKind) -> bool {
                 }
             }
             (
+                ExpressionKind::ArrayRepeat {
+                    value: a_value,
+                    count: a_count,
+                },
+                ExpressionKind::ArrayRepeat {
+                    value: b_value,
+                    count: b_count,
+                },
+            ) => {
+                let (
+                    ExpressionKind::Literal(ExpressionLiteral::Number(a_count)),
+                    ExpressionKind::Literal(ExpressionLiteral::Number(b_count)),
+                ) = (&a_count.kind, &b_count.kind)
+                else {
+                    return false;
+                };
+                if a_count != b_count {
+                    return false;
+                }
+                stack.push((&a_value.kind, &b_value.kind));
+            }
+            (ExpressionKind::ArrayRepeat { value, count }, ExpressionKind::Struct(fields))
+            | (ExpressionKind::Struct(fields), ExpressionKind::ArrayRepeat { value, count }) => {
+                let ExpressionKind::Literal(ExpressionLiteral::Number(count)) = &count.kind else {
+                    return false;
+                };
+                if *count < 0 || fields.len() != *count as usize {
+                    return false;
+                }
+                for (_, field_type) in fields.iter() {
+                    stack.push((&value.kind, &field_type.kind));
+                }
+            }
+            (
                 ExpressionKind::FunctionType {
                     parameter: a_param,
                     return_type: a_ret,
@@ -603,6 +637,20 @@ fn homogeneous_struct_element_type(ty: &Expression, context: &Context) -> Option
             _ => break,
         }
     }
+    if let ExpressionKind::ArrayRepeat { value, count } = &current.kind {
+        if !matches!(
+            count.kind,
+            ExpressionKind::Literal(ExpressionLiteral::Number(_))
+        ) {
+            return None;
+        }
+        let mut base_type = resolve_type_alias_expression(value, context);
+        if let ExpressionKind::IntrinsicType(intrinsic) = &base_type.kind {
+            base_type = intrinsic_type_expr(intrinsic.clone());
+        }
+        return Some(base_type);
+    }
+
     let ExpressionKind::Struct(fields) = &current.kind else {
         return None;
     };
@@ -692,6 +740,40 @@ fn collect_type_bindings(
                         return false;
                     }
                     stack.push((pattern_expr, value_expr));
+                }
+            }
+            (
+                ExpressionKind::ArrayRepeat {
+                    value: pattern_value,
+                    count: pattern_count,
+                },
+                ExpressionKind::ArrayRepeat {
+                    value: value_value,
+                    count: value_count,
+                },
+            ) => {
+                let (
+                    ExpressionKind::Literal(ExpressionLiteral::Number(pattern_count)),
+                    ExpressionKind::Literal(ExpressionLiteral::Number(value_count)),
+                ) = (&pattern_count.kind, &value_count.kind)
+                else {
+                    return false;
+                };
+                if pattern_count != value_count {
+                    return false;
+                }
+                stack.push((pattern_value, value_value));
+            }
+            (ExpressionKind::ArrayRepeat { value, count }, ExpressionKind::Struct(items))
+            | (ExpressionKind::Struct(items), ExpressionKind::ArrayRepeat { value, count }) => {
+                let ExpressionKind::Literal(ExpressionLiteral::Number(count)) = &count.kind else {
+                    return false;
+                };
+                if *count < 0 || items.len() != *count as usize {
+                    return false;
+                }
+                for (_, item_expr) in items.iter() {
+                    stack.push((value, item_expr));
                 }
             }
             (ExpressionKind::AttachImplementation { type_expr, .. }, _) => {
@@ -911,6 +993,15 @@ fn is_type_expression(expr: &ExpressionKind) -> bool {
                 for (_, ty) in items.iter() {
                     stack.push(&ty.kind);
                 }
+            }
+            ExpressionKind::ArrayRepeat { value, count } => {
+                if !matches!(
+                    count.kind,
+                    ExpressionKind::Literal(ExpressionLiteral::Number(_))
+                ) {
+                    return false;
+                }
+                stack.push(&value.kind);
             }
             _ => return false,
         }
@@ -1742,12 +1833,13 @@ pub fn interpret_expression(
                         count_expr.span(),
                     ));
                 }
-
-                let mut items = Vec::with_capacity(count as usize);
-                for idx in 0..count {
-                    items.push((Identifier::new(idx.to_string()), value_expr.clone()));
-                }
-                values.push(Expression::new(ExpressionKind::Struct(items), span));
+                values.push(Expression::new(
+                    ExpressionKind::ArrayRepeat {
+                        value: Rc::new(value_expr),
+                        count: Rc::new(count_expr),
+                    },
+                    span,
+                ));
             }
             Frame::FunctionType { span } => {
                 let return_type = values.pop().unwrap();
@@ -2512,6 +2604,26 @@ pub fn interpret_expression(
                                     continue;
                                 }
                                 return Err(diagnostic("Array index out of range", span));
+                            }
+
+                            if let (
+                                ExpressionKind::ArrayRepeat { value, count },
+                                ExpressionKind::Literal(ExpressionLiteral::Number(index)),
+                            ) = (&function_value.kind, &argument_value.kind)
+                            {
+                                let ExpressionKind::Literal(ExpressionLiteral::Number(count)) =
+                                    count.kind
+                                else {
+                                    return Err(diagnostic(
+                                        "Array repetition length must be a const i32 value",
+                                        span,
+                                    ));
+                                };
+                                if *index < 0 || *index >= count {
+                                    return Err(diagnostic("Array index out of range", span));
+                                }
+                                values.push(value.as_ref().clone());
+                                continue;
                             }
                         }
 
@@ -6333,8 +6445,28 @@ fn bind_pattern_from_value(
                     results.push((matched, preserve_behavior));
                 }
                 BindingPattern::Struct(pattern_items, span) => {
-                    let ExpressionKind::Struct(_) = &value.kind else {
-                        return Err(diagnostic("Struct pattern requires struct value", span));
+                    let (struct_items, repeat_value, repeat_count) = match &value.kind {
+                        ExpressionKind::Struct(items) => (Some(items), None, None),
+                        ExpressionKind::ArrayRepeat { value, count } => {
+                            let ExpressionKind::Literal(ExpressionLiteral::Number(count)) =
+                                count.kind
+                            else {
+                                return Err(diagnostic(
+                                    "Array repetition length must be a const i32 value",
+                                    span,
+                                ));
+                            };
+                            if count < 0 {
+                                return Err(diagnostic(
+                                    "Array repetition length must be non-negative",
+                                    span,
+                                ));
+                            }
+                            (None, Some(value.as_ref()), Some(count as usize))
+                        }
+                        _ => {
+                            return Err(diagnostic("Struct pattern requires struct value", span));
+                        }
                     };
                     if pattern_items.is_empty() {
                         results.push((true, preserve_behavior));
@@ -6342,22 +6474,41 @@ fn bind_pattern_from_value(
                     }
                     let items = pattern_items;
                     let (field_identifier, field_pattern) = items[0].clone();
-                    let ExpressionKind::Struct(struct_items) = &value.kind else {
-                        return Err(diagnostic("Struct pattern requires struct value", span));
-                    };
                     let field_span = field_pattern.span();
-                    let field_value = struct_items
-                        .iter()
-                        .find(|(value_identifier, _)| {
-                            value_identifier.name == field_identifier.name
-                        })
-                        .map(|(_, expr)| expr)
-                        .ok_or_else(|| {
-                            diagnostic(
+                    let field_value = if let Some(struct_items) = struct_items {
+                        struct_items
+                            .iter()
+                            .find(|(value_identifier, _)| {
+                                value_identifier.name == field_identifier.name
+                            })
+                            .map(|(_, expr)| expr)
+                            .ok_or_else(|| {
+                                diagnostic(
+                                    format!("Missing field {}", field_identifier.name),
+                                    field_span,
+                                )
+                            })?
+                    } else {
+                        let Some(repeat_value) = repeat_value else {
+                            return Err(diagnostic("Struct pattern requires struct value", span));
+                        };
+                        let Some(repeat_count) = repeat_count else {
+                            return Err(diagnostic("Struct pattern requires struct value", span));
+                        };
+                        let Ok(index) = field_identifier.name.parse::<usize>() else {
+                            return Err(diagnostic(
                                 format!("Missing field {}", field_identifier.name),
                                 field_span,
-                            )
-                        })?;
+                            ));
+                        };
+                        if index >= repeat_count {
+                            return Err(diagnostic(
+                                format!("Missing field {}", field_identifier.name),
+                                field_span,
+                            ));
+                        }
+                        repeat_value
+                    };
                     stack.push(Frame::StructContinue {
                         items,
                         value,

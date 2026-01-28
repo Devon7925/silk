@@ -240,6 +240,11 @@ pub fn expression_to_intermediate(
             field_ids: Vec<Identifier>,
             array_fields: Option<(Vec<String>, IntermediateType)>,
         },
+        FinishArrayRepeat {
+            count: usize,
+            element_type: IntermediateType,
+            field_names: Vec<String>,
+        },
         FinishAssignment(IntermediateLValue),
         FinishFunctionCall(usize),
         FinishArrayIndex,
@@ -351,27 +356,16 @@ pub fn expression_to_intermediate(
                         if count < 0 {
                             panic!("Array repetition length must be non-negative");
                         }
-                        let mut fields = Vec::with_capacity(count as usize);
-                        for idx in 0..count {
-                            fields.push((Identifier::new(idx.to_string()), (*value).clone()));
-                        }
-                        let field_ids = fields.iter().map(|(id, _)| id.clone()).collect();
-                        let struct_expr = ExpressionKind::Struct(fields.clone()).with_span(span);
-                        let array_fields = match builder.expression_value_type(&struct_expr) {
-                            IntermediateType::Array {
-                                field_names,
-                                element,
-                                ..
-                            } => Some((field_names, *element)),
-                            _ => None,
-                        };
-                        stack.push(Frame::FinishStruct {
-                            field_ids,
-                            array_fields,
+                        let count_usize = count as usize;
+                        let element_type = builder.expression_value_type(value.as_ref());
+                        let field_names =
+                            (0..count_usize).map(|index| index.to_string()).collect();
+                        stack.push(Frame::FinishArrayRepeat {
+                            count: count_usize,
+                            element_type,
+                            field_names,
                         });
-                        for (_, field_expr) in fields.into_iter().rev() {
-                            stack.push(Frame::Enter(field_expr));
-                        }
+                        stack.push(Frame::Enter(value.as_ref().clone()));
                     }
                     ExpressionKind::Literal(lit) => match lit {
                         ExpressionLiteral::String(bytes) => {
@@ -688,6 +682,22 @@ pub fn expression_to_intermediate(
                         .collect();
                     values.push(IntermediateKind::Struct(fields));
                 }
+            }
+            Frame::FinishArrayRepeat {
+                count,
+                element_type,
+                field_names,
+            } => {
+                let value = values.pop().expect("Missing array repeat value");
+                let mut items = Vec::with_capacity(count);
+                for _ in 0..count {
+                    items.push(value.clone());
+                }
+                values.push(IntermediateKind::ArrayLiteral {
+                    items,
+                    element_type,
+                    field_names,
+                });
             }
             Frame::FinishAssignment(target) => {
                 let expr = values.pop().expect("Missing assignment value");
@@ -1789,6 +1799,10 @@ impl IntermediateBuilder {
         enum Frame {
             Enter(Expression),
             FinishStruct(Vec<String>),
+            FinishArrayRepeat {
+                count: usize,
+                field_names: Vec<String>,
+            },
             FinishEnumType(Vec<String>),
             FinishBox,
         }
@@ -1820,6 +1834,25 @@ impl IntermediateBuilder {
                         for (_, field_expr) in fields.into_iter().rev() {
                             stack.push(Frame::Enter(field_expr));
                         }
+                    }
+                    ExpressionKind::ArrayRepeat { value, count } => {
+                        let ExpressionKind::Literal(ExpressionLiteral::Number(count)) = count.kind
+                        else {
+                            values.push(IntermediateType::I32);
+                            continue;
+                        };
+                        if count < 0 {
+                            values.push(IntermediateType::I32);
+                            continue;
+                        }
+                        let count_usize = count as usize;
+                        let field_names =
+                            (0..count_usize).map(|index| index.to_string()).collect();
+                        stack.push(Frame::FinishArrayRepeat {
+                            count: count_usize,
+                            field_names,
+                        });
+                        stack.push(Frame::Enter(value.as_ref().clone()));
                     }
                     ExpressionKind::Identifier(identifier) => {
                         if std::env::var("SILK_DEBUG_TYPE_ALIAS").is_ok() {
@@ -1904,6 +1937,16 @@ impl IntermediateBuilder {
                             .collect();
                         values.push(IntermediateType::Struct(fields));
                     }
+                }
+                Frame::FinishArrayRepeat { count, field_names } => {
+                    let element = values
+                        .pop()
+                        .unwrap_or_else(|| IntermediateType::I32);
+                    values.push(IntermediateType::Array {
+                        element: Box::new(element),
+                        length: count,
+                        field_names,
+                    });
                 }
                 Frame::FinishEnumType(variant_names) => {
                     let mut variant_types = Vec::with_capacity(variant_names.len());
@@ -2272,6 +2315,7 @@ fn is_type_expression(expr: &Expression) -> bool {
         ExpressionKind::IntrinsicType(_)
             | ExpressionKind::BoxType(_)
             | ExpressionKind::Struct(_)
+            | ExpressionKind::ArrayRepeat { .. }
             | ExpressionKind::EnumType(_)
             | ExpressionKind::AttachImplementation { .. }
             | ExpressionKind::FunctionType { .. }
