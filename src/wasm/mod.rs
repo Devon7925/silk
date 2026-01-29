@@ -287,18 +287,15 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<Vec<u8>, Dia
                     IntermediateKind::Loop { body } => {
                         stack.push(*body);
                     }
-                    IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
-                        left,
-                        right,
-                        _,
-                    )) => {
+                    IntermediateKind::IntrinsicOperation(
+                        IntermediateIntrinsicOperation::Binary(left, right, _),
+                    ) => {
                         stack.push(*left);
                         stack.push(*right);
                     }
-                    IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(
-                        operand,
-                        _,
-                    )) => {
+                    IntermediateKind::IntrinsicOperation(
+                        IntermediateIntrinsicOperation::Unary(operand, _),
+                    ) => {
                         stack.push(*operand);
                     }
                     IntermediateKind::InlineAssembly { .. }
@@ -1275,13 +1272,13 @@ fn infer_type_basic(
                         .cloned()
                         .ok_or_else(|| {
                             let mut message = format!("Unknown identifier `{}`", identifier.name);
-                        if std::env::var("SILK_DEBUG_UNKNOWN_IDENTIFIER").is_ok() {
-                            let mut names = locals_types.keys().cloned().collect::<Vec<_>>();
-                            names.sort();
-                            message.push_str(&format!("\nLocals: {}", names.join(", ")));
-                        }
-                        Diagnostic::new(message).with_span(SourceSpan::default())
-                    })?;
+                            if std::env::var("SILK_DEBUG_UNKNOWN_IDENTIFIER").is_ok() {
+                                let mut names = locals_types.keys().cloned().collect::<Vec<_>>();
+                                names.sort();
+                                message.push_str(&format!("\nLocals: {}", names.join(", ")));
+                            }
+                            Diagnostic::new(message).with_span(SourceSpan::default())
+                        })?;
                     results.push(ty);
                 }
                 IntermediateKind::Assignment { target, expr: rhs } => {
@@ -1504,13 +1501,13 @@ fn infer_type_impl(
                         .cloned()
                         .ok_or_else(|| {
                             let mut message = format!("Unknown identifier `{}`", identifier.name);
-                        if std::env::var("SILK_DEBUG_UNKNOWN_IDENTIFIER").is_ok() {
-                            let mut names = locals_types.keys().cloned().collect::<Vec<_>>();
-                            names.sort();
-                            message.push_str(&format!("\nLocals: {}", names.join(", ")));
-                        }
-                        Diagnostic::new(message).with_span(SourceSpan::default())
-                    })?;
+                            if std::env::var("SILK_DEBUG_UNKNOWN_IDENTIFIER").is_ok() {
+                                let mut names = locals_types.keys().cloned().collect::<Vec<_>>();
+                                names.sort();
+                                message.push_str(&format!("\nLocals: {}", names.join(", ")));
+                            }
+                            Diagnostic::new(message).with_span(SourceSpan::default())
+                        })?;
                     results.push(ty);
                 }
                 IntermediateKind::Assignment { target, expr: rhs } => {
@@ -2314,9 +2311,7 @@ fn emit_expression(
                             if std::env::var("SILK_DEBUG_TYPE_MISMATCH").is_ok() {
                                 message.push_str(&format!("\nExpr: {expr:?}"));
                             }
-                            return Err(
-                                Diagnostic::new(message).with_span(SourceSpan::default()),
-                            );
+                            return Err(Diagnostic::new(message).with_span(SourceSpan::default()));
                         }
                         if let WasmType::Box { element } = &expr_type {
                             let box_info = resolve_box_expr(&expr, box_ctx, box_registry)?;
@@ -2413,8 +2408,10 @@ fn emit_expression(
                                 ))
                                 .with_span(SourceSpan::default())
                             })?;
-                        let target_type =
-                            locals_types.get(&identifier.unique).cloned().ok_or_else(|| {
+                        let target_type = locals_types
+                            .get(&identifier.unique)
+                            .cloned()
+                            .ok_or_else(|| {
                                 Diagnostic::new(format!(
                                     "Identifier `{}` is not a local variable or parameter",
                                     identifier.name
@@ -2563,8 +2560,7 @@ fn emit_expression(
                                             field_type = Some(ty.clone());
                                             break;
                                         }
-                                        offset = offset
-                                            .saturating_add(wasm_type_size(&ty) as i32);
+                                        offset = offset.saturating_add(wasm_type_size(&ty) as i32);
                                     }
                                     let field_type = field_type.ok_or_else(|| {
                                         Diagnostic::new(format!(
@@ -2590,11 +2586,9 @@ fn emit_expression(
                                             .with_span(SourceSpan::default())
                                         })?;
                                         let store_instr = match &field_type {
-                                            WasmType::U8 => Instruction::I32Store8(memarg(
-                                                0,
-                                                0,
-                                                memory_index,
-                                            )),
+                                            WasmType::U8 => {
+                                                Instruction::I32Store8(memarg(0, 0, memory_index))
+                                            }
                                             WasmType::I32 | WasmType::Box { .. } => {
                                                 Instruction::I32Store(memarg(0, 2, memory_index))
                                             }
@@ -2625,8 +2619,11 @@ fn emit_expression(
                                             )
                                             .with_span(SourceSpan::default())
                                         })?;
-                                        let store_fields =
-                                            collect_boxed_store_leaves(value.as_ref(), &field_type, offset)?;
+                                        let store_fields = collect_boxed_store_leaves(
+                                            value.as_ref(),
+                                            &field_type,
+                                            offset,
+                                        )?;
                                         tasks.push(EmitTask::Eval(full_target_expr));
                                         for (field_expr, field_type, field_offset) in
                                             store_fields.into_iter().rev()
@@ -2706,11 +2703,9 @@ fn emit_expression(
                                             .with_span(SourceSpan::default())
                                         })?;
                                         let store_instr = match &field_type {
-                                            WasmType::U8 => Instruction::I32Store8(memarg(
-                                                0,
-                                                0,
-                                                memory_index,
-                                            )),
+                                            WasmType::U8 => {
+                                                Instruction::I32Store8(memarg(0, 0, memory_index))
+                                            }
                                             WasmType::I32 | WasmType::Box { .. } => {
                                                 Instruction::I32Store(memarg(0, 2, memory_index))
                                             }

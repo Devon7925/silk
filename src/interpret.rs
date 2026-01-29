@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
     diagnostics::{Diagnostic, SourceSpan},
@@ -10,7 +12,6 @@ use crate::{
         Identifier, IntrinsicOperation, IntrinsicType, LValue, TargetLiteral,
         UnaryIntrinsicOperator,
     },
-    uniquify,
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreserveBehavior {
@@ -1059,8 +1060,68 @@ pub fn resolve_enum_type_expression(
     }
 }
 
+fn intrinsic_allows_chain(op: &BinaryIntrinsicOperator) -> bool {
+    matches!(op, BinaryIntrinsicOperator::BooleanAnd)
+}
+
+fn operator_allows_chain(
+    operator: &str,
+    left: &Expression,
+    context: &Context,
+    seen_ops: &mut HashSet<String>,
+) -> bool {
+    if !seen_ops.insert(operator.to_string()) {
+        return false;
+    }
+    let Ok(object_type) = get_type_of_expression(left, context) else {
+        return false;
+    };
+    let Ok((trait_prop, _)) = get_trait_prop_of_type(&object_type, operator, left.span(), context)
+    else {
+        return false;
+    };
+    expression_allows_chain(&trait_prop, context, seen_ops)
+}
+
+fn expression_allows_chain(
+    expr: &Expression,
+    context: &Context,
+    seen_ops: &mut HashSet<String>,
+) -> bool {
+    let mut stack = vec![expr];
+    while let Some(expr) = stack.pop() {
+        match &expr.kind {
+            ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(
+                _,
+                _,
+                BinaryIntrinsicOperator::BooleanAnd,
+            )) => {
+                return true;
+            }
+            ExpressionKind::Function { body, .. } => {
+                stack.push(body.as_ref());
+            }
+            ExpressionKind::Operation { operator, left, .. } => {
+                if operator_allows_chain(operator, left, context, seen_ops) {
+                    return true;
+                }
+            }
+            ExpressionKind::Identifier(identifier) => {
+                if let Some((BindingContext::Bound(value, _, _), _)) =
+                    context.get_identifier(identifier)
+                {
+                    stack.push(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 fn collect_bindings(expr: &Expression, context: &mut Context) -> Result<(), Diagnostic> {
     let mut stack = vec![expr];
+    let mut seen_ops = HashSet::new();
     while let Some(expr) = stack.pop() {
         match &expr.kind {
             ExpressionKind::Binding(binding) => {
@@ -1084,13 +1145,21 @@ fn collect_bindings(expr: &Expression, context: &mut Context) -> Result<(), Diag
                     )?;
                 }
             }
-            ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(
+            ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(left, right, op)) => {
+                if intrinsic_allows_chain(op) {
+                    stack.push(right.as_ref());
+                    stack.push(left.as_ref());
+                }
+            }
+            ExpressionKind::Operation {
+                operator,
                 left,
                 right,
-                BinaryIntrinsicOperator::BooleanAnd,
-            )) => {
-                stack.push(right.as_ref());
-                stack.push(left.as_ref());
+            } => {
+                if operator_allows_chain(operator, left, context, &mut seen_ops) {
+                    stack.push(right.as_ref());
+                    stack.push(left.as_ref());
+                }
             }
             _ => {}
         }
@@ -1102,6 +1171,7 @@ pub fn interpret_expression(
     expr: Expression,
     context: &mut Context,
 ) -> Result<Expression, Diagnostic> {
+    let expr = uniquify_expression(expr, context);
     enum Frame {
         Eval(Expression),
         PatternStart(BindingPattern),
@@ -3962,10 +4032,9 @@ pub(crate) fn get_type_of_expression(
         }
     }
 
-    let result =
-        results
-            .pop()
-            .ok_or_else(|| diagnostic("Failed to determine expression type", expr.span()))?;
+    let result = results
+        .pop()
+        .ok_or_else(|| diagnostic("Failed to determine expression type", expr.span()))?;
     if expr.type_cache.borrow().is_none() {
         *expr.type_cache.borrow_mut() = Some(Rc::new(result.clone()));
     }
@@ -7720,7 +7789,6 @@ fn add_builtin_library(context: &mut Context) {
         remaining.trim().is_empty(),
         "Parser did not consume entire builtin library"
     );
-    let expression = uniquify::uniquify_program(expression);
     context.bindings.push(HashMap::new());
     interpret_library_expression(expression, context).expect("Failed to interpret builtin library");
     alias_builtin_bindings(context);
@@ -7772,8 +7840,6 @@ pub fn evaluate_text_to_raw_expression(program: &str) -> Result<(Expression, Con
         remaining.trim().is_empty(),
         "Parser did not consume entire input, remaining: {remaining:?}"
     );
-
-    let expression = uniquify::uniquify_program(expression);
     let mut context = intrinsic_context();
     interpret_program(expression, &mut context)
 }
@@ -7784,8 +7850,6 @@ pub fn evaluate_text_to_expression(program: &str) -> Result<(Expression, Context
         remaining.trim().is_empty(),
         "Parser did not consume entire input, remaining: {remaining:?}"
     );
-
-    let expression = uniquify::uniquify_program(expression);
     let mut context = intrinsic_context();
     let (mut value, context) = interpret_program(expression, &mut context)?;
 
@@ -8141,4 +8205,1425 @@ fn enum_rejects_value_payloads() {
         "unexpected error: {}",
         error.message
     );
+}
+
+#[test]
+fn let_chain_allows_custom_boolean_and_operator() {
+    let mut context = intrinsic_context();
+    let span = dummy_span();
+    let bool_type = intrinsic_type_expr(IntrinsicType::Boolean);
+    let self_pattern = BindingPattern::TypeHint(
+        Box::new(BindingPattern::Identifier(Identifier::new("self"), span)),
+        Box::new(bool_type.clone()),
+        span,
+    );
+    let other_pattern = BindingPattern::TypeHint(
+        Box::new(BindingPattern::Identifier(Identifier::new("other"), span)),
+        Box::new(bool_type.clone()),
+        span,
+    );
+    let inner_body = ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(
+        Rc::new(identifier_expr("self")),
+        Rc::new(identifier_expr("other")),
+        BinaryIntrinsicOperator::BooleanAnd,
+    ))
+    .with_span(span);
+    let inner_function = ExpressionKind::Function {
+        parameter: other_pattern,
+        return_type: Some(Rc::new(bool_type.clone())),
+        body: Rc::new(inner_body),
+    }
+    .with_span(span);
+    let function_type = ExpressionKind::FunctionType {
+        parameter: Rc::new(bool_type.clone()),
+        return_type: Rc::new(bool_type.clone()),
+    }
+    .with_span(span);
+    let outer_function = ExpressionKind::Function {
+        parameter: self_pattern,
+        return_type: Some(Rc::new(function_type)),
+        body: Rc::new(inner_function),
+    }
+    .with_span(span);
+
+    let bool_identifier = Identifier::new("bool");
+    let (binding_ctx, _) = context
+        .get_mut_identifier(&bool_identifier)
+        .expect("bool binding should exist");
+    let BindingContext::Bound(value, _, _) = binding_ctx else {
+        panic!("bool binding should be a bound value");
+    };
+    let ExpressionKind::AttachImplementation {
+        type_expr,
+        implementation,
+    } = &value.kind
+    else {
+        panic!("bool binding should be an implementation attachment");
+    };
+    let ExpressionKind::Struct(fields) = &implementation.kind else {
+        panic!("bool implementation should be a struct");
+    };
+    let mut fields = fields.clone();
+    fields.push((Identifier::new("&&&"), outer_function));
+    *value = ExpressionKind::AttachImplementation {
+        type_expr: type_expr.clone(),
+        implementation: Rc::new(ExpressionKind::Struct(fields).with_span(span)),
+    }
+    .with_span(span);
+
+    let setup = "
+        Option := enum { Some = i32, None = {} };
+        foo := Option::Some(5);
+        ";
+    let (setup_expr, remaining) = crate::parsing::parse_block(setup).unwrap();
+    assert!(remaining.trim().is_empty());
+    interpret_program(setup_expr, &mut context).unwrap();
+
+    let (expr, remaining) =
+        crate::parsing::parse_block("(Option::Some(a) := foo) &&& a == 5").unwrap();
+    assert!(remaining.trim().is_empty());
+    let expr = match expr.kind {
+        ExpressionKind::Block(mut exprs) => exprs.pop().expect("missing expression"),
+        other => Expression::new(other, expr.span),
+    };
+    let uniquified = uniquify_expression(expr, &context);
+
+    let bound = fold_expression(&uniquified, HashSet::new(), &|expr, mut ids| {
+        if let ExpressionKind::Binding(binding) = &expr.kind {
+            collect_bound_identifiers_from_pattern(&binding.pattern, &mut ids);
+        }
+        ids
+    });
+    let binding_id = bound
+        .iter()
+        .find(|id| id.name == "a")
+        .cloned()
+        .expect("expected binding identifier");
+    let usage_id = identifiers_used(&uniquified)
+        .into_iter()
+        .find(|id| id.name == "a")
+        .expect("expected identifier usage");
+    assert_eq!(binding_id.unique, usage_id.unique);
+}
+
+#[derive(Default, Clone)]
+struct ScopeStack {
+    scopes: Vec<HashMap<String, Identifier>>,
+}
+
+impl ScopeStack {
+    fn from_context(context: &Context) -> Self {
+        let mut scopes = Vec::new();
+        for scope in &context.bindings {
+            let mut map = HashMap::new();
+            for (identifier, _) in scope {
+                if identifier.name != "_" {
+                    map.insert(identifier.name.clone(), identifier.clone());
+                }
+            }
+            scopes.push(map);
+        }
+        if scopes.is_empty() {
+            scopes.push(HashMap::new());
+        }
+        ScopeStack { scopes }
+    }
+
+    fn push(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+
+    fn insert(&mut self, name: String, identifier: Identifier) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name, identifier);
+        }
+    }
+
+    fn resolve(&self, identifier: &Identifier) -> Identifier {
+        for scope in self.scopes.iter().rev() {
+            if let Some(mapped) = scope.get(&identifier.name) {
+                return mapped.clone();
+            }
+        }
+        identifier.clone()
+    }
+}
+
+fn fresh_identifier(identifier: &Identifier) -> Identifier {
+    Identifier::with_unique(identifier.name.clone(), generate_uuid_like())
+}
+
+fn insert_bound_identifiers(scope: &mut ScopeStack, pattern: &BindingPattern) {
+    let mut stack = vec![pattern];
+    while let Some(pattern) = stack.pop() {
+        match pattern {
+            BindingPattern::Identifier(identifier, _) => {
+                if identifier.name != "_" {
+                    scope.insert(identifier.name.clone(), identifier.clone());
+                }
+            }
+            BindingPattern::Struct(items, _) => {
+                for (_, sub_pattern) in items.iter() {
+                    stack.push(sub_pattern);
+                }
+            }
+            BindingPattern::EnumVariant { payload, .. } => {
+                if let Some(payload) = payload {
+                    stack.push(payload);
+                }
+            }
+            BindingPattern::TypeHint(inner, _, _) => {
+                stack.push(inner);
+            }
+            BindingPattern::Annotated { pattern, .. } => {
+                stack.push(pattern);
+            }
+            BindingPattern::Literal(_, _) => {}
+        }
+    }
+}
+
+fn insert_bound_identifiers_from_expr(
+    scope: &mut ScopeStack,
+    expr: &Expression,
+    context: &Context,
+) {
+    let mut stack = vec![expr];
+    let mut seen_ops = HashSet::new();
+    while let Some(expr) = stack.pop() {
+        match &expr.kind {
+            ExpressionKind::Binding(binding) => {
+                insert_bound_identifiers(scope, &binding.pattern);
+            }
+            ExpressionKind::Operation {
+                operator,
+                left,
+                right,
+            } => {
+                if operator_allows_chain(operator, left, context, &mut seen_ops) {
+                    stack.push(right.as_ref());
+                    stack.push(left.as_ref());
+                }
+            }
+            ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(left, right, op)) => {
+                if intrinsic_allows_chain(op) {
+                    stack.push(right.as_ref());
+                    stack.push(left.as_ref());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn generate_uuid_like() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let count = COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let bits = timestamp ^ count;
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        (bits >> 96) as u32,
+        (bits >> 80) as u16,
+        (bits >> 64) as u16,
+        (bits >> 48) as u16,
+        bits as u64
+    )
+}
+
+enum Value {
+    Expr(Expression),
+    Pattern {
+        pattern: BindingPattern,
+        scope: ScopeStack,
+    },
+    LValue(LValue),
+    Annotations(Vec<Expression>),
+}
+
+enum Task {
+    Expr(Expression, ScopeStack),
+    Pattern(BindingPattern, ScopeStack),
+    LValue(LValue, ScopeStack),
+    Annotations(Vec<Expression>, ScopeStack),
+    ContinueBinaryLeft {
+        span: SourceSpan,
+        op: BinaryIntrinsicOperator,
+        right: Expression,
+        scope: ScopeStack,
+    },
+    ContinueOperationLeft {
+        span: SourceSpan,
+        operator: String,
+        right: Expression,
+        scope: ScopeStack,
+    },
+    BuildBinary {
+        span: SourceSpan,
+        op: BinaryIntrinsicOperator,
+    },
+    BuildUnary {
+        span: SourceSpan,
+        op: UnaryIntrinsicOperator,
+    },
+    BuildInlineAssembly {
+        span: SourceSpan,
+        target: TargetLiteral,
+    },
+    BuildEnumType {
+        span: SourceSpan,
+        ids: Vec<Identifier>,
+    },
+    BuildEnumValue {
+        span: SourceSpan,
+        variant: Identifier,
+        variant_index: usize,
+    },
+    BuildEnumConstructor {
+        span: SourceSpan,
+        variant: Identifier,
+        variant_index: usize,
+    },
+    BuildAttachImplementation {
+        span: SourceSpan,
+    },
+    BuildFunctionType {
+        span: SourceSpan,
+    },
+    BuildBoxType {
+        span: SourceSpan,
+    },
+    BuildStruct {
+        span: SourceSpan,
+        ids: Vec<Identifier>,
+    },
+    BuildArrayRepeat {
+        span: SourceSpan,
+    },
+    BuildOperation {
+        span: SourceSpan,
+        operator: String,
+    },
+    BuildAssignment {
+        span: SourceSpan,
+    },
+    BuildFunctionCall {
+        span: SourceSpan,
+    },
+    BuildArrayIndex {
+        span: SourceSpan,
+    },
+    BuildTypePropertyAccess {
+        span: SourceSpan,
+        property: String,
+    },
+    BuildDiverge {
+        span: SourceSpan,
+        divergance_type: DivergeExpressionType,
+    },
+    BuildLoop {
+        span: SourceSpan,
+    },
+    BuildLValueProperty {
+        span: SourceSpan,
+        property: String,
+    },
+    BuildLValueArrayIndex {
+        span: SourceSpan,
+    },
+    ContinueBlock {
+        span: SourceSpan,
+        expressions: Vec<Expression>,
+        index: usize,
+        scope: ScopeStack,
+        acc: Vec<Expression>,
+    },
+    ContinueFunctionParam {
+        span: SourceSpan,
+        return_type: Option<Rc<Expression>>,
+        body: Rc<Expression>,
+    },
+    ContinueFunctionReturnType {
+        span: SourceSpan,
+        body: Rc<Expression>,
+        parameter: BindingPattern,
+        scope: ScopeStack,
+    },
+    ContinueFunctionBody {
+        span: SourceSpan,
+        parameter: BindingPattern,
+        return_type: Option<Expression>,
+    },
+    ContinueBindingPattern {
+        span: SourceSpan,
+        expr: Expression,
+        expr_scope: ScopeStack,
+    },
+    ContinueBindingExpr {
+        span: SourceSpan,
+        pattern: BindingPattern,
+    },
+    ContinueMatchValue {
+        span: SourceSpan,
+        outer_scope: ScopeStack,
+        branches: std::vec::IntoIter<(BindingPattern, Expression)>,
+    },
+    ContinueMatchBranchPattern {
+        span: SourceSpan,
+        outer_scope: ScopeStack,
+        branches: std::vec::IntoIter<(BindingPattern, Expression)>,
+        value: Expression,
+        acc: Vec<(BindingPattern, Expression)>,
+        branch_expr: Expression,
+    },
+    ContinueMatchBranchExpr {
+        span: SourceSpan,
+        outer_scope: ScopeStack,
+        branches: std::vec::IntoIter<(BindingPattern, Expression)>,
+        value: Expression,
+        acc: Vec<(BindingPattern, Expression)>,
+        pattern: BindingPattern,
+    },
+    ContinueIfCondition {
+        span: SourceSpan,
+        then_branch: Rc<Expression>,
+        else_branch: Rc<Expression>,
+        then_scope: ScopeStack,
+        else_scope: ScopeStack,
+    },
+    ContinueIfThen {
+        span: SourceSpan,
+        condition: Expression,
+        else_branch: Rc<Expression>,
+        else_scope: ScopeStack,
+    },
+    ContinueIfElse {
+        span: SourceSpan,
+        condition: Expression,
+        then_expr: Expression,
+    },
+    ContinuePatternStructField {
+        span: SourceSpan,
+        iter: std::vec::IntoIter<(Identifier, BindingPattern)>,
+        acc: Vec<(Identifier, BindingPattern)>,
+        field_id: Identifier,
+    },
+    ContinuePatternEnumVariant {
+        span: SourceSpan,
+        variant: Identifier,
+        payload: Option<Box<BindingPattern>>,
+        scope: ScopeStack,
+    },
+    ContinuePatternEnumVariantPayload {
+        span: SourceSpan,
+        variant: Identifier,
+        enum_type: Expression,
+    },
+    ContinuePatternTypeHint {
+        span: SourceSpan,
+        ty: Rc<Expression>,
+    },
+    ContinuePatternTypeHintExpr {
+        span: SourceSpan,
+        inner: BindingPattern,
+        scope: ScopeStack,
+    },
+    ContinuePatternAnnotated {
+        span: SourceSpan,
+        pattern: Box<BindingPattern>,
+        scope: ScopeStack,
+    },
+    ContinuePatternAnnotatedPattern {
+        span: SourceSpan,
+        annotations: Vec<Expression>,
+    },
+    ContinueAnnotationsItem {
+        iter: std::vec::IntoIter<Expression>,
+        scope: ScopeStack,
+        acc: Vec<Expression>,
+    },
+}
+
+fn pop_expr(results: &mut Vec<Value>) -> Expression {
+    match results.pop() {
+        Some(Value::Expr(expr)) => expr,
+        _ => panic!("expected expression result"),
+    }
+}
+
+fn pop_pattern(results: &mut Vec<Value>) -> (BindingPattern, ScopeStack) {
+    match results.pop() {
+        Some(Value::Pattern { pattern, scope }) => (pattern, scope),
+        _ => panic!("expected pattern result"),
+    }
+}
+
+fn pop_lvalue(results: &mut Vec<Value>) -> LValue {
+    match results.pop() {
+        Some(Value::LValue(lvalue)) => lvalue,
+        _ => panic!("expected lvalue result"),
+    }
+}
+
+fn pop_annotations(results: &mut Vec<Value>) -> Vec<Expression> {
+    match results.pop() {
+        Some(Value::Annotations(annotations)) => annotations,
+        _ => panic!("expected annotations result"),
+    }
+}
+
+fn uniquify_expression_iter(expr: Expression, scopes: ScopeStack, context: &Context) -> Expression {
+    let mut tasks = Vec::new();
+    let mut results = Vec::new();
+    tasks.push(Task::Expr(expr, scopes));
+
+    while let Some(task) = tasks.pop() {
+        match task {
+            Task::Expr(expr, scope) => {
+                let span = expr.span;
+                match expr.kind {
+                    ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(
+                        left,
+                        right,
+                        op,
+                    )) => {
+                        tasks.push(Task::ContinueBinaryLeft {
+                            span,
+                            op,
+                            right: right.as_ref().clone(),
+                            scope: scope.clone(),
+                        });
+                        tasks.push(Task::Expr(left.as_ref().clone(), scope));
+                    }
+                    ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(operand, op)) => {
+                        tasks.push(Task::BuildUnary { span, op });
+                        tasks.push(Task::Expr(operand.as_ref().clone(), scope));
+                    }
+                    ExpressionKind::IntrinsicOperation(IntrinsicOperation::InlineAssembly {
+                        target,
+                        code,
+                    }) => {
+                        tasks.push(Task::BuildInlineAssembly { span, target });
+                        tasks.push(Task::Expr(code.as_ref().clone(), scope));
+                    }
+                    ExpressionKind::BoxType(inner) => {
+                        tasks.push(Task::BuildBoxType { span });
+                        tasks.push(Task::Expr(inner.as_ref().clone(), scope));
+                    }
+                    ExpressionKind::EnumType(variants) => {
+                        let ids = variants.iter().map(|(id, _)| id.clone()).collect();
+                        tasks.push(Task::BuildEnumType { span, ids });
+                        for (_, expr) in variants.into_iter().rev() {
+                            tasks.push(Task::Expr(expr, scope.clone()));
+                        }
+                    }
+                    ExpressionKind::Match { value, branches } => {
+                        let outer_scope = scope.clone();
+                        tasks.push(Task::ContinueMatchValue {
+                            span,
+                            outer_scope,
+                            branches: branches.into_iter(),
+                        });
+                        tasks.push(Task::Expr(value.as_ref().clone(), scope));
+                    }
+                    ExpressionKind::EnumValue {
+                        enum_type,
+                        variant,
+                        variant_index,
+                        payload,
+                    } => {
+                        tasks.push(Task::BuildEnumValue {
+                            span,
+                            variant,
+                            variant_index,
+                        });
+                        tasks.push(Task::Expr(payload.as_ref().clone(), scope.clone()));
+                        tasks.push(Task::Expr(enum_type.as_ref().clone(), scope));
+                    }
+                    ExpressionKind::EnumConstructor {
+                        enum_type,
+                        variant,
+                        variant_index,
+                        payload_type,
+                    } => {
+                        tasks.push(Task::BuildEnumConstructor {
+                            span,
+                            variant,
+                            variant_index,
+                        });
+                        tasks.push(Task::Expr(payload_type.as_ref().clone(), scope.clone()));
+                        tasks.push(Task::Expr(enum_type.as_ref().clone(), scope));
+                    }
+                    ExpressionKind::If {
+                        condition,
+                        then_branch,
+                        else_branch,
+                    } => {
+                        let mut then_scope = scope.clone();
+                        then_scope.push();
+                        let mut else_scope = scope.clone();
+                        else_scope.push();
+                        tasks.push(Task::ContinueIfCondition {
+                            span,
+                            then_branch,
+                            else_branch,
+                            then_scope,
+                            else_scope,
+                        });
+                        tasks.push(Task::Expr(condition.as_ref().clone(), scope));
+                    }
+                    ExpressionKind::AttachImplementation {
+                        type_expr,
+                        implementation,
+                    } => {
+                        tasks.push(Task::BuildAttachImplementation { span });
+                        tasks.push(Task::Expr(implementation.as_ref().clone(), scope.clone()));
+                        tasks.push(Task::Expr(type_expr.as_ref().clone(), scope));
+                    }
+                    ExpressionKind::Function {
+                        parameter,
+                        return_type,
+                        body,
+                    } => {
+                        let mut function_scope = scope.clone();
+                        function_scope.push();
+                        tasks.push(Task::ContinueFunctionParam {
+                            span,
+                            return_type,
+                            body,
+                        });
+                        tasks.push(Task::Pattern(parameter, function_scope));
+                    }
+                    ExpressionKind::FunctionType {
+                        parameter,
+                        return_type,
+                    } => {
+                        let mut function_type_scope = scope.clone();
+                        function_type_scope.push();
+                        tasks.push(Task::BuildFunctionType { span });
+                        tasks.push(Task::Expr(
+                            return_type.as_ref().clone(),
+                            function_type_scope.clone(),
+                        ));
+                        tasks.push(Task::Expr(parameter.as_ref().clone(), function_type_scope));
+                    }
+                    ExpressionKind::Struct(fields) => {
+                        let ids = fields.iter().map(|(id, _)| id.clone()).collect();
+                        tasks.push(Task::BuildStruct { span, ids });
+                        for (_, expr) in fields.into_iter().rev() {
+                            tasks.push(Task::Expr(expr, scope.clone()));
+                        }
+                    }
+                    ExpressionKind::ArrayRepeat { value, count } => {
+                        tasks.push(Task::BuildArrayRepeat { span });
+                        tasks.push(Task::Expr(count.as_ref().clone(), scope.clone()));
+                        tasks.push(Task::Expr(value.as_ref().clone(), scope));
+                    }
+                    ExpressionKind::IntrinsicType(ty) => {
+                        results.push(Value::Expr(
+                            ExpressionKind::IntrinsicType(ty).with_span(span),
+                        ));
+                    }
+                    ExpressionKind::Literal(literal) => {
+                        results.push(Value::Expr(
+                            ExpressionKind::Literal(literal).with_span(span),
+                        ));
+                    }
+                    ExpressionKind::Identifier(identifier) => {
+                        let resolved = scope.resolve(&identifier);
+                        results.push(Value::Expr(
+                            ExpressionKind::Identifier(resolved).with_span(span),
+                        ));
+                    }
+                    ExpressionKind::Operation {
+                        operator,
+                        left,
+                        right,
+                    } => {
+                        tasks.push(Task::ContinueOperationLeft {
+                            span,
+                            operator,
+                            right: right.as_ref().clone(),
+                            scope: scope.clone(),
+                        });
+                        tasks.push(Task::Expr(left.as_ref().clone(), scope));
+                    }
+                    ExpressionKind::Assignment { target, expr } => {
+                        tasks.push(Task::BuildAssignment { span });
+                        tasks.push(Task::Expr(expr.as_ref().clone(), scope.clone()));
+                        tasks.push(Task::LValue(target, scope));
+                    }
+                    ExpressionKind::FunctionCall { function, argument } => {
+                        tasks.push(Task::BuildFunctionCall { span });
+                        tasks.push(Task::Expr(argument.as_ref().clone(), scope.clone()));
+                        tasks.push(Task::Expr(function.as_ref().clone(), scope));
+                    }
+                    ExpressionKind::ArrayIndex { array, index } => {
+                        tasks.push(Task::BuildArrayIndex { span });
+                        tasks.push(Task::Expr(index.as_ref().clone(), scope.clone()));
+                        tasks.push(Task::Expr(array.as_ref().clone(), scope));
+                    }
+                    ExpressionKind::TypePropertyAccess { object, property } => {
+                        tasks.push(Task::BuildTypePropertyAccess { span, property });
+                        tasks.push(Task::Expr(object.as_ref().clone(), scope));
+                    }
+                    ExpressionKind::Binding(binding) => {
+                        let mut binding_scope = scope.clone();
+                        binding_scope.push();
+                        let Binding { pattern, expr } = (*binding).clone();
+                        tasks.push(Task::ContinueBindingPattern {
+                            span,
+                            expr,
+                            expr_scope: scope,
+                        });
+                        tasks.push(Task::Pattern(pattern, binding_scope));
+                    }
+                    ExpressionKind::Block(expressions) => {
+                        let mut block_scope = scope.clone();
+                        block_scope.push();
+                        if expressions.is_empty() {
+                            results.push(Value::Expr(Expression::new(
+                                ExpressionKind::Block(Vec::new()),
+                                span,
+                            )));
+                        } else {
+                            let first_expr = expressions[0].clone();
+                            tasks.push(Task::ContinueBlock {
+                                span,
+                                expressions,
+                                index: 0,
+                                scope: block_scope.clone(),
+                                acc: Vec::new(),
+                            });
+                            tasks.push(Task::Expr(first_expr, block_scope));
+                        }
+                    }
+                    ExpressionKind::Diverge {
+                        value,
+                        divergance_type,
+                    } => {
+                        tasks.push(Task::BuildDiverge {
+                            span,
+                            divergance_type,
+                        });
+                        tasks.push(Task::Expr(value.as_ref().clone(), scope));
+                    }
+                    ExpressionKind::Loop { body } => {
+                        let mut loop_scope = scope.clone();
+                        loop_scope.push();
+                        tasks.push(Task::BuildLoop { span });
+                        tasks.push(Task::Expr(body.as_ref().clone(), loop_scope));
+                    }
+                }
+            }
+            Task::Pattern(pattern, mut scope) => match pattern {
+                BindingPattern::Identifier(identifier, span) => {
+                    let fresh = fresh_identifier(&identifier);
+                    scope.insert(identifier.name, fresh.clone());
+                    results.push(Value::Pattern {
+                        pattern: BindingPattern::Identifier(fresh, span),
+                        scope,
+                    });
+                }
+                BindingPattern::Literal(_, _) => {
+                    results.push(Value::Pattern { pattern, scope });
+                }
+                BindingPattern::Struct(fields, span) => {
+                    let mut iter = fields.into_iter();
+                    if let Some((field_id, sub_pattern)) = iter.next() {
+                        let child_scope = scope.clone();
+                        tasks.push(Task::ContinuePatternStructField {
+                            span,
+                            iter,
+                            acc: Vec::new(),
+                            field_id,
+                        });
+                        tasks.push(Task::Pattern(sub_pattern, child_scope));
+                    } else {
+                        results.push(Value::Pattern {
+                            pattern: BindingPattern::Struct(Vec::new(), span),
+                            scope,
+                        });
+                    }
+                }
+                BindingPattern::EnumVariant {
+                    enum_type,
+                    variant,
+                    payload,
+                    span,
+                } => {
+                    let expr_scope = scope.clone();
+                    tasks.push(Task::ContinuePatternEnumVariant {
+                        span,
+                        variant,
+                        payload,
+                        scope,
+                    });
+                    tasks.push(Task::Expr(*enum_type, expr_scope));
+                }
+                BindingPattern::TypeHint(inner, ty, span) => {
+                    let inner_scope = scope.clone();
+                    tasks.push(Task::ContinuePatternTypeHint {
+                        span,
+                        ty: ty.into(),
+                    });
+                    tasks.push(Task::Pattern(*inner, inner_scope));
+                }
+                BindingPattern::Annotated {
+                    annotations,
+                    pattern,
+                    span,
+                } => {
+                    let annotations_scope = scope.clone();
+                    tasks.push(Task::ContinuePatternAnnotated {
+                        span,
+                        pattern,
+                        scope,
+                    });
+                    tasks.push(Task::Annotations(annotations, annotations_scope));
+                }
+            },
+            Task::LValue(lvalue, scope) => match lvalue {
+                LValue::Identifier(identifier, span) => {
+                    results.push(Value::LValue(LValue::Identifier(
+                        scope.resolve(&identifier),
+                        span,
+                    )));
+                }
+                LValue::TypePropertyAccess {
+                    object,
+                    property,
+                    span,
+                } => {
+                    tasks.push(Task::BuildLValueProperty { span, property });
+                    tasks.push(Task::LValue(*object, scope));
+                }
+                LValue::ArrayIndex { array, index, span } => {
+                    tasks.push(Task::BuildLValueArrayIndex { span });
+                    tasks.push(Task::Expr(*index, scope.clone()));
+                    tasks.push(Task::LValue(*array, scope));
+                }
+            },
+            Task::Annotations(annotations, scope) => {
+                let mut iter = annotations.into_iter();
+                if let Some(annotation) = iter.next() {
+                    tasks.push(Task::ContinueAnnotationsItem {
+                        iter,
+                        scope: scope.clone(),
+                        acc: Vec::new(),
+                    });
+                    tasks.push(Task::Expr(annotation, scope));
+                } else {
+                    results.push(Value::Annotations(Vec::new()));
+                }
+            }
+            Task::ContinueBinaryLeft {
+                span,
+                op,
+                right,
+                mut scope,
+            } => {
+                let left = pop_expr(&mut results);
+                if intrinsic_allows_chain(&op) {
+                    insert_bound_identifiers_from_expr(&mut scope, &left, context);
+                }
+                results.push(Value::Expr(left));
+                tasks.push(Task::BuildBinary { span, op });
+                tasks.push(Task::Expr(right, scope));
+            }
+            Task::ContinueOperationLeft {
+                span,
+                operator,
+                right,
+                mut scope,
+            } => {
+                let left = pop_expr(&mut results);
+                if operator_allows_chain(&operator, &left, context, &mut HashSet::new()) {
+                    insert_bound_identifiers_from_expr(&mut scope, &left, context);
+                }
+                results.push(Value::Expr(left));
+                tasks.push(Task::BuildOperation { span, operator });
+                tasks.push(Task::Expr(right, scope));
+            }
+            Task::BuildBinary { span, op } => {
+                let right = pop_expr(&mut results);
+                let left = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(
+                        Rc::new(left),
+                        Rc::new(right),
+                        op,
+                    ))
+                    .with_span(span),
+                ));
+            }
+            Task::BuildUnary { span, op } => {
+                let operand = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::IntrinsicOperation(IntrinsicOperation::Unary(
+                        Rc::new(operand),
+                        op,
+                    ))
+                    .with_span(span),
+                ));
+            }
+            Task::BuildInlineAssembly { span, target } => {
+                let code = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::IntrinsicOperation(IntrinsicOperation::InlineAssembly {
+                        target,
+                        code: Rc::new(code),
+                    })
+                    .with_span(span),
+                ));
+            }
+            Task::BuildEnumType { span, ids } => {
+                let mut fields = Vec::with_capacity(ids.len());
+                for id in ids.iter().rev() {
+                    let expr = pop_expr(&mut results);
+                    fields.push((id.clone(), expr));
+                }
+                fields.reverse();
+                results.push(Value::Expr(
+                    ExpressionKind::EnumType(fields).with_span(span),
+                ));
+            }
+            Task::BuildEnumValue {
+                span,
+                variant,
+                variant_index,
+            } => {
+                let payload = pop_expr(&mut results);
+                let enum_type = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::EnumValue {
+                        enum_type: Rc::new(enum_type),
+                        variant,
+                        variant_index,
+                        payload: Rc::new(payload),
+                    }
+                    .with_span(span),
+                ));
+            }
+            Task::BuildEnumConstructor {
+                span,
+                variant,
+                variant_index,
+            } => {
+                let payload_type = pop_expr(&mut results);
+                let enum_type = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::EnumConstructor {
+                        enum_type: Rc::new(enum_type),
+                        variant,
+                        variant_index,
+                        payload_type: Rc::new(payload_type),
+                    }
+                    .with_span(span),
+                ));
+            }
+            Task::BuildAttachImplementation { span } => {
+                let implementation = pop_expr(&mut results);
+                let type_expr = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::AttachImplementation {
+                        type_expr: Rc::new(type_expr),
+                        implementation: Rc::new(implementation),
+                    }
+                    .with_span(span),
+                ));
+            }
+            Task::BuildFunctionType { span } => {
+                let return_type = pop_expr(&mut results);
+                let parameter = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::FunctionType {
+                        parameter: Rc::new(parameter),
+                        return_type: Rc::new(return_type),
+                    }
+                    .with_span(span),
+                ));
+            }
+            Task::BuildBoxType { span } => {
+                let inner = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::BoxType(Rc::new(inner)).with_span(span),
+                ));
+            }
+            Task::BuildStruct { span, ids } => {
+                let mut fields = Vec::with_capacity(ids.len());
+                for id in ids.iter().rev() {
+                    let expr = pop_expr(&mut results);
+                    fields.push((id.clone(), expr));
+                }
+                fields.reverse();
+                results.push(Value::Expr(ExpressionKind::Struct(fields).with_span(span)));
+            }
+            Task::BuildArrayRepeat { span } => {
+                let count = pop_expr(&mut results);
+                let value = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::ArrayRepeat {
+                        value: Rc::new(value),
+                        count: Rc::new(count),
+                    }
+                    .with_span(span),
+                ));
+            }
+            Task::BuildOperation { span, operator } => {
+                let right = pop_expr(&mut results);
+                let left = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::Operation {
+                        operator,
+                        left: Rc::new(left),
+                        right: Rc::new(right),
+                    }
+                    .with_span(span),
+                ));
+            }
+            Task::BuildAssignment { span } => {
+                let expr = pop_expr(&mut results);
+                let target = pop_lvalue(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::Assignment {
+                        target,
+                        expr: Rc::new(expr),
+                    }
+                    .with_span(span),
+                ));
+            }
+            Task::BuildFunctionCall { span } => {
+                let argument = pop_expr(&mut results);
+                let function = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::FunctionCall {
+                        function: Rc::new(function),
+                        argument: Rc::new(argument),
+                    }
+                    .with_span(span),
+                ));
+            }
+            Task::BuildArrayIndex { span } => {
+                let index = pop_expr(&mut results);
+                let array = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::ArrayIndex {
+                        array: Rc::new(array),
+                        index: Rc::new(index),
+                    }
+                    .with_span(span),
+                ));
+            }
+            Task::BuildTypePropertyAccess { span, property } => {
+                let object = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::TypePropertyAccess {
+                        object: Rc::new(object),
+                        property,
+                    }
+                    .with_span(span),
+                ));
+            }
+            Task::BuildDiverge {
+                span,
+                divergance_type,
+            } => {
+                let value = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::Diverge {
+                        value: Rc::new(value),
+                        divergance_type,
+                    }
+                    .with_span(span),
+                ));
+            }
+            Task::BuildLoop { span } => {
+                let body = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::Loop {
+                        body: Rc::new(body),
+                    }
+                    .with_span(span),
+                ));
+            }
+            Task::BuildLValueProperty { span, property } => {
+                let object = pop_lvalue(&mut results);
+                results.push(Value::LValue(LValue::TypePropertyAccess {
+                    object: Box::new(object),
+                    property,
+                    span,
+                }));
+            }
+            Task::BuildLValueArrayIndex { span } => {
+                let index = pop_expr(&mut results);
+                let array = pop_lvalue(&mut results);
+                results.push(Value::LValue(LValue::ArrayIndex {
+                    array: Box::new(array),
+                    index: Box::new(index),
+                    span,
+                }));
+            }
+            Task::ContinueFunctionParam {
+                span,
+                return_type,
+                body,
+            } => {
+                let (parameter, scope) = pop_pattern(&mut results);
+                if let Some(return_type) = return_type {
+                    let return_scope = scope.clone();
+                    tasks.push(Task::ContinueFunctionReturnType {
+                        span,
+                        body,
+                        parameter,
+                        scope,
+                    });
+                    tasks.push(Task::Expr((*return_type).clone(), return_scope));
+                } else {
+                    tasks.push(Task::ContinueFunctionBody {
+                        span,
+                        parameter,
+                        return_type: None,
+                    });
+                    tasks.push(Task::Expr((*body).clone(), scope));
+                }
+            }
+            Task::ContinueFunctionReturnType {
+                span,
+                body,
+                parameter,
+                scope,
+            } => {
+                let return_type = pop_expr(&mut results);
+                tasks.push(Task::ContinueFunctionBody {
+                    span,
+                    parameter,
+                    return_type: Some(return_type),
+                });
+                tasks.push(Task::Expr((*body).clone(), scope));
+            }
+            Task::ContinueFunctionBody {
+                span,
+                parameter,
+                return_type,
+            } => {
+                let body = pop_expr(&mut results);
+                let return_type = return_type.map(Rc::new);
+                results.push(Value::Expr(
+                    ExpressionKind::Function {
+                        parameter,
+                        return_type,
+                        body: Rc::new(body),
+                    }
+                    .with_span(span),
+                ));
+            }
+            Task::ContinueBindingPattern {
+                span,
+                expr,
+                expr_scope,
+            } => {
+                let (pattern, _scope) = pop_pattern(&mut results);
+                tasks.push(Task::ContinueBindingExpr { span, pattern });
+                tasks.push(Task::Expr(expr, expr_scope));
+            }
+            Task::ContinueBindingExpr { span, pattern } => {
+                let expr = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::Binding(Rc::new(Binding { pattern, expr })).with_span(span),
+                ));
+            }
+            Task::ContinueBlock {
+                span,
+                expressions,
+                index,
+                mut scope,
+                mut acc,
+            } => {
+                let expr = pop_expr(&mut results);
+                if let ExpressionKind::Binding(binding) = &expr.kind {
+                    insert_bound_identifiers(&mut scope, &binding.pattern);
+                }
+                acc.push(expr);
+                let next_index = index + 1;
+                if next_index < expressions.len() {
+                    let next_expr = expressions[next_index].clone();
+                    tasks.push(Task::ContinueBlock {
+                        span,
+                        expressions,
+                        index: next_index,
+                        scope: scope.clone(),
+                        acc,
+                    });
+                    tasks.push(Task::Expr(next_expr, scope));
+                } else {
+                    results.push(Value::Expr(Expression::new(
+                        ExpressionKind::Block(acc),
+                        span,
+                    )));
+                }
+            }
+            Task::ContinueMatchValue {
+                span,
+                outer_scope,
+                mut branches,
+            } => {
+                let value = pop_expr(&mut results);
+                if let Some((pattern, branch_expr)) = branches.next() {
+                    let mut branch_scope = outer_scope.clone();
+                    branch_scope.push();
+                    tasks.push(Task::ContinueMatchBranchPattern {
+                        span,
+                        outer_scope,
+                        branches,
+                        value,
+                        acc: Vec::new(),
+                        branch_expr,
+                    });
+                    tasks.push(Task::Pattern(pattern, branch_scope));
+                } else {
+                    results.push(Value::Expr(Expression::new(
+                        ExpressionKind::Match {
+                            value: Rc::new(value),
+                            branches: Vec::new(),
+                        },
+                        span,
+                    )));
+                }
+            }
+            Task::ContinueMatchBranchPattern {
+                span,
+                outer_scope,
+                branches,
+                value,
+                acc,
+                branch_expr,
+            } => {
+                let (pattern, branch_scope) = pop_pattern(&mut results);
+                let expr_scope = branch_scope.clone();
+                tasks.push(Task::ContinueMatchBranchExpr {
+                    span,
+                    outer_scope,
+                    branches,
+                    value,
+                    acc,
+                    pattern,
+                });
+                tasks.push(Task::Expr(branch_expr, expr_scope));
+            }
+            Task::ContinueMatchBranchExpr {
+                span,
+                outer_scope,
+                mut branches,
+                value,
+                mut acc,
+                pattern,
+            } => {
+                let branch_expr = pop_expr(&mut results);
+                acc.push((pattern, branch_expr));
+                if let Some((pattern, branch_expr)) = branches.next() {
+                    let mut branch_scope = outer_scope.clone();
+                    branch_scope.push();
+                    tasks.push(Task::ContinueMatchBranchPattern {
+                        span,
+                        outer_scope,
+                        branches,
+                        value,
+                        acc,
+                        branch_expr,
+                    });
+                    tasks.push(Task::Pattern(pattern, branch_scope));
+                } else {
+                    results.push(Value::Expr(Expression::new(
+                        ExpressionKind::Match {
+                            value: Rc::new(value),
+                            branches: acc,
+                        },
+                        span,
+                    )));
+                }
+            }
+            Task::ContinueIfCondition {
+                span,
+                then_branch,
+                else_branch,
+                mut then_scope,
+                else_scope,
+            } => {
+                let condition = pop_expr(&mut results);
+                insert_bound_identifiers_from_expr(&mut then_scope, &condition, context);
+                tasks.push(Task::ContinueIfThen {
+                    span,
+                    condition,
+                    else_branch,
+                    else_scope,
+                });
+                tasks.push(Task::Expr((*then_branch).clone(), then_scope));
+            }
+            Task::ContinueIfThen {
+                span,
+                condition,
+                else_branch,
+                else_scope,
+            } => {
+                let then_expr = pop_expr(&mut results);
+                tasks.push(Task::ContinueIfElse {
+                    span,
+                    condition,
+                    then_expr,
+                });
+                tasks.push(Task::Expr((*else_branch).clone(), else_scope));
+            }
+            Task::ContinueIfElse {
+                span,
+                condition,
+                then_expr,
+            } => {
+                let else_expr = pop_expr(&mut results);
+                results.push(Value::Expr(
+                    ExpressionKind::If {
+                        condition: Rc::new(condition),
+                        then_branch: Rc::new(then_expr),
+                        else_branch: Rc::new(else_expr),
+                    }
+                    .with_span(span),
+                ));
+            }
+            Task::ContinuePatternStructField {
+                span,
+                mut iter,
+                mut acc,
+                field_id,
+            } => {
+                let (pattern, scope) = pop_pattern(&mut results);
+                acc.push((field_id, pattern));
+                if let Some((field_id, sub_pattern)) = iter.next() {
+                    let child_scope = scope.clone();
+                    tasks.push(Task::ContinuePatternStructField {
+                        span,
+                        iter,
+                        acc,
+                        field_id,
+                    });
+                    tasks.push(Task::Pattern(sub_pattern, child_scope));
+                } else {
+                    results.push(Value::Pattern {
+                        pattern: BindingPattern::Struct(acc, span),
+                        scope,
+                    });
+                }
+            }
+            Task::ContinuePatternEnumVariant {
+                span,
+                variant,
+                payload,
+                scope,
+            } => {
+                let enum_type = pop_expr(&mut results);
+                if let Some(payload) = payload {
+                    let payload_scope = scope.clone();
+                    tasks.push(Task::ContinuePatternEnumVariantPayload {
+                        span,
+                        variant,
+                        enum_type,
+                    });
+                    tasks.push(Task::Pattern(*payload, payload_scope));
+                } else {
+                    results.push(Value::Pattern {
+                        pattern: BindingPattern::EnumVariant {
+                            enum_type: Box::new(enum_type),
+                            variant,
+                            payload: None,
+                            span,
+                        },
+                        scope,
+                    });
+                }
+            }
+            Task::ContinuePatternEnumVariantPayload {
+                span,
+                variant,
+                enum_type,
+            } => {
+                let (payload, scope) = pop_pattern(&mut results);
+                results.push(Value::Pattern {
+                    pattern: BindingPattern::EnumVariant {
+                        enum_type: Box::new(enum_type),
+                        variant,
+                        payload: Some(Box::new(payload)),
+                        span,
+                    },
+                    scope,
+                });
+            }
+            Task::ContinuePatternTypeHint { span, ty } => {
+                let (inner, scope) = pop_pattern(&mut results);
+                tasks.push(Task::ContinuePatternTypeHintExpr {
+                    span,
+                    inner,
+                    scope: scope.clone(),
+                });
+                tasks.push(Task::Expr((*ty).clone(), scope));
+            }
+            Task::ContinuePatternTypeHintExpr { span, inner, scope } => {
+                let ty = pop_expr(&mut results);
+                results.push(Value::Pattern {
+                    pattern: BindingPattern::TypeHint(Box::new(inner), Box::new(ty), span),
+                    scope,
+                });
+            }
+            Task::ContinuePatternAnnotated {
+                span,
+                pattern,
+                scope,
+            } => {
+                let annotations = pop_annotations(&mut results);
+                let pattern_scope = scope.clone();
+                tasks.push(Task::ContinuePatternAnnotatedPattern { span, annotations });
+                tasks.push(Task::Pattern(*pattern, pattern_scope));
+            }
+            Task::ContinuePatternAnnotatedPattern { span, annotations } => {
+                let (pattern, scope) = pop_pattern(&mut results);
+                results.push(Value::Pattern {
+                    pattern: BindingPattern::Annotated {
+                        annotations,
+                        pattern: Box::new(pattern),
+                        span,
+                    },
+                    scope,
+                });
+            }
+            Task::ContinueAnnotationsItem {
+                mut iter,
+                scope,
+                mut acc,
+            } => {
+                let expr = pop_expr(&mut results);
+                acc.push(expr);
+                if let Some(annotation) = iter.next() {
+                    tasks.push(Task::ContinueAnnotationsItem {
+                        iter,
+                        scope: scope.clone(),
+                        acc,
+                    });
+                    tasks.push(Task::Expr(annotation, scope));
+                } else {
+                    results.push(Value::Annotations(acc));
+                }
+            }
+        }
+    }
+
+    match results.pop() {
+        Some(Value::Expr(expr)) => expr,
+        _ => panic!("expected final expression result"),
+    }
+}
+
+fn uniquify_expression(expr: Expression, context: &Context) -> Expression {
+    let scopes = ScopeStack::from_context(context);
+    uniquify_expression_iter(expr, scopes, context)
 }

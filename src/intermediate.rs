@@ -298,12 +298,10 @@ pub fn expression_to_intermediate(
                     },
                     ExpressionKind::Match { value, branches } => {
                         let match_value = (*value).clone();
-                        let match_value_type = interpret::get_type_of_expression(
-                            &match_value,
-                            &builder.enum_context,
-                        )
-                        .map(|ty| builder.type_expr_to_intermediate(&ty))
-                        .unwrap_or_else(|_| builder.expression_value_type(&match_value));
+                        let match_value_type =
+                            interpret::get_type_of_expression(&match_value, &builder.enum_context)
+                                .map(|ty| builder.type_expr_to_intermediate(&ty))
+                                .unwrap_or_else(|_| builder.expression_value_type(&match_value));
                         let temp_identifier = builder.next_match_temp_identifier();
                         let branch_patterns = branches
                             .iter()
@@ -358,8 +356,7 @@ pub fn expression_to_intermediate(
                         }
                         let count_usize = count as usize;
                         let element_type = builder.expression_value_type(value.as_ref());
-                        let field_names =
-                            (0..count_usize).map(|index| index.to_string()).collect();
+                        let field_names = (0..count_usize).map(|index| index.to_string()).collect();
                         stack.push(Frame::FinishArrayRepeat {
                             count: count_usize,
                             element_type,
@@ -500,9 +497,9 @@ pub fn expression_to_intermediate(
                             if let Some((_, payload_type_expr)) =
                                 enum_variant_info(&enum_type, variant)
                             {
-                                payload
-                                    .as_ref()
-                                    .map(|payload_pattern| (payload_pattern.clone(), payload_type_expr))
+                                payload.as_ref().map(|payload_pattern| {
+                                    (payload_pattern.clone(), payload_type_expr)
+                                })
                             } else {
                                 None
                             }
@@ -961,8 +958,7 @@ impl IntermediateBuilder {
 
         if let Some((binding, _)) = self.enum_context.get_identifier(identifier) {
             if let Some(expr) = resolve_from_binding(binding) {
-                if std::env::var("SILK_DEBUG_TYPE_ALIAS").is_ok()
-                    && identifier.name == "StringRef"
+                if std::env::var("SILK_DEBUG_TYPE_ALIAS").is_ok() && identifier.name == "StringRef"
                 {
                     eprintln!("resolve_type_binding: StringRef via get_identifier");
                 }
@@ -1039,11 +1035,8 @@ impl IntermediateBuilder {
 
             if !is_function {
                 if !export_targets.is_empty() {
-                    let index = self.register_global(
-                        identifier.clone(),
-                        value.clone(),
-                        bound_type.clone(),
-                    );
+                    let index =
+                        self.register_global(identifier.clone(), value.clone(), bound_type.clone());
                     for target in export_targets {
                         self.exports.push(IntermediateExport {
                             target,
@@ -1254,7 +1247,9 @@ impl IntermediateBuilder {
                         homogeneous = false;
                     }
 
-                    if let Some(first) = first_type && homogeneous {
+                    if let Some(first) = first_type
+                        && homogeneous
+                    {
                         let array_field_names = normalize_field_names(field_names);
                         values.push(IntermediateType::Array {
                             element: Box::new(first),
@@ -1310,10 +1305,7 @@ impl IntermediateBuilder {
                             .map(|name| (name, (*element.clone())))
                             .collect(),
                         _ => {
-                            panic!(
-                                "Struct pattern used on non-struct type at {:?}",
-                                span
-                            )
+                            panic!("Struct pattern used on non-struct type at {:?}", span)
                         }
                     };
                     let field_count = fields.len();
@@ -1346,8 +1338,7 @@ impl IntermediateBuilder {
                         .unwrap_or(*enum_type.clone());
                     if let Some((_, payload_type_expr)) = enum_variant_info(&enum_type, &variant) {
                         if let Some(payload_pattern) = payload {
-                            let payload_type =
-                                self.type_expr_to_intermediate(&payload_type_expr);
+                            let payload_type = self.type_expr_to_intermediate(&payload_type_expr);
                             stack.push((*payload_pattern, payload_type));
                         }
                     }
@@ -1459,8 +1450,7 @@ impl IntermediateBuilder {
                             values.push(self.type_expr_to_intermediate(&ty_expr));
                             continue;
                         }
-                        if let ExpressionKind::EnumConstructor { enum_type, .. } = &function.kind
-                        {
+                        if let ExpressionKind::EnumConstructor { enum_type, .. } = &function.kind {
                             let enum_type = self
                                 .resolve_enum_type_expression(enum_type.as_ref())
                                 .unwrap_or(enum_type.as_ref().clone());
@@ -1490,9 +1480,7 @@ impl IntermediateBuilder {
                                 self.inline_bindings.get(identifier).cloned()
                             {
                                 if let ExpressionKind::Function {
-                                    return_type,
-                                    body,
-                                    ..
+                                    return_type, body, ..
                                 } = &inlined.kind
                                 {
                                     let ty = return_type
@@ -1505,17 +1493,13 @@ impl IntermediateBuilder {
                                 } else {
                                     values.push(IntermediateType::I32);
                                 }
-                            } else if let Some((
-                                BindingContext::Bound(value, _, bound_type),
-                                _,
-                            )) = self.enum_context.get_identifier(identifier).cloned()
+                            } else if let Some((BindingContext::Bound(value, _, bound_type), _)) =
+                                self.enum_context.get_identifier(identifier).cloned()
                             {
                                 if let Some(bound_type) = bound_type {
                                     values.push(self.type_expr_to_intermediate(&bound_type));
                                 } else if let ExpressionKind::Function {
-                                    return_type,
-                                    body,
-                                    ..
+                                    return_type, body, ..
                                 } = &value.kind
                                 {
                                     let ty = return_type
@@ -1670,7 +1654,9 @@ impl IntermediateBuilder {
                         homogeneous = false;
                     }
 
-                    if let Some(first) = first_type && homogeneous {
+                    if let Some(first) = first_type
+                        && homogeneous
+                    {
                         let array_field_names = normalize_field_names(field_names);
                         values.push(IntermediateType::Array {
                             element: Box::new(first),
@@ -1718,8 +1704,7 @@ impl IntermediateBuilder {
                     };
                     match object_type {
                         IntermediateType::Struct(fields) => {
-                            if let Some((_, ty)) =
-                                fields.iter().find(|(name, _)| name == &property)
+                            if let Some((_, ty)) = fields.iter().find(|(name, _)| name == &property)
                             {
                                 values.push(ty.clone());
                             } else {
@@ -1770,9 +1755,7 @@ impl IntermediateBuilder {
                     values.push(IntermediateType::I32);
                 }
                 Frame::FinishBlock { count, pop_scope } => {
-                    let last = values
-                        .pop()
-                        .unwrap_or_else(|| IntermediateType::I32);
+                    let last = values.pop().unwrap_or_else(|| IntermediateType::I32);
                     for _ in 1..count {
                         values.pop();
                     }
@@ -1846,8 +1829,7 @@ impl IntermediateBuilder {
                             continue;
                         }
                         let count_usize = count as usize;
-                        let field_names =
-                            (0..count_usize).map(|index| index.to_string()).collect();
+                        let field_names = (0..count_usize).map(|index| index.to_string()).collect();
                         stack.push(Frame::FinishArrayRepeat {
                             count: count_usize,
                             field_names,
@@ -1923,7 +1905,9 @@ impl IntermediateBuilder {
                         homogeneous = false;
                     }
 
-                    if let Some(first) = first_type && homogeneous {
+                    if let Some(first) = first_type
+                        && homogeneous
+                    {
                         let array_field_names = normalize_field_names(field_names);
                         values.push(IntermediateType::Array {
                             element: Box::new(first),
@@ -1939,9 +1923,7 @@ impl IntermediateBuilder {
                     }
                 }
                 Frame::FinishArrayRepeat { count, field_names } => {
-                    let element = values
-                        .pop()
-                        .unwrap_or_else(|| IntermediateType::I32);
+                    let element = values.pop().unwrap_or_else(|| IntermediateType::I32);
                     values.push(IntermediateType::Array {
                         element: Box::new(element),
                         length: count,
@@ -1959,7 +1941,10 @@ impl IntermediateBuilder {
                         .zip(variant_types.into_iter())
                         .collect();
                     if !is_tuple_field_names(
-                        &variant_pairs.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>(),
+                        &variant_pairs
+                            .iter()
+                            .map(|(name, _)| name.clone())
+                            .collect::<Vec<_>>(),
                     ) {
                         variant_pairs.sort_by(|a, b| a.0.cmp(&b.0));
                     }

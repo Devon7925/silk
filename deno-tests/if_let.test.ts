@@ -1,5 +1,5 @@
-import { assertEquals } from "@std/asserts";
-import { compileToInstance } from "./test_helpers.ts";
+import { assert, assertEquals, assertMatch } from "@std/asserts";
+import { compileToBase, compileToInstance } from "./test_helpers.ts";
 
 Deno.test("let as expression", async () => {
   const silkCode = `
@@ -105,4 +105,22 @@ Deno.test("if let with multiple unwraps", async () => {
     .exports as { check: (value: number) => number };
   assertEquals(exports.check(10), 10);
   assertEquals(exports.check(-10), 0);
+});
+
+Deno.test("let chain does not flow through ||", async () => {
+  const silkCode = `
+    Option := enum { Some = i32, None = {} };
+    (export wasm) check := (x: i32) => (
+        foo := Option::Some(x);
+        if (Option::Some(a) := foo) || a == 5 then (
+            1
+        ) else (
+            0
+        )
+    );
+    {}
+    `;
+  const result = await compileToBase(silkCode, "if_let_or_chain");
+  assert(result.code !== 0, "expected compilation failure");
+  assertMatch(result.stderr, /Unbound identifier: a/);
 });

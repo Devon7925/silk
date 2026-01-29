@@ -4,7 +4,6 @@ mod interpret;
 mod js;
 mod loader;
 pub mod parsing;
-mod uniquify;
 mod wasm;
 mod wgsl;
 

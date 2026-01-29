@@ -78,7 +78,9 @@ impl BoxRegistry {
         export_name: Option<String>,
     ) -> Result<BoxInfo, Diagnostic> {
         let bytes = encode_box_value(value, element_type).map_err(|err| {
-            let name = export_name.clone().unwrap_or_else(|| "<anonymous>".to_string());
+            let name = export_name
+                .clone()
+                .unwrap_or_else(|| "<anonymous>".to_string());
             Diagnostic {
                 message: format!("Box allocation for `{}` failed: {}", name, err.message),
                 span: err.span,
@@ -329,7 +331,9 @@ fn encode_box_value_with_path(
         IntermediateType::Struct(fields) => {
             let items = match value {
                 IntermediateKind::Struct(items) => items.clone(),
-                IntermediateKind::ArrayLiteral { items, field_names, .. } => {
+                IntermediateKind::ArrayLiteral {
+                    items, field_names, ..
+                } => {
                     if items.len() != field_names.len() {
                         return Err(Diagnostic::new(
                             "Box allocation requires a struct value".to_string(),

@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use crate::{
     diagnostics::{Diagnostic, SourceSpan},
     parsing::{self, Expression},
-    uniquify,
 };
 
 pub(crate) fn normalize_path(path: &str) -> String {
@@ -21,7 +20,7 @@ pub(crate) fn build_parsed_files(
     for (path, source) in files {
         let normalized = normalize_path(path);
         let parsed = parse_source_block(source)?;
-        map.insert(normalized, uniquify::uniquify_program(parsed));
+        map.insert(normalized, parsed);
     }
     Ok(map)
 }
