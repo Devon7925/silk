@@ -1126,24 +1126,12 @@ fn collect_bindings(expr: &Expression, context: &mut Context) -> Result<(), Diag
         match &expr.kind {
             ExpressionKind::Binding(binding) => {
                 let value_type = get_type_of_expression(&binding.expr, context).ok();
-
-                if let Some(value_type) = value_type {
-                    bind_pattern_blanks(
-                        binding.pattern.clone(),
-                        context,
-                        Vec::new(),
-                        Some(value_type),
-                    )?;
-                } else {
-                    let _ = bind_pattern_from_value(
-                        binding.pattern.clone(),
-                        &binding.expr,
-                        context,
-                        Vec::new(),
-                        PreserveBehavior::Inline,
-                        None,
-                    )?;
-                }
+                bind_pattern_blanks(
+                    binding.pattern.clone(),
+                    context,
+                    Vec::new(),
+                    value_type,
+                )?;
             }
             ExpressionKind::IntrinsicOperation(IntrinsicOperation::Binary(left, right, op)) => {
                 if intrinsic_allows_chain(op) {
@@ -1166,6 +1154,7 @@ fn collect_bindings(expr: &Expression, context: &mut Context) -> Result<(), Diag
     }
     Ok(())
 }
+
 
 pub fn interpret_expression(
     expr: Expression,

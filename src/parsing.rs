@@ -132,21 +132,9 @@ fn collect_identifiers_from_expression(expr: &Expression, out: &mut HashSet<Iden
                 stack.push(enum_type.as_ref());
             }
             ExpressionKind::FunctionType {
-                parameter,
-                return_type,
                 ..
-            } => {
-                stack.push(return_type.as_ref());
-                stack.push(parameter.as_ref());
-            }
-            ExpressionKind::Function {
-                return_type, body, ..
-            } => {
-                stack.push(body.as_ref());
-                if let Some(ret_type) = return_type {
-                    stack.push(ret_type.as_ref());
-                }
-            }
+            } => {}
+            ExpressionKind::Function { .. } => {}
             ExpressionKind::AttachImplementation {
                 type_expr,
                 implementation,
