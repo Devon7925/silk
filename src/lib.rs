@@ -7,6 +7,9 @@ pub mod parsing;
 mod wasm;
 mod wgsl;
 
+#[cfg(test)]
+mod wasm_parsing_tests;
+
 pub mod test_support {
     pub use crate::intermediate::{IntermediateResult, context_to_intermediate};
     pub use crate::interpret::{

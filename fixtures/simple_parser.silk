@@ -1495,6 +1495,38 @@ parse_block := (ignored: i32) => (
     ) else -1
 );
 
+(export wasm) get_binding_pattern_span_start := (idx: i32) => (
+    if NodeKind::Binding(binding) := nodes(idx).kind then (
+        if BindingPattern::Identifier(info) := binding.pattern then info.span.start else (
+            if BindingPattern::Literal(info) := binding.pattern then info.span.start else (
+                if BindingPattern::Struct(info) := binding.pattern then info.span.start else (
+                    if BindingPattern::EnumVariant(info) := binding.pattern then info.span.start else (
+                        if BindingPattern::TypeHint(info) := binding.pattern then info.span.start else (
+                            if BindingPattern::Annotated(info) := binding.pattern then info.span.start else -1
+                        )
+                    )
+                )
+            )
+        )
+    ) else -1
+);
+
+(export wasm) get_binding_pattern_span_length := (idx: i32) => (
+    if NodeKind::Binding(binding) := nodes(idx).kind then (
+        if BindingPattern::Identifier(info) := binding.pattern then info.span.length else (
+            if BindingPattern::Literal(info) := binding.pattern then info.span.length else (
+                if BindingPattern::Struct(info) := binding.pattern then info.span.length else (
+                    if BindingPattern::EnumVariant(info) := binding.pattern then info.span.length else (
+                        if BindingPattern::TypeHint(info) := binding.pattern then info.span.length else (
+                            if BindingPattern::Annotated(info) := binding.pattern then info.span.length else 0
+                        )
+                    )
+                )
+            )
+        )
+    ) else 0
+);
+
 (export wasm) get_binding_pattern_struct_fields := (idx: i32) => (
     if NodeKind::Binding(binding) := nodes(idx).kind then (
         if BindingPattern::Struct(info) := binding.pattern then info.fields else -1
@@ -1609,6 +1641,10 @@ parse_block := (ignored: i32) => (
     ) else -1
 );
 
+(export wasm) get_assignment_expr := (idx: i32) => (
+    if NodeKind::Assignment(info) := nodes(idx).kind then info.expr else -1
+);
+
 (export wasm) get_assignment_target_identifier_start := (idx: i32) => (
     if NodeKind::Assignment(info) := nodes(idx).kind then (
         if LValue::Identifier(value) := info.target then value.name.name.start else -1
@@ -1651,6 +1687,104 @@ parse_block := (ignored: i32) => (
             )
         )
     ) else -1
+);
+
+(export wasm) get_function_param_pattern_span_start := (idx: i32) => (
+    if NodeKind::Function(info) := nodes(idx).kind then (
+        if BindingPattern::Identifier(pattern) := info.parameter then pattern.span.start else (
+            if BindingPattern::Literal(pattern) := info.parameter then pattern.span.start else (
+                if BindingPattern::Struct(pattern) := info.parameter then pattern.span.start else (
+                    if BindingPattern::EnumVariant(pattern) := info.parameter then pattern.span.start else (
+                        if BindingPattern::TypeHint(pattern) := info.parameter then pattern.span.start else (
+                            if BindingPattern::Annotated(pattern) := info.parameter then pattern.span.start else -1
+                        )
+                    )
+                )
+            )
+        )
+    ) else -1
+);
+
+(export wasm) get_function_param_pattern_span_length := (idx: i32) => (
+    if NodeKind::Function(info) := nodes(idx).kind then (
+        if BindingPattern::Identifier(pattern) := info.parameter then pattern.span.length else (
+            if BindingPattern::Literal(pattern) := info.parameter then pattern.span.length else (
+                if BindingPattern::Struct(pattern) := info.parameter then pattern.span.length else (
+                    if BindingPattern::EnumVariant(pattern) := info.parameter then pattern.span.length else (
+                        if BindingPattern::TypeHint(pattern) := info.parameter then pattern.span.length else (
+                            if BindingPattern::Annotated(pattern) := info.parameter then pattern.span.length else 0
+                        )
+                    )
+                )
+            )
+        )
+    ) else 0
+);
+
+(export wasm) get_function_param_pattern_struct_fields := (idx: i32) => (
+    if NodeKind::Function(info) := nodes(idx).kind then (
+        if BindingPattern::Struct(pattern) := info.parameter then pattern.fields else -1
+    ) else -1
+);
+
+(export wasm) get_function_param_pattern_typehint_pattern := (idx: i32) => (
+    if NodeKind::Function(info) := nodes(idx).kind then (
+        if BindingPattern::TypeHint(pattern) := info.parameter then pattern.pattern else -1
+    ) else -1
+);
+
+(export wasm) get_function_param_pattern_typehint_type := (idx: i32) => (
+    if NodeKind::Function(info) := nodes(idx).kind then (
+        if BindingPattern::TypeHint(pattern) := info.parameter then pattern.type_expr else -1
+    ) else -1
+);
+
+(export wasm) get_function_param_pattern_annotations := (idx: i32) => (
+    if NodeKind::Function(info) := nodes(idx).kind then (
+        if BindingPattern::Annotated(pattern) := info.parameter then pattern.annotations else -1
+    ) else -1
+);
+
+(export wasm) get_function_param_pattern_annotated_pattern := (idx: i32) => (
+    if NodeKind::Function(info) := nodes(idx).kind then (
+        if BindingPattern::Annotated(pattern) := info.parameter then pattern.pattern else -1
+    ) else -1
+);
+
+(export wasm) get_function_param_pattern_enum_type := (idx: i32) => (
+    if NodeKind::Function(info) := nodes(idx).kind then (
+        if BindingPattern::EnumVariant(pattern) := info.parameter then pattern.enum_type else -1
+    ) else -1
+);
+
+(export wasm) get_function_param_pattern_enum_variant_start := (idx: i32) => (
+    if NodeKind::Function(info) := nodes(idx).kind then (
+        if BindingPattern::EnumVariant(pattern) := info.parameter then pattern.variant.name.start else -1
+    ) else -1
+);
+
+(export wasm) get_function_param_pattern_enum_variant_length := (idx: i32) => (
+    if NodeKind::Function(info) := nodes(idx).kind then (
+        if BindingPattern::EnumVariant(pattern) := info.parameter then pattern.variant.name.length else 0
+    ) else 0
+);
+
+(export wasm) get_function_param_pattern_enum_payload := (idx: i32) => (
+    if NodeKind::Function(info) := nodes(idx).kind then (
+        if BindingPattern::EnumVariant(pattern) := info.parameter then pattern.payload else -1
+    ) else -1
+);
+
+(export wasm) get_function_param_pattern_identifier_start := (idx: i32) => (
+    if NodeKind::Function(info) := nodes(idx).kind then (
+        if BindingPattern::Identifier(pattern) := info.parameter then pattern.name.name.start else -1
+    ) else -1
+);
+
+(export wasm) get_function_param_pattern_identifier_length := (idx: i32) => (
+    if NodeKind::Function(info) := nodes(idx).kind then (
+        if BindingPattern::Identifier(pattern) := info.parameter then pattern.name.name.length else 0
+    ) else 0
 );
 
 (export wasm) get_function_body := (idx: i32) => (

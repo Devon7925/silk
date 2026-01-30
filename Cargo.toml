@@ -6,4 +6,5 @@ edition = "2024"
 [dependencies]
 
 [dev-dependencies]
+wasmtime = "41.0.1"
 wasmparser = "0.215"
