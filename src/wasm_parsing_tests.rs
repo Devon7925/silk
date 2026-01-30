@@ -132,7 +132,18 @@ impl WasmParser {
     }
 
     fn span_string(&self, start: i32, length: i32) -> String {
-        let start = start.max(0) as usize;
+        if start < 0 {
+            return match start {
+                -2 => "mut".to_string(),
+                -3 => "Option".to_string(),
+                -4 => "Some".to_string(),
+                -5 => "iter_ty".to_string(),
+                -6 => "next".to_string(),
+                -7 => "__for_iter".to_string(),
+                _ => String::new(),
+            };
+        }
+        let start = start as usize;
         let length = length.max(0) as usize;
         let bytes = self.source.as_bytes();
         assert!(start + length <= bytes.len(), "span out of bounds");
@@ -153,11 +164,13 @@ impl WasmParser {
 
     fn parse_single_expression(&mut self, source: &str) -> Result<Expression, i32> {
         let block = self.parse_block(source)?;
-        let ExpressionKind::Block(items) = block.kind else {
-            panic!("expected block from wasm parser");
-        };
-        assert_eq!(items.len(), 1, "expected single expression");
-        Ok(items.into_iter().next().expect("single expression"))
+        match block.kind {
+            ExpressionKind::Block(items) => {
+                assert_eq!(items.len(), 1, "expected single expression");
+                Ok(items.into_iter().next().expect("single expression"))
+            }
+            _ => Ok(block),
+        }
     }
 
     fn expression_from_node(&mut self, idx: i32) -> Expression {
@@ -237,9 +250,13 @@ impl WasmParser {
                     let item = self.call2("get_block_item", idx, pos);
                     items.push(self.expression_from_node(item));
                 }
-                let block_span = if let (Some(first), Some(last)) = (items.first(), items.last()) {
-                    let start = first.span.start();
-                    let end = last.span.end();
+                let block_span = if let Some(first) = items.first() {
+                    let mut start = first.span.start();
+                    let mut end = first.span.end();
+                    for item in items.iter().skip(1) {
+                        start = start.min(item.span.start());
+                        end = end.max(item.span.end());
+                    }
                     SourceSpan::new(start, end.saturating_sub(start))
                 } else {
                     span
