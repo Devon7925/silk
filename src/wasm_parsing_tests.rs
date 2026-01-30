@@ -37,16 +37,16 @@ static WASM_BYTES: OnceLock<Vec<u8>> = OnceLock::new();
 static WASM_ENGINE: OnceLock<Engine> = OnceLock::new();
 static WASM_MODULE: OnceLock<Module> = OnceLock::new();
 
-fn load_simple_parser_wasm() -> &'static [u8] {
+fn load_silk_parser_wasm() -> &'static [u8] {
     WASM_BYTES.get_or_init(|| {
-        let path = "fixtures/simple_parser.silk";
-        let source = fs::read_to_string(path).expect("read simple_parser.silk");
+        let path = "silk_src/parser.silk";
+        let source = fs::read_to_string(path).expect("read parser.silk");
         let artifacts = crate::compile(vec![(path, source.as_str())], path)
             .unwrap_or_else(|err| panic!("{}", err.render_with_source(&source)));
         let CompilationArtifact { content, .. } = artifacts
             .into_iter()
             .find(|artifact| matches!(artifact.kind, ArtifactKind::Wasm))
-            .expect("expected wasm artifact for simple_parser.silk");
+            .expect("expected wasm artifact for parser.silk");
         content
     })
 }
@@ -62,8 +62,8 @@ fn wasm_engine() -> &'static Engine {
 
 fn wasm_module() -> &'static Module {
     WASM_MODULE.get_or_init(|| {
-        Module::new(wasm_engine(), load_simple_parser_wasm())
-            .expect("compile simple_parser.wasm")
+        Module::new(wasm_engine(), load_silk_parser_wasm())
+            .expect("compile parser.wasm")
     })
 }
 

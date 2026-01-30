@@ -3,7 +3,7 @@ import { join } from "@std/path";
 import { cleanup, compileToWasm, FIXTURES_DIR } from "./test_helpers.ts";
 
 const parserSource = await Deno.readTextFile(
-  join(FIXTURES_DIR, "simple_parser.silk"),
+  join(FIXTURES_DIR, "silk_src/parser.silk"),
 );
 
 const KIND_LITERAL = 13;
@@ -33,6 +33,31 @@ function writeInput(memory: WebAssembly.Memory, text: string) {
 function readSpan(memory: WebAssembly.Memory, start: number, length: number) {
   const bytes = new Uint8Array(memory.buffer.slice(start, start + length));
   return new TextDecoder().decode(bytes);
+}
+
+function getSingleExpression(exports: ParserExports, root: number) {
+  if (exports.get_kind_tag(root) === KIND_BLOCK) {
+    const count = exports.get_block_count(root);
+    if (count !== 1) {
+      throw new Error(`Expected single expression block, got ${count}`);
+    }
+    return exports.get_block_item(root, 0);
+  }
+  return root;
+}
+
+function getBlockExpression(exports: ParserExports, root: number) {
+  if (exports.get_kind_tag(root) === KIND_BLOCK) {
+    const count = exports.get_block_count(root);
+    if (count === 1) {
+      const inner = exports.get_block_item(root, 0);
+      if (exports.get_kind_tag(inner) === KIND_BLOCK) {
+        return inner;
+      }
+    }
+    return root;
+  }
+  throw new Error("Expected block expression");
 }
 
 type ParserExports = {
@@ -126,10 +151,7 @@ Deno.test("wasm parser: parses binary precedence", async () => {
     const root = exports.parse();
     assertEquals(exports.get_state_error(), -1);
 
-    assertEquals(exports.get_kind_tag(root), KIND_BLOCK);
-    assertEquals(exports.get_block_count(root), 1);
-
-    const exprNode = exports.get_block_item(root, 0);
+    const exprNode = getSingleExpression(exports, root);
     assertEquals(exports.get_kind_tag(exprNode), KIND_OPERATION);
     assertEquals(
       readSpan(
@@ -212,7 +234,7 @@ Deno.test("wasm parser: respects parentheses", async () => {
     const root = exports.parse();
     assertEquals(exports.get_state_error(), -1);
 
-    const exprNode = exports.get_block_item(root, 0);
+    const exprNode = getSingleExpression(exports, root);
     assertEquals(exports.get_kind_tag(exprNode), KIND_OPERATION);
     assertEquals(
       readSpan(
@@ -242,7 +264,7 @@ Deno.test("wasm parser: parses subtraction and division", async () => {
     const root = exports.parse();
     assertEquals(exports.get_state_error(), -1);
 
-    const exprNode = exports.get_block_item(root, 0);
+    const exprNode = getSingleExpression(exports, root);
     assertEquals(exports.get_kind_tag(exprNode), KIND_OPERATION);
     assertEquals(
       readSpan(
@@ -271,8 +293,8 @@ Deno.test("wasm parser: skips whitespace and comments", async () => {
     writeInput(exports.input, " 1 + 2 // comment\n +\t3");
     const root = exports.parse();
     assertEquals(exports.get_state_error(), -1);
-    assertEquals(exports.get_kind_tag(root), KIND_BLOCK);
-    assertEquals(exports.get_block_count(root), 1);
+    const exprNode = getSingleExpression(exports, root);
+    assertEquals(exports.get_kind_tag(exprNode), KIND_OPERATION);
   });
 });
 
@@ -281,7 +303,7 @@ Deno.test("wasm parser: parses negative numbers", async () => {
     writeInput(exports.input, "-5 + 2");
     const root = exports.parse();
     assertEquals(exports.get_state_error(), -1);
-    const exprNode = exports.get_block_item(root, 0);
+    const exprNode = getSingleExpression(exports, root);
     const leftNode = exports.get_operation_left(exprNode);
     assertEquals(exports.get_literal_number(leftNode), -5);
   });
@@ -311,7 +333,7 @@ Deno.test("wasm parser: supports multi-char operators", async () => {
     writeInput(exports.input, "1 <= 2 && 3 != 4");
     const root = exports.parse();
     assertEquals(exports.get_state_error(), -1);
-    const exprNode = exports.get_block_item(root, 0);
+    const exprNode = getSingleExpression(exports, root);
     assertEquals(exports.get_kind_tag(exprNode), KIND_OPERATION);
     assertEquals(
       readSpan(
@@ -376,7 +398,7 @@ Deno.test("wasm parser: parses function type expressions", async () => {
     writeInput(exports.input, "a -> b");
     const root = exports.parse();
     assertEquals(exports.get_state_error(), -1);
-    const exprNode = exports.get_block_item(root, 0);
+    const exprNode = getSingleExpression(exports, root);
     assertEquals(exports.get_kind_tag(exprNode), KIND_FUNCTION_TYPE);
   });
 });
@@ -386,7 +408,7 @@ Deno.test("wasm parser: desugars dot calls", async () => {
     writeInput(exports.input, "foo.bar baz");
     const root = exports.parse();
     assertEquals(exports.get_state_error(), -1);
-    const exprNode = exports.get_block_item(root, 0);
+    const exprNode = getSingleExpression(exports, root);
     assertEquals(exports.get_kind_tag(exprNode), KIND_FUNCTION_CALL);
     const inner = exports.get_function_call_function(exprNode);
     assertEquals(exports.get_kind_tag(inner), KIND_FUNCTION_CALL);
@@ -408,7 +430,7 @@ Deno.test("wasm parser: parses type property access", async () => {
     writeInput(exports.input, "foo::bar");
     const root = exports.parse();
     assertEquals(exports.get_state_error(), -1);
-    const exprNode = exports.get_block_item(root, 0);
+    const exprNode = getSingleExpression(exports, root);
     assertEquals(exports.get_kind_tag(exprNode), KIND_TYPE_PROPERTY);
     assertEquals(
       readSpan(
@@ -426,7 +448,7 @@ Deno.test("wasm parser: parses attach implementation", async () => {
     writeInput(exports.input, "Type @ Impl");
     const root = exports.parse();
     assertEquals(exports.get_state_error(), -1);
-    const exprNode = exports.get_block_item(root, 0);
+    const exprNode = getSingleExpression(exports, root);
     assertEquals(exports.get_kind_tag(exprNode), 8);
     assertEquals(exports.get_attach_type_expr(exprNode) !== -1, true);
     assertEquals(exports.get_attach_implementation(exprNode) !== -1, true);
@@ -438,7 +460,7 @@ Deno.test("wasm parser: parses if expressions", async () => {
     writeInput(exports.input, "if true then 1 else 2");
     const root = exports.parse();
     assertEquals(exports.get_state_error(), -1);
-    const exprNode = exports.get_block_item(root, 0);
+    const exprNode = getSingleExpression(exports, root);
     assertEquals(exports.get_kind_tag(exprNode), KIND_IF);
     const condition = exports.get_if_condition(exprNode);
     assertEquals(exports.get_literal_boolean(condition), 1);
@@ -464,7 +486,7 @@ Deno.test("wasm parser: parses for expressions into blocks", async () => {
     writeInput(exports.input, "for x in y do (x)");
     const root = exports.parse();
     assertEquals(exports.get_state_error(), -1);
-    const exprNode = exports.get_block_item(root, 0);
+    const exprNode = getBlockExpression(exports, root);
     assertEquals(exports.get_kind_tag(exprNode), KIND_BLOCK);
     assertEquals(exports.get_block_count(exprNode), 2);
   });

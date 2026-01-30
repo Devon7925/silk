@@ -7834,11 +7834,7 @@ pub fn evaluate_text_to_raw_expression(program: &str) -> Result<(Expression, Con
 }
 
 pub fn evaluate_text_to_expression(program: &str) -> Result<(Expression, Context), Diagnostic> {
-    let (expression, remaining) = crate::parsing::parse_block(program)?;
-    assert!(
-        remaining.trim().is_empty(),
-        "Parser did not consume entire input, remaining: {remaining:?}"
-    );
+    let expression = loader::parse_source_block(program)?;
     let mut context = intrinsic_context();
     let (mut value, context) = interpret_program(expression, &mut context)?;
 
