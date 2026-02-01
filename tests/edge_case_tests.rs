@@ -1,14 +1,11 @@
-use silk::parsing::{Expression, ExpressionKind, ExpressionLiteral, parse_block};
+use silk::parse_block;
+use silk::parsing::{Expression, ExpressionKind, ExpressionLiteral};
 use silk::test_support::{Context, interpret_program, intrinsic_context};
 
 fn evaluate_text_to_simplified_expression(
     program: &str,
 ) -> Result<(Expression, Context), silk::Diagnostic> {
-    let (expression, remaining) = parse_block(program).expect("Failed to parse program text");
-    assert!(
-        remaining.trim().is_empty(),
-        "Parser did not consume entire input, remaining: {remaining:?}"
-    );
+    let expression = parse_block(program).expect("Failed to parse program text");
 
     let mut context = intrinsic_context();
     interpret_program(expression, &mut context)
@@ -83,11 +80,7 @@ fn test_division_by_zero_errors() {
         (export wasm) div_zero := 1 / 0;
         {}
         ";
-    let (expression, remaining) = parse_block(program).expect("Failed to parse program text");
-    assert!(
-        remaining.trim().is_empty(),
-        "Parser did not consume entire input, remaining: {remaining:?}"
-    );
+    let expression = parse_block(program).expect("Failed to parse program text");
 
     let mut context = intrinsic_context();
     let result = interpret_program(expression, &mut context);
@@ -186,8 +179,7 @@ fn test_assignment_requires_mut_annotation() {
         counter = 2;
         ";
 
-    let (expression, remaining) = parse_block(program).expect("Failed to parse program text");
-    assert!(remaining.trim().is_empty());
+    let expression = parse_block(program).expect("Failed to parse program text");
 
     let mut context = intrinsic_context();
     let result = interpret_program(expression, &mut context);
@@ -208,8 +200,7 @@ fn test_assignment_respects_type_hints() {
         counter = true;
         ";
 
-    let (expression, remaining) = parse_block(program).expect("Failed to parse program text");
-    assert!(remaining.trim().is_empty());
+    let expression = parse_block(program).expect("Failed to parse program text");
 
     let mut context = intrinsic_context();
     let result = interpret_program(expression, &mut context);

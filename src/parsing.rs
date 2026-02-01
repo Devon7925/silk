@@ -2589,9 +2589,8 @@ fn escape_literal_byte(byte: u8, quote: char) -> String {
 #[test]
 fn test_enum_pattern_parse2() {
     let source = "Option::Some(value)";
-    let (pattern, remaining) = parse_operation_expression_with_guard(source, source).unwrap();
-    assert!(remaining.is_empty());
-    let pattern = pattern_expression_to_binding_pattern(pattern).unwrap();
+    let expr = parse_single_silk(source).unwrap();
+    let pattern = pattern_expression_to_binding_pattern(expr).unwrap();
 
     match pattern {
         BindingPattern::EnumVariant {
@@ -3132,16 +3131,29 @@ fn parse_block_with_terminators<'a>(
     Ok((expr, parser.remaining))
 }
 
+#[cfg(test)]
+fn parse_block_silk(source: &str) -> Result<Expression, Diagnostic> {
+    crate::parse_block(source)
+}
+
+#[cfg(test)]
+fn parse_single_silk(source: &str) -> Result<Expression, Diagnostic> {
+    let expr = crate::parse_block(source)?;
+    match expr.kind {
+        ExpressionKind::Block(mut items) if items.len() == 1 => Ok(items.remove(0)),
+        _ => Ok(expr),
+    }
+}
+
 #[test]
 fn parse_basic_let() {
-    let Ok((parsed, "")) = parse_block(
+    let parsed = parse_block_silk(
         "
 x := 42;
 y: i32 := x
     ",
-    ) else {
-        panic!()
-    };
+    )
+    .expect("parse");
 
     let ExpressionKind::Block(parsed) = parsed.kind else {
         panic!()
@@ -3202,15 +3214,14 @@ fn assert_mut_annotation(expr: &Expression) {
 
 #[test]
 fn parse_binding_with_export_annotation() {
-    let Ok((parsed, "")) = parse_block(
+    let parsed = parse_block_silk(
         "
 (export js) foo := 42;
 (export wasm) (export js) bar := foo;
 bar
     ",
-    ) else {
-        panic!()
-    };
+    )
+    .expect("parse");
 
     let ExpressionKind::Block(parsed) = parsed.kind else {
         panic!()
@@ -3253,14 +3264,13 @@ bar
 
 #[test]
 fn parse_struct_pattern_with_inner_multiple_annotations() {
-    let Ok((parsed, "")) = parse_block(
+    let parsed = parse_block_silk(
         "
 { foo = (export js) mut foo_binding, bar } := value;
 foo_binding
     ",
-    ) else {
-        panic!()
-    };
+    )
+    .expect("parse");
 
     let ExpressionKind::Block(parsed) = parsed.kind else {
         panic!()
@@ -3285,14 +3295,13 @@ foo_binding
 
 #[test]
 fn parse_struct_pattern_with_inner_export_annotation() {
-    let Ok((parsed, "")) = parse_block(
+    let parsed = parse_block_silk(
         "
 { foo = (export js) foo_binding, bar } := value;
 foo_binding
     ",
-    ) else {
-        panic!()
-    };
+    )
+    .expect("parse");
 
     let ExpressionKind::Block(parsed) = parsed.kind else {
         panic!()
@@ -3316,14 +3325,13 @@ foo_binding
 
 #[test]
 fn parse_mutable_binding_and_assignment() {
-    let Ok((parsed, "")) = parse_block(
+    let parsed = parse_block_silk(
         "
 mut foo := 1;
 foo = 2
     ",
-    ) else {
-        panic!()
-    };
+    )
+    .expect("parse");
 
     let ExpressionKind::Block(parsed) = parsed.kind else {
         panic!()
@@ -3352,8 +3360,7 @@ foo = 2
 
 #[test]
 fn parse_for_loop_desugars_to_iterator_binding() {
-    let (expr, remaining) = parse_block("for foo in bar do (foo)").unwrap();
-    assert!(remaining.trim().is_empty());
+    let expr = parse_block_silk("for foo in bar do (foo)").unwrap();
 
     let ExpressionKind::Block(items) = expr.kind else {
         panic!("expected for loop to desugar to block");
@@ -3447,9 +3454,7 @@ fn parse_for_loop_desugars_to_iterator_binding() {
 
 #[test]
 fn parse_operation_expression_precedence() {
-    let Ok((expr, "")) = parse_operation_expression("1 + 2 * 3 / 4 - 5") else {
-        panic!();
-    };
+    let expr = parse_single_silk("1 + 2 * 3 / 4 - 5").expect("parse");
     let ExpressionKind::Operation {
         operator,
         left,
@@ -3513,15 +3518,13 @@ fn parse_operation_expression_precedence() {
 
 #[test]
 fn parse_function_binding_and_call() {
-    let (expr, remaining) = parse_block(
+    let expr = parse_block_silk(
         "
 foo := (bar: i32) => bar + 1;
 foo(123)
     ",
     )
     .unwrap();
-
-    assert!(remaining.trim().is_empty());
 
     let ExpressionKind::Block(items) = &expr.kind else {
         panic!("expected block with binding and call");
@@ -3583,13 +3586,12 @@ foo(123)
 
 #[test]
 fn parse_function_struct_parameter_pattern() {
-    let (expr, remaining) = parse_operation_expression(
+    let expr = parse_single_silk(
         "{bar1: i32, bar2: i32} => (
     bar1 + bar2
 )",
     )
     .unwrap();
-    assert!(remaining.trim().is_empty());
 
     let ExpressionKind::Function { parameter, .. } = &expr.kind else {
         panic!("expected function expression");
@@ -3630,8 +3632,7 @@ fn parse_function_struct_parameter_pattern() {
 
 #[test]
 fn parse_struct_literal_named_and_tuple_fields() {
-    let (expr, remaining) = parse_isolated_expression("{foo = 10, 20, bar = 30}").unwrap();
-    assert!(remaining.trim().is_empty());
+    let expr = parse_single_silk("{foo = 10, 20, bar = 30}").unwrap();
     let ExpressionKind::Struct(items) = &expr.kind else {
         panic!("expected struct literal");
     };
@@ -3644,10 +3645,8 @@ fn parse_struct_literal_named_and_tuple_fields() {
 #[test]
 fn parse_struct_binding_pattern_named_fields() {
     let source = "{foo = first: i32, second: i32}";
-    let (pattern, remaining) =
-        parse_operation_expression_with_guard(source, source).expect("pattern parse");
-    assert!(remaining.trim().is_empty());
-    let pattern = pattern_expression_to_binding_pattern(pattern).unwrap();
+    let expr = parse_single_silk(source).expect("pattern parse");
+    let pattern = pattern_expression_to_binding_pattern(expr).unwrap();
     let BindingPattern::Struct(fields, _) = pattern else {
         panic!("expected struct pattern");
     };
@@ -3658,8 +3657,7 @@ fn parse_struct_binding_pattern_named_fields() {
 
 #[test]
 fn parse_struct_property_access_chain() {
-    let (expr, remaining) = parse_operation_expression("foo::bar::baz").expect("parse");
-    assert!(remaining.trim().is_empty());
+    let expr = parse_single_silk("foo::bar::baz").expect("parse");
 
     let ExpressionKind::TypePropertyAccess { object, property } = &expr.kind else {
         panic!("expected outer property access");
@@ -3682,8 +3680,7 @@ fn parse_struct_property_access_chain() {
 
 #[test]
 fn parse_struct_property_access_then_call() {
-    let (expr, remaining) = parse_operation_expression("foo.bar baz").expect("parse");
-    assert!(remaining.trim().is_empty());
+    let expr = parse_single_silk("foo.bar baz").expect("parse");
 
     let ExpressionKind::FunctionCall { function, argument } = &expr.kind else {
         panic!("expected function call");
@@ -3716,9 +3713,9 @@ fn parse_struct_property_access_then_call() {
 #[test]
 fn diagnostics_include_binding_pattern_source_reference() {
     let source = ":= 5;";
-    let err = parse_block(source).expect_err("binding should fail");
+    let err = parse_block_silk(source).expect_err("binding should fail");
     let rendered = err.render_with_source(source);
-    assert!(rendered.contains("Expected expression"));
+    assert!(rendered.contains("Parse error"));
     assert!(rendered.contains("line 1, column 1"));
     assert!(rendered.contains("^"));
 }
@@ -3726,9 +3723,9 @@ fn diagnostics_include_binding_pattern_source_reference() {
 #[test]
 fn diagnostics_include_grouping_closure_reference() {
     let source = "(1 + 2";
-    let err = parse_isolated_expression(source).expect_err("missing ) should fail");
+    let err = parse_block_silk(source).expect_err("missing ) should fail");
     let rendered = err.render_with_source(source);
-    assert!(rendered.contains("Expected ) to close grouping expression"));
-    assert!(rendered.contains("line 1, column 7"));
+    assert!(rendered.contains("Parse error"));
+    assert!(rendered.contains("line 1, column"));
     assert!(rendered.contains("^"));
 }

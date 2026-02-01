@@ -838,6 +838,9 @@ fn collect_types(
                 IntermediateKind::Loop { body } => {
                     stack.push((body, false));
                 }
+                IntermediateKind::Diverge { value, .. } => {
+                    stack.push((value, false));
+                }
                 IntermediateKind::TypePropertyAccess { object, .. } => {
                     stack.push((object, false));
                 }

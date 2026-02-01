@@ -1,9 +1,9 @@
-use silk::parsing::{BindingPattern, ExpressionKind, Identifier, parse_block};
+use silk::parse_block;
+use silk::parsing::{BindingPattern, ExpressionKind, Identifier};
 
 #[test]
 fn for_loop_desugars_with_identifier_iterator() {
-    let (expr, remaining) = parse_block("for item in iter do (item)").unwrap();
-    assert!(remaining.trim().is_empty());
+    let expr = parse_block("for item in iter do (item)").unwrap();
 
     let ExpressionKind::Block(items) = expr.kind else {
         panic!("expected block from for loop");
@@ -41,8 +41,7 @@ fn for_loop_desugars_with_identifier_iterator() {
 
 #[test]
 fn for_loop_parses_iterator_call_expression() {
-    let (expr, remaining) = parse_block("for value in make_range(3 + 1) do (value)").unwrap();
-    assert!(remaining.trim().is_empty());
+    let expr = parse_block("for value in make_range(3 + 1) do (value)").unwrap();
 
     let ExpressionKind::Block(items) = expr.kind else {
         panic!("expected block from for loop");

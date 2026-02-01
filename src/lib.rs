@@ -22,6 +22,10 @@ pub mod test_support {
 
 pub use diagnostics::{Diagnostic, SourceSpan};
 
+pub fn parse_block(source: &str) -> Result<parsing::Expression, Diagnostic> {
+    silk_parser::parse_block(source)
+}
+
 #[derive(Debug, Clone)]
 pub struct CompilationArtifact {
     pub name: String,

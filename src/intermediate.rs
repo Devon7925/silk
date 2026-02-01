@@ -298,15 +298,21 @@ pub fn expression_to_intermediate(
                     },
                     ExpressionKind::Match { value, branches } => {
                         let match_value = (*value).clone();
-                        let match_value_type =
-                            interpret::get_type_of_expression(&match_value, &builder.enum_context)
-                                .map(|ty| builder.type_expr_to_intermediate(&ty))
-                                .unwrap_or_else(|_| builder.expression_value_type(&match_value));
-                        let temp_identifier = builder.next_match_temp_identifier();
-                        let branch_patterns = branches
+                        let branch_patterns: Vec<BindingPattern> = branches
                             .iter()
                             .map(|(pattern, _)| pattern.clone())
                             .collect();
+                        let match_value_type = builder
+                            .infer_match_value_type_from_patterns(&branch_patterns)
+                            .unwrap_or_else(|| {
+                                interpret::get_type_of_expression(
+                                    &match_value,
+                                    &builder.enum_context,
+                                )
+                                .map(|ty| builder.type_expr_to_intermediate(&ty))
+                                .unwrap_or_else(|_| builder.expression_value_type(&match_value))
+                            });
+                        let temp_identifier = builder.next_match_temp_identifier();
                         stack.push(Frame::FinishMatch {
                             match_value_type,
                             temp_identifier,
@@ -1268,6 +1274,50 @@ impl IntermediateBuilder {
         }
 
         values.pop().unwrap_or(IntermediateType::I32)
+    }
+
+    fn infer_match_value_type_from_patterns(
+        &self,
+        patterns: &[BindingPattern],
+    ) -> Option<IntermediateType> {
+        fn infer_from_pattern(
+            builder: &IntermediateBuilder,
+            pattern: &BindingPattern,
+        ) -> Option<IntermediateType> {
+            match pattern {
+                BindingPattern::EnumVariant { enum_type, .. } => {
+                    Some(builder.type_expr_to_intermediate(enum_type))
+                }
+                BindingPattern::TypeHint(_, type_expr, _) => {
+                    Some(builder.type_expr_to_intermediate(type_expr))
+                }
+                BindingPattern::Struct(..) => Some(builder.binding_pattern_type(pattern)),
+                BindingPattern::Literal(literal, _) => match literal {
+                    ExpressionLiteral::Char(_) => Some(IntermediateType::U8),
+                    ExpressionLiteral::Number(_) | ExpressionLiteral::Boolean(_) => {
+                        Some(IntermediateType::I32)
+                    }
+                    _ => None,
+                },
+                BindingPattern::Annotated { pattern, .. } => infer_from_pattern(builder, pattern),
+                BindingPattern::Identifier(..) => None,
+            }
+        }
+
+        let mut inferred: Option<IntermediateType> = None;
+        for pattern in patterns {
+            let Some(candidate) = infer_from_pattern(self, pattern) else {
+                continue;
+            };
+            if let Some(existing) = inferred.as_ref() {
+                if existing != &candidate {
+                    return None;
+                }
+            } else {
+                inferred = Some(candidate);
+            }
+        }
+        inferred
     }
 
     fn collect_pattern_type_bindings(

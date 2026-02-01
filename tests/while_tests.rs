@@ -1,5 +1,5 @@
 use silk::{
-    parsing::parse_block,
+    parse_block,
     parsing::{ExpressionKind, ExpressionLiteral},
     test_support::{evaluate_text_to_expression, interpret_program, intrinsic_context},
 };
@@ -57,8 +57,7 @@ fn while_condition_must_be_boolean() {
         );
     ";
 
-    let (expression, remaining) = parse_block(program).expect("Failed to parse program text");
-    assert!(remaining.trim().is_empty());
+    let expression = parse_block(program).expect("Failed to parse program text");
 
     let mut context = intrinsic_context();
     match interpret_program(expression, &mut context) {

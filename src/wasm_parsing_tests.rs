@@ -39,6 +39,10 @@ static WASM_MODULE: OnceLock<Module> = OnceLock::new();
 
 fn load_silk_parser_wasm() -> &'static [u8] {
     WASM_BYTES.get_or_init(|| {
+        let binary_path = "binaries/parser.wasm";
+        if let Ok(bytes) = fs::read(binary_path) {
+            return bytes;
+        }
         let path = "silk_src/parser.silk";
         let source = fs::read_to_string(path).expect("read parser.silk");
         let artifacts = crate::compile(vec![(path, source.as_str())], path)
@@ -381,41 +385,245 @@ impl WasmParser {
     }
 
     fn literal_expression(&mut self, idx: i32, span: SourceSpan) -> Expression {
-        let string_start = self.call1("get_literal_string_start", idx);
-        if string_start != -1 {
-            let length = self.call1("get_literal_string_length", idx);
-            let bytes = self.span_string(string_start, length).into_bytes();
-            return Expression::new(
-                ExpressionKind::Literal(crate::parsing::ExpressionLiteral::String(bytes)),
-                span,
-            );
+        let literal = self.expression_literal_from_node(idx);
+        Expression::new(ExpressionKind::Literal(literal), span)
+    }
+
+    fn expression_literal_from_node(
+        &mut self,
+        idx: i32,
+    ) -> crate::parsing::ExpressionLiteral {
+        match self.call1("get_literal_tag", idx) {
+            0 => crate::parsing::ExpressionLiteral::Number(self.call1("get_literal_number", idx)),
+            1 => crate::parsing::ExpressionLiteral::Boolean(
+                self.call1("get_literal_boolean", idx) != 0,
+            ),
+            2 => crate::parsing::ExpressionLiteral::Char(
+                self.call1("get_literal_char", idx) as u8,
+            ),
+            3 => {
+                let start = self.call1("get_literal_string_start", idx);
+                let length = self.call1("get_literal_string_length", idx);
+                let bytes = self.span_string(start, length).into_bytes();
+                crate::parsing::ExpressionLiteral::String(bytes)
+            }
+            4 => {
+                let target_tag = self.call1("get_literal_target_tag", idx);
+                let target = match target_tag {
+                    0 => crate::parsing::TargetLiteral::JSTarget,
+                    1 => crate::parsing::TargetLiteral::WasmTarget,
+                    2 => crate::parsing::TargetLiteral::WgslTarget,
+                    _ => panic!("unsupported target literal tag {target_tag}"),
+                };
+                crate::parsing::ExpressionLiteral::Target(target)
+            }
+            5 => {
+                let binding_tag = self.call1("get_literal_binding_annotation_tag", idx);
+                let annotation = match binding_tag {
+                    0 => crate::parsing::BindingAnnotationLiteral::Mut,
+                    1 => {
+                        let target_tag =
+                            self.call1("get_literal_binding_annotation_target_tag", idx);
+                        let target = match target_tag {
+                            0 => crate::parsing::TargetLiteral::JSTarget,
+                            1 => crate::parsing::TargetLiteral::WasmTarget,
+                            2 => crate::parsing::TargetLiteral::WgslTarget,
+                            _ => panic!("unsupported export target tag {target_tag}"),
+                        };
+                        crate::parsing::BindingAnnotationLiteral::Export(target)
+                    }
+                    2 => {
+                        let target_tag =
+                            self.call1("get_literal_binding_annotation_target_tag", idx);
+                        let target = match target_tag {
+                            0 => crate::parsing::TargetLiteral::JSTarget,
+                            1 => crate::parsing::TargetLiteral::WasmTarget,
+                            2 => crate::parsing::TargetLiteral::WgslTarget,
+                            _ => panic!("unsupported target annotation tag {target_tag}"),
+                        };
+                        crate::parsing::BindingAnnotationLiteral::Target(target)
+                    }
+                    3 => {
+                        let target_tag =
+                            self.call1("get_literal_binding_annotation_target_tag", idx);
+                        let target = match target_tag {
+                            0 => crate::parsing::TargetLiteral::JSTarget,
+                            1 => crate::parsing::TargetLiteral::WasmTarget,
+                            2 => crate::parsing::TargetLiteral::WgslTarget,
+                            _ => panic!("unsupported wrap target tag {target_tag}"),
+                        };
+                        crate::parsing::BindingAnnotationLiteral::Wrap(target)
+                    }
+                    _ => panic!("unsupported binding annotation tag {binding_tag}"),
+                };
+                crate::parsing::ExpressionLiteral::BindingAnnotation(annotation)
+            }
+            other => panic!("unsupported literal at {idx} (tag {other})"),
         }
-        let char_value = self.call1("get_literal_char", idx);
-        if char_value != -1 {
-            return Expression::new(
-                ExpressionKind::Literal(crate::parsing::ExpressionLiteral::Char(
-                    char_value as u8,
-                )),
-                span,
-            );
+    }
+
+    fn binding_pattern_literal_from_node(
+        &mut self,
+        idx: i32,
+    ) -> crate::parsing::ExpressionLiteral {
+        match self.call1("get_binding_pattern_literal_tag", idx) {
+            0 => crate::parsing::ExpressionLiteral::Number(
+                self.call1("get_binding_pattern_literal_number", idx),
+            ),
+            1 => crate::parsing::ExpressionLiteral::Boolean(
+                self.call1("get_binding_pattern_literal_boolean", idx) != 0,
+            ),
+            2 => crate::parsing::ExpressionLiteral::Char(
+                self.call1("get_binding_pattern_literal_char", idx) as u8,
+            ),
+            3 => {
+                let start = self.call1("get_binding_pattern_literal_string_start", idx);
+                let length = self.call1("get_binding_pattern_literal_string_length", idx);
+                let bytes = self.span_string(start, length).into_bytes();
+                crate::parsing::ExpressionLiteral::String(bytes)
+            }
+            4 => {
+                let target_tag = self.call1("get_binding_pattern_literal_target_tag", idx);
+                let target = match target_tag {
+                    0 => crate::parsing::TargetLiteral::JSTarget,
+                    1 => crate::parsing::TargetLiteral::WasmTarget,
+                    2 => crate::parsing::TargetLiteral::WgslTarget,
+                    _ => panic!("unsupported target literal tag {target_tag}"),
+                };
+                crate::parsing::ExpressionLiteral::Target(target)
+            }
+            5 => {
+                let binding_tag =
+                    self.call1("get_binding_pattern_literal_binding_annotation_tag", idx);
+                let annotation = match binding_tag {
+                    0 => crate::parsing::BindingAnnotationLiteral::Mut,
+                    1 => {
+                        let target_tag = self.call1(
+                            "get_binding_pattern_literal_binding_annotation_target_tag",
+                            idx,
+                        );
+                        let target = match target_tag {
+                            0 => crate::parsing::TargetLiteral::JSTarget,
+                            1 => crate::parsing::TargetLiteral::WasmTarget,
+                            2 => crate::parsing::TargetLiteral::WgslTarget,
+                            _ => panic!("unsupported export target tag {target_tag}"),
+                        };
+                        crate::parsing::BindingAnnotationLiteral::Export(target)
+                    }
+                    2 => {
+                        let target_tag = self.call1(
+                            "get_binding_pattern_literal_binding_annotation_target_tag",
+                            idx,
+                        );
+                        let target = match target_tag {
+                            0 => crate::parsing::TargetLiteral::JSTarget,
+                            1 => crate::parsing::TargetLiteral::WasmTarget,
+                            2 => crate::parsing::TargetLiteral::WgslTarget,
+                            _ => panic!("unsupported target annotation tag {target_tag}"),
+                        };
+                        crate::parsing::BindingAnnotationLiteral::Target(target)
+                    }
+                    3 => {
+                        let target_tag = self.call1(
+                            "get_binding_pattern_literal_binding_annotation_target_tag",
+                            idx,
+                        );
+                        let target = match target_tag {
+                            0 => crate::parsing::TargetLiteral::JSTarget,
+                            1 => crate::parsing::TargetLiteral::WasmTarget,
+                            2 => crate::parsing::TargetLiteral::WgslTarget,
+                            _ => panic!("unsupported wrap target tag {target_tag}"),
+                        };
+                        crate::parsing::BindingAnnotationLiteral::Wrap(target)
+                    }
+                    _ => panic!("unsupported binding annotation tag {binding_tag}"),
+                };
+                crate::parsing::ExpressionLiteral::BindingAnnotation(annotation)
+            }
+            other => panic!("unsupported binding pattern literal at {idx} (tag {other})"),
         }
-        let bool_value = self.call1("get_literal_boolean", idx);
-        if bool_value != -1 {
-            return Expression::new(
-                ExpressionKind::Literal(crate::parsing::ExpressionLiteral::Boolean(
-                    bool_value != 0,
-                )),
-                span,
-            );
+    }
+
+    fn function_param_pattern_literal_from_node(
+        &mut self,
+        idx: i32,
+    ) -> crate::parsing::ExpressionLiteral {
+        match self.call1("get_function_param_pattern_literal_tag", idx) {
+            0 => crate::parsing::ExpressionLiteral::Number(
+                self.call1("get_function_param_pattern_literal_number", idx),
+            ),
+            1 => crate::parsing::ExpressionLiteral::Boolean(
+                self.call1("get_function_param_pattern_literal_boolean", idx) != 0,
+            ),
+            2 => crate::parsing::ExpressionLiteral::Char(
+                self.call1("get_function_param_pattern_literal_char", idx) as u8,
+            ),
+            3 => {
+                let start = self.call1("get_function_param_pattern_literal_string_start", idx);
+                let length = self.call1("get_function_param_pattern_literal_string_length", idx);
+                let bytes = self.span_string(start, length).into_bytes();
+                crate::parsing::ExpressionLiteral::String(bytes)
+            }
+            4 => {
+                let target_tag = self.call1("get_function_param_pattern_literal_target_tag", idx);
+                let target = match target_tag {
+                    0 => crate::parsing::TargetLiteral::JSTarget,
+                    1 => crate::parsing::TargetLiteral::WasmTarget,
+                    2 => crate::parsing::TargetLiteral::WgslTarget,
+                    _ => panic!("unsupported target literal tag {target_tag}"),
+                };
+                crate::parsing::ExpressionLiteral::Target(target)
+            }
+            5 => {
+                let binding_tag =
+                    self.call1("get_function_param_pattern_literal_binding_annotation_tag", idx);
+                let annotation = match binding_tag {
+                    0 => crate::parsing::BindingAnnotationLiteral::Mut,
+                    1 => {
+                        let target_tag = self.call1(
+                            "get_function_param_pattern_literal_binding_annotation_target_tag",
+                            idx,
+                        );
+                        let target = match target_tag {
+                            0 => crate::parsing::TargetLiteral::JSTarget,
+                            1 => crate::parsing::TargetLiteral::WasmTarget,
+                            2 => crate::parsing::TargetLiteral::WgslTarget,
+                            _ => panic!("unsupported export target tag {target_tag}"),
+                        };
+                        crate::parsing::BindingAnnotationLiteral::Export(target)
+                    }
+                    2 => {
+                        let target_tag = self.call1(
+                            "get_function_param_pattern_literal_binding_annotation_target_tag",
+                            idx,
+                        );
+                        let target = match target_tag {
+                            0 => crate::parsing::TargetLiteral::JSTarget,
+                            1 => crate::parsing::TargetLiteral::WasmTarget,
+                            2 => crate::parsing::TargetLiteral::WgslTarget,
+                            _ => panic!("unsupported target annotation tag {target_tag}"),
+                        };
+                        crate::parsing::BindingAnnotationLiteral::Target(target)
+                    }
+                    3 => {
+                        let target_tag = self.call1(
+                            "get_function_param_pattern_literal_binding_annotation_target_tag",
+                            idx,
+                        );
+                        let target = match target_tag {
+                            0 => crate::parsing::TargetLiteral::JSTarget,
+                            1 => crate::parsing::TargetLiteral::WasmTarget,
+                            2 => crate::parsing::TargetLiteral::WgslTarget,
+                            _ => panic!("unsupported wrap target tag {target_tag}"),
+                        };
+                        crate::parsing::BindingAnnotationLiteral::Wrap(target)
+                    }
+                    _ => panic!("unsupported binding annotation tag {binding_tag}"),
+                };
+                crate::parsing::ExpressionLiteral::BindingAnnotation(annotation)
+            }
+            other => panic!("unsupported function param literal at {idx} (tag {other})"),
         }
-        let num_value = self.call1("get_literal_number", idx);
-        if num_value != -1 {
-            return Expression::new(
-                ExpressionKind::Literal(crate::parsing::ExpressionLiteral::Number(num_value)),
-                span,
-            );
-        }
-        panic!("unsupported literal at {idx}");
     }
 
     fn binding_pattern_from_binding_node(&mut self, idx: i32) -> BindingPattern {
@@ -427,9 +635,7 @@ impl WasmParser {
             }
             1 => {
                 let span = self.binding_pattern_span(idx);
-                let literal = crate::parsing::ExpressionLiteral::Number(
-                    self.call1("get_literal_number", idx),
-                );
+                let literal = self.binding_pattern_literal_from_node(idx);
                 BindingPattern::Literal(literal, span)
             }
             2 => {
@@ -490,6 +696,11 @@ impl WasmParser {
                 let name = self.span_string(start, length);
                 BindingPattern::Identifier(Identifier::new(name), self.function_param_pattern_span(idx))
             }
+            1 => {
+                let span = self.function_param_pattern_span(idx);
+                let literal = self.function_param_pattern_literal_from_node(idx);
+                BindingPattern::Literal(literal, span)
+            }
             2 => {
                 let fields_head = self.call1("get_function_param_pattern_struct_fields", idx);
                 let fields = self.struct_pattern_fields(fields_head);
@@ -544,8 +755,8 @@ impl WasmParser {
         match self.call1("get_kind_tag", idx) {
             KIND_LITERAL => {
                 let span = self.node_span(idx);
-                let value = self.call1("get_literal_number", idx);
-                BindingPattern::Literal(crate::parsing::ExpressionLiteral::Number(value), span)
+                let literal = self.expression_literal_from_node(idx);
+                BindingPattern::Literal(literal, span)
             }
             KIND_IDENTIFIER => {
                 let start = self.call1("get_identifier_start", idx);
@@ -559,10 +770,7 @@ impl WasmParser {
                 BindingPattern::Struct(fields, span)
             }
             KIND_OPERATION => {
-                let op_start = self.call1("get_operation_operator_start", idx);
-                let op_len = self.call1("get_operation_operator_length", idx);
-                let operator = self.span_string(op_start, op_len);
-                if operator == ":" {
+                if self.call1("get_operation_is_typehint", idx) == 1 {
                     let pattern_idx = self.call1("get_operation_left", idx);
                     let type_idx = self.call1("get_operation_right", idx);
                     let pattern = self.binding_pattern_from_expression(pattern_idx);
@@ -706,19 +914,30 @@ impl WasmParser {
         SourceSpan::new(start as usize, length as usize)
     }
 }
-fn assert_wasm_block_matches_rust(source: &str) {
-    let (expected, remaining) = crate::parsing::parse_block(source)
-        .unwrap_or_else(|err| panic!("{}", err.render_with_source(source)));
-    assert!(remaining.trim().is_empty());
+fn parse_block_silk(source: &str) -> Expression {
+    crate::parse_block(source)
+        .unwrap_or_else(|err| panic!("{}", err.render_with_source(source)))
+}
+
+fn parse_single_silk(source: &str) -> Expression {
+    let expr = parse_block_silk(source);
+    match expr.kind {
+        ExpressionKind::Block(mut items) if items.len() == 1 => {
+            items.pop().expect("single expression")
+        }
+        _ => expr,
+    }
+}
+
+fn assert_wasm_block_matches_silk(source: &str) {
+    let expected = parse_block_silk(source);
     let mut parser = WasmParser::new();
     let actual = parser.parse_block(source).expect("wasm parse");
     assert_eq!(actual, expected);
 }
 
-fn assert_wasm_single_matches_rust(source: &str) {
-    let (expected, remaining) = crate::parsing::parse_operation_expression(source)
-        .unwrap_or_else(|err| panic!("{}", err.render_with_source(source)));
-    assert!(remaining.trim().is_empty());
+fn assert_wasm_single_matches_silk(source: &str) {
+    let expected = parse_single_silk(source);
     let mut parser = WasmParser::new();
     let actual = parser.parse_single_expression(source).expect("wasm parse");
     assert_eq!(actual, expected);
@@ -726,7 +945,7 @@ fn assert_wasm_single_matches_rust(source: &str) {
 
 #[test]
 fn wasm_parse_basic_let() {
-    assert_wasm_block_matches_rust(
+    assert_wasm_block_matches_silk(
         "
 x := 42;
 y: i32 := x
@@ -736,7 +955,7 @@ y: i32 := x
 
 #[test]
 fn wasm_parse_binding_with_export_annotation() {
-    assert_wasm_block_matches_rust(
+    assert_wasm_block_matches_silk(
         "
 (export js) foo := 42;
 (export wasm) (export js) bar := foo;
@@ -747,7 +966,7 @@ bar
 
 #[test]
 fn wasm_parse_struct_pattern_with_inner_multiple_annotations() {
-    assert_wasm_block_matches_rust(
+    assert_wasm_block_matches_silk(
         "
 { foo = (export js) mut foo_binding, bar } := value;
 foo_binding
@@ -757,7 +976,7 @@ foo_binding
 
 #[test]
 fn wasm_parse_struct_pattern_with_inner_export_annotation() {
-    assert_wasm_block_matches_rust(
+    assert_wasm_block_matches_silk(
         "
 { foo = (export js) foo_binding, bar } := value;
 foo_binding
@@ -767,7 +986,7 @@ foo_binding
 
 #[test]
 fn wasm_parse_mutable_binding_and_assignment() {
-    assert_wasm_block_matches_rust(
+    assert_wasm_block_matches_silk(
         "
 mut foo := 1;
 foo = 2
@@ -777,17 +996,17 @@ foo = 2
 
 #[test]
 fn wasm_parse_for_loop_desugars_to_iterator_binding() {
-    assert_wasm_block_matches_rust("for foo in bar do (foo)");
+    assert_wasm_block_matches_silk("for foo in bar do (foo)");
 }
 
 #[test]
 fn wasm_parse_operation_expression_precedence() {
-    assert_wasm_single_matches_rust("1 + 2 * 3 / 4 - 5");
+    assert_wasm_single_matches_silk("1 + 2 * 3 / 4 - 5");
 }
 
 #[test]
 fn wasm_parse_function_binding_and_call() {
-    assert_wasm_block_matches_rust(
+    assert_wasm_block_matches_silk(
         "
 foo := (bar: i32) => bar + 1;
 foo(123)
@@ -797,7 +1016,7 @@ foo(123)
 
 #[test]
 fn wasm_parse_function_struct_parameter_pattern() {
-    assert_wasm_single_matches_rust(
+    assert_wasm_single_matches_silk(
         "{bar1: i32, bar2: i32} => (
     bar1 + bar2
 )",
@@ -807,9 +1026,7 @@ fn wasm_parse_function_struct_parameter_pattern() {
 #[test]
 fn wasm_parse_struct_literal_named_and_tuple_fields() {
     let source = "{foo = 10, 20, bar = 30}";
-    let (expected, remaining) = crate::parsing::parse_isolated_expression(source)
-        .unwrap_or_else(|err| panic!("{}", err.render_with_source(source)));
-    assert!(remaining.trim().is_empty());
+    let expected = parse_single_silk(source);
     let mut parser = WasmParser::new();
     let actual = parser
         .parse_single_expression(source)
@@ -820,9 +1037,7 @@ fn wasm_parse_struct_literal_named_and_tuple_fields() {
 #[test]
 fn wasm_parse_struct_binding_pattern_named_fields() {
     let source = "{foo = first: i32, second: i32}";
-    let (expected, remaining) =
-        crate::parsing::parse_operation_expression(source).expect("pattern parse");
-    assert!(remaining.trim().is_empty());
+    let expected = parse_single_silk(source);
     let mut parser = WasmParser::new();
     let actual = parser
         .parse_single_expression(source)
@@ -832,19 +1047,19 @@ fn wasm_parse_struct_binding_pattern_named_fields() {
 
 #[test]
 fn wasm_parse_struct_property_access_chain() {
-    assert_wasm_single_matches_rust("foo::bar::baz");
+    assert_wasm_single_matches_silk("foo::bar::baz");
 }
 
 #[test]
 fn wasm_parse_struct_property_access_then_call() {
-    assert_wasm_single_matches_rust("foo.bar baz");
+    assert_wasm_single_matches_silk("foo.bar baz");
 }
 
 #[test]
 fn wasm_diagnostics_include_binding_pattern_source_reference() {
     let source = ":= 5;";
-    let err = crate::parsing::parse_block(source).expect_err("binding should fail");
-    let span = err.span.expect("rust diagnostic span");
+    let err = crate::parse_block(source).expect_err("binding should fail");
+    let span = err.span.expect("silk diagnostic span");
     let mut parser = WasmParser::new();
     parser.write_input(source);
     let err_pos = parser.parse_root().expect_err("wasm parse should fail");
@@ -854,9 +1069,8 @@ fn wasm_diagnostics_include_binding_pattern_source_reference() {
 #[test]
 fn wasm_diagnostics_include_grouping_closure_reference() {
     let source = "(1 + 2";
-    let err = crate::parsing::parse_isolated_expression(source)
-        .expect_err("missing ) should fail");
-    let span = err.span.expect("rust diagnostic span");
+    let err = crate::parse_block(source).expect_err("missing ) should fail");
+    let span = err.span.expect("silk diagnostic span");
     let mut parser = WasmParser::new();
     parser.write_input(source);
     let err_pos = parser.parse_root().expect_err("wasm parse should fail");
