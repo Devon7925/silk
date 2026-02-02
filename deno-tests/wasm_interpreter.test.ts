@@ -150,3 +150,31 @@ Deno.test("wasm interpreter: returns unit for empty struct", () => {
   const resultIdx = parseAndInterpret("{}");
   assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_UNIT);
 });
+
+Deno.test("wasm interpreter: resolves bindings and identifiers", () => {
+  const resultIdx = parseAndInterpret("x := 5; x + 2");
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 7);
+});
+
+Deno.test("wasm interpreter: supports mutable assignment", () => {
+  const resultIdx = parseAndInterpret("mut x := 1; x = x + 2; x");
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 3);
+});
+
+Deno.test("wasm interpreter: evaluates while loops", () => {
+  const resultIdx = parseAndInterpret(
+    "mut x := 0; mut acc := 0; while x < 4 do (acc = acc + x; x = x + 1;); acc",
+  );
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 6);
+});
+
+Deno.test("wasm interpreter: evaluates function calls", () => {
+  const resultIdx = parseAndInterpret(
+    "add_one := (x: i32) => (x + 1); add_one 4",
+  );
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 5);
+});

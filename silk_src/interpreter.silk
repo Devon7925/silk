@@ -78,11 +78,24 @@ Value := enum {
     Char = i32,
     String = StringRef,
     Unit = {},
+    Function = i32,
 };
 
 ValueState := { count = i32, error = i32 };
 
+BindingState := { count = i32, scope_count = i32 };
+BindingTemp := { start = i32, length = i32, is_mut = i32, ok = i32 };
+
+FlowState := { kind = i32, value = i32 };
+RuntimeState := { loop_depth = i32, function_depth = i32 };
+
 MAX_VALUES := 16384;
+MAX_BINDINGS := 4096;
+MAX_SCOPES := 256;
+
+FLOW_NONE := -1;
+FLOW_RETURN := 0;
+FLOW_BREAK := 1;
 
 EMPTY_VALUE := Value::Unit;
 
@@ -92,6 +105,15 @@ EMPTY_VALUE := Value::Unit;
 (export wasm) mut state: Box(State) := { count = 0, cursor = 0, error = 0, list_count = 0 };
 (export wasm) mut values: Box({Value; MAX_VALUES}) := {EMPTY_VALUE; MAX_VALUES};
 (export wasm) mut value_state: Box(ValueState) := { count = 0, error = -1 };
+(export wasm) mut binding_name_start: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
+(export wasm) mut binding_name_length: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
+(export wasm) mut binding_values: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
+(export wasm) mut binding_is_mut: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
+(export wasm) mut binding_state: Box(BindingState) := { count = 0, scope_count = 0 };
+(export wasm) mut binding_temp: Box(BindingTemp) := { start = 0, length = 0, is_mut = 0, ok = 0 };
+(export wasm) mut scope_stack: Box({i32; MAX_SCOPES}) := {0; MAX_SCOPES};
+(export wasm) mut flow_state: Box(FlowState) := { kind = FLOW_NONE, value = -1 };
+(export wasm) mut runtime_state: Box(RuntimeState) := { loop_depth = 0, function_depth = 0 };
 
 make_string_ref := {start: i32, length: i32} => (
     { start = start, length = length }
@@ -110,15 +132,39 @@ set_error: (i32 -> i32) := (pos: i32) => (
 reset_interpreter := {} => (
     value_state.count = 0;
     value_state.error = -1;
+    binding_state.count = 0;
+    binding_state.scope_count = 0;
+    binding_temp.start = 0;
+    binding_temp.length = 0;
+    binding_temp.is_mut = 0;
+    binding_temp.ok = 0;
+    flow_state.kind = FLOW_NONE;
+    flow_state.value = -1;
+    runtime_state.loop_depth = 0;
+    runtime_state.function_depth = 0;
     0
 );
 
 enter_scope := {} => (
-    0
+    if binding_state.scope_count >= MAX_SCOPES then (
+        set_error(0);
+        0
+    ) else (
+        scope_stack(binding_state.scope_count) = binding_state.count;
+        binding_state.scope_count = binding_state.scope_count + 1;
+        0
+    )
 );
 
 exit_scope := {} => (
-    0
+    if binding_state.scope_count <= 0 then (
+        set_error(0);
+        0
+    ) else (
+        binding_state.scope_count = binding_state.scope_count - 1;
+        binding_state.count = scope_stack(binding_state.scope_count);
+        0
+    )
 );
 
 string_ref_equals := {left: StringRef, right: StringRef} => (
@@ -139,6 +185,201 @@ string_ref_equals := {left: StringRef, right: StringRef} => (
             {}
         );
         ok
+    )
+);
+
+string_ref_equals_raw := {left_start: i32, left_len: i32, right_start: i32, right_len: i32} => (
+    if left_start < 0 || right_start < 0 then (
+        if left_start == right_start && left_len == right_len then 1 else 0
+    ) else if left_len != right_len then (
+        0
+    ) else (
+        mut idx := 0;
+        mut ok := 1;
+        while idx < left_len do (
+            if input(left_start + idx) != input(right_start + idx) then (
+                ok = 0;
+                idx = left_len;
+            ) else (
+                idx = idx + 1;
+            );
+            {}
+        );
+        ok
+    )
+);
+
+string_ref_is_mut := (value: StringRef) => (
+    if value.start < 0 then (
+        if value.start == SYNTHETIC_MUT_STRING.start && value.length == SYNTHETIC_MUT_STRING.length then 1 else 0
+    ) else if value.length != 3 then (
+        0
+    ) else (
+        if input(value.start) == 'm' then (
+            if input(value.start + 1) == 'u' then (
+                if input(value.start + 2) == 't' then 1 else 0
+            ) else 0
+        ) else 0
+    )
+);
+
+
+annotation_is_mut := (idx: i32) => (
+    if idx == -1 then 0 else (
+        nodes(idx).kind |> match {
+            NodeKind::Identifier(id) => string_ref_is_mut(id.name),
+            NodeKind::Literal(ExpressionLiteral::BindingAnnotation(value)) => (
+                value |> match {
+                    BindingAnnotationLiteral::Mut => 1,
+                    else => 0
+                }
+            ),
+            else => 0
+        }
+    )
+);
+
+annotations_has_mut := (head: i32) => (
+    mut current := head;
+    mut found := 0;
+    while current != -1 do (
+        if annotation_is_mut(list_nodes(current).value) == 1 then (
+            found = 1;
+            current = -1;
+        ) else (
+            current = list_nodes(current).next;
+        );
+        {}
+    );
+    found
+);
+
+expr_contains_mut_annotation := (expr_idx: i32) => (
+    if expr_idx == -1 then 0 else (
+        nodes(expr_idx).kind |> match {
+            NodeKind::Identifier(id) => string_ref_is_mut(id.name),
+            NodeKind::FunctionCall(info) => (
+                if expr_contains_mut_annotation(info.function) == 1 then 1 else (
+                    expr_contains_mut_annotation(info.argument)
+                )
+            ),
+            else => 0
+        }
+    )
+);
+
+resolve_binding_from_expr: (i32 -> i32) := (expr_idx: i32) => (
+    if expr_idx == -1 then (
+        binding_temp.start = 0;
+        binding_temp.length = 0;
+        binding_temp.is_mut = 0;
+        binding_temp.ok = 0;
+        0
+    ) else (
+        nodes(expr_idx).kind |> match {
+            NodeKind::Identifier(id) => (
+                binding_temp.start = id.name.start;
+                binding_temp.length = id.name.length;
+                binding_temp.is_mut = 0;
+                binding_temp.ok = 1;
+                1
+            ),
+            NodeKind::Operation(op) => (
+                if op_is1{op.operator.start, op.operator.length, ':'} == 1 then (
+                    resolve_binding_from_expr(op.left)
+                ) else (
+                    binding_temp.start = 0;
+                    binding_temp.length = 0;
+                    binding_temp.is_mut = 0;
+                    binding_temp.ok = 0;
+                    0
+                )
+            ),
+            NodeKind::FunctionCall(info) => (
+                resolve_binding_from_expr(info.argument);
+                if binding_temp.ok == 0 then (
+                    0
+                ) else (
+                    mut_flag := expr_contains_mut_annotation(info.function);
+                    binding_temp.is_mut = if binding_temp.is_mut == 1 || mut_flag == 1 then 1 else 0;
+                    binding_temp.ok = 1;
+                    1
+                )
+            ),
+            else => (
+                binding_temp.start = 0;
+                binding_temp.length = 0;
+                binding_temp.is_mut = 0;
+                binding_temp.ok = 0;
+                0
+            )
+        }
+    )
+);
+
+resolve_binding_pattern: (BindingPattern -> i32) := (pattern: BindingPattern) => (
+    pattern |> match {
+        BindingPattern::Identifier(info) => (
+            binding_temp.start = info.name.name.start;
+            binding_temp.length = info.name.name.length;
+            binding_temp.is_mut = 0;
+            binding_temp.ok = 1;
+            1
+        ),
+        BindingPattern::Annotated(info) => (
+            resolve_binding_from_expr(info.pattern);
+            if binding_temp.ok == 0 then (
+                0
+            ) else (
+                mut_flag := annotations_has_mut(info.annotations);
+                binding_temp.is_mut = if binding_temp.is_mut == 1 || mut_flag == 1 then 1 else 0;
+                binding_temp.ok = 1;
+                1
+            )
+        ),
+        BindingPattern::TypeHint(info) => resolve_binding_from_expr(info.pattern),
+        else => (
+            binding_temp.start = 0;
+            binding_temp.length = 0;
+            binding_temp.is_mut = 0;
+            binding_temp.ok = 0;
+            0
+        )
+    }
+);
+
+find_binding_index := (name: StringRef) => (
+    mut idx := binding_state.count - 1;
+    mut found := -1;
+    while idx >= 0 do (
+        if string_ref_equals_raw{
+            binding_name_start(idx),
+            binding_name_length(idx),
+            name.start,
+            name.length
+        } == 1 then (
+            found = idx;
+            idx = -1;
+        ) else (
+            idx = idx - 1;
+        );
+        {}
+    );
+    found
+);
+
+add_binding := {start: i32, length: i32, value: i32, is_mut: i32} => (
+    if binding_state.count >= MAX_BINDINGS then (
+        set_error(0);
+        -1
+    ) else (
+        idx := binding_state.count;
+        binding_name_start(idx) = start;
+        binding_name_length(idx) = length;
+        binding_values(idx) = value;
+        binding_is_mut(idx) = is_mut;
+        binding_state.count = idx + 1;
+        idx
     )
 );
 
@@ -185,58 +426,218 @@ eval_literal := (lit: ExpressionLiteral) => (
 eval_expression: (i32 -> i32) := (idx: i32) => (
     if value_state.error != -1 then (
         -1
+    ) else if flow_state.kind != FLOW_NONE then (
+        flow_state.value
     ) else (
         span_start := nodes(idx).span.start;
         nodes(idx).kind |> match {
             NodeKind::Literal(lit) => store_value(eval_literal(lit)),
-            NodeKind::Identifier(_) => (
-                set_error(span_start);
-                -1
+            NodeKind::Identifier(id) => (
+                binding_idx := find_binding_index(id.name);
+                if binding_idx == -1 then (
+                    set_error(span_start);
+                    -1
+                ) else (
+                    binding_values(binding_idx)
+                )
             ),
             NodeKind::Binding(binding) => (
-                eval_expression(binding.expr)
+                value_idx := eval_expression(binding.expr);
+                if value_idx == -1 then (
+                    -1
+                ) else if flow_state.kind != FLOW_NONE then (
+                    value_idx
+                ) else (
+                    if resolve_binding_pattern(binding.pattern) == 0 then (
+                        set_error(span_start);
+                        -1
+                    ) else (
+                        add_binding{binding_temp.start, binding_temp.length, value_idx, binding_temp.is_mut};
+                        value_idx
+                    )
+                )
             ),
-            NodeKind::Assignment(_) => (
-                set_error(span_start);
-                -1
+            NodeKind::Assignment(info) => (
+                value_idx := eval_expression(info.expr);
+                if value_idx == -1 then (
+                    -1
+                ) else if flow_state.kind != FLOW_NONE then (
+                    value_idx
+                ) else (
+                    info.target |> match {
+                        LValue::Identifier(target_info) => (
+                            idx := find_binding_index(target_info.name.name);
+                            if idx == -1 then (
+                                set_error(span_start);
+                                -1
+                            ) else if binding_is_mut(idx) == 0 then (
+                                set_error(span_start);
+                                -1
+                            ) else (
+                                binding_values(idx) = value_idx;
+                                value_idx
+                            )
+                        ),
+                        else => (
+                            set_error(span_start);
+                            -1
+                        )
+                    }
+                )
+            ),
+            NodeKind::Function(_) => (
+                store_value(Value::Function(idx))
+            ),
+            NodeKind::FunctionCall(info) => (
+                func_idx := eval_expression(info.function);
+                if func_idx == -1 then (
+                    -1
+                ) else if flow_state.kind != FLOW_NONE then (
+                    func_idx
+                ) else (
+                    arg_idx := eval_expression(info.argument);
+                    if arg_idx == -1 then (
+                        -1
+                    ) else if flow_state.kind != FLOW_NONE then (
+                        arg_idx
+                    ) else (
+                        func_val := values(func_idx);
+                        if Value::Function(fn_node) := func_val then (
+                            if NodeKind::Function(fn_info) := nodes(fn_node).kind then (
+                                runtime_state.function_depth = runtime_state.function_depth + 1;
+                                enter_scope{};
+                                bind_ok := resolve_binding_pattern(fn_info.parameter);
+                                mut result_idx := -1;
+                                if bind_ok == 0 then (
+                                    set_error(span_start);
+                                    result_idx = -1;
+                                ) else (
+                                    add_binding{binding_temp.start, binding_temp.length, arg_idx, binding_temp.is_mut};
+                                    result_idx = eval_expression(fn_info.body);
+                                    if flow_state.kind == FLOW_RETURN then (
+                                        result_idx = flow_state.value;
+                                        flow_state.kind = FLOW_NONE;
+                                        flow_state.value = -1;
+                                    );
+                                );
+                                exit_scope{};
+                                runtime_state.function_depth = runtime_state.function_depth - 1;
+                                result_idx
+                            ) else (
+                                set_error(span_start);
+                                -1
+                            )
+                        ) else (
+                            set_error(span_start);
+                            -1
+                        )
+                    )
+                )
             ),
             NodeKind::Operation(info) => (
                 left_idx := eval_expression(info.left);
-                right_idx := eval_expression(info.right);
-                if left_idx == -1 || right_idx == -1 then (
+                if left_idx == -1 then (
                     -1
+                ) else if flow_state.kind != FLOW_NONE then (
+                    left_idx
                 ) else (
-                    op_start := info.operator.start;
-                    op_len := info.operator.length;
-                    left := values(left_idx);
-                    right := values(right_idx);
-                    if Value::Number(lv) := left then (
-                        if Value::Number(rv) := right then (
-                            if op_is1{op_start, op_len, '+'} == 1 then (
-                                store_value(Value::Number(lv + rv))
-                            ) else if op_is1{op_start, op_len, '-'} == 1 then (
-                                store_value(Value::Number(lv - rv))
-                            ) else if op_is1{op_start, op_len, '*'} == 1 then (
-                                store_value(Value::Number(lv * rv))
-                            ) else if op_is1{op_start, op_len, '/'} == 1 then (
-                                if rv == 0 then (
+                    right_idx := eval_expression(info.right);
+                    if right_idx == -1 then (
+                        -1
+                    ) else if flow_state.kind != FLOW_NONE then (
+                        right_idx
+                    ) else (
+                        op_start := info.operator.start;
+                        op_len := info.operator.length;
+                        left := values(left_idx);
+                        right := values(right_idx);
+                        if Value::Number(lv) := left then (
+                            if Value::Number(rv) := right then (
+                                if op_is1{op_start, op_len, '+'} == 1 then (
+                                    store_value(Value::Number(lv + rv))
+                                ) else if op_is1{op_start, op_len, '-'} == 1 then (
+                                    store_value(Value::Number(lv - rv))
+                                ) else if op_is1{op_start, op_len, '*'} == 1 then (
+                                    store_value(Value::Number(lv * rv))
+                                ) else if op_is1{op_start, op_len, '/'} == 1 then (
+                                    if rv == 0 then (
+                                        set_error(span_start);
+                                        -1
+                                    ) else (
+                                        store_value(Value::Number(lv / rv))
+                                    )
+                                ) else if op_is2{op_start, op_len, '=', '='} == 1 then (
+                                    store_value(Value::Boolean(if lv == rv then 1 else 0))
+                                ) else if op_is2{op_start, op_len, '!', '='} == 1 then (
+                                    store_value(Value::Boolean(if lv != rv then 1 else 0))
+                                ) else if op_is1{op_start, op_len, '<'} == 1 then (
+                                    store_value(Value::Boolean(if lv < rv then 1 else 0))
+                                ) else if op_is1{op_start, op_len, '>'} == 1 then (
+                                    store_value(Value::Boolean(if lv > rv then 1 else 0))
+                                ) else if op_is2{op_start, op_len, '<', '='} == 1 then (
+                                    store_value(Value::Boolean(if lv <= rv then 1 else 0))
+                                ) else if op_is2{op_start, op_len, '>', '='} == 1 then (
+                                    store_value(Value::Boolean(if lv >= rv then 1 else 0))
+                                ) else (
                                     set_error(span_start);
                                     -1
-                                ) else (
-                                    store_value(Value::Number(lv / rv))
                                 )
-                            ) else if op_is2{op_start, op_len, '=', '='} == 1 then (
-                                store_value(Value::Boolean(if lv == rv then 1 else 0))
-                            ) else if op_is2{op_start, op_len, '!', '='} == 1 then (
-                                store_value(Value::Boolean(if lv != rv then 1 else 0))
-                            ) else if op_is1{op_start, op_len, '<'} == 1 then (
-                                store_value(Value::Boolean(if lv < rv then 1 else 0))
-                            ) else if op_is1{op_start, op_len, '>'} == 1 then (
-                                store_value(Value::Boolean(if lv > rv then 1 else 0))
-                            ) else if op_is2{op_start, op_len, '<', '='} == 1 then (
-                                store_value(Value::Boolean(if lv <= rv then 1 else 0))
-                            ) else if op_is2{op_start, op_len, '>', '='} == 1 then (
-                                store_value(Value::Boolean(if lv >= rv then 1 else 0))
+                            ) else (
+                                set_error(span_start);
+                                -1
+                            )
+                        ) else if Value::Boolean(lv) := left then (
+                            if Value::Boolean(rv) := right then (
+                                if op_is2{op_start, op_len, '&', '&'} == 1 then (
+                                    store_value(Value::Boolean(if lv == 1 && rv == 1 then 1 else 0))
+                                ) else if op_is2{op_start, op_len, '|', '|'} == 1 then (
+                                    store_value(Value::Boolean(if lv == 1 || rv == 1 then 1 else 0))
+                                ) else if op_is1{op_start, op_len, '^'} == 1 then (
+                                    store_value(Value::Boolean(if lv != rv then 1 else 0))
+                                ) else if op_is2{op_start, op_len, '=', '='} == 1 then (
+                                    store_value(Value::Boolean(if lv == rv then 1 else 0))
+                                ) else if op_is2{op_start, op_len, '!', '='} == 1 then (
+                                    store_value(Value::Boolean(if lv != rv then 1 else 0))
+                                ) else (
+                                    set_error(span_start);
+                                    -1
+                                )
+                            ) else (
+                                set_error(span_start);
+                                -1
+                            )
+                        ) else if Value::Char(lv) := left then (
+                            if Value::Char(rv) := right then (
+                                if op_is2{op_start, op_len, '=', '='} == 1 then (
+                                    store_value(Value::Boolean(if lv == rv then 1 else 0))
+                                ) else if op_is2{op_start, op_len, '!', '='} == 1 then (
+                                    store_value(Value::Boolean(if lv != rv then 1 else 0))
+                                ) else if op_is1{op_start, op_len, '<'} == 1 then (
+                                    store_value(Value::Boolean(if lv < rv then 1 else 0))
+                                ) else if op_is1{op_start, op_len, '>'} == 1 then (
+                                    store_value(Value::Boolean(if lv > rv then 1 else 0))
+                                ) else if op_is2{op_start, op_len, '<', '='} == 1 then (
+                                    store_value(Value::Boolean(if lv <= rv then 1 else 0))
+                                ) else if op_is2{op_start, op_len, '>', '='} == 1 then (
+                                    store_value(Value::Boolean(if lv >= rv then 1 else 0))
+                                ) else (
+                                    set_error(span_start);
+                                    -1
+                                )
+                            ) else (
+                                set_error(span_start);
+                                -1
+                            )
+                        ) else if Value::String(lv) := left then (
+                            if Value::String(rv) := right then (
+                                if op_is2{op_start, op_len, '=', '='} == 1 then (
+                                    store_value(Value::Boolean(if string_ref_equals{lv, rv} == 1 then 1 else 0))
+                                ) else if op_is2{op_start, op_len, '!', '='} == 1 then (
+                                    store_value(Value::Boolean(if string_ref_equals{lv, rv} == 1 then 0 else 1))
+                                ) else (
+                                    set_error(span_start);
+                                    -1
+                                )
                             ) else (
                                 set_error(span_start);
                                 -1
@@ -245,65 +646,6 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                             set_error(span_start);
                             -1
                         )
-                    ) else if Value::Boolean(lv) := left then (
-                        if Value::Boolean(rv) := right then (
-                            if op_is2{op_start, op_len, '&', '&'} == 1 then (
-                                store_value(Value::Boolean(if lv == 1 && rv == 1 then 1 else 0))
-                            ) else if op_is2{op_start, op_len, '|', '|'} == 1 then (
-                                store_value(Value::Boolean(if lv == 1 || rv == 1 then 1 else 0))
-                            ) else if op_is1{op_start, op_len, '^'} == 1 then (
-                                store_value(Value::Boolean(if lv != rv then 1 else 0))
-                            ) else if op_is2{op_start, op_len, '=', '='} == 1 then (
-                                store_value(Value::Boolean(if lv == rv then 1 else 0))
-                            ) else if op_is2{op_start, op_len, '!', '='} == 1 then (
-                                store_value(Value::Boolean(if lv != rv then 1 else 0))
-                            ) else (
-                                set_error(span_start);
-                                -1
-                            )
-                        ) else (
-                            set_error(span_start);
-                            -1
-                        )
-                    ) else if Value::Char(lv) := left then (
-                        if Value::Char(rv) := right then (
-                            if op_is2{op_start, op_len, '=', '='} == 1 then (
-                                store_value(Value::Boolean(if lv == rv then 1 else 0))
-                            ) else if op_is2{op_start, op_len, '!', '='} == 1 then (
-                                store_value(Value::Boolean(if lv != rv then 1 else 0))
-                            ) else if op_is1{op_start, op_len, '<'} == 1 then (
-                                store_value(Value::Boolean(if lv < rv then 1 else 0))
-                            ) else if op_is1{op_start, op_len, '>'} == 1 then (
-                                store_value(Value::Boolean(if lv > rv then 1 else 0))
-                            ) else if op_is2{op_start, op_len, '<', '='} == 1 then (
-                                store_value(Value::Boolean(if lv <= rv then 1 else 0))
-                            ) else if op_is2{op_start, op_len, '>', '='} == 1 then (
-                                store_value(Value::Boolean(if lv >= rv then 1 else 0))
-                            ) else (
-                                set_error(span_start);
-                                -1
-                            )
-                        ) else (
-                            set_error(span_start);
-                            -1
-                        )
-                    ) else if Value::String(lv) := left then (
-                        if Value::String(rv) := right then (
-                            if op_is2{op_start, op_len, '=', '='} == 1 then (
-                                store_value(Value::Boolean(if string_ref_equals{lv, rv} == 1 then 1 else 0))
-                            ) else if op_is2{op_start, op_len, '!', '='} == 1 then (
-                                store_value(Value::Boolean(if string_ref_equals{lv, rv} == 1 then 0 else 1))
-                            ) else (
-                                set_error(span_start);
-                                -1
-                            )
-                        ) else (
-                            set_error(span_start);
-                            -1
-                        )
-                    ) else (
-                        set_error(span_start);
-                        -1
                     )
                 )
             ),
@@ -311,6 +653,8 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 cond_idx := eval_expression(info.condition);
                 if cond_idx == -1 then (
                     -1
+                ) else if flow_state.kind != FLOW_NONE then (
+                    cond_idx
                 ) else (
                     cond_value := values(cond_idx);
                     if Value::Boolean(flag) := cond_value then (
@@ -332,12 +676,82 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 mut last_idx: i32 := store_value(Value::Unit);
                 while count < list.count && current != -1 do (
                     last_idx = eval_expression(list_nodes(current).value);
-                    current = list_nodes(current).next;
-                    count = count + 1;
+                    if value_state.error != -1 || flow_state.kind != FLOW_NONE then (
+                        current = -1;
+                        0
+                    ) else (
+                        current = list_nodes(current).next;
+                        count = count + 1;
+                        0
+                    );
                     {}
                 );
                 exit_scope{};
                 last_idx
+            ),
+            NodeKind::Loop(info) => (
+                runtime_state.loop_depth = runtime_state.loop_depth + 1;
+                mut last_idx := store_value(Value::Unit);
+                mut done := 0;
+                while done == 0 do (
+                    last_idx = eval_expression(info.body);
+                    if value_state.error != -1 then (
+                        done = 1;
+                        0
+                    ) else if flow_state.kind == FLOW_BREAK then (
+                        last_idx = flow_state.value;
+                        flow_state.kind = FLOW_NONE;
+                        flow_state.value = -1;
+                        done = 1;
+                        0
+                    ) else if flow_state.kind == FLOW_RETURN then (
+                        done = 1;
+                        0
+                    ) else (
+                        0
+                    );
+                    {}
+                );
+                runtime_state.loop_depth = runtime_state.loop_depth - 1;
+                last_idx
+            ),
+            NodeKind::Diverge(info) => (
+                info.divergance_type |> match {
+                    DivergeExpressionType::Break => (
+                        if runtime_state.loop_depth <= 0 then (
+                            set_error(span_start);
+                            -1
+                        ) else (
+                            value_idx := eval_expression(info.value);
+                            if value_idx == -1 then (
+                                -1
+                            ) else (
+                                flow_state.kind = FLOW_BREAK;
+                                flow_state.value = value_idx;
+                                value_idx
+                            )
+                        )
+                    ),
+                    DivergeExpressionType::Return => (
+                        if runtime_state.function_depth <= 0 then (
+                            set_error(span_start);
+                            -1
+                        ) else (
+                            value_idx := eval_expression(info.value);
+                            if value_idx == -1 then (
+                                -1
+                            ) else (
+                                flow_state.kind = FLOW_RETURN;
+                                flow_state.value = value_idx;
+                                value_idx
+                            )
+                        )
+                    ),
+                    else => (
+                        set_error(span_start);
+                        -1
+                    )
+                }
             ),
             NodeKind::Struct(info) => (
                 if is_empty_struct(info.fields) == 1 then (
@@ -362,6 +776,7 @@ value_tag := (value: Value) => (
         Value::Char(_) => 2,
         Value::String(_) => 3,
         Value::Unit => 4,
+        Value::Function(_) => 5,
         else => -1
     }
 );
