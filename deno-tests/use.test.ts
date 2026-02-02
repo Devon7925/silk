@@ -1,18 +1,15 @@
 import { assertEquals } from "@std/asserts";
 import { basename, dirname, join } from "@std/path";
-import { cleanup, runCommand, tempBase } from "./test_helpers.ts";
+import { cleanup, runSilk, tempBase } from "./test_helpers.ts";
 
 async function compileAndLoad<T extends WebAssembly.Exports>(
   mainPath: string,
   wasmPath: string,
 ) {
-  const { code, stderr } = await runCommand("cargo", [
-    "run",
-    "--",
-    mainPath,
-    "-o",
-    wasmPath,
-  ]);
+  const { code, stderr } = await runSilk(
+    [mainPath, "-o", wasmPath],
+    { stderr: "piped" },
+  );
   if (code !== 0) {
     throw new Error(`Compilation failed:\n${stderr}`);
   }

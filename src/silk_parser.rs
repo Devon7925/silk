@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::OnceLock;
 
@@ -39,6 +40,8 @@ const KIND_BINDING: i32 = 20;
 const KIND_BLOCK: i32 = 21;
 const KIND_DIVERGE: i32 = 22;
 const KIND_LOOP: i32 = 23;
+
+const PARSER_MODULE_CACHE_PATH: &str = "target/wasm_cache/parser.wasmtime";
 
 static PARSER_WASM: OnceLock<Result<Vec<u8>, Diagnostic>> = OnceLock::new();
 static WASM_ENGINE: OnceLock<Result<Engine, Diagnostic>> = OnceLock::new();
@@ -87,12 +90,35 @@ fn wasm_module() -> Result<&'static Module, Diagnostic> {
             Ok(bytes) => bytes,
             Err(err) => return Err(err),
         };
-        Module::new(engine, bytes)
-            .map_err(|err| Diagnostic::new(format!("Failed to compile silk parser wasm: {err}")))
+        if let Some(module) = load_cached_module(engine) {
+            return Ok(module);
+        }
+        let module = Module::new(engine, bytes)
+            .map_err(|err| Diagnostic::new(format!("Failed to compile silk parser wasm: {err}")))?;
+        save_cached_module(&module);
+        Ok(module)
     });
     match result {
         Ok(module) => Ok(module),
         Err(err) => Err(err.clone()),
+    }
+}
+
+fn load_cached_module(engine: &Engine) -> Option<Module> {
+    let bytes = fs::read(PARSER_MODULE_CACHE_PATH).ok()?;
+    unsafe { Module::deserialize(engine, &bytes).ok() }
+}
+
+fn save_cached_module(module: &Module) {
+    let Ok(bytes) = module.serialize() else {
+        return;
+    };
+    if let Some(parent) = Path::new(PARSER_MODULE_CACHE_PATH).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let tmp_path = format!("{PARSER_MODULE_CACHE_PATH}.tmp");
+    if fs::write(&tmp_path, &bytes).is_ok() {
+        let _ = fs::rename(&tmp_path, PARSER_MODULE_CACHE_PATH);
     }
 }
 

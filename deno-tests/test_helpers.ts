@@ -5,6 +5,16 @@ export const FIXTURES_DIR = join(ROOT_DIR, "fixtures");
 
 const decoder = new TextDecoder();
 
+type RunCommandOptions = {
+  cwd?: string;
+  stdout?: "null" | "piped";
+  stderr?: "null" | "piped";
+  stdin?: "null" | "piped";
+  signal?: AbortSignal;
+};
+
+let silkBinaryPromise: Promise<string> | null = null;
+
 export function tempBase(prefix: string) {
   const unique = `${prefix}_${Date.now()}_${
     Math.random().toString(16).slice(2)
@@ -16,17 +26,15 @@ export function tempBase(prefix: string) {
 export async function runCommand(
   command: string,
   args: string[],
-  options: {
-    cwd?: string;
-    stdout?: "null" | "piped";
-    stderr?: "null" | "piped";
-  } = {},
+  options: RunCommandOptions = {},
 ) {
   const result = await new Deno.Command(command, {
     args,
     cwd: options.cwd ?? ROOT_DIR,
     stdout: options.stdout ?? "null",
     stderr: options.stderr ?? "piped",
+    stdin: options.stdin ?? "null",
+    signal: options.signal,
   }).output();
   const stdout = options.stdout === "piped"
     ? decoder.decode(result.stdout)
@@ -41,15 +49,54 @@ export async function runCommand(
   };
 }
 
+async function ensureSilkBinary() {
+  if (silkBinaryPromise) {
+    return await silkBinaryPromise;
+  }
+
+  silkBinaryPromise = (async () => {
+    const exeName = Deno.build.os === "windows" ? "silk.exe" : "silk";
+    const binaryPath = join(ROOT_DIR, "target", "debug", exeName);
+    try {
+      const stat = await Deno.stat(binaryPath);
+      if (stat.isFile) {
+        return binaryPath;
+      }
+    } catch {
+      // Build below.
+    }
+
+    const build = await runCommand("cargo", ["build", "--quiet"], {
+      stdout: "piped",
+      stderr: "piped",
+    });
+    if (build.code !== 0) {
+      const combined = [build.stderr, build.stdout].filter(Boolean).join("");
+      throw new Error(`Failed to build silk binary:\n${combined}`);
+    }
+
+    return binaryPath;
+  })();
+
+  return await silkBinaryPromise;
+}
+
+export async function runSilk(
+  args: string[],
+  options: RunCommandOptions = {},
+) {
+  const binaryPath = await ensureSilkBinary();
+  return await runCommand(binaryPath, args, options);
+}
+
 export async function compileSilk(silkCode: string, outputPath: string) {
   const silkPath = outputPath.endsWith(".silk")
     ? outputPath
     : outputPath + ".silk";
   const normalized = silkCode.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
   await Deno.writeTextFile(silkPath, normalized);
-  const { code, stdout, stderr } = await runCommand(
-    "cargo",
-    ["run", "--", silkPath, "-o", outputPath],
+  const { code, stdout, stderr } = await runSilk(
+    [silkPath, "-o", outputPath],
     { stdout: "piped", stderr: "piped" },
   );
   const combined = [stderr, stdout].filter(Boolean).join("");

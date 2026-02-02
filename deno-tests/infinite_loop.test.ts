@@ -1,5 +1,5 @@
 import { assert } from "@std/asserts";
-import { cleanupBase, FIXTURES_DIR, ROOT_DIR, tempBase } from "./test_helpers.ts";
+import { cleanupBase, FIXTURES_DIR, runSilk, tempBase } from "./test_helpers.ts";
 import { join } from "@std/path";
 
 Deno.test("compiler does not hang on infinite loop evaluation in function bodies", async () => {
@@ -12,13 +12,11 @@ Deno.test("compiler does not hang on infinite loop evaluation in function bodies
 
   let completed = false;
   try {
-    const _result = await new Deno.Command("cargo", {
-      args: ["run", "--", silkPath, "-o", outputPath],
-      cwd: ROOT_DIR,
+    const _result = await runSilk([silkPath, "-o", outputPath], {
       stdout: "null",
       stderr: "piped",
       signal: controller.signal,
-    }).output();
+    });
 
     completed = true;
   } catch (err) {

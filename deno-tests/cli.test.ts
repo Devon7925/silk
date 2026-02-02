@@ -1,9 +1,9 @@
 import { assert, assertEquals, assertInstanceOf } from "@std/asserts";
 import { join } from "@std/path";
-import { ROOT_DIR, runCommand } from "./test_helpers.ts";
+import { ROOT_DIR, runSilk } from "./test_helpers.ts";
 
-async function runSilk(args: string[]) {
-  const result = await runCommand("cargo", ["run", "--quiet", "--", ...args], {
+async function runSilkCli(args: string[]) {
+  const result = await runSilk(args, {
     stdout: "piped",
     stderr: "piped",
   });
@@ -21,7 +21,7 @@ async function compileFixtureToBytes(fixture: string) {
   const outputPath = join(tmpDir, "module.wasm");
 
   try {
-    const result = await runSilk([programPath, "--output", outputPath]);
+    const result = await runSilkCli([programPath, "--output", outputPath]);
     if (result.exitCode !== 0) {
       console.error("Compilation failed:", result.stderr);
       console.error("With stdout:", result.stdout);
@@ -41,7 +41,7 @@ Deno.test("compiles a wasm export to a file", async () => {
   const outputPath = join(tmpDir, "answer.wasm");
 
   try {
-    const result = await runSilk([programPath, "--output", outputPath]);
+    const result = await runSilkCli([programPath, "--output", outputPath]);
     assertEquals(result.exitCode, 0);
 
     const moduleBytes = await Deno.readFile(outputPath);
