@@ -69,6 +69,11 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
 
     if needs_wgsl_runner {
         output.push_str("async function __silk_run_wgsl(entryPoint, inputValues, outputCount) {\n");
+        output.push_str("  if (typeof Array.prototype[Symbol.iterator] !== \"function\") {\n");
+        output.push_str("    Array.prototype[Symbol.iterator] = function* () {\n");
+        output.push_str("      for (let i = 0; i < this.length; i++) { yield this[i]; }\n");
+        output.push_str("    };\n");
+        output.push_str("  }\n");
         output.push_str("  const wgslUrl = new URL(import.meta.url);\n");
         output.push_str("  wgslUrl.pathname = wgslUrl.pathname.replace(/\\.js$/, \".wgsl\");\n");
         output.push_str("  const wgsl = await fetch(wgslUrl).then((res) => res.text());\n");
@@ -104,11 +109,16 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
         output.push_str(
             "  if (output) device.queue.writeBuffer(output, 0, new Int32Array(outputCount));\n",
         );
-        output.push_str("  const entries = [];\n");
-        output.push_str("  if (input && inBinding !== null) entries.push({ binding: inBinding, resource: { buffer: input } });\n");
-        output.push_str("  if (output && outBinding !== null) entries.push({ binding: outBinding, resource: { buffer: output } });\n");
+        output.push_str("  const bindGroupEntries = [];\n");
+        output.push_str("  if (input && inBinding !== null) bindGroupEntries.push({ binding: inBinding, resource: { buffer: input } });\n");
+        output.push_str("  if (output && outBinding !== null) bindGroupEntries.push({ binding: outBinding, resource: { buffer: output } });\n");
+        output.push_str("  if (typeof bindGroupEntries[Symbol.iterator] !== \"function\") {\n");
+        output.push_str("    bindGroupEntries[Symbol.iterator] = function* () {\n");
+        output.push_str("      for (let i = 0; i < bindGroupEntries.length; i++) { yield bindGroupEntries[i]; }\n");
+        output.push_str("    };\n");
+        output.push_str("  }\n");
         output.push_str(
-            "  const bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries });\n",
+            "  const bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries: bindGroupEntries });\n",
         );
         output.push_str("  const encoder = device.createCommandEncoder();\n");
         output.push_str("  const pass = encoder.beginComputePass();\n");
@@ -148,6 +158,11 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
         );
         output.push_str("      const view = new Int32Array(sab);\n");
         output.push_str("      try {\n");
+        output.push_str("        if (typeof Array.prototype[Symbol.iterator] !== \"function\") {\n");
+        output.push_str("          Array.prototype[Symbol.iterator] = function* () {\n");
+        output.push_str("            for (let i = 0; i < this.length; i++) { yield this[i]; }\n");
+        output.push_str("          };\n");
+        output.push_str("        }\n");
         output.push_str("        const wgsl = await fetch(wgslUrl).then((res) => res.text());\n");
         output.push_str("        const adapter = await navigator.gpu?.requestAdapter();\n");
         output.push_str("        if (!adapter) throw new Error(\"No GPU adapter available\");\n");
@@ -177,10 +192,15 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
         output.push_str("        const output = outputCount ? makeStorage(outputCount) : null;\n");
         output.push_str("        if (input) device.queue.writeBuffer(input, 0, inputArray);\n");
         output.push_str("        if (output) device.queue.writeBuffer(output, 0, new Int32Array(outputCount));\n");
-        output.push_str("        const entries = [];\n");
-        output.push_str("        if (input && inBinding !== null) entries.push({ binding: inBinding, resource: { buffer: input } });\n");
-        output.push_str("        if (output && outBinding !== null) entries.push({ binding: outBinding, resource: { buffer: output } });\n");
-        output.push_str("        const bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries });\n");
+        output.push_str("        const bindGroupEntries = [];\n");
+        output.push_str("        if (input && inBinding !== null) bindGroupEntries.push({ binding: inBinding, resource: { buffer: input } });\n");
+        output.push_str("        if (output && outBinding !== null) bindGroupEntries.push({ binding: outBinding, resource: { buffer: output } });\n");
+        output.push_str("        if (typeof bindGroupEntries[Symbol.iterator] !== \"function\") {\n");
+        output.push_str("          bindGroupEntries[Symbol.iterator] = function* () {\n");
+        output.push_str("            for (let i = 0; i < bindGroupEntries.length; i++) { yield bindGroupEntries[i]; }\n");
+        output.push_str("          };\n");
+        output.push_str("        }\n");
+        output.push_str("        const bindGroup = device.createBindGroup({ layout: bindGroupLayout, entries: bindGroupEntries });\n");
         output.push_str("        const encoder = device.createCommandEncoder();\n");
         output.push_str("        const pass = encoder.beginComputePass();\n");
         output.push_str("        pass.setPipeline(pipeline);\n");

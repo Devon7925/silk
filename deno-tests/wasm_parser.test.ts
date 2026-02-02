@@ -1,9 +1,9 @@
 import { assertEquals } from "@std/asserts";
 import { join } from "@std/path";
-import { cleanup, compileToWasm, FIXTURES_DIR } from "./test_helpers.ts";
+import { cleanup, compileToWasm, ROOT_DIR } from "./test_helpers.ts";
 
 const parserSource = await Deno.readTextFile(
-  join(FIXTURES_DIR, "silk_src/parser.silk"),
+  join(ROOT_DIR, "silk_src/parser.silk"),
 );
 
 const KIND_LITERAL = 13;

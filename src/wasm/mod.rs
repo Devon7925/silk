@@ -1274,7 +1274,7 @@ fn infer_type_basic(
                         .or_else(|| locals_types.get(&identifier.name))
                         .cloned()
                         .ok_or_else(|| {
-                            let mut message = format!("Unknown identifier `{}`", identifier.name);
+                            let mut message = format!("Unbound identifier: {}", identifier.name);
                             if std::env::var("SILK_DEBUG_UNKNOWN_IDENTIFIER").is_ok() {
                                 let mut names = locals_types.keys().cloned().collect::<Vec<_>>();
                                 names.sort();
@@ -1503,7 +1503,7 @@ fn infer_type_impl(
                         .or_else(|| locals_types.get(&identifier.name))
                         .cloned()
                         .ok_or_else(|| {
-                            let mut message = format!("Unknown identifier `{}`", identifier.name);
+                            let mut message = format!("Unbound identifier: {}", identifier.name);
                             if std::env::var("SILK_DEBUG_UNKNOWN_IDENTIFIER").is_ok() {
                                 let mut names = locals_types.keys().cloned().collect::<Vec<_>>();
                                 names.sort();

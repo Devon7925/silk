@@ -6953,7 +6953,7 @@ fn bind_pattern_from_value(
                     )
                     .ok_or_else(|| {
                         diagnostic(
-                            format!("Enum pattern references unknown type: {}", enum_type_name),
+                            format!("Unbound identifier: {}", enum_type_name),
                             span,
                         )
                     })?;
