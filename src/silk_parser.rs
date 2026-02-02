@@ -142,9 +142,29 @@ fn compile_silk_parser_wasm() -> Result<Vec<u8>, Diagnostic> {
                 .with_span(span),
         );
     }
+    let types_path = "silk_src/types.silk";
+    let types_source = fs::read_to_string(types_path)
+        .map_err(|err| Diagnostic::new(format!("Failed to read {types_path}: {err}")))?;
+    let (types_ast, types_remaining) = crate::parsing::parse_block(&types_source)?;
+    let types_leftover = types_remaining.trim_start();
+    if !types_leftover.is_empty() {
+        let token_len = types_leftover
+            .chars()
+            .take_while(|ch| !ch.is_whitespace())
+            .map(|ch| ch.len_utf8())
+            .sum::<usize>()
+            .max(1);
+        let start = types_source.len().saturating_sub(types_leftover.len());
+        let span = SourceSpan::new(start, token_len);
+        return Err(
+            Diagnostic::new("Unexpected trailing input while compiling the parser types source")
+                .with_span(span),
+        );
+    }
     let mut file_map = HashMap::new();
     let normalized = loader::normalize_path(path);
     file_map.insert(normalized, ast.clone());
+    file_map.insert(loader::normalize_path("types.silk"), types_ast);
     let mut context = interpret::intrinsic_context_with_files_bootstrap(file_map);
     let (_value, program_context) = interpret::interpret_program(ast, &mut context)?;
     let intermediate = intermediate::context_to_intermediate(&program_context);

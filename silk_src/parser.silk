@@ -1,170 +1,82 @@
-StringRef := { length = i32, start = i32 };
-SourceSpan := { length = i32, start = i32 };
+types := use "types.silk";
 
-Identifier := { name = StringRef, unique = StringRef };
+StringRef := types.StringRef;
+SourceSpan := types.SourceSpan;
 
-TargetLiteral := enum {
-    JSTarget = {},
-    WasmTarget = {},
-    WgslTarget = {},
-};
+Identifier := types.Identifier;
 
-BindingAnnotationLiteral := enum {
-    Mut = {},
-    Export = TargetLiteral,
-    Target = TargetLiteral,
-    Wrap = TargetLiteral,
-};
+TargetLiteral := types.TargetLiteral;
 
-ExpressionLiteral := enum {
-    Number = i32,
-    Boolean = i32,
-    Char = i32,
-    String = StringRef,
-    Target = TargetLiteral,
-    BindingAnnotation = BindingAnnotationLiteral,
-};
+BindingAnnotationLiteral := types.BindingAnnotationLiteral;
 
-IntrinsicType := enum {
-    I32 = {},
-    U8 = {},
-    Boolean = {},
-    Type = {},
-    Target = {},
-    BindingAnnotation = {},
-};
+ExpressionLiteral := types.ExpressionLiteral;
 
-UnaryIntrinsicOperator := enum {
-    BooleanNot = {},
-    EnumFromStruct = {},
-    MatchFromStruct = {},
-    UseFromString = {},
-    BoxFromType = {},
-    BindingAnnotationExportFromTarget = {},
-    BindingAnnotationTargetFromTarget = {},
-    BindingAnnotationWrapFromTarget = {},
-    AssemblyFromTarget = {},
-};
+IntrinsicType := types.IntrinsicType;
 
-BinaryIntrinsicOperator := enum {
-    I32Add = {},
-    I32Subtract = {},
-    I32Multiply = {},
-    I32Divide = {},
-    I32Equal = {},
-    I32NotEqual = {},
-    I32LessThan = {},
-    I32GreaterThan = {},
-    I32LessThanOrEqual = {},
-    I32GreaterThanOrEqual = {},
-    BooleanAnd = {},
-    BooleanOr = {},
-    BooleanXor = {},
-};
+UnaryIntrinsicOperator := types.UnaryIntrinsicOperator;
 
-IntrinsicOperation := enum {
-    Binary = { left = i32, right = i32, operator = BinaryIntrinsicOperator },
-    Unary = { operand = i32, operator = UnaryIntrinsicOperator },
-    InlineAssembly = { target = TargetLiteral, code = i32 },
-};
+BinaryIntrinsicOperator := types.BinaryIntrinsicOperator;
 
-DivergeExpressionType := enum {
-    Return = {},
-    Break = {},
-};
+IntrinsicOperation := types.IntrinsicOperation;
 
-BindingPattern := enum {
-    Identifier = { name = Identifier, span = SourceSpan },
-    Literal = { literal = ExpressionLiteral, span = SourceSpan },
-    Struct = { fields = i32, span = SourceSpan },
-    EnumVariant = { enum_type = i32, variant = Identifier, payload = i32, span = SourceSpan },
-    TypeHint = { pattern = i32, type_expr = i32, span = SourceSpan },
-    Annotated = { annotations = i32, pattern = i32, span = SourceSpan },
-};
+DivergeExpressionType := types.DivergeExpressionType;
 
-LValue := enum {
-    Identifier = { name = Identifier, span = SourceSpan },
-    TypePropertyAccess = { object = i32, property = StringRef, span = SourceSpan },
-    ArrayIndex = { array = i32, index = i32, span = SourceSpan },
-};
+BindingPattern := types.BindingPattern;
 
-Binding := { pattern = BindingPattern, expr = i32 };
+LValue := types.LValue;
 
-ExpressionList := { count = i32, head = i32 };
+Binding := types.Binding;
 
-FunctionTypeInfo := { parameter = i32, return_type = i32 };
-FunctionInfo := { parameter = BindingPattern, return_type = i32, body = i32 };
-EnumValueInfo := { enum_type = i32, variant = Identifier, variant_index = i32, payload = i32 };
-EnumConstructorInfo := { enum_type = i32, variant = Identifier, variant_index = i32, payload_type = i32 };
-IfInfo := { condition = i32, then_branch = i32, else_branch = i32 };
-AttachImplementationInfo := { type_expr = i32, implementation = i32 };
-ArrayRepeatInfo := { value = i32, count = i32 };
-OperationInfo := { operator = StringRef, left = i32, right = i32 };
-AssignmentInfo := { target = LValue, expr = i32 };
-FunctionCallInfo := { function = i32, argument = i32 };
-ArrayIndexInfo := { array = i32, index = i32 };
-TypePropertyAccessInfo := { object = i32, property = StringRef };
-DivergeInfo := { value = i32, divergance_type = DivergeExpressionType };
-LoopInfo := { body = i32 };
-MatchInfo := { value = i32, branches = i32 };
-StructInfo := { fields = i32 };
-EnumTypeInfo := { variants = i32 };
+ExpressionList := types.ExpressionList;
 
-NodeKind := enum {
-    IntrinsicType = IntrinsicType,
-    BoxType = i32,
-    IntrinsicOperation = IntrinsicOperation,
-    EnumType = EnumTypeInfo,
-    Match = MatchInfo,
-    EnumValue = EnumValueInfo,
-    EnumConstructor = EnumConstructorInfo,
-    If = IfInfo,
-    AttachImplementation = AttachImplementationInfo,
-    Function = FunctionInfo,
-    FunctionType = FunctionTypeInfo,
-    Struct = StructInfo,
-    ArrayRepeat = ArrayRepeatInfo,
-    Literal = ExpressionLiteral,
-    Identifier = Identifier,
-    Operation = OperationInfo,
-    Assignment = AssignmentInfo,
-    FunctionCall = FunctionCallInfo,
-    ArrayIndex = ArrayIndexInfo,
-    TypePropertyAccess = TypePropertyAccessInfo,
-    Binding = Binding,
-    Block = ExpressionList,
-    Diverge = DivergeInfo,
-    Loop = LoopInfo,
-};
+FunctionTypeInfo := types.FunctionTypeInfo;
+FunctionInfo := types.FunctionInfo;
+EnumValueInfo := types.EnumValueInfo;
+EnumConstructorInfo := types.EnumConstructorInfo;
+IfInfo := types.IfInfo;
+AttachImplementationInfo := types.AttachImplementationInfo;
+ArrayRepeatInfo := types.ArrayRepeatInfo;
+OperationInfo := types.OperationInfo;
+AssignmentInfo := types.AssignmentInfo;
+FunctionCallInfo := types.FunctionCallInfo;
+ArrayIndexInfo := types.ArrayIndexInfo;
+TypePropertyAccessInfo := types.TypePropertyAccessInfo;
+DivergeInfo := types.DivergeInfo;
+LoopInfo := types.LoopInfo;
+MatchInfo := types.MatchInfo;
+StructInfo := types.StructInfo;
+EnumTypeInfo := types.EnumTypeInfo;
 
-TypeCache := enum { None = {}, Some = i32 };
-Node := { kind = NodeKind, span = SourceSpan, type_cache = TypeCache };
+NodeKind := types.NodeKind;
 
-ListNode := { next = i32, value = i32 };
+TypeCache := types.TypeCache;
+Node := types.Node;
 
-MAX_INPUT := 131072;
-MAX_NODES := 16384;
-MAX_LIST_NODES := 32768;
+ListNode := types.ListNode;
 
-EMPTY_STRING := { length = 0, start = 0 };
-SYNTHETIC_MUT_STRING := { length = 3, start = -2 };
-SYNTHETIC_OPTION_STRING := { length = 6, start = -3 };
-SYNTHETIC_SOME_STRING := { length = 4, start = -4 };
-SYNTHETIC_ITER_TY_STRING := { length = 7, start = -5 };
-SYNTHETIC_NEXT_STRING := { length = 4, start = -6 };
-SYNTHETIC_FOR_ITER_STRING := { length = 10, start = -7 };
-EMPTY_IDENTIFIER := { name = EMPTY_STRING, unique = EMPTY_STRING };
-EMPTY_SPAN := { length = 0, start = 0 };
-EMPTY_NODE := { kind = NodeKind::Literal(ExpressionLiteral::Number(0)), span = EMPTY_SPAN, type_cache = TypeCache::None };
-EMPTY_LIST_NODE := { next = -1, value = -1 };
+MAX_INPUT := types.MAX_INPUT;
+MAX_NODES := types.MAX_NODES;
+MAX_LIST_NODES := types.MAX_LIST_NODES;
 
-State := { count = i32, cursor = i32, error = i32, list_count = i32 };
+EMPTY_STRING := types.EMPTY_STRING;
+SYNTHETIC_MUT_STRING := types.SYNTHETIC_MUT_STRING;
+SYNTHETIC_OPTION_STRING := types.SYNTHETIC_OPTION_STRING;
+SYNTHETIC_SOME_STRING := types.SYNTHETIC_SOME_STRING;
+SYNTHETIC_ITER_TY_STRING := types.SYNTHETIC_ITER_TY_STRING;
+SYNTHETIC_NEXT_STRING := types.SYNTHETIC_NEXT_STRING;
+SYNTHETIC_FOR_ITER_STRING := types.SYNTHETIC_FOR_ITER_STRING;
+EMPTY_IDENTIFIER := types.EMPTY_IDENTIFIER;
+EMPTY_SPAN := types.EMPTY_SPAN;
+EMPTY_NODE := types.EMPTY_NODE;
+EMPTY_LIST_NODE := types.EMPTY_LIST_NODE;
+
+State := types.State;
 
 (export wasm) input: Box({u8; MAX_INPUT}) := {0; MAX_INPUT};
 (export wasm) mut nodes: Box({Node; MAX_NODES}) := {EMPTY_NODE; MAX_NODES};
 (export wasm) mut state: Box(State) := { count = 0, cursor = 0, error = 0, list_count = 0 };
 
-mut list_nodes: Box({ListNode; MAX_LIST_NODES}) := {EMPTY_LIST_NODE; MAX_LIST_NODES};
+(export wasm) mut list_nodes: Box({ListNode; MAX_LIST_NODES}) := {EMPTY_LIST_NODE; MAX_LIST_NODES};
 
 make_span := {start: i32, end: i32} => (
     { start = start, length = end - start }

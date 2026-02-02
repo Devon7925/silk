@@ -45,7 +45,12 @@ fn load_silk_parser_wasm() -> &'static [u8] {
         }
         let path = "silk_src/parser.silk";
         let source = fs::read_to_string(path).expect("read parser.silk");
-        let artifacts = crate::compile(vec![(path, source.as_str())], path)
+        let types_path = "silk_src/types.silk";
+        let types_source = fs::read_to_string(types_path).expect("read types.silk");
+        let artifacts = crate::compile(
+            vec![(path, source.as_str()), ("types.silk", types_source.as_str())],
+            path,
+        )
             .unwrap_or_else(|err| panic!("{}", err.render_with_source(&source)));
         let CompilationArtifact { content, .. } = artifacts
             .into_iter()

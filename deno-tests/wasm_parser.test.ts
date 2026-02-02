@@ -1,9 +1,16 @@
 import { assertEquals } from "@std/asserts";
 import { join } from "@std/path";
-import { cleanup, compileToWasm, ROOT_DIR } from "./test_helpers.ts";
+import {
+  cleanup,
+  compileToWasmWithExtraFiles,
+  ROOT_DIR,
+} from "./test_helpers.ts";
 
 const parserSource = await Deno.readTextFile(
   join(ROOT_DIR, "silk_src/parser.silk"),
+);
+const typesSource = await Deno.readTextFile(
+  join(ROOT_DIR, "silk_src/types.silk"),
 );
 
 const KIND_LITERAL = 13;
@@ -127,14 +134,16 @@ type ParserExports = {
 };
 
 const parserExports = await (async () => {
-  const { wasmPath, silkPath } = await compileToWasm(
-    parserSource,
-    "wasm_parser",
-  );
+  const { wasmPath, silkPath, extraPaths } =
+    await compileToWasmWithExtraFiles(
+      parserSource,
+      "wasm_parser",
+      { "types.silk": typesSource },
+    );
   const bytes = await Deno.readFile(wasmPath);
   const { instance } = await WebAssembly.instantiate(bytes);
   addEventListener("unload", () => {
-    void cleanup([silkPath, wasmPath]);
+    void cleanup([silkPath, wasmPath, ...extraPaths]);
   });
   return instance.exports as ParserExports;
 })();

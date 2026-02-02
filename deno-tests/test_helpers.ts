@@ -15,6 +15,10 @@ type RunCommandOptions = {
 
 let silkBinaryPromise: Promise<string> | null = null;
 
+function normalizeLineEndings(text: string) {
+  return text.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+}
+
 export function tempBase(prefix: string) {
   const unique = `${prefix}_${Date.now()}_${
     Math.random().toString(16).slice(2)
@@ -93,7 +97,7 @@ export async function compileSilk(silkCode: string, outputPath: string) {
   const silkPath = outputPath.endsWith(".silk")
     ? outputPath
     : outputPath + ".silk";
-  const normalized = silkCode.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+  const normalized = normalizeLineEndings(silkCode);
   await Deno.writeTextFile(silkPath, normalized);
   const { code, stdout, stderr } = await runSilk(
     [silkPath, "-o", outputPath],
@@ -111,6 +115,34 @@ export async function compileToWasm(silkCode: string, prefix: string) {
     throw new Error(`Compilation failed:\n${stderr}`);
   }
   return { wasmPath, silkPath };
+}
+
+export async function compileToWasmWithExtraFiles(
+  silkCode: string,
+  prefix: string,
+  extraFiles: Record<string, string>,
+) {
+  const basePath = tempBase(prefix);
+  const wasmPath = basePath + ".wasm";
+  const silkPath = basePath + ".silk";
+  const dir = dirname(silkPath);
+  await Deno.writeTextFile(silkPath, normalizeLineEndings(silkCode));
+  const extraPaths: string[] = [];
+  for (const [name, contents] of Object.entries(extraFiles)) {
+    const extraPath = join(dir, name);
+    await Deno.writeTextFile(extraPath, normalizeLineEndings(contents));
+    extraPaths.push(extraPath);
+  }
+  const { code, stdout, stderr } = await runSilk(
+    [silkPath, "-o", wasmPath],
+    { stdout: "piped", stderr: "piped" },
+  );
+  const combined = [stderr, stdout].filter(Boolean).join("");
+  if (code !== 0) {
+    await cleanup([silkPath, wasmPath, ...extraPaths]);
+    throw new Error(`Compilation failed:\n${combined}`);
+  }
+  return { wasmPath, silkPath, extraPaths };
 }
 
 export async function compileToInstance(silkCode: string, prefix: string) {
