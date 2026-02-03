@@ -941,6 +941,25 @@ eval_literal := (lit: ExpressionLiteral) => (
     }
 );
 
+enum_variant_name_matches := {enum_head: i32, enum_count: i32, variant_idx: i32, name_start: i32, name_length: i32} => (
+    if enum_head < 0 || enum_count <= 0 then (
+        0
+    ) else if variant_idx < enum_head || variant_idx >= enum_head + enum_count * 2 then (
+        0
+    ) else (
+        if Value::String(stored_name) := values(variant_idx) then (
+            string_ref_equals_raw{
+                stored_name.start,
+                stored_name.length,
+                name_start,
+                name_length
+            }
+        ) else (
+            0
+        )
+    )
+);
+
 enum_type_matches := {left_head: i32, left_count: i32, right_head: i32, right_count: i32} => (
     if left_head < 0 || right_head < 0 then (
         0
@@ -1063,51 +1082,54 @@ bind_payload_pattern := {payload_expr: i32, payload_idx: i32, inherit_mut: i32} 
 
 bind_struct_pattern := {fields_head: i32, value_idx: i32, inherit_mut: i32} => (
     if Value::Record(rec_info) := values(value_idx) then (
-        if rec_info.has_named == 0 then (
-            0
-        ) else (
-            start_count := binding_state.count;
-            mut current := fields_head;
-            mut ok := 1;
-            while current != -1 && ok == 1 do (
-                field_node := list_nodes(current).value;
-                if NodeKind::Binding(field_binding) := nodes(field_node).kind then (
-                    mut field_name := EMPTY_STRING;
-                    field_binding.pattern |> match {
-                        BindingPattern::Identifier(id) => (field_name = id.name.name),
-                        else => (field_name = EMPTY_STRING)
+        start_count := binding_state.count;
+        mut current := fields_head;
+        mut ok := 1;
+        mut positional_idx := 0;
+        while current != -1 && ok == 1 do (
+            field_node := list_nodes(current).value;
+            if NodeKind::Binding(field_binding) := nodes(field_node).kind then (
+                mut field_name := EMPTY_STRING;
+                field_binding.pattern |> match {
+                    BindingPattern::Identifier(id) => (field_name = id.name.name),
+                    else => (field_name = EMPTY_STRING)
+                };
+                mut field_value_idx := -1;
+                if field_name.length <= 0 then (
+                    field_value_idx = record_value_index_by_position_no_error{
+                        rec_info.head,
+                        rec_info.count,
+                        positional_idx
                     };
-                    if field_name.length <= 0 then (
+                    positional_idx = positional_idx + 1;
+                ) else (
+                    field_value_idx = record_find_field_index_no_error{
+                        rec_info.head,
+                        rec_info.count,
+                        rec_info.has_named,
+                        field_name.start,
+                        field_name.length
+                    };
+                );
+                if field_value_idx == -1 then (
+                    ok = 0;
+                ) else (
+                    if bind_pattern_expr{field_binding.expr, field_value_idx, inherit_mut} == 0 then (
                         ok = 0;
                     ) else (
-                        field_value_idx := record_find_field_index_no_error{
-                            rec_info.head,
-                            rec_info.count,
-                            rec_info.has_named,
-                            field_name.start,
-                            field_name.length
-                        };
-                        if field_value_idx == -1 then (
-                            ok = 0;
-                        ) else (
-                            if bind_pattern_expr{field_binding.expr, field_value_idx, inherit_mut} == 0 then (
-                                ok = 0;
-                            ) else (
-                                current = list_nodes(current).next;
-                            )
-                        )
+                        current = list_nodes(current).next;
                     )
-                ) else (
-                    ok = 0;
-                );
-                {}
-            );
-            if ok == 0 then (
-                binding_state.count = start_count;
-                0
+                )
             ) else (
-                1
-            )
+                ok = 0;
+            );
+            {}
+        );
+        if ok == 0 then (
+            binding_state.count = start_count;
+            0
+        ) else (
+            1
         )
     ) else (
         0
@@ -1128,16 +1150,36 @@ bind_pattern_expr := {pattern_expr: i32, value_idx: i32, inherit_mut: i32} => (
         ),
         NodeKind::TypePropertyAccess(info) => (
             if Value::Enum(enum_info) := values(value_idx) then (
-                if enum_info.payload == -1 then 1 else 0
+                if enum_variant_name_matches{
+                    enum_info.enum_head,
+                    enum_info.enum_count,
+                    enum_info.variant_idx,
+                    info.property.start,
+                    info.property.length
+                } == 1 then (
+                    if enum_info.payload == -1 then 1 else 0
+                ) else (
+                    0
+                )
             ) else (
                 0
             )
         ),
         NodeKind::FunctionCall(call) => (
-            if NodeKind::TypePropertyAccess(_) := nodes(call.function).kind then (
+            if NodeKind::TypePropertyAccess(access) := nodes(call.function).kind then (
                 if Value::Enum(enum_info) := values(value_idx) then (
-                    if enum_info.payload == -1 then 0 else (
-                        bind_payload_pattern{call.argument, enum_info.payload, inherit_mut}
+                if enum_variant_name_matches{
+                    enum_info.enum_head,
+                    enum_info.enum_count,
+                    enum_info.variant_idx,
+                    access.property.start,
+                    access.property.length
+                } == 1 then (
+                        if enum_info.payload == -1 then 0 else (
+                            bind_payload_pattern{call.argument, enum_info.payload, inherit_mut}
+                        )
+                    ) else (
+                        0
                     )
                 ) else (
                     0
@@ -1222,12 +1264,22 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
         BindingPattern::Literal(_) => 0,
         BindingPattern::EnumVariant(info) => (
             if Value::Enum(enum_info) := values(value_idx) then (
-                if info.payload == -1 then (
-                    if enum_info.payload == -1 then 1 else 0
-                ) else (
-                    if enum_info.payload == -1 then 0 else (
-                        bind_payload_pattern{info.payload, enum_info.payload, inherit_mut}
+                if enum_variant_name_matches{
+                    enum_info.enum_head,
+                    enum_info.enum_count,
+                    enum_info.variant_idx,
+                    info.variant.name.start,
+                    info.variant.name.length
+                } == 1 then (
+                    if info.payload == -1 then (
+                        if enum_info.payload == -1 then 1 else 0
+                    ) else (
+                        if enum_info.payload == -1 then 0 else (
+                            bind_payload_pattern{info.payload, enum_info.payload, inherit_mut}
+                        )
                     )
+                ) else (
+                    0
                 )
             ) else (
                 0

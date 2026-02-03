@@ -237,6 +237,25 @@ Deno.test("wasm interpreter: destructures struct patterns", () => {
   assertEquals(interpreterExports.get_value_number(resultIdx), 7);
 });
 
+Deno.test("wasm interpreter: destructures positional struct patterns", () => {
+  const resultIdx = parseAndInterpret("{ a, b } := { 3, 4 }; a + b");
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 7);
+});
+
+Deno.test("wasm interpreter: matches enum variants by name", () => {
+  const resultIdx = parseAndInterpret(`
+    Either := (T: type) => (enum { Left = T, Right = T });
+    value := Either(i32)::Right(7);
+    value |> match {
+      Either(i32)::Left(x) => x,
+      else => 0
+    }
+  `);
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 0);
+});
+
 Deno.test("wasm interpreter: supports pattern parameters", () => {
   const resultIdx = parseAndInterpret(
     "sum_pair := { first = a, second = b } => (a + b); sum_pair { first = 2, second = 5 }",
