@@ -244,3 +244,25 @@ Deno.test("wasm interpreter: supports pattern parameters", () => {
   assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
   assertEquals(interpreterExports.get_value_number(resultIdx), 7);
 });
+
+Deno.test("wasm interpreter: supports implementations on intrinsic types", () => {
+  const resultIdx = parseAndInterpret(`
+    Meters := i32 @ { square = (self: i32) => self * self };
+    value: Meters := 5;
+    value.square
+  `);
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 25);
+});
+
+Deno.test("wasm interpreter: supports implementations on struct types", () => {
+  const resultIdx = parseAndInterpret(`
+    Pair := { first = i32, second = i32 } @ {
+      sum = (self: { first = i32, second = i32 }) => self.first + self.second,
+    };
+    pair: Pair := { first = 3, second = 4 };
+    pair.sum
+  `);
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 7);
+});

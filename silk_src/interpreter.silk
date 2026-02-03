@@ -91,12 +91,17 @@ Value := enum {
     EnumConstructor = { enum_head = i32, enum_count = i32, variant_idx = i32, expects_payload = i32 },
     Enum = { enum_head = i32, enum_count = i32, variant_idx = i32, payload = i32 },
     MatchFunction = { head = i32, count = i32 },
+    Target = i32,
+    BindingAnnotation = { kind = i32, target = i32 },
+    AsmFunction = i32,
+    InlineAssembly = { target = i32, code = StringRef },
 };
 
 ValueState := { count = i32, error = i32 };
 
 BindingState := { count = i32, scope_count = i32 };
 BindingTemp := { start = i32, length = i32, is_mut = i32, ok = i32 };
+ImplementationState := { count = i32 };
 
 FlowState := { kind = i32, value = i32 };
 RuntimeState := { loop_depth = i32, function_depth = i32 };
@@ -104,6 +109,7 @@ BindPatternState := { value_idx = i32, inherit_mut = i32 };
 
 MAX_VALUES := 16384;
 MAX_BINDINGS := 4096;
+MAX_IMPLS := 1024;
 MAX_SCOPES := 256;
 
 FLOW_NONE := -1;
@@ -112,6 +118,19 @@ FLOW_BREAK := 1;
 
 BUILTIN_ENUM := 0;
 BUILTIN_MATCH := 1;
+BUILTIN_EXPORT := 2;
+BUILTIN_TARGET := 3;
+BUILTIN_WRAP := 4;
+BUILTIN_ASM := 5;
+
+TARGET_JS := 0;
+TARGET_WASM := 1;
+TARGET_WGSL := 2;
+
+BINDING_ANN_MUT := 0;
+BINDING_ANN_EXPORT := 1;
+BINDING_ANN_TARGET := 2;
+BINDING_ANN_WRAP := 3;
 
 EMPTY_VALUE := Value::Unit;
 
@@ -125,8 +144,12 @@ EMPTY_VALUE := Value::Unit;
 (export wasm) mut binding_name_length: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
 (export wasm) mut binding_values: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
 (export wasm) mut binding_is_mut: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
+(export wasm) mut binding_type_values: Box({i32; MAX_BINDINGS}) := {-1; MAX_BINDINGS};
 (export wasm) mut binding_state: Box(BindingState) := { count = 0, scope_count = 0 };
 (export wasm) mut binding_temp: Box(BindingTemp) := { start = 0, length = 0, is_mut = 0, ok = 0 };
+(export wasm) mut impl_type_values: Box({i32; MAX_IMPLS}) := {0; MAX_IMPLS};
+(export wasm) mut impl_value_values: Box({i32; MAX_IMPLS}) := {0; MAX_IMPLS};
+(export wasm) mut impl_state: Box(ImplementationState) := { count = 0 };
 (export wasm) mut scope_stack: Box({i32; MAX_SCOPES}) := {0; MAX_SCOPES};
 (export wasm) mut flow_state: Box(FlowState) := { kind = FLOW_NONE, value = -1 };
 (export wasm) mut runtime_state: Box(RuntimeState) := { loop_depth = 0, function_depth = 0 };
@@ -155,6 +178,7 @@ reset_interpreter := {} => (
     binding_temp.length = 0;
     binding_temp.is_mut = 0;
     binding_temp.ok = 0;
+    impl_state.count = 0;
     flow_state.kind = FLOW_NONE;
     flow_state.value = -1;
     runtime_state.loop_depth = 0;
@@ -401,6 +425,7 @@ add_binding := {start: i32, length: i32, value: i32, is_mut: i32} => (
         binding_name_length(idx) = length;
         binding_values(idx) = value;
         binding_is_mut(idx) = is_mut;
+        binding_type_values(idx) = -1;
         binding_state.count = idx + 1;
         idx
     )
@@ -428,13 +453,25 @@ add_intrinsic_binding := {name: StringRef} => (
     )
 );
 
+add_intrinsic_binding_value := {name: StringRef, value: Value} => (
+    value_idx := store_value(value);
+    if value_idx == -1 then (
+        -1
+    ) else (
+        add_binding{name.start, name.length, value_idx, 0}
+    )
+);
+
 init_intrinsic_context := {} => (
     if add_intrinsic_binding{SYNTHETIC_TYPE_STRING} == -1 then -1 else (
         if add_intrinsic_binding{SYNTHETIC_I32_STRING} == -1 then -1 else (
             if add_intrinsic_binding{SYNTHETIC_U8_STRING} == -1 then -1 else (
                 if add_intrinsic_binding{SYNTHETIC_BOOL_STRING} == -1 then -1 else (
-                    if add_intrinsic_binding{SYNTHETIC_TARGET_STRING} == -1 then -1 else (
-                        if add_intrinsic_binding{SYNTHETIC_BINDING_ANNOTATION_STRING} == -1 then -1 else (
+                    if add_intrinsic_binding{SYNTHETIC_BINDING_ANNOTATION_STRING} == -1 then -1 else (
+                        if add_intrinsic_binding_value{SYNTHETIC_MUT_STRING, Value::BindingAnnotation({
+                            kind = BINDING_ANN_MUT,
+                            target = -1
+                        })} == -1 then -1 else (
                             0
                         )
                     )
@@ -630,7 +667,15 @@ string_ref_is_else := (value: StringRef) => (
 
 builtin_from_identifier := (name: StringRef) => (
     if string_ref_is_enum(name) == 1 then BUILTIN_ENUM else (
-        if string_ref_is_match(name) == 1 then BUILTIN_MATCH else -1
+        if string_ref_is_match(name) == 1 then BUILTIN_MATCH else (
+            if string_ref_is_export(name) == 1 then BUILTIN_EXPORT else (
+                if string_ref_is_target(name) == 1 then BUILTIN_TARGET else (
+                    if string_ref_is_wrap(name) == 1 then BUILTIN_WRAP else (
+                        if string_ref_is_asm(name) == 1 then BUILTIN_ASM else -1
+                    )
+                )
+            )
+        )
     )
 );
 
@@ -710,6 +755,44 @@ record_find_field_index := {start: i32, count: i32, has_named: i32, name_start: 
     )
 );
 
+string_ref_is_export := (value: StringRef) => (
+    if value.start < 0 then 0 else if value.length != 6 then 0 else (
+        if input(value.start) == 'e' then (
+            if input(value.start + 1) == 'x' then (
+                if input(value.start + 2) == 'p' then (
+                    if input(value.start + 3) == 'o' then (
+                        if input(value.start + 4) == 'r' then (
+                            if input(value.start + 5) == 't' then 1 else 0
+                        ) else 0
+                    ) else 0
+                ) else 0
+            ) else 0
+        ) else 0
+    )
+);
+
+string_ref_is_wrap := (value: StringRef) => (
+    if value.start < 0 then 0 else if value.length != 4 then 0 else (
+        if input(value.start) == 'w' then (
+            if input(value.start + 1) == 'r' then (
+                if input(value.start + 2) == 'a' then (
+                    if input(value.start + 3) == 'p' then 1 else 0
+                ) else 0
+            ) else 0
+        ) else 0
+    )
+);
+
+string_ref_is_asm := (value: StringRef) => (
+    if value.start < 0 then 0 else if value.length != 3 then 0 else (
+        if input(value.start) == 'a' then (
+            if input(value.start + 1) == 's' then (
+                if input(value.start + 2) == 'm' then 1 else 0
+            ) else 0
+        ) else 0
+    )
+);
+
 record_value_index_by_position_no_error := {start: i32, count: i32, index: i32} => (
     if index < 0 then (
         -1
@@ -759,6 +842,34 @@ record_find_field_index_no_error := {start: i32, count: i32, has_named: i32, nam
     )
 );
 
+impl_add := {type_idx: i32, impl_idx: i32} => (
+    if impl_state.count >= MAX_IMPLS then (
+        set_error(0);
+        -1
+    ) else (
+        idx := impl_state.count;
+        impl_type_values(idx) = type_idx;
+        impl_value_values(idx) = impl_idx;
+        impl_state.count = idx + 1;
+        idx
+    )
+);
+
+impl_find := (type_idx: i32) => (
+    mut idx := impl_state.count - 1;
+    mut found := -1;
+    while idx >= 0 do (
+        if impl_type_values(idx) == type_idx then (
+            found = impl_value_values(idx);
+            idx = -1;
+        ) else (
+            idx = idx - 1;
+        );
+        {}
+    );
+    found
+);
+
 op_is1 := {op_start: i32, op_len: i32, ch: u8} => (
     if op_len == 1 then (
         if input(op_start) == ch then 1 else 0
@@ -789,6 +900,34 @@ is_empty_struct := (fields: i32) => (
     if fields == -1 then 1 else 0
 );
 
+target_literal_tag := (target: TargetLiteral) => (
+    target |> match {
+        TargetLiteral::JSTarget => TARGET_JS,
+        TargetLiteral::WasmTarget => TARGET_WASM,
+        TargetLiteral::WgslTarget => TARGET_WGSL,
+        else => -1
+    }
+);
+
+binding_annotation_from_literal := (ann: BindingAnnotationLiteral) => (
+    ann |> match {
+        BindingAnnotationLiteral::Mut => Value::BindingAnnotation({ kind = BINDING_ANN_MUT, target = -1 }),
+        BindingAnnotationLiteral::Export(target) => Value::BindingAnnotation({
+            kind = BINDING_ANN_EXPORT,
+            target = target_literal_tag(target)
+        }),
+        BindingAnnotationLiteral::Target(target) => Value::BindingAnnotation({
+            kind = BINDING_ANN_TARGET,
+            target = target_literal_tag(target)
+        }),
+        BindingAnnotationLiteral::Wrap(target) => Value::BindingAnnotation({
+            kind = BINDING_ANN_WRAP,
+            target = target_literal_tag(target)
+        }),
+        else => Value::Unit
+    }
+);
+
 
 eval_literal := (lit: ExpressionLiteral) => (
     lit |> match {
@@ -796,6 +935,8 @@ eval_literal := (lit: ExpressionLiteral) => (
         ExpressionLiteral::Boolean(value) => Value::Boolean(value),
         ExpressionLiteral::Char(value) => Value::Char(value),
         ExpressionLiteral::String(value) => Value::String(value),
+        ExpressionLiteral::Target(value) => Value::Target(target_literal_tag(value)),
+        ExpressionLiteral::BindingAnnotation(value) => binding_annotation_from_literal(value),
         else => Value::Unit
     }
 );
@@ -976,6 +1117,7 @@ bind_struct_pattern := {fields_head: i32, value_idx: i32, inherit_mut: i32} => (
 bind_pattern_expr := {pattern_expr: i32, value_idx: i32, inherit_mut: i32} => (
     nodes(pattern_expr).kind |> match {
         NodeKind::Identifier(info) => add_binding_if_named{info.name.start, info.name.length, value_idx, inherit_mut},
+        NodeKind::Literal(_) => 0,
         NodeKind::Struct(info) => bind_struct_pattern{info.fields, value_idx, inherit_mut},
         NodeKind::Operation(op) => (
             if op_is1{op.operator.start, op.operator.length, ':'} == 1 then (
@@ -984,7 +1126,7 @@ bind_pattern_expr := {pattern_expr: i32, value_idx: i32, inherit_mut: i32} => (
                 0
             )
         ),
-        NodeKind::TypePropertyAccess(_) => (
+        NodeKind::TypePropertyAccess(info) => (
             if Value::Enum(enum_info) := values(value_idx) then (
                 if enum_info.payload == -1 then 1 else 0
             ) else (
@@ -1015,9 +1157,67 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
     matched := pattern |> match {
         BindingPattern::Annotated(info) => (
             mut_flag := if annotations_has_mut(info.annotations) == 1 || inherit_mut == 1 then 1 else 0;
-            bind_pattern_expr{info.pattern, value_idx, mut_flag}
+            if NodeKind::Operation(op) := nodes(info.pattern).kind then (
+                if op_is1{op.operator.start, op.operator.length, ':'} == 1 then (
+                    type_idx := eval_expression(op.right);
+                    if type_idx == -1 then (
+                        0
+                    ) else if flow_state.kind != FLOW_NONE then (
+                        0
+                    ) else (
+                        resolve_binding_from_expr(op.left);
+                        name_ok := binding_temp.ok;
+                        name_start := binding_temp.start;
+                        name_len := binding_temp.length;
+                        matched := bind_pattern_expr{op.left, value_idx, mut_flag};
+                        if matched == 1 && name_ok == 1 then (
+                            bind_name := make_string_ref{name_start, name_len};
+                            bind_idx := find_binding_index(bind_name);
+                            if bind_idx != -1 then (
+                                binding_type_values(bind_idx) = type_idx;
+                                0
+                            ) else (
+                                0
+                            )
+                        ) else (
+                            0
+                        );
+                        matched
+                    )
+                ) else (
+                    bind_pattern_expr{info.pattern, value_idx, mut_flag}
+                )
+            ) else (
+                bind_pattern_expr{info.pattern, value_idx, mut_flag}
+            )
         ),
-        BindingPattern::TypeHint(info) => bind_pattern_expr{info.pattern, value_idx, inherit_mut},
+        BindingPattern::TypeHint(info) => (
+            type_idx := eval_expression(info.type_expr);
+            if type_idx == -1 then (
+                0
+            ) else if flow_state.kind != FLOW_NONE then (
+                0
+            ) else (
+                resolve_binding_from_expr(info.pattern);
+                name_ok := binding_temp.ok;
+                name_start := binding_temp.start;
+                name_len := binding_temp.length;
+                matched := bind_pattern_expr{info.pattern, value_idx, inherit_mut};
+                if matched == 1 && name_ok == 1 then (
+                    bind_name := make_string_ref{name_start, name_len};
+                    bind_idx := find_binding_index(bind_name);
+                    if bind_idx != -1 then (
+                        binding_type_values(bind_idx) = type_idx;
+                        0
+                    ) else (
+                        0
+                    )
+                ) else (
+                    0
+                );
+                matched
+            )
+        ),
         BindingPattern::Identifier(info) => add_binding_if_named{info.name.name.start, info.name.name.length, value_idx, inherit_mut},
         BindingPattern::Literal(_) => 0,
         BindingPattern::EnumVariant(info) => (
@@ -1044,6 +1244,205 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
     )
 );
 
+apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
+    func_val := values(func_idx);
+    func_val |> match {
+        Value::Function(fn_node) => (
+            if NodeKind::Function(fn_info) := nodes(fn_node).kind then (
+                runtime_state.function_depth = runtime_state.function_depth + 1;
+                enter_scope{};
+                bind_pattern_state.value_idx = arg_idx;
+                bind_pattern_state.inherit_mut = 0;
+                bind_ok := bind_pattern_simple(fn_info.parameter);
+                mut result_idx := -1;
+                if bind_ok == 0 then (
+                    set_error(span_start);
+                    result_idx = -1;
+                ) else (
+                    result_idx = eval_expression(fn_info.body);
+                    if flow_state.kind == FLOW_RETURN then (
+                        result_idx = flow_state.value;
+                        flow_state.kind = FLOW_NONE;
+                        flow_state.value = -1;
+                    );
+                );
+                exit_scope{};
+                runtime_state.function_depth = runtime_state.function_depth - 1;
+                result_idx
+            ) else (
+                set_error(span_start);
+                -1
+            )
+        ),
+        Value::EnumConstructor(enum_ctor) => (
+            if enum_ctor.expects_payload == 0 then (
+                store_value(Value::Enum({
+                    enum_head = enum_ctor.enum_head,
+                    enum_count = enum_ctor.enum_count,
+                    variant_idx = enum_ctor.variant_idx,
+                    payload = -1
+                }))
+            ) else (
+                store_value(Value::Enum({
+                    enum_head = enum_ctor.enum_head,
+                    enum_count = enum_ctor.enum_count,
+                    variant_idx = enum_ctor.variant_idx,
+                    payload = arg_idx
+                }))
+            )
+        ),
+        Value::MatchFunction(match_info) => (
+            mut matched := 0;
+            mut result_idx := -1;
+            mut branch_idx := 0;
+            while branch_idx < match_info.count && matched == 0 do (
+                branch_value_idx := match_info.head + branch_idx * 2 + 1;
+                if Value::Function(branch_fn_node) := values(branch_value_idx) then (
+                    if NodeKind::Function(branch_fn) := nodes(branch_fn_node).kind then (
+                        enter_scope{};
+                        bind_pattern_state.value_idx = arg_idx;
+                        bind_pattern_state.inherit_mut = 0;
+                        if bind_pattern_simple(branch_fn.parameter) == 1 then (
+                            matched = 1;
+                            runtime_state.function_depth = runtime_state.function_depth + 1;
+                            result_idx = eval_expression(branch_fn.body);
+                            if flow_state.kind == FLOW_RETURN then (
+                                result_idx = flow_state.value;
+                                flow_state.kind = FLOW_NONE;
+                                flow_state.value = -1;
+                            );
+                            runtime_state.function_depth = runtime_state.function_depth - 1;
+                            0
+                        ) else (
+                            0
+                        );
+                        exit_scope{};
+                    ) else (
+                        set_error(span_start);
+                        matched = 1;
+                        result_idx = -1;
+                    )
+                ) else (
+                    set_error(span_start);
+                    matched = 1;
+                    result_idx = -1;
+                );
+                if matched == 0 then (
+                    branch_idx = branch_idx + 1;
+                    0
+                ) else (
+                    0
+                );
+                {}
+            );
+            if matched == 0 then (
+                set_error(span_start);
+                -1
+            ) else (
+                result_idx
+            )
+        ),
+        Value::Builtin(builtin_id) => (
+            if builtin_id == BUILTIN_ENUM then (
+                if Value::Record(rec_info) := values(arg_idx) then (
+                    if rec_info.has_named == 0 then (
+                        set_error(span_start);
+                        -1
+                    ) else (
+                        store_value(Value::EnumType({ head = rec_info.head, count = rec_info.count }))
+                    )
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else if builtin_id == BUILTIN_MATCH then (
+                if Value::Record(rec_info) := values(arg_idx) then (
+                    store_value(Value::MatchFunction({ head = rec_info.head, count = rec_info.count }))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else if builtin_id == BUILTIN_EXPORT || builtin_id == BUILTIN_TARGET || builtin_id == BUILTIN_WRAP then (
+                if Value::Target(target_tag) := values(arg_idx) then (
+                    kind := if builtin_id == BUILTIN_EXPORT then BINDING_ANN_EXPORT else (
+                        if builtin_id == BUILTIN_TARGET then BINDING_ANN_TARGET else BINDING_ANN_WRAP
+                    );
+                    store_value(Value::BindingAnnotation({ kind = kind, target = target_tag }))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else if builtin_id == BUILTIN_ASM then (
+                if Value::Target(target_tag) := values(arg_idx) then (
+                    store_value(Value::AsmFunction(target_tag))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else (
+                set_error(span_start);
+                -1
+            )
+        ),
+        Value::AsmFunction(target_tag) => (
+            if Value::String(code_ref) := values(arg_idx) then (
+                store_value(Value::InlineAssembly({ target = target_tag, code = code_ref }))
+            ) else (
+                set_error(span_start);
+                -1
+            )
+        ),
+        else => (
+            set_error(span_start);
+            -1
+        )
+    }
+);
+
+apply_impl_method := {object_idx: i32, object_expr: i32, property: StringRef, span_start: i32} => (
+    if NodeKind::Identifier(id) := nodes(object_expr).kind then (
+        bind_idx := find_binding_index(id.name);
+        if bind_idx == -1 then (
+            set_error(span_start);
+            -1
+        ) else (
+            type_idx := binding_type_values(bind_idx);
+            if type_idx == -1 then (
+                set_error(span_start);
+                -1
+            ) else (
+                impl_idx := impl_find(type_idx);
+                if impl_idx == -1 then (
+                    set_error(span_start);
+                    -1
+                ) else (
+                    if Value::Record(impl_info) := values(impl_idx) then (
+                        method_idx := record_find_field_index_no_error{
+                            impl_info.head,
+                            impl_info.count,
+                            impl_info.has_named,
+                            property.start,
+                            property.length
+                        };
+                        if method_idx == -1 then (
+                            set_error(span_start);
+                            -1
+                        ) else (
+                            apply_function_value{method_idx, object_idx, span_start}
+                        )
+                    ) else (
+                        set_error(span_start);
+                        -1
+                    )
+                )
+            )
+        )
+    ) else (
+        set_error(span_start);
+        -1
+    )
+);
+
 eval_expression: (i32 -> i32) := (idx: i32) => (
     if value_state.error != -1 then (
         -1
@@ -1053,6 +1452,20 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
         span_start := nodes(idx).span.start;
         nodes(idx).kind |> match {
             NodeKind::Literal(lit) => store_value(eval_literal(lit)),
+            NodeKind::IntrinsicType(ty) => (
+                ty |> match {
+                    IntrinsicType::I32 => store_value(Value::String(SYNTHETIC_I32_STRING)),
+                    IntrinsicType::U8 => store_value(Value::String(SYNTHETIC_U8_STRING)),
+                    IntrinsicType::Boolean => store_value(Value::String(SYNTHETIC_BOOL_STRING)),
+                    IntrinsicType::Type => store_value(Value::String(SYNTHETIC_TYPE_STRING)),
+                    IntrinsicType::Target => store_value(Value::String(SYNTHETIC_TARGET_STRING)),
+                    IntrinsicType::BindingAnnotation => store_value(Value::String(SYNTHETIC_BINDING_ANNOTATION_STRING)),
+                    else => (
+                        set_error(span_start);
+                        -1
+                    )
+                }
+            ),
             NodeKind::Identifier(id) => (
                 binding_idx := find_binding_index(id.name);
                 if binding_idx == -1 then (
@@ -1197,6 +1610,65 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
             NodeKind::Function(_) => (
                 store_value(Value::Function(idx))
             ),
+            NodeKind::BoxType(inner_idx) => (
+                inner_value_idx := eval_expression(inner_idx);
+                if inner_value_idx == -1 then (
+                    -1
+                ) else if flow_state.kind != FLOW_NONE then (
+                    inner_value_idx
+                ) else (
+                    start_idx := value_state.count;
+                    name_idx := store_value(Value::String(EMPTY_STRING));
+                    if name_idx == -1 then (
+                        -1
+                    ) else (
+                        val_idx := store_value(values(inner_value_idx));
+                        if val_idx == -1 then (
+                            -1
+                        ) else (
+                            store_value(Value::Record({ head = start_idx, count = 1, has_named = 0 }))
+                        )
+                    )
+                )
+            ),
+            NodeKind::FunctionType(info) => (
+                param_value_idx := eval_expression(info.parameter);
+                if param_value_idx == -1 then (
+                    -1
+                ) else if flow_state.kind != FLOW_NONE then (
+                    param_value_idx
+                ) else (
+                    ret_value_idx := eval_expression(info.return_type);
+                    if ret_value_idx == -1 then (
+                        -1
+                    ) else if flow_state.kind != FLOW_NONE then (
+                        ret_value_idx
+                    ) else (
+                        start_idx := value_state.count;
+                        name_idx := store_value(Value::String(EMPTY_STRING));
+                        if name_idx == -1 then (
+                            -1
+                        ) else (
+                            param_idx := store_value(values(param_value_idx));
+                            if param_idx == -1 then (
+                                -1
+                            ) else (
+                                name_idx2 := store_value(Value::String(EMPTY_STRING));
+                                if name_idx2 == -1 then (
+                                    -1
+                                ) else (
+                                    ret_idx := store_value(values(ret_value_idx));
+                                    if ret_idx == -1 then (
+                                        -1
+                                    ) else (
+                                        store_value(Value::Record({ head = start_idx, count = 2, has_named = 0 }))
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            ),
             NodeKind::FunctionCall(info) => (
                 if NodeKind::TypePropertyAccess(access) := nodes(info.function).kind then (
                     obj_idx := eval_expression(access.object);
@@ -1205,61 +1677,81 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     ) else if flow_state.kind != FLOW_NONE then (
                         obj_idx
                     ) else (
-                        obj_val := values(obj_idx);
-                        if Value::EnumType(enum_info) := obj_val then (
-                            payload_idx := record_find_field_index_no_error{
-                                enum_info.head,
-                                enum_info.count,
-                                1,
-                                access.property.start,
-                                access.property.length
-                            };
-                            if payload_idx == -1 then (
-                                set_error(span_start);
-                                -1
-                            ) else (
-                                variant_idx := payload_idx - 1;
-                                expects_payload := if Value::Unit := values(payload_idx) then 0 else 1;
-                                if expects_payload == 0 then (
-                                    store_value(Value::Enum({
-                                        enum_head = enum_info.head,
-                                        enum_count = enum_info.count,
-                                        variant_idx = variant_idx,
-                                        payload = -1
-                                    }))
+                        if info.argument == access.object then (
+                            obj_val := values(obj_idx);
+                            if Value::Record(struct_info) := obj_val then (
+                                field_idx := record_find_field_index_no_error{
+                                    struct_info.head,
+                                    struct_info.count,
+                                    struct_info.has_named,
+                                    access.property.start,
+                                    access.property.length
+                                };
+                                if field_idx != -1 then (
+                                    field_idx
                                 ) else (
-                                    payload_value_idx := eval_expression(info.argument);
-                                    if payload_value_idx == -1 then (
-                                        -1
-                                    ) else if flow_state.kind != FLOW_NONE then (
-                                        payload_value_idx
-                                    ) else (
+                                    apply_impl_method{obj_idx, access.object, access.property, span_start}
+                                )
+                            ) else (
+                                apply_impl_method{obj_idx, access.object, access.property, span_start}
+                            )
+                        ) else (
+                            obj_val := values(obj_idx);
+                            if Value::EnumType(enum_info) := obj_val then (
+                                payload_idx := record_find_field_index_no_error{
+                                    enum_info.head,
+                                    enum_info.count,
+                                    1,
+                                    access.property.start,
+                                    access.property.length
+                                };
+                                if payload_idx == -1 then (
+                                    set_error(span_start);
+                                    -1
+                                ) else (
+                                    variant_idx := payload_idx - 1;
+                                    expects_payload := if Value::Unit := values(payload_idx) then 0 else 1;
+                                    if expects_payload == 0 then (
                                         store_value(Value::Enum({
                                             enum_head = enum_info.head,
                                             enum_count = enum_info.count,
                                             variant_idx = variant_idx,
-                                            payload = payload_value_idx
+                                            payload = -1
                                         }))
+                                    ) else (
+                                        payload_value_idx := eval_expression(info.argument);
+                                        if payload_value_idx == -1 then (
+                                            -1
+                                        ) else if flow_state.kind != FLOW_NONE then (
+                                            payload_value_idx
+                                        ) else (
+                                            store_value(Value::Enum({
+                                                enum_head = enum_info.head,
+                                                enum_count = enum_info.count,
+                                                variant_idx = variant_idx,
+                                                payload = payload_value_idx
+                                            }))
+                                        )
                                     )
                                 )
-                            )
-                        ) else if Value::Record(struct_info) := obj_val then (
-                            field_idx := record_find_field_index{
-                                struct_info.head,
-                                struct_info.count,
-                                struct_info.has_named,
-                                access.property.start,
-                                access.property.length,
-                                span_start
-                            };
-                            if field_idx == -1 then (
-                                -1
+                            ) else if Value::Record(struct_info) := obj_val then (
+                                field_idx := record_find_field_index{
+                                    struct_info.head,
+                                    struct_info.count,
+                                    struct_info.has_named,
+                                    access.property.start,
+                                    access.property.length,
+                                    span_start
+                                };
+                                if field_idx == -1 then (
+                                    -1
+                                ) else (
+                                    field_idx
+                                )
                             ) else (
-                                field_idx
+                                set_error(span_start);
+                                -1
                             )
-                        ) else (
-                            set_error(span_start);
-                            -1
                         )
                     )
                 ) else (
@@ -1275,133 +1767,33 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         ) else if flow_state.kind != FLOW_NONE then (
                             arg_idx
                         ) else (
-                            func_val := values(func_idx);
-                            func_val |> match {
-                                Value::Function(fn_node) => (
-                                    if NodeKind::Function(fn_info) := nodes(fn_node).kind then (
-                                        runtime_state.function_depth = runtime_state.function_depth + 1;
-                                        enter_scope{};
-                                        bind_pattern_state.value_idx = arg_idx;
-                                        bind_pattern_state.inherit_mut = 0;
-                                        bind_ok := bind_pattern_simple(fn_info.parameter);
-                                        mut result_idx := -1;
-                                        if bind_ok == 0 then (
-                                            set_error(span_start);
-                                            result_idx = -1;
-                                        ) else (
-                                            result_idx = eval_expression(fn_info.body);
-                                            if flow_state.kind == FLOW_RETURN then (
-                                                result_idx = flow_state.value;
-                                                flow_state.kind = FLOW_NONE;
-                                                flow_state.value = -1;
-                                            );
-                                        );
-                                        exit_scope{};
-                                        runtime_state.function_depth = runtime_state.function_depth - 1;
-                                        result_idx
-                                    ) else (
-                                        set_error(span_start);
-                                        -1
-                                    )
-                                ),
-                                Value::EnumConstructor(enum_ctor) => (
-                                    if enum_ctor.expects_payload == 0 then (
-                                        store_value(Value::Enum({
-                                            enum_head = enum_ctor.enum_head,
-                                            enum_count = enum_ctor.enum_count,
-                                            variant_idx = enum_ctor.variant_idx,
-                                            payload = -1
-                                        }))
-                                    ) else (
-                                        store_value(Value::Enum({
-                                            enum_head = enum_ctor.enum_head,
-                                            enum_count = enum_ctor.enum_count,
-                                            variant_idx = enum_ctor.variant_idx,
-                                            payload = arg_idx
-                                        }))
-                                    )
-                                ),
-                                Value::MatchFunction(match_info) => (
-                                    mut matched := 0;
-                                    mut result_idx := -1;
-                                    mut branch_idx := 0;
-                                    while branch_idx < match_info.count && matched == 0 do (
-                                        branch_value_idx := match_info.head + branch_idx * 2 + 1;
-                                        if Value::Function(branch_fn_node) := values(branch_value_idx) then (
-                                            if NodeKind::Function(branch_fn) := nodes(branch_fn_node).kind then (
-                                                enter_scope{};
-                                                bind_pattern_state.value_idx = arg_idx;
-                                                bind_pattern_state.inherit_mut = 0;
-                                                if bind_pattern_simple(branch_fn.parameter) == 1 then (
-                                                    matched = 1;
-                                                    runtime_state.function_depth = runtime_state.function_depth + 1;
-                                                    result_idx = eval_expression(branch_fn.body);
-                                                    if flow_state.kind == FLOW_RETURN then (
-                                                        result_idx = flow_state.value;
-                                                        flow_state.kind = FLOW_NONE;
-                                                        flow_state.value = -1;
-                                                    );
-                                                    runtime_state.function_depth = runtime_state.function_depth - 1;
-                                                    0
-                                                ) else (
-                                                    0
-                                                );
-                                                exit_scope{};
-                                            ) else (
-                                                set_error(span_start);
-                                                matched = 1;
-                                                result_idx = -1;
-                                            )
-                                        ) else (
-                                            set_error(span_start);
-                                            matched = 1;
-                                            result_idx = -1;
-                                        );
-                                        if matched == 0 then (
-                                            branch_idx = branch_idx + 1;
-                                            0
-                                        ) else (
-                                            0
-                                        );
-                                        {}
-                                    );
-                                    if matched == 0 then (
-                                        set_error(span_start);
-                                        -1
-                                    ) else (
-                                        result_idx
-                                    )
-                                ),
-                                Value::Builtin(builtin_id) => (
-                                    if builtin_id == BUILTIN_ENUM then (
-                                        if Value::Record(rec_info) := values(arg_idx) then (
-                                            if rec_info.has_named == 0 then (
-                                                set_error(span_start);
-                                                -1
-                                            ) else (
-                                                store_value(Value::EnumType({ head = rec_info.head, count = rec_info.count }))
-                                            )
-                                        ) else (
-                                            set_error(span_start);
-                                            -1
-                                        )
-                                    ) else if builtin_id == BUILTIN_MATCH then (
-                                        if Value::Record(rec_info) := values(arg_idx) then (
-                                            store_value(Value::MatchFunction({ head = rec_info.head, count = rec_info.count }))
-                                        ) else (
-                                            set_error(span_start);
-                                            -1
-                                        )
-                                    ) else (
-                                        set_error(span_start);
-                                        -1
-                                    )
-                                ),
-                                else => (
-                                    set_error(span_start);
-                                    -1
-                                )
-                            }
+                            apply_function_value{func_idx, arg_idx, span_start}
+                        )
+                    )
+                )
+            ),
+            NodeKind::AttachImplementation(info) => (
+                type_idx := eval_expression(info.type_expr);
+                if type_idx == -1 then (
+                    -1
+                ) else if flow_state.kind != FLOW_NONE then (
+                    type_idx
+                ) else (
+                    impl_idx := eval_expression(info.implementation);
+                    if impl_idx == -1 then (
+                        -1
+                    ) else if flow_state.kind != FLOW_NONE then (
+                        impl_idx
+                    ) else (
+                        if Value::Record(_) := values(impl_idx) then (
+                            if impl_add{type_idx, impl_idx} == -1 then (
+                                -1
+                            ) else (
+                                type_idx
+                            )
+                        ) else (
+                            set_error(span_start);
+                            -1
                         )
                     )
                 )
@@ -1622,6 +2014,68 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                         -1
                                     )
                                 ),
+                                UnaryIntrinsicOperator::EnumFromStruct => (
+                                    if Value::Record(rec_info) := values(operand_idx) then (
+                                        if rec_info.has_named == 0 then (
+                                            set_error(span_start);
+                                            -1
+                                        ) else (
+                                            store_value(Value::EnumType({ head = rec_info.head, count = rec_info.count }))
+                                        )
+                                    ) else (
+                                        set_error(span_start);
+                                        -1
+                                    )
+                                ),
+                                UnaryIntrinsicOperator::MatchFromStruct => (
+                                    if Value::Record(rec_info) := values(operand_idx) then (
+                                        store_value(Value::MatchFunction({ head = rec_info.head, count = rec_info.count }))
+                                    ) else (
+                                        set_error(span_start);
+                                        -1
+                                    )
+                                ),
+                                UnaryIntrinsicOperator::BindingAnnotationExportFromTarget => (
+                                    if Value::Target(target_tag) := values(operand_idx) then (
+                                        store_value(Value::BindingAnnotation({
+                                            kind = BINDING_ANN_EXPORT,
+                                            target = target_tag
+                                        }))
+                                    ) else (
+                                        set_error(span_start);
+                                        -1
+                                    )
+                                ),
+                                UnaryIntrinsicOperator::BindingAnnotationTargetFromTarget => (
+                                    if Value::Target(target_tag) := values(operand_idx) then (
+                                        store_value(Value::BindingAnnotation({
+                                            kind = BINDING_ANN_TARGET,
+                                            target = target_tag
+                                        }))
+                                    ) else (
+                                        set_error(span_start);
+                                        -1
+                                    )
+                                ),
+                                UnaryIntrinsicOperator::BindingAnnotationWrapFromTarget => (
+                                    if Value::Target(target_tag) := values(operand_idx) then (
+                                        store_value(Value::BindingAnnotation({
+                                            kind = BINDING_ANN_WRAP,
+                                            target = target_tag
+                                        }))
+                                    ) else (
+                                        set_error(span_start);
+                                        -1
+                                    )
+                                ),
+                                UnaryIntrinsicOperator::AssemblyFromTarget => (
+                                    if Value::Target(target_tag) := values(operand_idx) then (
+                                        store_value(Value::AsmFunction(target_tag))
+                                    ) else (
+                                        set_error(span_start);
+                                        -1
+                                    )
+                                ),
                                 else => (
                                     set_error(span_start);
                                     -1
@@ -1629,9 +2083,23 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                             }
                         )
                     ),
-                    IntrinsicOperation::InlineAssembly(_) => (
-                        set_error(span_start);
-                        -1
+                    IntrinsicOperation::InlineAssembly(info) => (
+                        code_idx := eval_expression(info.code);
+                        if code_idx == -1 then (
+                            -1
+                        ) else if flow_state.kind != FLOW_NONE then (
+                            code_idx
+                        ) else (
+                            if Value::String(code_ref) := values(code_idx) then (
+                                store_value(Value::InlineAssembly({
+                                    target = target_literal_tag(info.target),
+                                    code = code_ref
+                                }))
+                            ) else (
+                                set_error(span_start);
+                                -1
+                            )
+                        )
                     ),
                     else => (
                         set_error(span_start);
@@ -1739,6 +2207,38 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                     store_value(Value::Boolean(if string_ref_equals{lv, rv} == 1 then 1 else 0))
                                 ) else if op_is2{op_start, op_len, '!', '='} == 1 then (
                                     store_value(Value::Boolean(if string_ref_equals{lv, rv} == 1 then 0 else 1))
+                                ) else (
+                                    set_error(span_start);
+                                    -1
+                                )
+                            ) else (
+                                set_error(span_start);
+                                -1
+                            )
+                        ) else if Value::Target(lv) := left then (
+                            if Value::Target(rv) := right then (
+                                if op_is2{op_start, op_len, '=', '='} == 1 then (
+                                    store_value(Value::Boolean(if lv == rv then 1 else 0))
+                                ) else if op_is2{op_start, op_len, '!', '='} == 1 then (
+                                    store_value(Value::Boolean(if lv != rv then 1 else 0))
+                                ) else (
+                                    set_error(span_start);
+                                    -1
+                                )
+                            ) else (
+                                set_error(span_start);
+                                -1
+                            )
+                        ) else if Value::BindingAnnotation(lv) := left then (
+                            if Value::BindingAnnotation(rv) := right then (
+                                if op_is2{op_start, op_len, '=', '='} == 1 then (
+                                    store_value(Value::Boolean(
+                                        if lv.kind == rv.kind && lv.target == rv.target then 1 else 0
+                                    ))
+                                ) else if op_is2{op_start, op_len, '!', '='} == 1 then (
+                                    store_value(Value::Boolean(
+                                        if lv.kind == rv.kind && lv.target == rv.target then 0 else 1
+                                    ))
                                 ) else (
                                     set_error(span_start);
                                     -1
@@ -1858,9 +2358,135 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     )
                 }
             ),
+            NodeKind::EnumType(info) => (
+                mut current := info.variants;
+                mut temp_head := -1;
+                mut temp_tail := -1;
+                mut last_idx := -1;
+                while current != -1 do (
+                    variant_node := list_nodes(current).value;
+                    if NodeKind::Binding(variant_binding) := nodes(variant_node).kind then (
+                        last_idx = eval_expression(variant_binding.expr);
+                        if last_idx == -1 then (
+                            current = -1;
+                        ) else if flow_state.kind != FLOW_NONE then (
+                            current = -1;
+                        ) else (
+                            temp_node := new_list_node{last_idx, -1};
+                            if temp_node == -1 then (
+                                current = -1;
+                            ) else (
+                                if temp_head == -1 then (
+                                    temp_head = temp_node;
+                                ) else (
+                                    list_nodes(temp_tail).next = temp_node;
+                                );
+                                temp_tail = temp_node;
+                                current = list_nodes(current).next;
+                            )
+                        )
+                    ) else (
+                        set_error(span_start);
+                        current = -1;
+                    );
+                    {}
+                );
+                if value_state.error != -1 then (
+                    -1
+                ) else if flow_state.kind != FLOW_NONE then (
+                    last_idx
+                ) else (
+                    start_idx := value_state.count;
+                    mut count := 0;
+                    current = info.variants;
+                    mut temp_current := temp_head;
+                    while current != -1 && temp_current != -1 do (
+                        variant_node := list_nodes(current).value;
+                        if NodeKind::Binding(variant_binding) := nodes(variant_node).kind then (
+                            mut variant_name := EMPTY_STRING;
+                            variant_binding.pattern |> match {
+                                BindingPattern::Identifier(id) => (variant_name = id.name.name),
+                                else => (variant_name = EMPTY_STRING)
+                            };
+                            if variant_name.length <= 0 then (
+                                set_error(span_start);
+                                current = -1;
+                                temp_current = -1;
+                            ) else (
+                                name_idx := store_value(Value::String(variant_name));
+                                if name_idx == -1 then (
+                                    current = -1;
+                                    temp_current = -1;
+                                ) else (
+                                    val_idx := store_value(values(list_nodes(temp_current).value));
+                                    if val_idx == -1 then (
+                                        current = -1;
+                                        temp_current = -1;
+                                    ) else (
+                                        count = count + 1;
+                                        current = list_nodes(current).next;
+                                        temp_current = list_nodes(temp_current).next;
+                                    )
+                                )
+                            )
+                        ) else (
+                            set_error(span_start);
+                            current = -1;
+                            temp_current = -1;
+                        );
+                        {}
+                    );
+                    if value_state.error != -1 then (
+                        -1
+                    ) else (
+                        store_value(Value::EnumType({ head = start_idx, count = count }))
+                    )
+                )
+            ),
             NodeKind::Match(info) => (
-                set_error(span_start);
-                -1
+                value_idx := eval_expression(info.value);
+                if value_idx == -1 then (
+                    -1
+                ) else if flow_state.kind != FLOW_NONE then (
+                    value_idx
+                ) else (
+                    mut matched := 0;
+                    mut result_idx := -1;
+                    mut current := info.branches;
+                    while current != -1 && matched == 0 do (
+                        branch_node := list_nodes(current).value;
+                        if NodeKind::Binding(branch_binding) := nodes(branch_node).kind then (
+                            enter_scope{};
+                            bind_pattern_state.value_idx = value_idx;
+                            bind_pattern_state.inherit_mut = 0;
+                            if bind_pattern_simple(branch_binding.pattern) == 1 then (
+                                matched = 1;
+                                result_idx = eval_expression(branch_binding.expr);
+                                0
+                            ) else (
+                                0
+                            );
+                            exit_scope{};
+                        ) else (
+                            set_error(span_start);
+                            matched = 1;
+                            result_idx = -1;
+                        );
+                        if matched == 0 then (
+                            current = list_nodes(current).next;
+                            0
+                        ) else (
+                            0
+                        );
+                        {}
+                    );
+                    if matched == 0 then (
+                        set_error(span_start);
+                        -1
+                    ) else (
+                        result_idx
+                    )
+                )
             ),
             NodeKind::EnumValue(info) => (
                 enum_idx := eval_expression(info.enum_type);
@@ -2202,6 +2828,10 @@ value_tag := (value: Value) => (
         Value::EnumConstructor(_) => 9,
         Value::Enum(_) => 10,
         Value::MatchFunction(_) => 11,
+        Value::Target(_) => 12,
+        Value::BindingAnnotation(_) => 13,
+        Value::AsmFunction(_) => 14,
+        Value::InlineAssembly(_) => 15,
         else => -1
     }
 );
