@@ -178,3 +178,23 @@ Deno.test("wasm interpreter: evaluates function calls", () => {
   assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
   assertEquals(interpreterExports.get_value_number(resultIdx), 5);
 });
+
+Deno.test("wasm interpreter: accesses struct properties", () => {
+  const resultIdx = parseAndInterpret("point := { x = 5, y = 10 }; point.x");
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 5);
+});
+
+Deno.test("wasm interpreter: calls functions stored on structs", () => {
+  const resultIdx = parseAndInterpret(
+    "container := { inc = (value: i32) => (value + 1) }; container.inc(41)",
+  );
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 42);
+});
+
+Deno.test("wasm interpreter: evaluates array repeats", () => {
+  const resultIdx = parseAndInterpret("arr := {5; 3}; arr.1");
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 5);
+});
