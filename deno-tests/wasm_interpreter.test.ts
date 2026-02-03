@@ -198,3 +198,49 @@ Deno.test("wasm interpreter: evaluates array repeats", () => {
   assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
   assertEquals(interpreterExports.get_value_number(resultIdx), 5);
 });
+
+Deno.test("wasm interpreter: matches enum patterns in while", () => {
+  const resultIdx = parseAndInterpret(`
+    Option := (T: type) => (enum { Some = T, None = {} });
+    mut opt := Option(i32)::Some(7);
+    mut result := 0;
+    while Option(i32)::Some(value) := opt do (
+      opt = Option(i32)::None;
+      result = value;
+    );
+    result
+  `);
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 7);
+});
+
+Deno.test("wasm interpreter: evaluates match expressions via match builtin", () => {
+  const resultIdx = parseAndInterpret(`
+    Option := (T: type) => (enum { Some = T, None = {} });
+    choose := (option: Option(i32)) => (
+      option |> match {
+        Option(i32)::Some(value) => value,
+        else => 0
+      }
+    );
+    choose(Option(i32)::Some(5))
+  `);
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 5);
+});
+
+Deno.test("wasm interpreter: destructures struct patterns", () => {
+  const resultIdx = parseAndInterpret(
+    "mut { first = a, second = b } := { first = 3, second = 4 }; a + b",
+  );
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 7);
+});
+
+Deno.test("wasm interpreter: supports pattern parameters", () => {
+  const resultIdx = parseAndInterpret(
+    "sum_pair := { first = a, second = b } => (a + b); sum_pair { first = 2, second = 5 }",
+  );
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 7);
+});
