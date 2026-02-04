@@ -120,6 +120,20 @@ function parseAndInterpret(source: string) {
   return resultIdx;
 }
 
+function parseAndExpectError(source: string) {
+  writeInput(parserExports.input, source);
+  const root = parserExports.parse();
+  assertEquals(parserExports.get_state_error(), -1);
+  copyMemory(parserExports.input, interpreterExports.input);
+  copyMemory(parserExports.nodes, interpreterExports.nodes);
+  copyMemory(parserExports.list_nodes, interpreterExports.list_nodes);
+  copyMemory(parserExports.state, interpreterExports.state);
+  interpreterExports.interpret(root);
+  const errorPos = interpreterExports.get_interp_error();
+  assert(errorPos !== -1);
+  return errorPos;
+}
+
 Deno.test("wasm interpreter: evaluates arithmetic", () => {
   const resultIdx = parseAndInterpret("1 + 2 * 3");
   assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
@@ -340,4 +354,12 @@ Deno.test("wasm interpreter: resolves Box type annotations", () => {
   `);
   assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
   assertEquals(interpreterExports.get_value_number(resultIdx), 5);
+});
+
+Deno.test("wasm interpreter: rejects Box of non-type expressions", () => {
+  parseAndExpectError("Box(1 + 2)");
+});
+
+Deno.test("wasm interpreter: rejects nested Box types", () => {
+  parseAndExpectError("Box(Box(i32))");
 });

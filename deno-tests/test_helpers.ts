@@ -59,27 +59,50 @@ async function ensureSilkBinary() {
   }
 
   silkBinaryPromise = (async () => {
-    const exeName = Deno.build.os === "windows" ? "silk.exe" : "silk";
-    const binaryPath = join(ROOT_DIR, "target", "debug", exeName);
+    let override: string | undefined;
     try {
-      const stat = await Deno.stat(binaryPath);
+      override = Deno.env.get("SILK_BINARY") ?? undefined;
+    } catch {
+      override = undefined;
+    }
+    if (override) {
+      return override;
+    }
+    const exeName = Deno.build.os === "windows" ? "silk.exe" : "silk";
+    const releasePath = join(ROOT_DIR, "target", "release", exeName);
+    const debugPath = join(ROOT_DIR, "target", "debug", exeName);
+    try {
+      const stat = await Deno.stat(releasePath);
       if (stat.isFile) {
-        return binaryPath;
+        return releasePath;
       }
     } catch {
       // Build below.
     }
 
-    const build = await runCommand("cargo", ["build", "--quiet"], {
+    const buildRelease = await runCommand("cargo", ["build", "--release", "--quiet"], {
       stdout: "piped",
       stderr: "piped",
     });
-    if (build.code !== 0) {
-      const combined = [build.stderr, build.stdout].filter(Boolean).join("");
+    if (buildRelease.code === 0) {
+      return releasePath;
+    }
+
+    const buildDebug = await runCommand("cargo", ["build", "--quiet"], {
+      stdout: "piped",
+      stderr: "piped",
+    });
+    if (buildDebug.code !== 0) {
+      const combined = [
+        buildRelease.stderr,
+        buildRelease.stdout,
+        buildDebug.stderr,
+        buildDebug.stdout,
+      ].filter(Boolean).join("");
       throw new Error(`Failed to build silk binary:\n${combined}`);
     }
 
-    return binaryPath;
+    return debugPath;
   })();
 
   return await silkBinaryPromise;

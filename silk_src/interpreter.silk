@@ -68,6 +68,7 @@ SYNTHETIC_NEXT_STRING := types.SYNTHETIC_NEXT_STRING;
 SYNTHETIC_FOR_ITER_STRING := types.SYNTHETIC_FOR_ITER_STRING;
 SYNTHETIC_CURRENT_STRING := { length = 7, start = -15 };
 SYNTHETIC_END_STRING := { length = 3, start = -16 };
+SYNTHETIC_BOX_STRING := { length = 3, start = -17 };
 SYNTHETIC_I32_STRING := { length = 3, start = -8 };
 SYNTHETIC_U8_STRING := { length = 2, start = -9 };
 SYNTHETIC_BOOL_STRING := { length = 4, start = -10 };
@@ -107,7 +108,7 @@ BindingTemp := { start = i32, length = i32, is_mut = i32, ok = i32 };
 ImplementationState := { count = i32 };
 
 FlowState := { kind = i32, value = i32 };
-RuntimeState := { loop_depth = i32, function_depth = i32, option_enum_idx = i32 };
+RuntimeState := { loop_depth = i32, function_depth = i32, option_enum_idx = i32, type_value_idx = i32 };
 BindPatternState := { value_idx = i32, inherit_mut = i32 };
 
 MAX_VALUES := 10000;
@@ -147,6 +148,7 @@ EMPTY_VALUE := Value::Unit;
 (export wasm) mut values: Box({Value; MAX_VALUES}) := {EMPTY_VALUE; MAX_VALUES};
 (export wasm) mut value_state: Box(ValueState) := { count = 0, error = -1 };
 mut value_type_values: Box({i32; MAX_VALUES}) := {-1; MAX_VALUES};
+mut value_is_box_type: Box({i32; MAX_VALUES}) := {0; MAX_VALUES};
 (export wasm) mut binding_name_start: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
 (export wasm) mut binding_name_length: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
 (export wasm) mut binding_values: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
@@ -159,7 +161,7 @@ mut value_type_values: Box({i32; MAX_VALUES}) := {-1; MAX_VALUES};
 (export wasm) mut impl_state: Box(ImplementationState) := { count = 0 };
 (export wasm) mut scope_stack: Box({i32; MAX_SCOPES}) := {0; MAX_SCOPES};
 (export wasm) mut flow_state: Box(FlowState) := { kind = FLOW_NONE, value = -1 };
-(export wasm) mut runtime_state: Box(RuntimeState) := { loop_depth = 0, function_depth = 0, option_enum_idx = -1 };
+(export wasm) mut runtime_state: Box(RuntimeState) := { loop_depth = 0, function_depth = 0, option_enum_idx = -1, type_value_idx = -1 };
 (export wasm) mut bind_pattern_state: Box(BindPatternState) := { value_idx = -1, inherit_mut = 0 };
 
 make_string_ref := {start: i32, length: i32} => (
@@ -191,6 +193,7 @@ reset_interpreter := {} => (
     runtime_state.loop_depth = 0;
     runtime_state.function_depth = 0;
     runtime_state.option_enum_idx = -1;
+    runtime_state.type_value_idx = -1;
     0
 );
 
@@ -457,7 +460,18 @@ add_intrinsic_binding := {name: StringRef} => (
     if value_idx == -1 then (
         -1
     ) else (
-        add_binding{name.start, name.length, value_idx, 0}
+        bind_idx := add_binding{name.start, name.length, value_idx, 0};
+        if bind_idx == -1 then (
+            -1
+        ) else (
+            ensure_type_value_idx{};
+            if runtime_state.type_value_idx == -1 then (
+                -1
+            ) else (
+                value_type_values(value_idx) = runtime_state.type_value_idx;
+                bind_idx
+            )
+        )
     )
 );
 
@@ -492,6 +506,7 @@ init_option_enum := {} => (
                     if enum_idx == -1 then (
                         -1
                     ) else (
+                        mark_value_as_type(enum_idx);
                         runtime_state.option_enum_idx = enum_idx;
                         0
                     )
@@ -1188,21 +1203,33 @@ type_values_equal := {left_idx: i32, right_idx: i32} => (
         if left_idx == right_idx then 1 else (
             left := values(left_idx);
             right := values(right_idx);
-            left |> match {
-                Value::String(lstr) => (
-                    if Value::String(rstr) := right then (
-                        string_ref_equals_raw{lstr.start, lstr.length, rstr.start, rstr.length}
-                    ) else 0
-                ),
-                Value::Record(lrec) => (
-                    if Value::Record(rrec) := right then (
-                        if lrec.has_named == 0 && rrec.has_named == 0 && lrec.count == 1 && rrec.count == 1 then (
-                            type_values_equal{lrec.head + 1, rrec.head + 1}
+            if value_is_box_type_flag(left_idx) == 1 || value_is_box_type_flag(right_idx) == 1 then (
+                if value_is_box_type_flag(left_idx) == 1 && value_is_box_type_flag(right_idx) == 1 then (
+                    if Value::Record(lrec) := left then (
+                        if Value::Record(rrec) := right then (
+                            if lrec.has_named == 0 && rrec.has_named == 0 && lrec.count == 1 && rrec.count == 1 then (
+                                type_values_equal{lrec.head + 1, rrec.head + 1}
+                            ) else 0
                         ) else 0
                     ) else 0
-                ),
-                else => 0
-            }
+                ) else 0
+            ) else (
+                left |> match {
+                    Value::String(lstr) => (
+                        if Value::String(rstr) := right then (
+                            string_ref_equals_raw{lstr.start, lstr.length, rstr.start, rstr.length}
+                        ) else 0
+                    ),
+                    Value::Record(lrec) => (
+                        if Value::Record(rrec) := right then (
+                            if lrec.has_named == 0 && rrec.has_named == 0 && lrec.count == 1 && rrec.count == 1 then (
+                                type_values_equal{lrec.head + 1, rrec.head + 1}
+                            ) else 0
+                        ) else 0
+                    ),
+                    else => 0
+                }
+            )
         )
     )
 );
@@ -1251,6 +1278,7 @@ store_value := (value: Value) => (
         idx := value_state.count;
         values(idx) = value;
         value_type_values(idx) = -1;
+        value_is_box_type(idx) = 0;
         value_state.count = value_state.count + 1;
         idx
     )
@@ -1264,6 +1292,7 @@ copy_value := (idx: i32) => (
         if new_idx == -1 then (
             -1
         ) else (
+            value_is_box_type(new_idx) = value_is_box_type(idx);
             if value_type_values(idx) != -1 then (
                 value_type_values(new_idx) = value_type_values(idx);
                 0
@@ -1271,6 +1300,70 @@ copy_value := (idx: i32) => (
                 0
             );
             new_idx
+        )
+    )
+);
+
+ensure_type_value_idx := {} => (
+    if runtime_state.type_value_idx == -1 then (
+        runtime_state.type_value_idx = store_value(Value::String(SYNTHETIC_TYPE_STRING));
+        0
+    ) else (
+        0
+    )
+);
+
+mark_value_as_type := (value_idx: i32) => (
+    if value_idx == -1 then (
+        -1
+    ) else (
+        ensure_type_value_idx{};
+        if runtime_state.type_value_idx == -1 then (
+            -1
+        ) else (
+            value_type_values(value_idx) = runtime_state.type_value_idx;
+            value_idx
+        )
+    )
+);
+
+value_is_type_value := (type_idx: i32) => (
+    if type_idx == -1 || runtime_state.type_value_idx == -1 then (
+        0
+    ) else (
+        type_values_equal{type_idx, runtime_state.type_value_idx}
+    )
+);
+
+value_is_type := (value_idx: i32) => (
+    if value_idx == -1 then (
+        0
+    ) else (
+        value_is_type_value(value_type_values(value_idx))
+    )
+);
+
+mark_value_as_box_type := (value_idx: i32) => (
+    if value_idx == -1 then (
+        -1
+    ) else (
+        value_is_box_type(value_idx) = 1;
+        value_idx
+    )
+);
+
+value_is_box_type_flag := (value_idx: i32) => (
+    if value_idx == -1 then (
+        0
+    ) else (
+        if value_is_box_type(value_idx) == 1 then 1 else (
+            if Value::Record(rec_info) := values(value_idx) then (
+                if rec_info.count == 1 && rec_info.has_named == 0 then (
+                    if Value::String(name_ref) := values(rec_info.head) then (
+                        if name_ref.start == SYNTHETIC_BOX_STRING.start && name_ref.length == SYNTHETIC_BOX_STRING.length then 1 else 0
+                    ) else 0
+                ) else 0
+            ) else 0
         )
     )
 );
@@ -1412,6 +1505,14 @@ string_ref_equals_synthetic := {synthetic_start: i32, synthetic_len: i32, input_
             string_ref_is_current(input_ref)
         ) else if synthetic_start == SYNTHETIC_END_STRING.start then (
             string_ref_is_end(input_ref)
+        ) else if synthetic_start == SYNTHETIC_BOX_STRING.start then (
+            if input_ref.start < 0 then 0 else if input_ref.length != 3 then 0 else (
+                if input(input_ref.start) == 'b' then (
+                    if input(input_ref.start + 1) == 'o' then (
+                        if input(input_ref.start + 2) == 'x' then 1 else 0
+                    ) else 0
+                ) else 0
+            )
         ) else if synthetic_start == SYNTHETIC_I32_STRING.start then (
             string_ref_is_i32(input_ref)
         ) else if synthetic_start == SYNTHETIC_U8_STRING.start then (
@@ -1837,7 +1938,12 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                         set_error(span_start);
                         -1
                     ) else (
-                        store_value(Value::EnumType({ head = rec_info.head, count = rec_info.count }))
+                        enum_idx := store_value(Value::EnumType({ head = rec_info.head, count = rec_info.count }));
+                        if enum_idx == -1 then (
+                            -1
+                        ) else (
+                            mark_value_as_type(enum_idx)
+                        )
                     )
                 ) else (
                     set_error(span_start);
@@ -1862,8 +1968,8 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                     set_error(span_start);
                     -1
                 ) else (
-                    start_idx := value_state.count;
-                    name_idx := store_value(Value::String(EMPTY_STRING));
+                                    start_idx := value_state.count;
+                                    name_idx := store_value(Value::String(SYNTHETIC_BOX_STRING));
                     if name_idx == -1 then (
                         -1
                     ) else (
@@ -1883,6 +1989,9 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                                     if fn_type_idx == -1 then (
                                         -1
                                     ) else (
+                                        if mark_value_as_type(fn_type_idx) == -1 then (
+                                            -1
+                                        ) else (
                                         struct_start := value_state.count;
                                         name_idx3 := store_value(Value::String(SYNTHETIC_ITER_TY_STRING));
                                         if name_idx3 == -1 then (
@@ -1890,6 +1999,8 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                                         ) else (
                                             iter_ty_idx := store_value(Value::String(SYNTHETIC_TYPE_STRING));
                                             if iter_ty_idx == -1 then (
+                                                -1
+                                            ) else if mark_value_as_type(iter_ty_idx) == -1 then (
                                                 -1
                                             ) else (
                                                 name_idx4 := store_value(Value::String(SYNTHETIC_NEXT_STRING));
@@ -1900,10 +2011,16 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                                                     if next_idx == -1 then (
                                                         -1
                                                     ) else (
-                                                        store_value(Value::Record({ head = struct_start, count = 2, has_named = 1 }))
+                                                        iter_idx := store_value(Value::Record({ head = struct_start, count = 2, has_named = 1 }));
+                                                        if iter_idx == -1 then (
+                                                            -1
+                                                        ) else (
+                                                            mark_value_as_type(iter_idx)
+                                                        )
                                                     )
                                                 )
                                             )
+                                        )
                                         )
                                     )
                                 )
@@ -2119,12 +2236,30 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
             NodeKind::Literal(lit) => store_value(eval_literal(lit)),
             NodeKind::IntrinsicType(ty) => (
                 ty |> match {
-                    IntrinsicType::I32 => store_value(Value::String(SYNTHETIC_I32_STRING)),
-                    IntrinsicType::U8 => store_value(Value::String(SYNTHETIC_U8_STRING)),
-                    IntrinsicType::Boolean => store_value(Value::String(SYNTHETIC_BOOL_STRING)),
-                    IntrinsicType::Type => store_value(Value::String(SYNTHETIC_TYPE_STRING)),
-                    IntrinsicType::Target => store_value(Value::String(SYNTHETIC_TARGET_STRING)),
-                    IntrinsicType::BindingAnnotation => store_value(Value::String(SYNTHETIC_BINDING_ANNOTATION_STRING)),
+                    IntrinsicType::I32 => (
+                        value_idx := store_value(Value::String(SYNTHETIC_I32_STRING));
+                        if value_idx == -1 then -1 else mark_value_as_type(value_idx)
+                    ),
+                    IntrinsicType::U8 => (
+                        value_idx := store_value(Value::String(SYNTHETIC_U8_STRING));
+                        if value_idx == -1 then -1 else mark_value_as_type(value_idx)
+                    ),
+                    IntrinsicType::Boolean => (
+                        value_idx := store_value(Value::String(SYNTHETIC_BOOL_STRING));
+                        if value_idx == -1 then -1 else mark_value_as_type(value_idx)
+                    ),
+                    IntrinsicType::Type => (
+                        value_idx := store_value(Value::String(SYNTHETIC_TYPE_STRING));
+                        if value_idx == -1 then -1 else mark_value_as_type(value_idx)
+                    ),
+                    IntrinsicType::Target => (
+                        value_idx := store_value(Value::String(SYNTHETIC_TARGET_STRING));
+                        if value_idx == -1 then -1 else mark_value_as_type(value_idx)
+                    ),
+                    IntrinsicType::BindingAnnotation => (
+                        value_idx := store_value(Value::String(SYNTHETIC_BINDING_ANNOTATION_STRING));
+                        if value_idx == -1 then -1 else mark_value_as_type(value_idx)
+                    ),
                     else => (
                         set_error(span_start);
                         -1
@@ -2217,6 +2352,8 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                             -1
                                         ) else (
                                             values(field_idx) = values(value_idx);
+                                            value_type_values(field_idx) = value_type_values(value_idx);
+                                            value_is_box_type(field_idx) = value_is_box_type(value_idx);
                                             value_idx
                                         )
                                     ) else (
@@ -2259,6 +2396,8 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                                     -1
                                                 ) else (
                                                     values(field_idx) = values(value_idx);
+                                                    value_type_values(field_idx) = value_type_values(value_idx);
+                                                    value_is_box_type(field_idx) = value_is_box_type(value_idx);
                                                     value_idx
                                                 )
                                             ) else (
@@ -2289,9 +2428,15 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     -1
                 ) else if flow_state.kind != FLOW_NONE then (
                     inner_value_idx
+                ) else if value_is_type(inner_value_idx) == 0 then (
+                    set_error(span_start);
+                    -1
+                ) else if value_is_box_type_flag(inner_value_idx) == 1 then (
+                    set_error(span_start);
+                    -1
                 ) else (
                     start_idx := value_state.count;
-                    name_idx := store_value(Value::String(EMPTY_STRING));
+                    name_idx := store_value(Value::String(SYNTHETIC_BOX_STRING));
                     if name_idx == -1 then (
                         -1
                     ) else (
@@ -2299,7 +2444,13 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         if val_idx == -1 then (
                             -1
                         ) else (
-                            store_value(Value::Record({ head = start_idx, count = 1, has_named = 0 }))
+                            box_idx := store_value(Value::Record({ head = start_idx, count = 1, has_named = 0 }));
+                            if box_idx == -1 then (
+                                -1
+                            ) else (
+                                mark_value_as_box_type(box_idx);
+                                mark_value_as_type(box_idx)
+                            )
                         )
                     )
                 )
@@ -2310,12 +2461,18 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     -1
                 ) else if flow_state.kind != FLOW_NONE then (
                     param_value_idx
+                ) else if value_is_type(param_value_idx) == 0 then (
+                    set_error(span_start);
+                    -1
                 ) else (
                     ret_value_idx := eval_expression(info.return_type);
                     if ret_value_idx == -1 then (
                         -1
                     ) else if flow_state.kind != FLOW_NONE then (
                         ret_value_idx
+                    ) else if value_is_type(ret_value_idx) == 0 then (
+                        set_error(span_start);
+                        -1
                     ) else (
                         start_idx := value_state.count;
                         name_idx := store_value(Value::String(EMPTY_STRING));
@@ -2334,7 +2491,12 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                     if ret_idx == -1 then (
                                         -1
                                     ) else (
-                                        store_value(Value::Record({ head = start_idx, count = 2, has_named = 0 }))
+                                        fn_type_idx := store_value(Value::Record({ head = start_idx, count = 2, has_named = 0 }));
+                                        if fn_type_idx == -1 then (
+                                            -1
+                                        ) else (
+                                            mark_value_as_type(fn_type_idx)
+                                        )
                                     )
                                 )
                             )
@@ -2717,7 +2879,12 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                             set_error(span_start);
                                             -1
                                         ) else (
-                                            store_value(Value::EnumType({ head = rec_info.head, count = rec_info.count }))
+                                            enum_idx := store_value(Value::EnumType({ head = rec_info.head, count = rec_info.count }));
+                                            if enum_idx == -1 then (
+                                                -1
+                                            ) else (
+                                                mark_value_as_type(enum_idx)
+                                            )
                                         )
                                     ) else (
                                         set_error(span_start);
@@ -2733,16 +2900,30 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                     )
                                 ),
                                 UnaryIntrinsicOperator::BoxFromType => (
-                                    start_idx := value_state.count;
-                                    name_idx := store_value(Value::String(EMPTY_STRING));
-                                    if name_idx == -1 then (
+                                    if value_is_type(operand_idx) == 0 then (
+                                        set_error(span_start);
+                                        -1
+                                    ) else if value_is_box_type_flag(operand_idx) == 1 then (
+                                        set_error(span_start);
                                         -1
                                     ) else (
-                                        val_idx := store_value(values(operand_idx));
-                                        if val_idx == -1 then (
+                                        start_idx := value_state.count;
+                                        name_idx := store_value(Value::String(EMPTY_STRING));
+                                        if name_idx == -1 then (
                                             -1
                                         ) else (
-                                            store_value(Value::Record({ head = start_idx, count = 1, has_named = 0 }))
+                                            val_idx := store_value(values(operand_idx));
+                                            if val_idx == -1 then (
+                                                -1
+                                            ) else (
+                                                box_idx := store_value(Value::Record({ head = start_idx, count = 1, has_named = 0 }));
+                                                if box_idx == -1 then (
+                                                    -1
+                                                ) else (
+                                                    mark_value_as_box_type(box_idx);
+                                                    mark_value_as_type(box_idx)
+                                                )
+                                            )
                                         )
                                     )
                                 ),
@@ -3117,6 +3298,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 mut temp_head := -1;
                 mut temp_tail := -1;
                 mut last_idx := -1;
+                mut type_ok := 1;
                 while current != -1 do (
                     variant_node := list_nodes(current).value;
                     if NodeKind::Binding(variant_binding) := nodes(variant_node).kind then (
@@ -3124,6 +3306,9 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         if last_idx == -1 then (
                             current = -1;
                         ) else if flow_state.kind != FLOW_NONE then (
+                            current = -1;
+                        ) else if value_is_type(last_idx) == 0 then (
+                            type_ok = 0;
                             current = -1;
                         ) else (
                             temp_node := new_list_node{last_idx, -1};
@@ -3149,6 +3334,9 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     -1
                 ) else if flow_state.kind != FLOW_NONE then (
                     last_idx
+                ) else if type_ok == 0 then (
+                    set_error(span_start);
+                    -1
                 ) else (
                     start_idx := value_state.count;
                     mut count := 0;
@@ -3193,7 +3381,12 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     if value_state.error != -1 then (
                         -1
                     ) else (
-                        store_value(Value::EnumType({ head = start_idx, count = count }))
+                        enum_idx := store_value(Value::EnumType({ head = start_idx, count = count }));
+                        if enum_idx == -1 then (
+                            -1
+                        ) else (
+                            mark_value_as_type(enum_idx)
+                        )
                     )
                 )
             ),
@@ -3293,6 +3486,9 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         -1
                     ) else if flow_state.kind != FLOW_NONE then (
                         payload_type_idx
+                    ) else if value_is_type(payload_type_idx) == 0 then (
+                        set_error(span_start);
+                        -1
                     ) else (
                         if Value::EnumType(enum_info) := values(enum_idx) then (
                             expects_payload := if Value::Unit := values(payload_type_idx) then 0 else 1;
@@ -3440,6 +3636,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 ) else if flow_state.kind != FLOW_NONE then (
                     value_idx
                 ) else (
+                    count_is_literal := if NodeKind::Literal(ExpressionLiteral::Number(_)) := nodes(info.count).kind then 1 else 0;
                     count_idx := eval_expression(info.count);
                     if count_idx == -1 then (
                         -1
@@ -3470,7 +3667,14 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                 if value_state.error != -1 then (
                                     -1
                                 ) else (
-                                    store_value(Value::Record({ head = start_idx, count = count_value, has_named = 0 }))
+                                    array_idx := store_value(Value::Record({ head = start_idx, count = count_value, has_named = 0 }));
+                                    if array_idx == -1 then (
+                                        -1
+                                    ) else if count_is_literal == 1 && value_is_type(value_idx) == 1 then (
+                                        mark_value_as_type(array_idx)
+                                    ) else (
+                                        array_idx
+                                    )
                                 )
                             )
                         ) else (
@@ -3482,12 +3686,18 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
             ),
             NodeKind::Struct(info) => (
                 if is_empty_struct(info.fields) == 1 then (
-                    store_value(Value::Unit)
+                    unit_idx := store_value(Value::Unit);
+                    if unit_idx == -1 then (
+                        -1
+                    ) else (
+                        mark_value_as_type(unit_idx)
+                    )
                 ) else (
                     mut current := info.fields;
                     mut temp_head := -1;
                     mut temp_tail := -1;
                     mut last_idx := -1;
+                    mut struct_is_type := 1;
                     while current != -1 do (
                         field_node := list_nodes(current).value;
                         if NodeKind::Binding(field_binding) := nodes(field_node).kind then (
@@ -3497,6 +3707,12 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                             ) else if flow_state.kind != FLOW_NONE then (
                                 current = -1;
                             ) else (
+                                if value_is_type(last_idx) == 0 then (
+                                    struct_is_type = 0;
+                                    0
+                                ) else (
+                                    0
+                                );
                                 temp_node := new_list_node{last_idx, -1};
                                 if temp_node == -1 then (
                                     current = -1;
@@ -3565,7 +3781,14 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         if value_state.error != -1 then (
                             -1
                         ) else (
-                            store_value(Value::Record({ head = start_idx, count = count, has_named = has_named }))
+                            struct_idx := store_value(Value::Record({ head = start_idx, count = count, has_named = has_named }));
+                            if struct_idx == -1 then (
+                                -1
+                            ) else if struct_is_type == 1 then (
+                                mark_value_as_type(struct_idx)
+                            ) else (
+                                struct_idx
+                            )
                         )
                     )
                 )
