@@ -163,6 +163,14 @@ Deno.test("wasm interpreter: supports mutable assignment", () => {
   assertEquals(interpreterExports.get_value_number(resultIdx), 3);
 });
 
+Deno.test("wasm interpreter: supports nested struct mutation", () => {
+  const resultIdx = parseAndInterpret(
+    "mut foo := { first = { 5, 3 }, second = 4 }; foo.first.0 = foo.first.0 + foo.second; foo.first.0",
+  );
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 9);
+});
+
 Deno.test("wasm interpreter: evaluates while loops", () => {
   const resultIdx = parseAndInterpret(
     "mut x := 0; mut acc := 0; while x < 4 do (acc = acc + x; x = x + 1;); acc",
