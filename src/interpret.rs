@@ -74,6 +74,7 @@ pub struct Context {
     pub files: HashMap<String, Expression>,
     pub import_cache: HashMap<String, Expression>,
     pub binding_target_stack: Vec<Vec<TargetLiteral>>,
+    pub bootstrap_parser: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -110,6 +111,7 @@ impl Context {
             files: HashMap::new(),
             import_cache: HashMap::new(),
             binding_target_stack: Vec::new(),
+            bootstrap_parser: false,
         }
     }
 
@@ -1152,6 +1154,19 @@ fn is_type_expression_in_context(expr: &Expression, context: &Context) -> bool {
                 false
             }
         }
+        ExpressionKind::TypePropertyAccess { object, property } => {
+            let mut eval_context = context.clone();
+            interpret_expression(
+                ExpressionKind::TypePropertyAccess {
+                    object: object.clone(),
+                    property: property.clone(),
+                }
+                .with_span(expr.span()),
+                &mut eval_context,
+            )
+            .map(|value| is_type_expression(&value.kind))
+            .unwrap_or(false)
+        }
         _ => is_type_expression(&expr.kind),
     }
 }
@@ -1172,12 +1187,17 @@ pub fn resolve_enum_type_expression(
     enum_expr: &Expression,
     context: &mut Context,
 ) -> Option<Expression> {
-    let mut current = enum_expr;
+    let mut current = enum_expr.clone();
+    let mut hops = 0;
     loop {
+        if hops > 32 {
+            return None;
+        }
+        hops += 1;
         match &current.kind {
-            ExpressionKind::EnumType(_) => return Some(current.clone()),
+            ExpressionKind::EnumType(_) => return Some(current),
             ExpressionKind::AttachImplementation { type_expr, .. } => {
-                current = type_expr.as_ref();
+                current = type_expr.as_ref().clone();
             }
             ExpressionKind::FunctionCall { function, argument } => {
                 let mut eval_context = context.clone();
@@ -1190,19 +1210,38 @@ pub fn resolve_enum_type_expression(
                     &mut eval_context,
                 )
                 .ok()?;
-                return match evaluated.kind {
-                    ExpressionKind::EnumType(_) => Some(evaluated),
-                    _ => None,
-                };
+                if matches!(evaluated.kind, ExpressionKind::EnumType(_)) {
+                    return Some(evaluated);
+                }
+                current = evaluated;
+            }
+            ExpressionKind::TypePropertyAccess { object, property } => {
+                let mut eval_context = context.clone();
+                let evaluated = interpret_expression(
+                    ExpressionKind::TypePropertyAccess {
+                        object: object.clone(),
+                        property: property.clone(),
+                    }
+                    .with_span(enum_expr.span()),
+                    &mut eval_context,
+                )
+                .ok()?;
+                if matches!(evaluated.kind, ExpressionKind::EnumType(_)) {
+                    return Some(evaluated);
+                }
+                current = evaluated;
             }
             ExpressionKind::Identifier(identifier) => {
-                return context
-                    .get_identifier(identifier)
-                    .and_then(|(binding, _)| match binding {
-                        BindingContext::Bound(value, _, _) => Some(value.clone()),
-                        BindingContext::UnboundWithType(type_expr) => Some(type_expr.clone()),
-                        BindingContext::UnboundWithoutType => None,
-                    });
+                let (binding, _) = context.get_identifier(identifier)?;
+                match binding {
+                    BindingContext::Bound(value, _, _) | BindingContext::UnboundWithType(value) => {
+                        if matches!(value.kind, ExpressionKind::EnumType(_)) {
+                            return Some(value.clone());
+                        }
+                        current = value.clone();
+                    }
+                    BindingContext::UnboundWithoutType => return None,
+                }
             }
             _ => return None,
         }
@@ -2338,8 +2377,11 @@ pub fn interpret_expression(
                         let expression = context.files.get(&normalized).ok_or_else(|| {
                             diagnostic(format!("Unknown file path: {path}"), span)
                         })?;
-                        let mut import_context =
-                            intrinsic_context_with_files(context.files.clone());
+                        let mut import_context = if context.bootstrap_parser {
+                            intrinsic_context_with_files_bootstrap(context.files.clone())
+                        } else {
+                            intrinsic_context_with_files(context.files.clone())
+                        };
                         let (value, _) =
                             interpret_program(expression.clone(), &mut import_context)?;
                         context.import_cache.insert(normalized, value.clone());
@@ -5799,9 +5841,36 @@ fn resolve_type_alias_expression(expr: &Expression, context: &Context) -> Expres
                         && is_type_expression(&value.kind)
                     {
                         results.push(value.clone());
+                    } else if let Some((BindingContext::Bound(value, _, _), _)) =
+                        context.get_identifier(&identifier)
+                        && matches!(value.kind, ExpressionKind::TypePropertyAccess { .. })
+                    {
+                        stack.push(Frame::Enter(value.clone()));
                     } else {
                         results.push(Expression::new(
                             ExpressionKind::Identifier(identifier),
+                            expr.span,
+                        ));
+                    }
+                }
+                ExpressionKind::TypePropertyAccess { object, property } => {
+                    let mut eval_context = context.clone();
+                    let evaluated = interpret_expression(
+                        ExpressionKind::TypePropertyAccess {
+                            object: object.clone(),
+                            property: property.clone(),
+                        }
+                        .with_span(expr.span),
+                        &mut eval_context,
+                    );
+                    if let Ok(value) = evaluated
+                        && !matches!(value.kind, ExpressionKind::TypePropertyAccess { .. })
+                        && is_type_expression(&value.kind)
+                    {
+                        stack.push(Frame::Enter(value));
+                    } else {
+                        results.push(Expression::new(
+                            ExpressionKind::TypePropertyAccess { object, property },
                             expr.span,
                         ));
                     }
@@ -7037,15 +7106,32 @@ fn bind_pattern_blanks(
                 payload,
                 ..
             } => {
-                let type_hint = frame.type_hint.or_else(|| {
-                    resolve_enum_type_expression(&enum_type, context).or_else(|| {
-                        get_type_of_expression(&enum_type, context)
-                            .ok()
-                            .and_then(|expr| {
-                                matches!(expr.kind, ExpressionKind::EnumType(_)).then_some(expr)
+                let type_hint = frame
+                    .type_hint
+                    .and_then(|hint| {
+                        if matches!(hint.kind, ExpressionKind::EnumType(_)) {
+                            Some(hint)
+                        } else {
+                            resolve_enum_type_expression(&hint, context).or_else(|| {
+                                get_type_of_expression(&hint, context)
+                                    .ok()
+                                    .and_then(|expr| {
+                                        matches!(expr.kind, ExpressionKind::EnumType(_))
+                                            .then_some(expr)
+                                    })
                             })
+                        }
                     })
-                });
+                    .or_else(|| {
+                        resolve_enum_type_expression(&enum_type, context).or_else(|| {
+                            get_type_of_expression(&enum_type, context)
+                                .ok()
+                                .and_then(|expr| {
+                                    matches!(expr.kind, ExpressionKind::EnumType(_))
+                                        .then_some(expr)
+                                })
+                        })
+                    });
                 let payload_hint = type_hint
                     .as_ref()
                     .and_then(|hint| enum_variant_info(hint, &variant).map(|(_, ty)| ty));
@@ -8183,6 +8269,7 @@ fn intrinsic_context_with_files_inner(
         files,
         import_cache: HashMap::new(),
         binding_target_stack: Vec::new(),
+        bootstrap_parser,
     };
 
     context.bindings.last_mut().unwrap().insert(

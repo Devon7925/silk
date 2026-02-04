@@ -293,3 +293,51 @@ Deno.test("wasm interpreter: supports implementations on struct types", () => {
   assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
   assertEquals(interpreterExports.get_value_number(resultIdx), 7);
 });
+
+Deno.test("wasm interpreter: evaluates for loops via iterator impls", () => {
+  const resultIdx = parseAndInterpret(`
+    RangeIter := { value = i32, limit = i32 } @ {
+      iter_ty = i32,
+      next = (mut self: { value = i32, limit = i32 }) => (
+        if self.value < self.limit then (
+          current := self.value;
+          self.value = self.value + 1;
+          Option(i32)::Some(current)
+        ) else Option(i32)::None
+      ),
+    };
+    make_range := (limit: i32) => (
+      range: RangeIter := { value = 0, limit = limit };
+      range
+    );
+    mut acc := 0;
+    for value in make_range(4) do (
+      acc = acc + value;
+    );
+    acc
+  `);
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 6);
+});
+
+Deno.test("wasm interpreter: iterates range operators", () => {
+  const resultIdx = parseAndInterpret(`
+    mut acc := 0;
+    for value in 0..4 do (
+      acc = acc + value;
+    );
+    acc
+  `);
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 6);
+});
+
+Deno.test("wasm interpreter: resolves Box type annotations", () => {
+  const resultIdx = parseAndInterpret(`
+    Boxed := Box(i32) @ { get = (self: Box(i32)) => self };
+    value: Box(i32) := 5;
+    value.get
+  `);
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 5);
+});

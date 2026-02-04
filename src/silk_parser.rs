@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -42,6 +43,8 @@ const KIND_DIVERGE: i32 = 22;
 const KIND_LOOP: i32 = 23;
 
 const PARSER_MODULE_CACHE_PATH: &str = "target/wasm_cache/parser.wasmtime";
+const PARSER_MODULE_HASH_PATH: &str = "target/wasm_cache/parser.wasmtime.hash";
+const PARSER_WASM_HASH_PATH: &str = "target/wasm_cache/parser.wasm.hash";
 
 static PARSER_WASM: OnceLock<Result<Vec<u8>, Diagnostic>> = OnceLock::new();
 static WASM_ENGINE: OnceLock<Result<Engine, Diagnostic>> = OnceLock::new();
@@ -53,17 +56,61 @@ thread_local! {
 fn parser_wasm() -> Result<&'static [u8], Diagnostic> {
     let result = PARSER_WASM.get_or_init(|| {
         let path = "binaries/parser.wasm";
-        if let Ok(bytes) = fs::read(path) {
-            return Ok(bytes);
+        if !parser_wasm_needs_rebuild(path) {
+            if let Ok(bytes) = fs::read(path) {
+                return Ok(bytes);
+            }
         }
         let bytes = compile_silk_parser_wasm()?;
         let _ = fs::write(path, &bytes);
+        write_parser_hash();
         Ok(bytes)
     });
     match result {
         Ok(bytes) => Ok(bytes.as_slice()),
         Err(err) => Err(err.clone()),
     }
+}
+
+fn parser_wasm_needs_rebuild(path: &str) -> bool {
+    if fs::metadata(path).is_err() {
+        return true;
+    }
+    let Some(expected) = parser_source_hash() else {
+        return true;
+    };
+    let Ok(stored) = fs::read_to_string(PARSER_WASM_HASH_PATH) else {
+        return true;
+    };
+    stored.trim() != expected.to_string()
+}
+
+fn parser_source_hash() -> Option<u64> {
+    let parser_bytes = fs::read("silk_src/parser.silk").ok()?;
+    let types_bytes = fs::read("silk_src/types.silk").ok()?;
+    let mut hash: u64 = 14695981039346656037;
+    hash = fnv1a64(hash, &parser_bytes);
+    hash = fnv1a64(hash, &[0]);
+    hash = fnv1a64(hash, &types_bytes);
+    Some(hash)
+}
+
+fn fnv1a64(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    hash
+}
+
+fn write_parser_hash() {
+    let Some(hash) = parser_source_hash() else {
+        return;
+    };
+    if let Some(parent) = Path::new(PARSER_WASM_HASH_PATH).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(PARSER_WASM_HASH_PATH, hash.to_string());
 }
 
 fn wasm_engine() -> Result<&'static Engine, Diagnostic> {
@@ -105,6 +152,11 @@ fn wasm_module() -> Result<&'static Module, Diagnostic> {
 }
 
 fn load_cached_module(engine: &Engine) -> Option<Module> {
+    let expected = parser_source_hash()?;
+    let stored = fs::read_to_string(PARSER_MODULE_HASH_PATH).ok()?;
+    if stored.trim() != expected.to_string() {
+        return None;
+    }
     let bytes = fs::read(PARSER_MODULE_CACHE_PATH).ok()?;
     unsafe { Module::deserialize(engine, &bytes).ok() }
 }
@@ -120,12 +172,20 @@ fn save_cached_module(module: &Module) {
     if fs::write(&tmp_path, &bytes).is_ok() {
         let _ = fs::rename(&tmp_path, PARSER_MODULE_CACHE_PATH);
     }
+    if let Some(hash) = parser_source_hash() {
+        if let Some(parent) = Path::new(PARSER_MODULE_HASH_PATH).parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(PARSER_MODULE_HASH_PATH, hash.to_string());
+    }
 }
 
 fn compile_silk_parser_wasm() -> Result<Vec<u8>, Diagnostic> {
+    log_parser_rebuild("rebuild: reading parser sources");
     let path = "silk_src/parser.silk";
     let source = fs::read_to_string(path)
         .map_err(|err| Diagnostic::new(format!("Failed to read {path}: {err}")))?;
+    log_parser_rebuild("rebuild: parsing parser.silk");
     let (ast, remaining) = crate::parsing::parse_block(&source)?;
     let leftover = remaining.trim_start();
     if !leftover.is_empty() {
@@ -145,6 +205,7 @@ fn compile_silk_parser_wasm() -> Result<Vec<u8>, Diagnostic> {
     let types_path = "silk_src/types.silk";
     let types_source = fs::read_to_string(types_path)
         .map_err(|err| Diagnostic::new(format!("Failed to read {types_path}: {err}")))?;
+    log_parser_rebuild("rebuild: parsing types.silk");
     let (types_ast, types_remaining) = crate::parsing::parse_block(&types_source)?;
     let types_leftover = types_remaining.trim_start();
     if !types_leftover.is_empty() {
@@ -166,19 +227,46 @@ fn compile_silk_parser_wasm() -> Result<Vec<u8>, Diagnostic> {
     file_map.insert(normalized, ast.clone());
     file_map.insert(loader::normalize_path("types.silk"), types_ast);
     let mut context = interpret::intrinsic_context_with_files_bootstrap(file_map);
+    log_parser_rebuild("rebuild: interpreting parser.silk");
     let (_value, program_context) = interpret::interpret_program(ast, &mut context)?;
     let intermediate = intermediate::context_to_intermediate(&program_context);
+    log_parser_rebuild("rebuild: compiling wasm");
     let wasm = wasm::compile_exports(&intermediate)?;
+    log_parser_rebuild("rebuild: done");
     Ok(wasm)
+}
+
+fn log_parser_rebuild(message: &str) {
+    if std::env::var("SILK_PARSER_REBUILD_LOG").is_ok() {
+        eprintln!("{message}");
+        let _ = append_parser_rebuild_log(message);
+    }
+}
+
+fn append_parser_rebuild_log(message: &str) -> std::io::Result<()> {
+    let path = "target/wasm_cache/parser_rebuild.log";
+    if let Some(parent) = Path::new(path).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "{message}")?;
+    Ok(())
 }
 
 pub fn parse_block(source: &str) -> Result<Expression, Diagnostic> {
     THREAD_PARSER.with(|cell| -> Result<Expression, Diagnostic> {
-        let mut slot = cell.borrow_mut();
-        if slot.is_none() {
-            *slot = Some(WasmParser::new()?);
+        let needs_init = cell.borrow().is_none();
+        if needs_init {
+            let parser = WasmParser::new()?;
+            *cell.borrow_mut() = Some(parser);
         }
-        slot.as_mut().expect("parser slot set").parse_block(source)
+        cell.borrow_mut()
+            .as_mut()
+            .expect("parser slot set")
+            .parse_block(source)
     })
 }
 
@@ -517,9 +605,13 @@ impl WasmParser {
                     span,
                 )
             }
+            KIND_BOX_TYPE => {
+                let inner_idx = self.call1("get_box_type_inner", idx);
+                let inner = Rc::new(self.expression_from_node(inner_idx));
+                Expression::new(ExpressionKind::BoxType(inner), span)
+            }
             KIND_ARRAY_INDEX
             | KIND_INTRINSIC_TYPE
-            | KIND_BOX_TYPE
             | KIND_INTRINSIC_OPERATION
             | KIND_ENUM_TYPE
             | KIND_MATCH

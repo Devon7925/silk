@@ -742,6 +742,16 @@ pattern_from_expression := (expr_idx: i32) => (
     )
 );
 
+string_ref_is_box := (value: StringRef) => (
+    if value.start < 0 then 0 else if value.length != 3 then 0 else (
+        if input(value.start) == 'B' then (
+            if input(value.start + 1) == 'o' then (
+                if input(value.start + 2) == 'x' then 1 else 0
+            ) else 0
+        ) else 0
+    )
+);
+
 get_property_from_node := (expr_idx: i32) => (
     if NodeKind::Identifier(id) := nodes(expr_idx).kind then (
         id.name
@@ -796,7 +806,15 @@ new_binary_operation := {left: i32, right: i32, op_start: i32, op_len: i32} => (
         access := new_node{NodeKind::TypePropertyAccess({ object = left, property = prop }), span};
         new_node{NodeKind::FunctionCall({ function = access, argument = left }), span}
     ) else if op_is0(op_len) == 1 then (
-        new_node{NodeKind::FunctionCall({ function = left, argument = right }), span}
+        if NodeKind::Identifier(id) := nodes(left).kind then (
+            if string_ref_is_box(id.name) == 1 then (
+                new_node{NodeKind::BoxType(right), span}
+            ) else (
+                new_node{NodeKind::FunctionCall({ function = left, argument = right }), span}
+            )
+        ) else (
+            new_node{NodeKind::FunctionCall({ function = left, argument = right }), span}
+        )
     ) else if op_is2{op_start, op_len, '|', '>'} == 1 then (
         new_node{NodeKind::FunctionCall({ function = right, argument = left }), span}
     ) else if op_is1{op_start, op_len, '@'} == 1 then (
@@ -1238,6 +1256,7 @@ parse_for_expr := (ignored: i32) => (
                             iter_binding_node := new_node{NodeKind::Binding(iter_binding), iter_span};
 
                             iter_ident_expr := new_node{NodeKind::Identifier(iter_id), overall_span};
+                            iter_arg_expr := new_node{NodeKind::Identifier(iter_id), overall_span};
                             iter_ty_access := new_node{NodeKind::TypePropertyAccess({
                                 object = iter_ident_expr,
                                 property = SYNTHETIC_ITER_TY_STRING
@@ -1261,7 +1280,7 @@ parse_for_expr := (ignored: i32) => (
                             }), overall_span};
                             next_call := new_node{NodeKind::FunctionCall({
                                 function = next_access,
-                                argument = iter_ident_expr
+                                argument = iter_arg_expr
                             }), overall_span};
                             condition_binding := { pattern = condition_pattern, expr = next_call };
                             condition_expr := new_node{NodeKind::Binding(condition_binding), overall_span};
@@ -2244,6 +2263,10 @@ binding_pattern_literal_binding_annotation_target_tag := (pattern: BindingPatter
 
 (export wasm) get_function_type_return := (idx: i32) => (
     if NodeKind::FunctionType(info) := nodes(idx).kind then info.return_type else -1
+);
+
+(export wasm) get_box_type_inner := (idx: i32) => (
+    if NodeKind::BoxType(inner) := nodes(idx).kind then inner else -1
 );
 
 (export wasm) get_if_condition := (idx: i32) => (
