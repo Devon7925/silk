@@ -26,6 +26,7 @@ const TARGET_MASK_WASM = 2;
 
 type ParserExports = {
   parse: () => number;
+  parse_at: (start: number) => number;
   input: WebAssembly.Memory;
   nodes: WebAssembly.Memory;
   list_nodes: WebAssembly.Memory;
@@ -54,6 +55,8 @@ type InterpreterExports = {
   get_binding_target_mask: (idx: number) => number;
   get_binding_export_mask: (idx: number) => number;
   get_binding_wrap_mask: (idx: number) => number;
+  register_file: (pathStart: number, pathLength: number, rootIdx: number) => number;
+  clear_file_registry: () => number;
 };
 
 const { parserExports, interpreterExports } = await (async () => {
@@ -99,6 +102,26 @@ function writeInput(memory: WebAssembly.Memory, text: string) {
   view[bytes.length] = 0;
 }
 
+function writeInputSegments(
+  memory: WebAssembly.Memory,
+  segments: string[],
+) {
+  const view = new Uint8Array(memory.buffer);
+  const encoder = new TextEncoder();
+  view.fill(0);
+  const offsets: number[] = [];
+  let cursor = 0;
+  for (const segment of segments) {
+    const bytes = encoder.encode(segment);
+    offsets.push(cursor);
+    view.set(bytes, cursor);
+    cursor += bytes.length;
+    view[cursor] = 0;
+    cursor += 1;
+  }
+  return offsets;
+}
+
 function copyMemory(src: WebAssembly.Memory, dst: WebAssembly.Memory) {
   const srcView = new Uint8Array(src.buffer);
   const dstView = new Uint8Array(dst.buffer);
@@ -123,6 +146,52 @@ function parseAndInterpret(source: string) {
   copyMemory(parserExports.nodes, interpreterExports.nodes);
   copyMemory(parserExports.list_nodes, interpreterExports.list_nodes);
   copyMemory(parserExports.state, interpreterExports.state);
+  const resultIdx = interpreterExports.interpret(root);
+  assertEquals(interpreterExports.get_interp_error(), -1);
+  return resultIdx;
+}
+
+function parseAndInterpretWithImports(
+  mainSource: string,
+  imports: Record<string, string>,
+) {
+  const entries = Object.entries(imports).sort(([a], [b]) =>
+    a.localeCompare(b)
+  );
+  const importSources = entries.map(([, source]) => source);
+  const importPaths = entries.map(([name]) => name);
+  const segments = [mainSource, ...importSources, ...importPaths];
+  const offsets = writeInputSegments(parserExports.input, segments);
+  const mainOffset = offsets[0];
+  assertEquals(mainOffset, 0);
+  const importOffsets = offsets.slice(1, 1 + entries.length);
+  const pathOffsets = offsets.slice(1 + entries.length);
+
+  const root = parserExports.parse();
+  assertEquals(parserExports.get_state_error(), -1);
+
+  const importRoots: number[] = [];
+  for (const offset of importOffsets) {
+    const importRoot = parserExports.parse_at(offset);
+    assertEquals(parserExports.get_state_error(), -1);
+    importRoots.push(importRoot);
+  }
+
+  copyMemory(parserExports.input, interpreterExports.input);
+  copyMemory(parserExports.nodes, interpreterExports.nodes);
+  copyMemory(parserExports.list_nodes, interpreterExports.list_nodes);
+  copyMemory(parserExports.state, interpreterExports.state);
+
+  interpreterExports.clear_file_registry();
+  for (let i = 0; i < entries.length; i++) {
+    const path = importPaths[i];
+    interpreterExports.register_file(
+      pathOffsets[i],
+      path.length,
+      importRoots[i],
+    );
+  }
+
   const resultIdx = interpreterExports.interpret(root);
   assertEquals(interpreterExports.get_interp_error(), -1);
   return resultIdx;
@@ -395,6 +464,10 @@ Deno.test("wasm interpreter: rejects asm with mismatched target context", () => 
   parseAndExpectError(`(target js) foo := asm(wasm)("i32.const 1"); 0`);
 });
 
+Deno.test("wasm interpreter: rejects wrap wgsl annotation", () => {
+  parseAndExpectError(`(wrap wgsl) foo := (x: i32) => x; 0`);
+});
+
 Deno.test("wasm interpreter: allows asm with matching target context", () => {
   const resultIdx = parseAndInterpret(`
     (target wasm) foo := asm(wasm)("i32.const 1");
@@ -443,4 +516,15 @@ Deno.test("wasm interpreter: exposes binding annotations", () => {
   assertEquals(interpreterExports.get_binding_export_mask(bridgeIdx), TARGET_MASK_JS);
   assertEquals(interpreterExports.get_binding_wrap_mask(bridgeIdx), TARGET_MASK_WASM);
   assertEquals(interpreterExports.get_binding_target_mask(bridgeIdx), 0);
+});
+
+Deno.test("wasm interpreter: supports use imports", () => {
+  const resultIdx = parseAndInterpretWithImports(
+    `lib := use "lib.silk"; lib.answer`,
+    {
+      "lib.silk": "{ answer = 40 + 2 }",
+    },
+  );
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 42);
 });

@@ -110,6 +110,8 @@ BindingState := { count = i32, scope_count = i32 };
 BindingTemp := { start = i32, length = i32, is_mut = i32, ok = i32 };
 BindingTargetState := { depth = i32, acc_mask = i32 };
 ImplementationState := { count = i32 };
+FileState := { count = i32 };
+IntrinsicState := { binding_count = i32 };
 AnnotationTemp := { is_mut = i32, target_mask = i32, export_mask = i32, wrap_mask = i32 };
 
 FlowState := { kind = i32, value = i32 };
@@ -120,6 +122,7 @@ MAX_VALUES := 10000;
 MAX_BINDINGS := 4096;
 MAX_IMPLS := 1024;
 MAX_SCOPES := 256;
+MAX_FILES := 256;
 
 FLOW_NONE := -1;
 FLOW_RETURN := 0;
@@ -134,6 +137,7 @@ BUILTIN_ASM := 5;
 BUILTIN_OPTION := 6;
 BUILTIN_ITERATOR := 7;
 BUILTIN_RANGE_NEXT := 8;
+BUILTIN_USE := 9;
 
 TARGET_JS := 0;
 TARGET_WASM := 1;
@@ -173,6 +177,14 @@ mut binding_target_mask: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
 (export wasm) mut impl_state: Box(ImplementationState) := { count = 0 };
 (export wasm) mut scope_stack: Box({i32; MAX_SCOPES}) := {0; MAX_SCOPES};
 mut binding_target_stack: Box({i32; MAX_SCOPES}) := {0; MAX_SCOPES};
+mut scope_stack_backup: Box({i32; MAX_SCOPES}) := {0; MAX_SCOPES};
+mut binding_target_stack_backup: Box({i32; MAX_SCOPES}) := {0; MAX_SCOPES};
+mut intrinsic_state: Box(IntrinsicState) := { binding_count = 0 };
+(export wasm) mut file_state: Box(FileState) := { count = 0 };
+(export wasm) mut file_path_start: Box({i32; MAX_FILES}) := {0; MAX_FILES};
+(export wasm) mut file_path_length: Box({i32; MAX_FILES}) := {0; MAX_FILES};
+(export wasm) mut file_root_idx: Box({i32; MAX_FILES}) := {0; MAX_FILES};
+mut file_import_value: Box({i32; MAX_FILES}) := {-1; MAX_FILES};
 (export wasm) mut flow_state: Box(FlowState) := { kind = FLOW_NONE, value = -1 };
 (export wasm) mut runtime_state: Box(RuntimeState) := { loop_depth = 0, function_depth = 0, option_enum_idx = -1, type_value_idx = -1 };
 (export wasm) mut bind_pattern_state: Box(BindPatternState) := { value_idx = -1, inherit_mut = 0, inherit_target_mask = 0, inherit_export_mask = 0, inherit_wrap_mask = 0 };
@@ -219,6 +231,39 @@ reset_interpreter := {} => (
     bind_pattern_state.inherit_target_mask = 0;
     bind_pattern_state.inherit_export_mask = 0;
     bind_pattern_state.inherit_wrap_mask = 0;
+    intrinsic_state.binding_count = 0;
+    reset_import_cache{};
+    0
+);
+
+(export wasm) clear_file_registry := {} => (
+    file_state.count = 0;
+    0
+);
+
+(export wasm) register_file := {path_start: i32, path_length: i32, root_idx: i32} => (
+    if file_state.count >= MAX_FILES then (
+        -1
+    ) else if path_length <= 0 || root_idx < 0 then (
+        -1
+    ) else (
+        idx := file_state.count;
+        file_path_start(idx) = path_start;
+        file_path_length(idx) = path_length;
+        file_root_idx(idx) = root_idx;
+        file_import_value(idx) = -1;
+        file_state.count = idx + 1;
+        idx
+    )
+);
+
+reset_import_cache := {} => (
+    mut idx := 0;
+    while idx < file_state.count do (
+        file_import_value(idx) = -1;
+        idx = idx + 1;
+        {}
+    );
     0
 );
 
@@ -242,6 +287,46 @@ exit_scope := {} => (
         binding_state.count = scope_stack(binding_state.scope_count);
         0
     )
+);
+
+save_scope_stack := (count: i32) => (
+    mut idx := 0;
+    while idx < count do (
+        scope_stack_backup(idx) = scope_stack(idx);
+        idx = idx + 1;
+        {}
+    );
+    0
+);
+
+restore_scope_stack := (count: i32) => (
+    mut idx := 0;
+    while idx < count do (
+        scope_stack(idx) = scope_stack_backup(idx);
+        idx = idx + 1;
+        {}
+    );
+    0
+);
+
+save_binding_target_stack := (count: i32) => (
+    mut idx := 0;
+    while idx < count do (
+        binding_target_stack_backup(idx) = binding_target_stack(idx);
+        idx = idx + 1;
+        {}
+    );
+    0
+);
+
+restore_binding_target_stack := (count: i32) => (
+    mut idx := 0;
+    while idx < count do (
+        binding_target_stack(idx) = binding_target_stack_backup(idx);
+        idx = idx + 1;
+        {}
+    );
+    0
 );
 
 push_binding_target_mask := (mask: i32) => (
@@ -525,6 +610,47 @@ find_binding_index := (name: StringRef) => (
     found
 );
 
+find_file_index := (name: StringRef) => (
+    mut idx := file_state.count - 1;
+    mut found := -1;
+    while idx >= 0 do (
+        if string_ref_equals_raw{
+            file_path_start(idx),
+            file_path_length(idx),
+            name.start,
+            name.length
+        } == 1 then (
+            found = idx;
+            idx = -1;
+        ) else (
+            idx = idx - 1;
+        );
+        {}
+    );
+    found
+);
+
+eval_use_from_string := {path_ref: StringRef, span_start: i32} => (
+    file_idx := find_file_index(path_ref);
+    if file_idx == -1 then (
+        set_error(span_start);
+        -1
+    ) else (
+        cached_idx := file_import_value(file_idx);
+        if cached_idx != -1 then (
+            cached_idx
+        ) else (
+            import_idx := eval_import_root{file_root_idx(file_idx), span_start};
+            if import_idx == -1 then (
+                -1
+            ) else (
+                file_import_value(file_idx) = import_idx;
+                import_idx
+            )
+        )
+    )
+);
+
 ensure_binding_target_access := {binding_idx: i32, span_start: i32} => (
     required_mask := binding_target_mask(binding_idx);
     if required_mask == 0 then (
@@ -712,7 +838,10 @@ init_intrinsic_context := {} => (
                             if add_intrinsic_binding_value{SYNTHETIC_JS_STRING, Value::Target(TARGET_JS)} == -1 then -1 else (
                                 if add_intrinsic_binding_value{SYNTHETIC_WASM_STRING, Value::Target(TARGET_WASM)} == -1 then -1 else (
                                     if add_intrinsic_binding_value{SYNTHETIC_WGSL_STRING, Value::Target(TARGET_WGSL)} == -1 then -1 else (
-                                        if init_option_enum{} == -1 then -1 else 0
+                                        if init_option_enum{} == -1 then -1 else (
+                                            intrinsic_state.binding_count = binding_state.count;
+                                            0
+                                        )
                                     )
                                 )
                             )
@@ -787,6 +916,16 @@ string_ref_is_match := (value: StringRef) => (
                         if input(value.start + 4) == 'h' then 1 else 0
                     ) else 0
                 ) else 0
+            ) else 0
+        ) else 0
+    )
+);
+
+string_ref_is_use := (value: StringRef) => (
+    if value.start < 0 then 0 else if value.length != 3 then 0 else (
+        if input(value.start) == 'u' then (
+            if input(value.start + 1) == 's' then (
+                if input(value.start + 2) == 'e' then 1 else 0
             ) else 0
         ) else 0
     )
@@ -1072,14 +1211,16 @@ builtin_from_identifier := (name: StringRef) => (
             if string_ref_is_option(name) == 1 then BUILTIN_OPTION else (
                 if string_ref_is_iterator(name) == 1 then BUILTIN_ITERATOR else (
                     if string_ref_is_export(name) == 1 then BUILTIN_EXPORT else (
-                        if string_ref_is_target(name) == 1 then BUILTIN_TARGET else (
-                            if string_ref_is_wrap(name) == 1 then BUILTIN_WRAP else (
-                                if string_ref_is_asm(name) == 1 then BUILTIN_ASM else -1
+                    if string_ref_is_target(name) == 1 then BUILTIN_TARGET else (
+                        if string_ref_is_wrap(name) == 1 then BUILTIN_WRAP else (
+                            if string_ref_is_asm(name) == 1 then BUILTIN_ASM else (
+                                if string_ref_is_use(name) == 1 then BUILTIN_USE else -1
                             )
                         )
                     )
                 )
             )
+        )
         )
     )
 );
@@ -2421,10 +2562,15 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                 )
             ) else if builtin_id == BUILTIN_EXPORT || builtin_id == BUILTIN_TARGET || builtin_id == BUILTIN_WRAP then (
                 if Value::Target(target_tag) := values(arg_idx) then (
-                    kind := if builtin_id == BUILTIN_EXPORT then BINDING_ANN_EXPORT else (
-                        if builtin_id == BUILTIN_TARGET then BINDING_ANN_TARGET else BINDING_ANN_WRAP
-                    );
-                    store_value(Value::BindingAnnotation({ kind = kind, target = target_tag }))
+                    if builtin_id == BUILTIN_WRAP && target_tag == TARGET_WGSL then (
+                        set_error(span_start);
+                        -1
+                    ) else (
+                        kind := if builtin_id == BUILTIN_EXPORT then BINDING_ANN_EXPORT else (
+                            if builtin_id == BUILTIN_TARGET then BINDING_ANN_TARGET else BINDING_ANN_WRAP
+                        );
+                        store_value(Value::BindingAnnotation({ kind = kind, target = target_tag }))
+                    )
                 ) else (
                     set_error(span_start);
                     -1
@@ -2432,6 +2578,13 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
             ) else if builtin_id == BUILTIN_ASM then (
                 if Value::Target(target_tag) := values(arg_idx) then (
                     store_value(Value::AsmFunction(target_tag))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else if builtin_id == BUILTIN_USE then (
+                if Value::String(path_ref) := values(arg_idx) then (
+                    eval_use_from_string{path_ref, span_start}
                 ) else (
                     set_error(span_start);
                     -1
@@ -2616,6 +2769,94 @@ apply_impl_property := {object_expr: i32, object_value_idx: i32, property_start:
             )
         )
     )
+);
+
+eval_import_root := {root_idx: i32, span_start: i32} => (
+    saved_binding_count := binding_state.count;
+    saved_scope_count := binding_state.scope_count;
+    saved_binding_target_depth := binding_target_state.depth;
+    saved_binding_target_acc := binding_target_state.acc_mask;
+    saved_flow_kind := flow_state.kind;
+    saved_flow_value := flow_state.value;
+    saved_loop_depth := runtime_state.loop_depth;
+    saved_function_depth := runtime_state.function_depth;
+    saved_bind_value := bind_pattern_state.value_idx;
+    saved_bind_inherit_mut := bind_pattern_state.inherit_mut;
+    saved_bind_inherit_target := bind_pattern_state.inherit_target_mask;
+    saved_bind_inherit_export := bind_pattern_state.inherit_export_mask;
+    saved_bind_inherit_wrap := bind_pattern_state.inherit_wrap_mask;
+    saved_ann_mut := annotation_temp.is_mut;
+    saved_ann_target := annotation_temp.target_mask;
+    saved_ann_export := annotation_temp.export_mask;
+    saved_ann_wrap := annotation_temp.wrap_mask;
+    saved_temp_start := binding_temp.start;
+    saved_temp_length := binding_temp.length;
+    saved_temp_is_mut := binding_temp.is_mut;
+    saved_temp_ok := binding_temp.ok;
+
+    save_scope_stack(saved_scope_count);
+    save_binding_target_stack(saved_binding_target_depth);
+
+    binding_state.count = intrinsic_state.binding_count;
+    binding_state.scope_count = 0;
+    binding_target_state.depth = 0;
+    binding_target_state.acc_mask = 0;
+    flow_state.kind = FLOW_NONE;
+    flow_state.value = -1;
+    runtime_state.loop_depth = 0;
+    runtime_state.function_depth = 0;
+    bind_pattern_state.value_idx = -1;
+    bind_pattern_state.inherit_mut = 0;
+    bind_pattern_state.inherit_target_mask = 0;
+    bind_pattern_state.inherit_export_mask = 0;
+    bind_pattern_state.inherit_wrap_mask = 0;
+    annotation_temp.is_mut = 0;
+    annotation_temp.target_mask = 0;
+    annotation_temp.export_mask = 0;
+    annotation_temp.wrap_mask = 0;
+    binding_temp.start = 0;
+    binding_temp.length = 0;
+    binding_temp.is_mut = 0;
+    binding_temp.ok = 0;
+
+    enter_scope{};
+    mut result_idx := eval_expression(root_idx);
+    if flow_state.kind != FLOW_NONE then (
+        flow_state.kind = FLOW_NONE;
+        flow_state.value = -1;
+        set_error(span_start);
+        result_idx = -1;
+        0
+    ) else (
+        0
+    );
+    exit_scope{};
+
+    binding_state.count = saved_binding_count;
+    binding_state.scope_count = saved_scope_count;
+    restore_scope_stack(saved_scope_count);
+    binding_target_state.depth = saved_binding_target_depth;
+    binding_target_state.acc_mask = saved_binding_target_acc;
+    restore_binding_target_stack(saved_binding_target_depth);
+    flow_state.kind = saved_flow_kind;
+    flow_state.value = saved_flow_value;
+    runtime_state.loop_depth = saved_loop_depth;
+    runtime_state.function_depth = saved_function_depth;
+    bind_pattern_state.value_idx = saved_bind_value;
+    bind_pattern_state.inherit_mut = saved_bind_inherit_mut;
+    bind_pattern_state.inherit_target_mask = saved_bind_inherit_target;
+    bind_pattern_state.inherit_export_mask = saved_bind_inherit_export;
+    bind_pattern_state.inherit_wrap_mask = saved_bind_inherit_wrap;
+    annotation_temp.is_mut = saved_ann_mut;
+    annotation_temp.target_mask = saved_ann_target;
+    annotation_temp.export_mask = saved_ann_export;
+    annotation_temp.wrap_mask = saved_ann_wrap;
+    binding_temp.start = saved_temp_start;
+    binding_temp.length = saved_temp_length;
+    binding_temp.is_mut = saved_temp_is_mut;
+    binding_temp.ok = saved_temp_ok;
+
+    result_idx
 );
 
 eval_expression: (i32 -> i32) := (idx: i32) => (
@@ -3313,6 +3554,14 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                         -1
                                     )
                                 ),
+                                UnaryIntrinsicOperator::UseFromString => (
+                                    if Value::String(path_ref) := values(operand_idx) then (
+                                        eval_use_from_string{path_ref, span_start}
+                                    ) else (
+                                        set_error(span_start);
+                                        -1
+                                    )
+                                ),
                                 UnaryIntrinsicOperator::BoxFromType => (
                                     if value_is_type(operand_idx) == 0 then (
                                         set_error(span_start);
@@ -3365,10 +3614,15 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                 ),
                                 UnaryIntrinsicOperator::BindingAnnotationWrapFromTarget => (
                                     if Value::Target(target_tag) := values(operand_idx) then (
-                                        store_value(Value::BindingAnnotation({
-                                            kind = BINDING_ANN_WRAP,
-                                            target = target_tag
-                                        }))
+                                        if target_tag == TARGET_WGSL then (
+                                            set_error(span_start);
+                                            -1
+                                        ) else (
+                                            store_value(Value::BindingAnnotation({
+                                                kind = BINDING_ANN_WRAP,
+                                                target = target_tag
+                                            }))
+                                        )
                                     ) else (
                                         set_error(span_start);
                                         -1

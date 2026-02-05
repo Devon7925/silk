@@ -1462,6 +1462,7 @@ parse_statement := (ignored: i32) => (
 );
 
 parse_block := (ignored: i32) => (
+    block_start := state.cursor;
     skip_ws(0);
     if input(state.cursor) == 0 then (
         set_error(state.cursor);
@@ -1539,7 +1540,7 @@ parse_block := (ignored: i32) => (
                 expr
             ) else (
                 list := { count = count, head = head };
-                span := make_span{0, span_end(last_expr)};
+                span := make_span{block_start, span_end(last_expr)};
                 new_node{NodeKind::Block(list), span}
             )
         )
@@ -1551,6 +1552,22 @@ parse_block := (ignored: i32) => (
     state.list_count = 0;
     state.error = -1;
     state.cursor = 0;
+
+    root := parse_block(0);
+    skip_ws(0);
+    if state.error != -1 then (
+        -1
+    ) else if input(state.cursor) != 0 then (
+        set_error(state.cursor);
+        -1
+    ) else (
+        root
+    )
+);
+
+(export wasm) parse_at := (start: i32) => (
+    state.error = -1;
+    state.cursor = start;
 
     root := parse_block(0);
     skip_ws(0);
