@@ -4,6 +4,43 @@ export const ROOT_DIR = fromFileUrl(new URL("..", import.meta.url));
 export const FIXTURES_DIR = join(ROOT_DIR, "fixtures");
 
 const decoder = new TextDecoder();
+const encoder = new TextEncoder();
+
+const WASM_CACHE_DIR = join(ROOT_DIR, "tmp", "wasm_cache");
+
+async function ensureWasmCacheDir() {
+  await Deno.mkdir(WASM_CACHE_DIR, { recursive: true });
+}
+
+function toHex(buffer: ArrayBuffer) {
+  return Array.from(new Uint8Array(buffer))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function hashWasmInputs(
+  silkCode: string,
+  extraFiles: Record<string, string>,
+) {
+  const entries = Object.entries(extraFiles).sort(([a], [b]) =>
+    a.localeCompare(b)
+  );
+  let payload = `silk:${silkCode}\0`;
+  for (const [name, contents] of entries) {
+    payload += `file:${name}\0${contents}\0`;
+  }
+  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(payload));
+  return toHex(digest);
+}
+
+async function fileExists(path: string) {
+  try {
+    const stat = await Deno.stat(path);
+    return stat.isFile;
+  } catch {
+    return false;
+  }
+}
 
 type RunCommandOptions = {
   cwd?: string;
@@ -145,17 +182,33 @@ export async function compileToWasmWithExtraFiles(
   prefix: string,
   extraFiles: Record<string, string>,
 ) {
+  const normalized = normalizeLineEndings(silkCode);
+  const normalizedExtras: Record<string, string> = {};
+  for (const [name, contents] of Object.entries(extraFiles)) {
+    normalizedExtras[name] = normalizeLineEndings(contents);
+  }
+  await ensureWasmCacheDir();
+  const cacheKey = await hashWasmInputs(normalized, normalizedExtras);
+  const cacheBase = join(WASM_CACHE_DIR, `${prefix}_${cacheKey}`);
+  const cacheWasmPath = cacheBase + ".wasm";
+
   const basePath = tempBase(prefix);
   const wasmPath = basePath + ".wasm";
   const silkPath = basePath + ".silk";
   const dir = dirname(silkPath);
-  await Deno.writeTextFile(silkPath, normalizeLineEndings(silkCode));
   const extraPaths: string[] = [];
-  for (const [name, contents] of Object.entries(extraFiles)) {
+  await Deno.writeTextFile(silkPath, normalized);
+  for (const [name, contents] of Object.entries(normalizedExtras)) {
     const extraPath = join(dir, name);
-    await Deno.writeTextFile(extraPath, normalizeLineEndings(contents));
+    await Deno.writeTextFile(extraPath, contents);
     extraPaths.push(extraPath);
   }
+
+  if (await fileExists(cacheWasmPath)) {
+    await Deno.copyFile(cacheWasmPath, wasmPath);
+    return { wasmPath, silkPath, extraPaths };
+  }
+
   const { code, stdout, stderr } = await runSilk(
     [silkPath, "-o", wasmPath],
     { stdout: "piped", stderr: "piped" },
@@ -165,6 +218,7 @@ export async function compileToWasmWithExtraFiles(
     await cleanup([silkPath, wasmPath, ...extraPaths]);
     throw new Error(`Compilation failed:\n${combined}`);
   }
+  await Deno.copyFile(wasmPath, cacheWasmPath);
   return { wasmPath, silkPath, extraPaths };
 }
 

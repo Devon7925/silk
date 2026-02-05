@@ -21,6 +21,8 @@ const VALUE_BOOLEAN = 1;
 const VALUE_CHAR = 2;
 const VALUE_STRING = 3;
 const VALUE_UNIT = 4;
+const TARGET_MASK_JS = 1;
+const TARGET_MASK_WASM = 2;
 
 type ParserExports = {
   parse: () => number;
@@ -46,6 +48,12 @@ type InterpreterExports = {
   get_value_char: (idx: number) => number;
   get_value_string_start: (idx: number) => number;
   get_value_string_length: (idx: number) => number;
+  get_binding_count: () => number;
+  get_binding_name_start: (idx: number) => number;
+  get_binding_name_length: (idx: number) => number;
+  get_binding_target_mask: (idx: number) => number;
+  get_binding_export_mask: (idx: number) => number;
+  get_binding_wrap_mask: (idx: number) => number;
 };
 
 const { parserExports, interpreterExports } = await (async () => {
@@ -132,6 +140,21 @@ function parseAndExpectError(source: string) {
   const errorPos = interpreterExports.get_interp_error();
   assert(errorPos !== -1);
   return errorPos;
+}
+
+function findBindingIndex(name: string) {
+  const count = interpreterExports.get_binding_count();
+  for (let i = 0; i < count; i++) {
+    const start = interpreterExports.get_binding_name_start(i);
+    const length = interpreterExports.get_binding_name_length(i);
+    if (start < 0 || length <= 0) {
+      continue;
+    }
+    if (readSpan(interpreterExports.input, start, length) === name) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 Deno.test("wasm interpreter: evaluates arithmetic", () => {
@@ -393,4 +416,31 @@ Deno.test("wasm interpreter: allows target bindings inside matching context", ()
   `);
   assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
   assertEquals(interpreterExports.get_value_number(resultIdx), 0);
+});
+
+Deno.test("wasm interpreter: exposes binding annotations", () => {
+  parseAndInterpret(`
+    (export wasm) (wrap js) add_one := (x: i32) => (x + 1);
+    (target wasm) only_wasm := 5;
+    (export js) (wrap wasm) bridge := (x: i32) => x;
+    0
+  `);
+
+  const addIdx = findBindingIndex("add_one");
+  assert(addIdx !== -1);
+  assertEquals(interpreterExports.get_binding_export_mask(addIdx), TARGET_MASK_WASM);
+  assertEquals(interpreterExports.get_binding_wrap_mask(addIdx), TARGET_MASK_JS);
+  assertEquals(interpreterExports.get_binding_target_mask(addIdx), 0);
+
+  const onlyIdx = findBindingIndex("only_wasm");
+  assert(onlyIdx !== -1);
+  assertEquals(interpreterExports.get_binding_target_mask(onlyIdx), TARGET_MASK_WASM);
+  assertEquals(interpreterExports.get_binding_export_mask(onlyIdx), 0);
+  assertEquals(interpreterExports.get_binding_wrap_mask(onlyIdx), 0);
+
+  const bridgeIdx = findBindingIndex("bridge");
+  assert(bridgeIdx !== -1);
+  assertEquals(interpreterExports.get_binding_export_mask(bridgeIdx), TARGET_MASK_JS);
+  assertEquals(interpreterExports.get_binding_wrap_mask(bridgeIdx), TARGET_MASK_WASM);
+  assertEquals(interpreterExports.get_binding_target_mask(bridgeIdx), 0);
 });
