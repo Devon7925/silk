@@ -75,6 +75,9 @@ SYNTHETIC_BOOL_STRING := { length = 4, start = -10 };
 SYNTHETIC_TYPE_STRING := { length = 4, start = -11 };
 SYNTHETIC_TARGET_STRING := { length = 6, start = -12 };
 SYNTHETIC_BINDING_ANNOTATION_STRING := { length = 18, start = -13 };
+SYNTHETIC_JS_STRING := { length = 2, start = -18 };
+SYNTHETIC_WASM_STRING := { length = 4, start = -19 };
+SYNTHETIC_WGSL_STRING := { length = 4, start = -20 };
 EMPTY_IDENTIFIER := types.EMPTY_IDENTIFIER;
 EMPTY_SPAN := types.EMPTY_SPAN;
 EMPTY_NODE := types.EMPTY_NODE;
@@ -105,11 +108,13 @@ ValueState := { count = i32, error = i32 };
 
 BindingState := { count = i32, scope_count = i32 };
 BindingTemp := { start = i32, length = i32, is_mut = i32, ok = i32 };
+BindingTargetState := { depth = i32, acc_mask = i32 };
 ImplementationState := { count = i32 };
+AnnotationTemp := { is_mut = i32, target_mask = i32 };
 
 FlowState := { kind = i32, value = i32 };
 RuntimeState := { loop_depth = i32, function_depth = i32, option_enum_idx = i32, type_value_idx = i32 };
-BindPatternState := { value_idx = i32, inherit_mut = i32 };
+BindPatternState := { value_idx = i32, inherit_mut = i32, inherit_target_mask = i32 };
 
 MAX_VALUES := 10000;
 MAX_BINDINGS := 4096;
@@ -133,6 +138,9 @@ BUILTIN_RANGE_NEXT := 8;
 TARGET_JS := 0;
 TARGET_WASM := 1;
 TARGET_WGSL := 2;
+TARGET_MASK_JS := 1;
+TARGET_MASK_WASM := 2;
+TARGET_MASK_WGSL := 4;
 
 BINDING_ANN_MUT := 0;
 BINDING_ANN_EXPORT := 1;
@@ -154,15 +162,19 @@ mut value_is_box_type: Box({i32; MAX_VALUES}) := {0; MAX_VALUES};
 (export wasm) mut binding_values: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
 (export wasm) mut binding_is_mut: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
 (export wasm) mut binding_type_values: Box({i32; MAX_BINDINGS}) := {-1; MAX_BINDINGS};
+mut binding_target_mask: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
 (export wasm) mut binding_state: Box(BindingState) := { count = 0, scope_count = 0 };
 (export wasm) mut binding_temp: Box(BindingTemp) := { start = 0, length = 0, is_mut = 0, ok = 0 };
+(export wasm) mut binding_target_state: Box(BindingTargetState) := { depth = 0, acc_mask = 0 };
 (export wasm) mut impl_type_values: Box({i32; MAX_IMPLS}) := {0; MAX_IMPLS};
 (export wasm) mut impl_value_values: Box({i32; MAX_IMPLS}) := {0; MAX_IMPLS};
 (export wasm) mut impl_state: Box(ImplementationState) := { count = 0 };
 (export wasm) mut scope_stack: Box({i32; MAX_SCOPES}) := {0; MAX_SCOPES};
+mut binding_target_stack: Box({i32; MAX_SCOPES}) := {0; MAX_SCOPES};
 (export wasm) mut flow_state: Box(FlowState) := { kind = FLOW_NONE, value = -1 };
 (export wasm) mut runtime_state: Box(RuntimeState) := { loop_depth = 0, function_depth = 0, option_enum_idx = -1, type_value_idx = -1 };
-(export wasm) mut bind_pattern_state: Box(BindPatternState) := { value_idx = -1, inherit_mut = 0 };
+(export wasm) mut bind_pattern_state: Box(BindPatternState) := { value_idx = -1, inherit_mut = 0, inherit_target_mask = 0 };
+(export wasm) mut annotation_temp: Box(AnnotationTemp) := { is_mut = 0, target_mask = 0 };
 
 make_string_ref := {start: i32, length: i32} => (
     { start = start, length = length }
@@ -187,6 +199,10 @@ reset_interpreter := {} => (
     binding_temp.length = 0;
     binding_temp.is_mut = 0;
     binding_temp.ok = 0;
+    binding_target_state.depth = 0;
+    binding_target_state.acc_mask = 0;
+    annotation_temp.is_mut = 0;
+    annotation_temp.target_mask = 0;
     impl_state.count = 0;
     flow_state.kind = FLOW_NONE;
     flow_state.value = -1;
@@ -194,6 +210,9 @@ reset_interpreter := {} => (
     runtime_state.function_depth = 0;
     runtime_state.option_enum_idx = -1;
     runtime_state.type_value_idx = -1;
+    bind_pattern_state.value_idx = -1;
+    bind_pattern_state.inherit_mut = 0;
+    bind_pattern_state.inherit_target_mask = 0;
     0
 );
 
@@ -217,6 +236,31 @@ exit_scope := {} => (
         binding_state.count = scope_stack(binding_state.scope_count);
         0
     )
+);
+
+push_binding_target_mask := (mask: i32) => (
+    if binding_target_state.depth >= MAX_SCOPES then (
+        set_error(0);
+        0
+    ) else (
+        binding_target_stack(binding_target_state.depth) = mask;
+        binding_target_state.depth = binding_target_state.depth + 1;
+        1
+    )
+);
+
+pop_binding_target_mask := {} => (
+    if binding_target_state.depth <= 0 then (
+        set_error(0);
+        0
+    ) else (
+        binding_target_state.depth = binding_target_state.depth - 1;
+        1
+    )
+);
+
+current_binding_target_mask := {} => (
+    if binding_target_state.depth <= 0 then -1 else binding_target_stack(binding_target_state.depth - 1)
 );
 
 string_ref_equals := {left: StringRef, right: StringRef} => (
@@ -310,6 +354,43 @@ annotations_has_mut := (head: i32) => (
         {}
     );
     found
+);
+
+resolve_annotation_flags := (head: i32) => (
+    annotation_temp.is_mut = 0;
+    annotation_temp.target_mask = 0;
+    mut current := head;
+    mut ok := 1;
+    while current != -1 do (
+        ann_idx := list_nodes(current).value;
+        ann_value_idx := eval_expression(ann_idx);
+        if ann_value_idx == -1 then (
+            ok = 0;
+            current = -1;
+        ) else if flow_state.kind != FLOW_NONE then (
+            ok = 0;
+            current = -1;
+        ) else (
+            if Value::BindingAnnotation(ann) := values(ann_value_idx) then (
+                if ann.kind == BINDING_ANN_MUT then (
+                    annotation_temp.is_mut = 1;
+                    0
+                ) else 0;
+                if ann.kind == BINDING_ANN_TARGET then (
+                    ann_mask := target_mask_from_tag(ann.target);
+                    annotation_temp.target_mask = target_mask_or{annotation_temp.target_mask, ann_mask};
+                    0
+                ) else 0;
+                current = list_nodes(current).next;
+            ) else (
+                set_error(nodes(ann_idx).span.start);
+                ok = 0;
+                current = -1;
+            )
+        );
+        {}
+    );
+    ok
 );
 
 expr_contains_mut_annotation := (expr_idx: i32) => (
@@ -426,6 +507,87 @@ find_binding_index := (name: StringRef) => (
     found
 );
 
+ensure_binding_target_access := {binding_idx: i32, span_start: i32} => (
+    required_mask := binding_target_mask(binding_idx);
+    if required_mask == 0 then (
+        1
+    ) else (
+        current_mask := current_binding_target_mask{};
+        if current_mask == -1 then (
+            set_error(span_start);
+            0
+        ) else if current_mask == 0 then (
+            set_error(span_start);
+            0
+        ) else if target_mask_allows{required_mask, current_mask} == 1 then (
+            1
+        ) else (
+            set_error(span_start);
+            0
+        )
+    )
+);
+
+string_ref_is_js := (value: StringRef) => (
+    if value.start < 0 then (
+        if value.start == SYNTHETIC_JS_STRING.start && value.length == SYNTHETIC_JS_STRING.length then 1 else 0
+    ) else if value.length != 2 then (
+        0
+    ) else (
+        if input(value.start) == 'j' then (
+            if input(value.start + 1) == 's' then 1 else 0
+        ) else 0
+    )
+);
+
+string_ref_is_wasm := (value: StringRef) => (
+    if value.start < 0 then (
+        if value.start == SYNTHETIC_WASM_STRING.start && value.length == SYNTHETIC_WASM_STRING.length then 1 else 0
+    ) else if value.length != 4 then (
+        0
+    ) else (
+        if input(value.start) == 'w' then (
+            if input(value.start + 1) == 'a' then (
+                if input(value.start + 2) == 's' then (
+                    if input(value.start + 3) == 'm' then 1 else 0
+                ) else 0
+            ) else 0
+        ) else 0
+    )
+);
+
+string_ref_is_wgsl := (value: StringRef) => (
+    if value.start < 0 then (
+        if value.start == SYNTHETIC_WGSL_STRING.start && value.length == SYNTHETIC_WGSL_STRING.length then 1 else 0
+    ) else if value.length != 4 then (
+        0
+    ) else (
+        if input(value.start) == 'w' then (
+            if input(value.start + 1) == 'g' then (
+                if input(value.start + 2) == 's' then (
+                    if input(value.start + 3) == 'l' then 1 else 0
+                ) else 0
+            ) else 0
+        ) else 0
+    )
+);
+
+ensure_asm_target_allowed := {target_tag: i32, span_start: i32} => (
+    current_mask := current_binding_target_mask{};
+    if current_mask == -1 then (
+        set_error(span_start);
+        0
+    ) else if current_mask == 0 then (
+        set_error(span_start);
+        0
+    ) else if target_mask_has{current_mask, target_tag} == 0 then (
+        set_error(span_start);
+        0
+    ) else (
+        1
+    )
+);
+
 add_binding := {start: i32, length: i32, value: i32, is_mut: i32} => (
     if binding_state.count >= MAX_BINDINGS then (
         set_error(0);
@@ -437,6 +599,7 @@ add_binding := {start: i32, length: i32, value: i32, is_mut: i32} => (
         binding_values(idx) = value;
         binding_is_mut(idx) = is_mut;
         binding_type_values(idx) = -1;
+        binding_target_mask(idx) = 0;
         binding_state.count = idx + 1;
         idx
     )
@@ -526,7 +689,13 @@ init_intrinsic_context := {} => (
                             kind = BINDING_ANN_MUT,
                             target = -1
                         })} == -1 then -1 else (
-                            if init_option_enum{} == -1 then -1 else 0
+                            if add_intrinsic_binding_value{SYNTHETIC_JS_STRING, Value::Target(TARGET_JS)} == -1 then -1 else (
+                                if add_intrinsic_binding_value{SYNTHETIC_WASM_STRING, Value::Target(TARGET_WASM)} == -1 then -1 else (
+                                    if add_intrinsic_binding_value{SYNTHETIC_WGSL_STRING, Value::Target(TARGET_WGSL)} == -1 then -1 else (
+                                        if init_option_enum{} == -1 then -1 else 0
+                                    )
+                                )
+                            )
                         )
                     )
                 )
@@ -1381,6 +1550,68 @@ target_literal_tag := (target: TargetLiteral) => (
     }
 );
 
+target_mask_from_tag := (target_tag: i32) => (
+    if target_tag == TARGET_JS then TARGET_MASK_JS else (
+        if target_tag == TARGET_WASM then TARGET_MASK_WASM else (
+            if target_tag == TARGET_WGSL then TARGET_MASK_WGSL else 0
+        )
+    )
+);
+
+target_mask_has := {mask: i32, target_tag: i32} => (
+    if target_tag == TARGET_JS then (
+        if mask == 1 || mask == 3 || mask == 5 || mask == 7 then 1 else 0
+    ) else if target_tag == TARGET_WASM then (
+        if mask == 2 || mask == 3 || mask == 6 || mask == 7 then 1 else 0
+    ) else if target_tag == TARGET_WGSL then (
+        if mask == 4 || mask == 5 || mask == 6 || mask == 7 then 1 else 0
+    ) else (
+        0
+    )
+);
+
+target_mask_or := {left: i32, right: i32} => (
+    mut result := left;
+    if target_mask_has{right, TARGET_JS} == 1 && target_mask_has{result, TARGET_JS} == 0 then (
+        result = result + TARGET_MASK_JS;
+        0
+    ) else 0;
+    if target_mask_has{right, TARGET_WASM} == 1 && target_mask_has{result, TARGET_WASM} == 0 then (
+        result = result + TARGET_MASK_WASM;
+        0
+    ) else 0;
+    if target_mask_has{right, TARGET_WGSL} == 1 && target_mask_has{result, TARGET_WGSL} == 0 then (
+        result = result + TARGET_MASK_WGSL;
+        0
+    ) else 0;
+    result
+);
+
+target_mask_and := {left: i32, right: i32} => (
+    mut result := 0;
+    if target_mask_has{left, TARGET_JS} == 1 && target_mask_has{right, TARGET_JS} == 1 then (
+        result = result + TARGET_MASK_JS;
+        0
+    ) else 0;
+    if target_mask_has{left, TARGET_WASM} == 1 && target_mask_has{right, TARGET_WASM} == 1 then (
+        result = result + TARGET_MASK_WASM;
+        0
+    ) else 0;
+    if target_mask_has{left, TARGET_WGSL} == 1 && target_mask_has{right, TARGET_WGSL} == 1 then (
+        result = result + TARGET_MASK_WGSL;
+        0
+    ) else 0;
+    result
+);
+
+target_mask_allows := {required: i32, current: i32} => (
+    if target_mask_has{current, TARGET_JS} == 1 && target_mask_has{required, TARGET_JS} == 0 then 0 else (
+        if target_mask_has{current, TARGET_WASM} == 1 && target_mask_has{required, TARGET_WASM} == 0 then 0 else (
+            if target_mask_has{current, TARGET_WGSL} == 1 && target_mask_has{required, TARGET_WGSL} == 0 then 0 else 1
+        )
+    )
+);
+
 binding_annotation_from_literal := (ann: BindingAnnotationLiteral) => (
     ann |> match {
         BindingAnnotationLiteral::Mut => Value::BindingAnnotation({ kind = BINDING_ANN_MUT, target = -1 }),
@@ -1525,6 +1756,12 @@ string_ref_equals_synthetic := {synthetic_start: i32, synthetic_len: i32, input_
             string_ref_is_target(input_ref)
         ) else if synthetic_start == SYNTHETIC_BINDING_ANNOTATION_STRING.start then (
             string_ref_is_binding_annotation(input_ref)
+        ) else if synthetic_start == SYNTHETIC_JS_STRING.start then (
+            string_ref_is_js(input_ref)
+        ) else if synthetic_start == SYNTHETIC_WASM_STRING.start then (
+            string_ref_is_wasm(input_ref)
+        ) else if synthetic_start == SYNTHETIC_WGSL_STRING.start then (
+            string_ref_is_wgsl(input_ref)
         ) else (
             0
         )
@@ -1561,17 +1798,121 @@ add_binding_if_named := {start: i32, length: i32, value_idx: i32, is_mut: i32} =
     )
 );
 
-bind_payload_pattern := {payload_expr: i32, payload_idx: i32, inherit_mut: i32} => (
+binding_target_mask_update := (mask: i32) => (
+    if binding_target_state.acc_mask == -1 then (
+        binding_target_state.acc_mask = mask;
+        0
+    ) else (
+        binding_target_state.acc_mask = target_mask_and{binding_target_state.acc_mask, mask};
+        0
+    );
+    1
+);
+
+binding_pattern_target_mask_expr := {pattern_expr: i32, passed_mask: i32} => (
+    if pattern_expr == -1 then 1 else (
+        nodes(pattern_expr).kind |> match {
+            NodeKind::Identifier(_) => binding_target_mask_update(passed_mask),
+            NodeKind::Literal(_) => 1,
+            NodeKind::Struct(info) => (
+                mut current := info.fields;
+                while current != -1 do (
+                    field_node := list_nodes(current).value;
+                    if NodeKind::Binding(field_binding) := nodes(field_node).kind then (
+                        binding_pattern_target_mask_expr{field_binding.expr, passed_mask};
+                        if value_state.error != -1 then (
+                            current = -1;
+                        ) else (
+                            current = list_nodes(current).next;
+                        )
+                    ) else (
+                        set_error(nodes(field_node).span.start);
+                        current = -1;
+                    );
+                    {}
+                );
+                1
+            ),
+            NodeKind::Operation(op) => (
+                if op_is1{op.operator.start, op.operator.length, ':'} == 1 then (
+                    binding_pattern_target_mask_expr{op.left, passed_mask}
+                ) else (
+                    1
+                )
+            ),
+            NodeKind::TypePropertyAccess(_) => 1,
+            NodeKind::FunctionCall(call) => (
+                if NodeKind::TypePropertyAccess(_) := nodes(call.function).kind then (
+                    binding_pattern_target_mask_expr{call.argument, passed_mask}
+                ) else (
+                    annotations := extract_binding_annotations(call.function);
+                    if resolve_annotation_flags(annotations) == 0 then 0 else (
+                        combined_mask := target_mask_or{passed_mask, annotation_temp.target_mask};
+                        binding_pattern_target_mask_expr{call.argument, combined_mask}
+                    )
+                )
+            ),
+            else => 1
+        }
+    )
+);
+
+binding_pattern_target_mask := (pattern: BindingPattern) => (
+    binding_target_state.acc_mask = -1;
+    pattern |> match {
+        BindingPattern::Identifier(_) => binding_target_mask_update(0),
+        BindingPattern::Literal(_) => 1,
+        BindingPattern::Struct(info) => (
+            mut current := info.fields;
+            while current != -1 do (
+                field_node := list_nodes(current).value;
+                if NodeKind::Binding(field_binding) := nodes(field_node).kind then (
+                    binding_pattern_target_mask_expr{field_binding.expr, 0};
+                    if value_state.error != -1 then (
+                        current = -1;
+                    ) else (
+                        current = list_nodes(current).next;
+                    )
+                ) else (
+                    set_error(nodes(field_node).span.start);
+                    current = -1;
+                );
+                {}
+            );
+            1
+        ),
+        BindingPattern::EnumVariant(info) => (
+            if info.payload == -1 then 1 else binding_pattern_target_mask_expr{info.payload, 0}
+        ),
+        BindingPattern::TypeHint(info) => binding_pattern_target_mask_expr{info.pattern, 0},
+        BindingPattern::Annotated(info) => (
+            if resolve_annotation_flags(info.annotations) == 0 then 0 else (
+                binding_pattern_target_mask_expr{info.pattern, annotation_temp.target_mask}
+            )
+        ),
+        else => 1
+    };
+    if value_state.error != -1 then -1 else (
+        if binding_target_state.acc_mask == -1 then 0 else binding_target_state.acc_mask
+    )
+);
+
+bind_payload_pattern := {payload_expr: i32, payload_idx: i32, inherit_mut: i32, inherit_target_mask: i32} => (
     mut payload_mut := inherit_mut;
     nodes(payload_expr).kind |> match {
         NodeKind::Identifier(info) => (
             bind_idx := add_binding_if_named{info.name.start, info.name.length, payload_idx, payload_mut};
-            if bind_idx == -1 then 0 else 1
+            if bind_idx == -1 then (
+                0
+            ) else (
+                binding_target_mask(bind_idx) = inherit_target_mask;
+                1
+            )
         ),
         NodeKind::Literal(_) => 0,
         NodeKind::Operation(op) => (
             if op_is1{op.operator.start, op.operator.length, ':'} == 1 then (
-                bind_payload_pattern{op.left, payload_idx, payload_mut}
+                bind_payload_pattern{op.left, payload_idx, payload_mut, inherit_target_mask}
             ) else (
                 0
             )
@@ -1580,7 +1921,7 @@ bind_payload_pattern := {payload_expr: i32, payload_idx: i32, inherit_mut: i32} 
     }
 );
 
-bind_struct_pattern := {fields_head: i32, value_idx: i32, inherit_mut: i32} => (
+bind_struct_pattern := {fields_head: i32, value_idx: i32, inherit_mut: i32, inherit_target_mask: i32} => (
     if Value::Record(rec_info) := values(value_idx) then (
         start_count := binding_state.count;
         mut current := fields_head;
@@ -1614,7 +1955,7 @@ bind_struct_pattern := {fields_head: i32, value_idx: i32, inherit_mut: i32} => (
                 if field_value_idx == -1 then (
                     ok = 0;
                 ) else (
-                    if bind_pattern_expr{field_binding.expr, field_value_idx, inherit_mut} == 0 then (
+                    if bind_pattern_expr{field_binding.expr, field_value_idx, inherit_mut, inherit_target_mask} == 0 then (
                         ok = 0;
                     ) else (
                         current = list_nodes(current).next;
@@ -1636,10 +1977,14 @@ bind_struct_pattern := {fields_head: i32, value_idx: i32, inherit_mut: i32} => (
     )
 );
 
-bind_pattern_expr := {pattern_expr: i32, value_idx: i32, inherit_mut: i32} => (
+bind_pattern_expr := {pattern_expr: i32, value_idx: i32, inherit_mut: i32, inherit_target_mask: i32} => (
     nodes(pattern_expr).kind |> match {
         NodeKind::Identifier(info) => (
             bind_idx := add_binding_if_named{info.name.start, info.name.length, value_idx, inherit_mut};
+            if bind_idx >= 0 then (
+                binding_target_mask(bind_idx) = inherit_target_mask;
+                0
+            ) else 0;
             if value_type_values(value_idx) != -1 then (
                 if info.name.length > 0 && span_is_underscore{info.name.start, info.name.length} == 0 && span_is_else{info.name.start, info.name.length} == 0 then (
                     if bind_idx >= 0 then (
@@ -1651,10 +1996,10 @@ bind_pattern_expr := {pattern_expr: i32, value_idx: i32, inherit_mut: i32} => (
             if bind_idx == -1 then 0 else 1
         ),
         NodeKind::Literal(_) => 0,
-        NodeKind::Struct(info) => bind_struct_pattern{info.fields, value_idx, inherit_mut},
+        NodeKind::Struct(info) => bind_struct_pattern{info.fields, value_idx, inherit_mut, inherit_target_mask},
         NodeKind::Operation(op) => (
             if op_is1{op.operator.start, op.operator.length, ':'} == 1 then (
-                bind_pattern_expr{op.left, value_idx, inherit_mut}
+                bind_pattern_expr{op.left, value_idx, inherit_mut, inherit_target_mask}
             ) else (
                 0
             )
@@ -1687,7 +2032,7 @@ bind_pattern_expr := {pattern_expr: i32, value_idx: i32, inherit_mut: i32} => (
                     access.property.length
                 } == 1 then (
                         if enum_info.payload == -1 then 0 else (
-                            bind_payload_pattern{call.argument, enum_info.payload, inherit_mut}
+                            bind_payload_pattern{call.argument, enum_info.payload, inherit_mut, inherit_target_mask}
                         )
                     ) else (
                         0
@@ -1696,8 +2041,12 @@ bind_pattern_expr := {pattern_expr: i32, value_idx: i32, inherit_mut: i32} => (
                     0
                 )
             ) else (
-                mut_flag := expr_contains_mut_annotation(call.function);
-                bind_pattern_expr{call.argument, value_idx, if inherit_mut == 1 || mut_flag == 1 then 1 else 0}
+                annotations := extract_binding_annotations(call.function);
+                if resolve_annotation_flags(annotations) == 0 then 0 else (
+                    mut_flag := if annotation_temp.is_mut == 1 || inherit_mut == 1 then 1 else 0;
+                    combined_mask := target_mask_or{inherit_target_mask, annotation_temp.target_mask};
+                    bind_pattern_expr{call.argument, value_idx, mut_flag, combined_mask}
+                )
             )
         ),
         else => 0
@@ -1707,49 +2056,55 @@ bind_pattern_expr := {pattern_expr: i32, value_idx: i32, inherit_mut: i32} => (
 bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
     value_idx := bind_pattern_state.value_idx;
     inherit_mut := bind_pattern_state.inherit_mut;
+    inherit_target_mask := bind_pattern_state.inherit_target_mask;
     start_count := binding_state.count;
     matched := pattern |> match {
         BindingPattern::Annotated(info) => (
-            mut_flag := if annotations_has_mut(info.annotations) == 1 || inherit_mut == 1 then 1 else 0;
-            if NodeKind::Operation(op) := nodes(info.pattern).kind then (
-                if op_is1{op.operator.start, op.operator.length, ':'} == 1 then (
-                    type_idx := eval_expression(op.right);
-                    if type_idx == -1 then (
-                        0
-                    ) else if flow_state.kind != FLOW_NONE then (
-                        0
-                    ) else (
-                        resolve_binding_from_expr(op.left);
-                        name_ok := binding_temp.ok;
-                        name_start := binding_temp.start;
-                        name_len := binding_temp.length;
-                        matched := bind_pattern_expr{op.left, value_idx, mut_flag};
-                        if matched == 1 && name_ok == 1 then (
-                            bind_name := make_string_ref{name_start, name_len};
-                            bind_idx := find_binding_index(bind_name);
-                            if bind_idx != -1 then (
-                                existing_type := value_type_values(value_idx);
-                                if existing_type == -1 then (
-                                    binding_type_values(bind_idx) = type_idx;
-                                    value_type_values(value_idx) = type_idx;
-                                    0
+            if resolve_annotation_flags(info.annotations) == 0 then (
+                0
+            ) else (
+                mut_flag := if annotation_temp.is_mut == 1 || inherit_mut == 1 then 1 else 0;
+                combined_mask := target_mask_or{inherit_target_mask, annotation_temp.target_mask};
+                if NodeKind::Operation(op) := nodes(info.pattern).kind then (
+                    if op_is1{op.operator.start, op.operator.length, ':'} == 1 then (
+                        type_idx := eval_expression(op.right);
+                        if type_idx == -1 then (
+                            0
+                        ) else if flow_state.kind != FLOW_NONE then (
+                            0
+                        ) else (
+                            resolve_binding_from_expr(op.left);
+                            name_ok := binding_temp.ok;
+                            name_start := binding_temp.start;
+                            name_len := binding_temp.length;
+                            matched := bind_pattern_expr{op.left, value_idx, mut_flag, combined_mask};
+                            if matched == 1 && name_ok == 1 then (
+                                bind_name := make_string_ref{name_start, name_len};
+                                bind_idx := find_binding_index(bind_name);
+                                if bind_idx != -1 then (
+                                    existing_type := value_type_values(value_idx);
+                                    if existing_type == -1 then (
+                                        binding_type_values(bind_idx) = type_idx;
+                                        value_type_values(value_idx) = type_idx;
+                                        0
+                                    ) else (
+                                        binding_type_values(bind_idx) = existing_type;
+                                        0
+                                    )
                                 ) else (
-                                    binding_type_values(bind_idx) = existing_type;
                                     0
                                 )
                             ) else (
                                 0
-                            )
-                        ) else (
-                            0
-                        );
-                        matched
+                            );
+                            matched
+                        )
+                    ) else (
+                        bind_pattern_expr{info.pattern, value_idx, mut_flag, combined_mask}
                     )
                 ) else (
-                    bind_pattern_expr{info.pattern, value_idx, mut_flag}
+                    bind_pattern_expr{info.pattern, value_idx, mut_flag, combined_mask}
                 )
-            ) else (
-                bind_pattern_expr{info.pattern, value_idx, mut_flag}
             )
         ),
         BindingPattern::TypeHint(info) => (
@@ -1763,7 +2118,7 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
                 name_ok := binding_temp.ok;
                 name_start := binding_temp.start;
                 name_len := binding_temp.length;
-                matched := bind_pattern_expr{info.pattern, value_idx, inherit_mut};
+                matched := bind_pattern_expr{info.pattern, value_idx, inherit_mut, inherit_target_mask};
                 if matched == 1 && name_ok == 1 then (
                     bind_name := make_string_ref{name_start, name_len};
                     bind_idx := find_binding_index(bind_name);
@@ -1812,7 +2167,7 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
                         if enum_info.payload == -1 then 1 else 0
                     ) else (
                         if enum_info.payload == -1 then 0 else (
-                            bind_payload_pattern{info.payload, enum_info.payload, inherit_mut}
+                            bind_payload_pattern{info.payload, enum_info.payload, inherit_mut, inherit_target_mask}
                         )
                     )
                 ) else (
@@ -1822,7 +2177,7 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
                 0
             )
         ),
-        BindingPattern::Struct(info) => bind_struct_pattern{info.fields, value_idx, inherit_mut},
+        BindingPattern::Struct(info) => bind_struct_pattern{info.fields, value_idx, inherit_mut, inherit_target_mask},
         else => 0
     };
     if matched == 0 then (
@@ -1842,6 +2197,7 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                 enter_scope{};
                 bind_pattern_state.value_idx = arg_idx;
                 bind_pattern_state.inherit_mut = 0;
+                bind_pattern_state.inherit_target_mask = 0;
                 bind_ok := bind_pattern_simple(fn_info.parameter);
                 mut result_idx := -1;
                 if bind_ok == 0 then (
@@ -1891,6 +2247,7 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                         enter_scope{};
                         bind_pattern_state.value_idx = arg_idx;
                         bind_pattern_state.inherit_mut = 0;
+                        bind_pattern_state.inherit_target_mask = 0;
                         if bind_pattern_simple(branch_fn.parameter) == 1 then (
                             matched = 1;
                             runtime_state.function_depth = runtime_state.function_depth + 1;
@@ -2117,7 +2474,9 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
             )
         ),
         Value::AsmFunction(target_tag) => (
-            if Value::String(code_ref) := values(arg_idx) then (
+            if ensure_asm_target_allowed{target_tag, span_start} == 0 then (
+                -1
+            ) else if Value::String(code_ref) := values(arg_idx) then (
                 store_value(Value::InlineAssembly({ target = target_tag, code = code_ref }))
             ) else (
                 set_error(span_start);
@@ -2277,23 +2636,36 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         -1
                     )
                 ) else (
-                    binding_values(binding_idx)
+                    if ensure_binding_target_access{binding_idx, span_start} == 0 then (
+                        -1
+                    ) else (
+                        binding_values(binding_idx)
+                    )
                 )
             ),
             NodeKind::Binding(binding) => (
-                value_idx := eval_expression(binding.expr);
-                if value_idx == -1 then (
+                target_mask := binding_pattern_target_mask(binding.pattern);
+                if target_mask == -1 then (
                     -1
-                ) else if flow_state.kind != FLOW_NONE then (
-                    value_idx
+                ) else if push_binding_target_mask(target_mask) == 0 then (
+                    -1
                 ) else (
-                    bind_pattern_state.value_idx = value_idx;
-                    bind_pattern_state.inherit_mut = 0;
-                    matched := bind_pattern_simple(binding.pattern);
-                    if matched == 1 then (
-                        store_value(Value::Boolean(1))
+                    value_idx := eval_expression(binding.expr);
+                    pop_binding_target_mask{};
+                    if value_idx == -1 then (
+                        -1
+                    ) else if flow_state.kind != FLOW_NONE then (
+                        value_idx
                     ) else (
-                        store_value(Value::Boolean(0))
+                        bind_pattern_state.value_idx = value_idx;
+                        bind_pattern_state.inherit_mut = 0;
+                        bind_pattern_state.inherit_target_mask = 0;
+                        matched := bind_pattern_simple(binding.pattern);
+                        if matched == 1 then (
+                            store_value(Value::Boolean(1))
+                        ) else (
+                            store_value(Value::Boolean(0))
+                        )
                     )
                 )
             ),
@@ -2309,6 +2681,8 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                             idx := find_binding_index(target_info.name.name);
                             if idx == -1 then (
                                 set_error(span_start);
+                                -1
+                            ) else if ensure_binding_target_access{idx, span_start} == 0 then (
                                 -1
                             ) else if binding_is_mut(idx) == 0 then (
                                 set_error(span_start);
@@ -2328,6 +2702,8 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                             root_idx := resolve_lvalue_root_binding_from_expr(target_info.object);
                             if root_idx == -1 then (
                                 set_error(span_start);
+                                -1
+                            ) else if ensure_binding_target_access{root_idx, span_start} == 0 then (
                                 -1
                             ) else if binding_is_mut(root_idx) == 0 then (
                                 set_error(span_start);
@@ -2367,6 +2743,8 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                             root_idx := resolve_lvalue_root_binding_from_expr(target_info.array);
                             if root_idx == -1 then (
                                 set_error(span_start);
+                                -1
+                            ) else if ensure_binding_target_access{root_idx, span_start} == 0 then (
                                 -1
                             ) else if binding_is_mut(root_idx) == 0 then (
                                 set_error(span_start);
@@ -2982,9 +3360,12 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         ) else if flow_state.kind != FLOW_NONE then (
                             code_idx
                         ) else (
-                            if Value::String(code_ref) := values(code_idx) then (
+                            target_tag := target_literal_tag(info.target);
+                            if ensure_asm_target_allowed{target_tag, span_start} == 0 then (
+                                -1
+                            ) else if Value::String(code_ref) := values(code_idx) then (
                                 store_value(Value::InlineAssembly({
-                                    target = target_literal_tag(info.target),
+                                    target = target_tag,
                                     code = code_ref
                                 }))
                             ) else (
@@ -3406,6 +3787,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                             enter_scope{};
                             bind_pattern_state.value_idx = value_idx;
                             bind_pattern_state.inherit_mut = 0;
+                            bind_pattern_state.inherit_target_mask = 0;
                             if bind_pattern_simple(branch_binding.pattern) == 1 then (
                                 matched = 1;
                                 result_idx = eval_expression(branch_binding.expr);

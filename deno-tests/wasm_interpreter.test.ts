@@ -363,3 +363,34 @@ Deno.test("wasm interpreter: rejects Box of non-type expressions", () => {
 Deno.test("wasm interpreter: rejects nested Box types", () => {
   parseAndExpectError("Box(Box(i32))");
 });
+
+Deno.test("wasm interpreter: rejects asm without target context", () => {
+  parseAndExpectError(`foo := asm(wasm)("i32.const 1"); 0`);
+});
+
+Deno.test("wasm interpreter: rejects asm with mismatched target context", () => {
+  parseAndExpectError(`(target js) foo := asm(wasm)("i32.const 1"); 0`);
+});
+
+Deno.test("wasm interpreter: allows asm with matching target context", () => {
+  const resultIdx = parseAndInterpret(`
+    (target wasm) foo := asm(wasm)("i32.const 1");
+    0
+  `);
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 0);
+});
+
+Deno.test("wasm interpreter: rejects target bindings outside target context", () => {
+  parseAndExpectError(`(target wasm) foo := 1; foo`);
+});
+
+Deno.test("wasm interpreter: allows target bindings inside matching context", () => {
+  const resultIdx = parseAndInterpret(`
+    (target wasm) foo := 1;
+    (target wasm) bar := foo;
+    0
+  `);
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 0);
+});

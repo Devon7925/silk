@@ -5,7 +5,7 @@ This document tracks known feature gaps between the Rust interpreter (`src/inter
 **Missing Or Incomplete**
 - `use "path"` imports. The Rust interpreter resolves files, normalizes paths, and caches imports; the Silk interpreter does not handle `UnaryIntrinsicOperator::UseFromString`, so `use` expressions are unsupported.
 - Builtin library prelude fidelity. The Silk interpreter now provides `Option`, `Iterator`, and range iteration helpers at runtime, but does not fully mirror the Rust interpreter's library evaluation or type-parameter specialization.
-- Target annotation integration. The Rust interpreter tracks binding targets and uses that context to validate `asm` usage and to surface `export`, `target`, and `wrap` annotations for code generation; the Silk interpreter treats these as values but does not expose annotated bindings or enforce target context.
+- Target annotation integration. The Silk interpreter now enforces target context for `asm` usage and target-annotated bindings, but it still does not expose annotated bindings (`export`, `target`, `wrap`) for code generation.
 - Preserve/inlining metadata. The Rust interpreter computes `PreserveBehavior` and returns a rich `Context` used by `src/intermediate.rs`; the Silk interpreter only returns value indices, so preserve metadata is unavailable.
 - Diagnostics. The Rust interpreter reports structured `Diagnostic` messages with spans; the Silk interpreter only tracks a numeric error position in `value_state.error`.
 
