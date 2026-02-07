@@ -1,7 +1,7 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
     diagnostics::{Diagnostic, SourceSpan},
@@ -13,6 +13,7 @@ use crate::{
         UnaryIntrinsicOperator,
     },
 };
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreserveBehavior {
     PreserveUsage,
@@ -71,7 +72,8 @@ pub struct Context {
     pub bindings: Vec<HashMap<Identifier, (BindingContext, Vec<BindingAnnotation>)>>,
     pub in_loop: bool,
     pub function_depth: usize,
-    pub files: HashMap<String, Expression>,
+    pub files: Rc<RefCell<HashMap<String, Expression>>>,
+    pub file_sources: Rc<HashMap<String, String>>,
     pub import_cache: HashMap<String, Expression>,
     pub binding_target_stack: Vec<Vec<TargetLiteral>>,
     pub bootstrap_parser: bool,
@@ -108,7 +110,8 @@ impl Context {
             bindings: vec![],
             in_loop: false,
             function_depth: 0,
-            files: HashMap::new(),
+            files: Rc::new(RefCell::new(HashMap::new())),
+            file_sources: Rc::new(HashMap::new()),
             import_cache: HashMap::new(),
             binding_target_stack: Vec::new(),
             bootstrap_parser: false,
@@ -1349,6 +1352,13 @@ pub fn interpret_expression(
     context: &mut Context,
 ) -> Result<Expression, Diagnostic> {
     let expr = uniquify_expression(expr, context);
+    interpret_expression_uniquified(expr, context)
+}
+
+fn interpret_expression_uniquified(
+    expr: Expression,
+    context: &mut Context,
+) -> Result<Expression, Diagnostic> {
     enum Frame {
         Eval(Expression),
         PatternStart(BindingPattern),
@@ -2374,16 +2384,35 @@ pub fn interpret_expression(
                         if let Some(cached) = context.import_cache.get(&normalized) {
                             return Ok(cached.clone());
                         }
-                        let expression = context.files.get(&normalized).ok_or_else(|| {
-                            diagnostic(format!("Unknown file path: {path}"), span)
-                        })?;
-                        let mut import_context = if context.bootstrap_parser {
-                            intrinsic_context_with_files_bootstrap(context.files.clone())
+                        let expression = if let Some(parsed) =
+                            context.files.borrow().get(&normalized).cloned()
+                        {
+                            parsed
                         } else {
-                            intrinsic_context_with_files(context.files.clone())
+                            let source =
+                                context.file_sources.get(&normalized).ok_or_else(|| {
+                                    diagnostic(format!("Unknown file path: {path}"), span)
+                                })?;
+                            let parsed = loader::parse_source_block(source)?;
+                            context
+                                .files
+                                .borrow_mut()
+                                .insert(normalized.clone(), parsed.clone());
+                            parsed
+                        };
+                        let mut import_context = if context.bootstrap_parser {
+                            intrinsic_context_with_files_bootstrap_shared(
+                                context.files.clone(),
+                                context.file_sources.clone(),
+                            )
+                        } else {
+                            intrinsic_context_with_files_shared(
+                                context.files.clone(),
+                                context.file_sources.clone(),
+                            )
                         };
                         let (value, _) =
-                            interpret_program(expression.clone(), &mut import_context)?;
+                            interpret_program(expression, &mut import_context)?;
                         context.import_cache.insert(normalized, value.clone());
                         value
                     }
@@ -6198,6 +6227,30 @@ fn identifiers_used(expr: &Expression) -> HashSet<Identifier> {
     })
 }
 
+fn prebind_context_scope(context: &mut Context, expressions: &[Expression]) {
+    let mut prebound = HashSet::new();
+    for expr in expressions {
+        if let ExpressionKind::Binding(binding) = &expr.kind {
+            collect_bound_identifiers_from_pattern(&binding.pattern, &mut prebound);
+        }
+    }
+    if let Some(scope) = context.bindings.last_mut() {
+        for identifier in prebound {
+            if identifier.name == "_" {
+                continue;
+            }
+            let exists = scope.keys().any(|id| id.name == identifier.name);
+            if !exists {
+                let fresh = fresh_identifier(&identifier);
+                scope.insert(
+                    fresh,
+                    (BindingContext::UnboundWithoutType, Vec::new()),
+                );
+            }
+        }
+    }
+}
+
 fn interpret_block(
     expressions: Vec<Expression>,
     span: SourceSpan,
@@ -6205,34 +6258,14 @@ fn interpret_block(
 ) -> Result<(Expression, Context), Diagnostic> {
     let outer_context = context.clone();
     context.bindings.push(HashMap::new());
-    {
-        let mut prebound = HashSet::new();
-        for expr in &expressions {
-            if let ExpressionKind::Binding(binding) = &expr.kind {
-                collect_bound_identifiers_from_pattern(&binding.pattern, &mut prebound);
-            }
-        }
-        if let Some(scope) = context.bindings.last_mut() {
-            for identifier in prebound {
-                if identifier.name == "_" {
-                    continue;
-                }
-                let exists = scope.keys().any(|id| id.name == identifier.name);
-                if !exists {
-                    let fresh = fresh_identifier(&identifier);
-                    scope.insert(
-                        fresh,
-                        (BindingContext::UnboundWithoutType, Vec::new()),
-                    );
-                }
-            }
-        }
-    }
+    prebind_context_scope(context, &expressions);
+    let base_scope = ScopeStack::from_context(context);
     let mut interpreted_expressions = Vec::new();
     let mut preserved_expression_indicies = HashSet::new();
 
     for (expr_idx, expression) in expressions.into_iter().enumerate() {
-        let value = interpret_expression(expression, context)?;
+        let uniquified = uniquify_expression_iter(expression, base_scope.clone(), context);
+        let value = interpret_expression_uniquified(uniquified, context)?;
         if expression_contains_external_mutation(&value, &outer_context)
             || expression_does_diverge(&value, true, false)
             || expression_exports(&value)
@@ -6282,7 +6315,6 @@ fn interpret_block(
             // for identifier in &expression_modifications[idx] {
             //     needed_identifiers.remove(identifier);
             // }
-
             for identifier in &expression_usage[idx] {
                 needed_identifiers.insert(identifier.clone());
             }
@@ -6314,6 +6346,35 @@ fn interpret_block(
     }
 }
 
+fn interpret_block_for_context(
+    expressions: Vec<Expression>,
+    context: &mut Context,
+) -> Result<Context, Diagnostic> {
+    context.bindings.push(HashMap::new());
+    prebind_context_scope(context, &expressions);
+    let base_scope = ScopeStack::from_context(context);
+
+    for expression in expressions {
+        let uniquified = uniquify_expression_iter(expression, base_scope.clone(), context);
+        let value = interpret_expression_uniquified(uniquified, context)?;
+        if matches!(
+            value.kind,
+            ExpressionKind::Diverge {
+                divergance_type: DivergeExpressionType::Break | DivergeExpressionType::Return,
+                ..
+            }
+        ) {
+            let block_context = context.clone();
+            context.bindings.pop();
+            return Ok(block_context);
+        }
+    }
+
+    let block_context = context.clone();
+    context.bindings.pop();
+    Ok(block_context)
+}
+
 pub fn interpret_program(
     expr: Expression,
     context: &mut Context,
@@ -6325,6 +6386,22 @@ pub fn interpret_program(
             ..
         } => interpret_block(expressions, span, context),
         other => interpret_expression(other, context).map(|value| (value, context.clone())),
+    }
+}
+
+pub fn interpret_program_for_context(
+    expr: Expression,
+    context: &mut Context,
+) -> Result<Context, Diagnostic> {
+    match expr {
+        Expression {
+            kind: ExpressionKind::Block(expressions),
+            ..
+        } => interpret_block_for_context(expressions, context),
+        other => {
+            let _ = interpret_expression(other, context)?;
+            Ok(context.clone())
+        }
     }
 }
 
@@ -8249,17 +8326,52 @@ pub fn intrinsic_context() -> Context {
 }
 
 pub fn intrinsic_context_with_files(files: HashMap<String, Expression>) -> Context {
-    intrinsic_context_with_files_inner(files, false)
+    intrinsic_context_with_files_and_sources(files, HashMap::new())
+}
+
+pub fn intrinsic_context_with_files_and_sources(
+    files: HashMap<String, Expression>,
+    file_sources: HashMap<String, String>,
+) -> Context {
+    intrinsic_context_with_files_shared(
+        Rc::new(RefCell::new(files)),
+        Rc::new(file_sources),
+    )
 }
 
 pub(crate) fn intrinsic_context_with_files_bootstrap(
     files: HashMap<String, Expression>,
 ) -> Context {
-    intrinsic_context_with_files_inner(files, true)
+    intrinsic_context_with_files_bootstrap_and_sources(files, HashMap::new())
+}
+
+pub(crate) fn intrinsic_context_with_files_bootstrap_and_sources(
+    files: HashMap<String, Expression>,
+    file_sources: HashMap<String, String>,
+) -> Context {
+    intrinsic_context_with_files_bootstrap_shared(
+        Rc::new(RefCell::new(files)),
+        Rc::new(file_sources),
+    )
+}
+
+fn intrinsic_context_with_files_shared(
+    files: Rc<RefCell<HashMap<String, Expression>>>,
+    file_sources: Rc<HashMap<String, String>>,
+) -> Context {
+    intrinsic_context_with_files_inner(files, file_sources, false)
+}
+
+fn intrinsic_context_with_files_bootstrap_shared(
+    files: Rc<RefCell<HashMap<String, Expression>>>,
+    file_sources: Rc<HashMap<String, String>>,
+) -> Context {
+    intrinsic_context_with_files_inner(files, file_sources, true)
 }
 
 fn intrinsic_context_with_files_inner(
-    files: HashMap<String, Expression>,
+    files: Rc<RefCell<HashMap<String, Expression>>>,
+    file_sources: Rc<HashMap<String, String>>,
     bootstrap_parser: bool,
 ) -> Context {
     let mut context = Context {
@@ -8267,6 +8379,7 @@ fn intrinsic_context_with_files_inner(
         in_loop: false,
         function_depth: 0,
         files,
+        file_sources,
         import_cache: HashMap::new(),
         binding_target_stack: Vec::new(),
         bootstrap_parser,
@@ -9454,7 +9567,7 @@ fn let_chain_allows_custom_boolean_and_operator() {
 
 #[derive(Default, Clone)]
 struct ScopeStack {
-    scopes: Vec<HashMap<String, Identifier>>,
+    scopes: Vec<Rc<HashMap<String, Identifier>>>,
 }
 
 impl ScopeStack {
@@ -9467,10 +9580,10 @@ impl ScopeStack {
                     map.insert(identifier.name.clone(), identifier.clone());
                 }
             }
-            scopes.push(map);
+            scopes.push(Rc::new(map));
         }
         if scopes.is_empty() {
-            scopes.push(HashMap::new());
+            scopes.push(Rc::new(HashMap::new()));
         }
         ScopeStack { scopes }
     }
@@ -9492,12 +9605,12 @@ impl ScopeStack {
     }
 
     fn push(&mut self) {
-        self.scopes.push(HashMap::new());
+        self.scopes.push(Rc::new(HashMap::new()));
     }
 
     fn insert(&mut self, name: String, identifier: Identifier) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name, identifier);
+            Rc::make_mut(scope).insert(name, identifier);
         }
     }
 
@@ -9580,20 +9693,8 @@ fn insert_bound_identifiers_from_expr(
 
 fn generate_uuid_like() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let count = COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let bits = timestamp ^ count;
-    format!(
-        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-        (bits >> 96) as u32,
-        (bits >> 80) as u16,
-        (bits >> 64) as u16,
-        (bits >> 48) as u16,
-        bits as u64
-    )
+    let next = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("id-{next:016x}")
 }
 
 enum Value {

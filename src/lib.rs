@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::time::Instant;
+
 mod diagnostics;
 mod intermediate;
 mod interpret;
@@ -44,15 +47,46 @@ pub fn compile(
     files: Vec<(&str, &str)>,
     root: &str,
 ) -> Result<Vec<CompilationArtifact>, Diagnostic> {
-    let file_map = loader::build_parsed_files(files)?;
+    let timings_enabled = std::env::var_os("SILK_TIMINGS").is_some();
+    let total_start = Instant::now();
+
+    let parse_start = Instant::now();
+    let mut file_sources = HashMap::with_capacity(files.len());
+    for (path, source) in files {
+        file_sources.insert(loader::normalize_path(path), source.to_string());
+    }
     let root = loader::normalize_path(root);
-    let ast = file_map
+    let root_source = file_sources
         .get(&root)
-        .ok_or_else(|| Diagnostic::new(format!("Missing root source for {root}")))?
-        .clone();
-    let mut context = interpret::intrinsic_context_with_files(file_map);
-    let (_value, program_context) = interpret::interpret_program(ast, &mut context)?;
+        .ok_or_else(|| Diagnostic::new(format!("Missing root source for {root}")))?;
+    let ast = loader::parse_source_block(root_source)?;
+    if timings_enabled {
+        eprintln!(
+            "SILK_TIMINGS parse_files_ms={:.2}",
+            parse_start.elapsed().as_secs_f64() * 1_000.0
+        );
+    }
+    let mut parsed_files = HashMap::with_capacity(1);
+    parsed_files.insert(root.clone(), ast.clone());
+
+    let interpret_start = Instant::now();
+    let mut context = interpret::intrinsic_context_with_files_and_sources(parsed_files, file_sources);
+    let program_context = interpret::interpret_program_for_context(ast, &mut context)?;
+    if timings_enabled {
+        eprintln!(
+            "SILK_TIMINGS interpret_ms={:.2}",
+            interpret_start.elapsed().as_secs_f64() * 1_000.0
+        );
+    }
+
+    let intermediate_start = Instant::now();
     let intermediate = intermediate::context_to_intermediate(&program_context);
+    if timings_enabled {
+        eprintln!(
+            "SILK_TIMINGS lower_intermediate_ms={:.2}",
+            intermediate_start.elapsed().as_secs_f64() * 1_000.0
+        );
+    }
 
     let mut artifacts = Vec::new();
 
@@ -65,7 +99,14 @@ pub fn compile(
             .iter()
             .any(|w| matches!(w.wrap_target, parsing::TargetLiteral::WasmTarget))
     {
+        let wasm_start = Instant::now();
         let content = wasm::compile_exports(&intermediate)?;
+        if timings_enabled {
+            eprintln!(
+                "SILK_TIMINGS compile_wasm_ms={:.2}",
+                wasm_start.elapsed().as_secs_f64() * 1_000.0
+            );
+        }
         artifacts.push(CompilationArtifact {
             name: "main".to_string(), // TODO: use file name
             content,
@@ -94,7 +135,14 @@ pub fn compile(
             )
         })
     {
+        let js_start = Instant::now();
         let content = js::compile_exports(&intermediate)?;
+        if timings_enabled {
+            eprintln!(
+                "SILK_TIMINGS compile_js_ms={:.2}",
+                js_start.elapsed().as_secs_f64() * 1_000.0
+            );
+        }
         artifacts.push(CompilationArtifact {
             name: "main".to_string(), // TODO: use file name
             content: content.into_bytes(),
@@ -107,12 +155,26 @@ pub fn compile(
         .iter()
         .any(|e| matches!(e.target, parsing::TargetLiteral::WgslTarget))
     {
+        let wgsl_start = Instant::now();
         let content = wgsl::compile_exports(&intermediate)?;
+        if timings_enabled {
+            eprintln!(
+                "SILK_TIMINGS compile_wgsl_ms={:.2}",
+                wgsl_start.elapsed().as_secs_f64() * 1_000.0
+            );
+        }
         artifacts.push(CompilationArtifact {
             name: "main".to_string(), // TODO: use file name
             content: content.into_bytes(),
             kind: ArtifactKind::Wgsl,
         });
+    }
+
+    if timings_enabled {
+        eprintln!(
+            "SILK_TIMINGS total_ms={:.2}",
+            total_start.elapsed().as_secs_f64() * 1_000.0
+        );
     }
 
     Ok(artifacts)

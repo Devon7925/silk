@@ -228,7 +228,7 @@ fn compile_silk_parser_wasm() -> Result<Vec<u8>, Diagnostic> {
     file_map.insert(loader::normalize_path("types.silk"), types_ast);
     let mut context = interpret::intrinsic_context_with_files_bootstrap(file_map);
     log_parser_rebuild("rebuild: interpreting parser.silk");
-    let (_value, program_context) = interpret::interpret_program(ast, &mut context)?;
+    let program_context = interpret::interpret_program_for_context(ast, &mut context)?;
     let intermediate = intermediate::context_to_intermediate(&program_context);
     log_parser_rebuild("rebuild: compiling wasm");
     let wasm = wasm::compile_exports(&intermediate)?;
@@ -333,7 +333,6 @@ impl WasmParser {
                 data.len().saturating_sub(1)
             )));
         }
-        data.fill(0);
         data[..bytes.len()].copy_from_slice(bytes);
         data[bytes.len()] = 0;
         Ok(())
