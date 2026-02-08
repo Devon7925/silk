@@ -35,3 +35,26 @@ fn test_string_literal_index() {
         other => panic!("Expected char literal, got {:?}", other),
     }
 }
+
+#[test]
+fn test_string_binding_index() {
+    let (expr, _) =
+        evaluate_text_to_expression("value := \"hi\"; value(0)").expect("Failed to index string binding");
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Char(value)) => {
+            assert_eq!(value, b'h');
+        }
+        other => panic!("Expected char literal, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_string_literal_index_out_of_range() {
+    let err = evaluate_text_to_expression("\"hi\"(2)")
+        .expect_err("Expected out-of-range string index to fail");
+    assert!(
+        err.message.contains("Array index out of range"),
+        "unexpected error: {}",
+        err.message
+    );
+}

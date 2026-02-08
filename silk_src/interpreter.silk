@@ -2406,6 +2406,22 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
 apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
     func_val := values(func_idx);
     func_val |> match {
+        Value::String(string_value) => (
+            if Value::Number(index_value) := values(arg_idx) then (
+                if index_value < 0 || index_value >= string_value.length then (
+                    set_error(span_start);
+                    -1
+                ) else if string_value.start < 0 then (
+                    set_error(span_start);
+                    -1
+                ) else (
+                    store_value(Value::Char(input(string_value.start + index_value) + 0))
+                )
+            ) else (
+                set_error(span_start);
+                -1
+            )
+        ),
         Value::Function(fn_node) => (
             if NodeKind::Function(fn_info) := nodes(fn_node).kind then (
                 runtime_state.function_depth = runtime_state.function_depth + 1;
@@ -4256,7 +4272,17 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         index_idx
                     ) else (
                         if Value::Number(index_value) := values(index_idx) then (
-                            if Value::Record(struct_info) := values(array_idx) then (
+                            if Value::String(string_value) := values(array_idx) then (
+                                if index_value < 0 || index_value >= string_value.length then (
+                                    set_error(span_start);
+                                    -1
+                                ) else if string_value.start < 0 then (
+                                    set_error(span_start);
+                                    -1
+                                ) else (
+                                    store_value(Value::Char(input(string_value.start + index_value) + 0))
+                                )
+                            ) else if Value::Record(struct_info) := values(array_idx) then (
                                 field_idx := record_value_index_by_position{
                                     struct_info.head,
                                     struct_info.count,

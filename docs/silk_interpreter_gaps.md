@@ -14,6 +14,7 @@ This document tracks known feature gaps between the Rust interpreter (`src/inter
 - `Box(T)` validation now rejects non-type expressions and nested `Box` types.
 - Binding annotations (`export`, `target`, `wrap`) are now surfaced via binding metadata in the Silk interpreter.
 - `wrap` annotation validation now mirrors Rust interpreter constraints: wrap bindings require exactly one export target, and non-function wraps are limited to wasm exports wrapped to js.
+- String indexing via call syntax (for example, `"hi"(1)`) now mirrors Rust interpreter behavior, including out-of-range failure handling.
 
 **Notes**
 - This list focuses on functionality visible in the current code. Update it as the Silk interpreter adds or changes behavior.

@@ -252,6 +252,22 @@ Deno.test("wasm interpreter: returns string literals", () => {
   assertEquals(readSpan(interpreterExports.input, start, length), "hi");
 });
 
+Deno.test("wasm interpreter: indexes string literals", () => {
+  const resultIdx = parseAndInterpret("\"hi\"(1)");
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_CHAR);
+  assertEquals(interpreterExports.get_value_char(resultIdx), "i".charCodeAt(0));
+});
+
+Deno.test("wasm interpreter: indexes string bindings", () => {
+  const resultIdx = parseAndInterpret("value := \"hi\"; value(0)");
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_CHAR);
+  assertEquals(interpreterExports.get_value_char(resultIdx), "h".charCodeAt(0));
+});
+
+Deno.test("wasm interpreter: rejects out-of-range string index", () => {
+  parseAndExpectError("\"hi\"(2)");
+});
+
 Deno.test("wasm interpreter: returns unit for empty struct", () => {
   const resultIdx = parseAndInterpret("{}");
   assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_UNIT);
