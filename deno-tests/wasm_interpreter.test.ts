@@ -468,6 +468,26 @@ Deno.test("wasm interpreter: rejects wrap wgsl annotation", () => {
   parseAndExpectError(`(wrap wgsl) foo := (x: i32) => x; 0`);
 });
 
+Deno.test("wasm interpreter: rejects wrap without export target", () => {
+  parseAndExpectError(`(wrap js) add_one := (x: i32) => x + 1; 0`);
+});
+
+Deno.test("wasm interpreter: rejects wrap with multiple export targets", () => {
+  parseAndExpectError(
+    `(export wasm) (export js) (wrap js) add_one := (x: i32) => x + 1; 0`,
+  );
+});
+
+Deno.test("wasm interpreter: rejects non-function wrap outside wasm->js globals", () => {
+  parseAndExpectError(`(export js) (wrap wasm) answer: i32 := 42; 0`);
+});
+
+Deno.test("wasm interpreter: allows non-function wrap for wasm->js globals", () => {
+  const resultIdx = parseAndInterpret(`(export wasm) (wrap js) answer: i32 := 42; answer`);
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 42);
+});
+
 Deno.test("wasm interpreter: allows asm with matching target context", () => {
   const resultIdx = parseAndInterpret(`
     (target wasm) foo := asm(wasm)("i32.const 1");

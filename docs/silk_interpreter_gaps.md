@@ -13,6 +13,7 @@ This document tracks known feature gaps between the Rust interpreter (`src/inter
 - Range operators (`start..end`) now iterate correctly through the builtin range `next` helper.
 - `Box(T)` validation now rejects non-type expressions and nested `Box` types.
 - Binding annotations (`export`, `target`, `wrap`) are now surfaced via binding metadata in the Silk interpreter.
+- `wrap` annotation validation now mirrors Rust interpreter constraints: wrap bindings require exactly one export target, and non-function wraps are limited to wasm exports wrapped to js.
 
 **Notes**
 - This list focuses on functionality visible in the current code. Update it as the Silk interpreter adds or changes behavior.

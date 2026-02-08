@@ -1773,6 +1773,30 @@ target_mask_allows := {required: i32, current: i32} => (
     )
 );
 
+target_mask_is_single_target := (mask: i32) => (
+    if mask == TARGET_MASK_JS || mask == TARGET_MASK_WASM || mask == TARGET_MASK_WGSL then 1 else 0
+);
+
+validate_wrap_export_annotations := {value_idx: i32, export_mask: i32, wrap_mask: i32, span_start: i32} => (
+    if wrap_mask == 0 then (
+        1
+    ) else if target_mask_is_single_target(export_mask) == 0 then (
+        set_error(span_start);
+        0
+    ) else (
+        if Value::Function(_) := values(value_idx) then (
+            1
+        ) else (
+            if export_mask == TARGET_MASK_WASM && wrap_mask == TARGET_MASK_JS then (
+                1
+            ) else (
+                set_error(span_start);
+                0
+            )
+        )
+    )
+);
+
 binding_annotation_from_literal := (ann: BindingAnnotationLiteral) => (
     ann |> match {
         BindingAnnotationLiteral::Mut => Value::BindingAnnotation({ kind = BINDING_ANN_MUT, target = -1 }),
@@ -2212,7 +2236,16 @@ bind_pattern_expr := {pattern_expr: i32, value_idx: i32, inherit_mut: i32, inher
                     combined_mask := target_mask_or{inherit_target_mask, annotation_temp.target_mask};
                     combined_export_mask := target_mask_or{inherit_export_mask, annotation_temp.export_mask};
                     combined_wrap_mask := target_mask_or{inherit_wrap_mask, annotation_temp.wrap_mask};
-                    bind_pattern_expr{call.argument, value_idx, mut_flag, combined_mask, combined_export_mask, combined_wrap_mask}
+                    if validate_wrap_export_annotations{
+                        value_idx,
+                        combined_export_mask,
+                        combined_wrap_mask,
+                        nodes(pattern_expr).span.start
+                    } == 0 then (
+                        0
+                    ) else (
+                        bind_pattern_expr{call.argument, value_idx, mut_flag, combined_mask, combined_export_mask, combined_wrap_mask}
+                    )
                 )
             )
         ),
@@ -2236,45 +2269,56 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
                 combined_mask := target_mask_or{inherit_target_mask, annotation_temp.target_mask};
                 combined_export_mask := target_mask_or{inherit_export_mask, annotation_temp.export_mask};
                 combined_wrap_mask := target_mask_or{inherit_wrap_mask, annotation_temp.wrap_mask};
-                if NodeKind::Operation(op) := nodes(info.pattern).kind then (
-                    if op_is1{op.operator.start, op.operator.length, ':'} == 1 then (
-                        type_idx := eval_expression(op.right);
-                        if type_idx == -1 then (
-                            0
-                        ) else if flow_state.kind != FLOW_NONE then (
-                            0
-                        ) else (
-                            resolve_binding_from_expr(op.left);
-                            name_ok := binding_temp.ok;
-                            name_start := binding_temp.start;
-                            name_len := binding_temp.length;
-                            matched := bind_pattern_expr{op.left, value_idx, mut_flag, combined_mask, combined_export_mask, combined_wrap_mask};
-                            if matched == 1 && name_ok == 1 then (
-                                bind_name := make_string_ref{name_start, name_len};
-                                bind_idx := find_binding_index(bind_name);
-                                if bind_idx != -1 then (
-                                    existing_type := value_type_values(value_idx);
-                                    if existing_type == -1 then (
-                                        binding_type_values(bind_idx) = type_idx;
-                                        value_type_values(value_idx) = type_idx;
-                                        0
-                                    ) else (
-                                        binding_type_values(bind_idx) = existing_type;
-                                        0
-                                    )
-                                ) else (
-                                    0
-                                )
-                            ) else (
+                if validate_wrap_export_annotations{
+                    value_idx,
+                    combined_export_mask,
+                    combined_wrap_mask,
+                    nodes(info.pattern).span.start
+                } == 0 then (
+                    0
+                ) else (
+                    if NodeKind::Operation(op) := nodes(info.pattern).kind then (
+                        if op_is1{op.operator.start, op.operator.length, ':'} == 1 then (
+                            type_idx := eval_expression(op.right);
+                            if type_idx == -1 then (
                                 0
-                            );
-                            matched
+                            ) else (
+                                if flow_state.kind != FLOW_NONE then (
+                                    0
+                                ) else (
+                                    resolve_binding_from_expr(op.left);
+                                    name_ok := binding_temp.ok;
+                                    name_start := binding_temp.start;
+                                    name_len := binding_temp.length;
+                                    matched := bind_pattern_expr{op.left, value_idx, mut_flag, combined_mask, combined_export_mask, combined_wrap_mask};
+                                    if matched == 1 && name_ok == 1 then (
+                                        bind_name := make_string_ref{name_start, name_len};
+                                        bind_idx := find_binding_index(bind_name);
+                                        if bind_idx != -1 then (
+                                            existing_type := value_type_values(value_idx);
+                                            if existing_type == -1 then (
+                                                binding_type_values(bind_idx) = type_idx;
+                                                value_type_values(value_idx) = type_idx;
+                                                0
+                                            ) else (
+                                                binding_type_values(bind_idx) = existing_type;
+                                                0
+                                            )
+                                        ) else (
+                                            0
+                                        )
+                                    ) else (
+                                        0
+                                    );
+                                    matched
+                                )
+                            )
+                        ) else (
+                            bind_pattern_expr{info.pattern, value_idx, mut_flag, combined_mask, combined_export_mask, combined_wrap_mask}
                         )
                     ) else (
                         bind_pattern_expr{info.pattern, value_idx, mut_flag, combined_mask, combined_export_mask, combined_wrap_mask}
                     )
-                ) else (
-                    bind_pattern_expr{info.pattern, value_idx, mut_flag, combined_mask, combined_export_mask, combined_wrap_mask}
                 )
             )
         ),

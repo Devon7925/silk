@@ -9322,6 +9322,64 @@ answer
 }
 
 #[test]
+fn interpret_rejects_wrap_without_export_target() {
+    let program = "
+(wrap js) add_one := (x: i32) => (
+    x + 1
+);
+add_one(1)
+    ";
+    let err = evaluate_text_to_expression(program).expect_err("expected wrap/export error");
+    assert!(
+        err.message
+            .contains("wrap annotation requires exactly one export target"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[test]
+fn interpret_rejects_wrap_with_multiple_export_targets() {
+    let program = "
+(export wasm) (export js) (wrap js) add_one := (x: i32) => (
+    x + 1
+);
+add_one(1)
+    ";
+    let err = evaluate_text_to_expression(program).expect_err("expected wrap/export error");
+    assert!(
+        err.message
+            .contains("wrap annotation requires exactly one export target"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[test]
+fn interpret_rejects_non_function_wrap_outside_wasm_to_js_globals() {
+    let program = "
+(export js) (wrap wasm) answer: i32 := 42;
+answer
+    ";
+    let err = evaluate_text_to_expression(program).expect_err("expected non-function wrap error");
+    assert!(
+        err.message
+            .contains("wrap annotation only supports globals for wasm exports wrapped to js"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[test]
+fn interpret_allows_non_function_wrap_for_wasm_to_js_globals() {
+    let program = "
+(export wasm) (wrap js) answer: i32 := 42;
+answer
+    ";
+    assert_eq!(evaluate_text_to_number(program), 42);
+}
+
+#[test]
 fn interpret_reports_unbound_identifier_span() {
     let source = "unknown";
     let expr = crate::parse_block(source).expect("parse should succeed");
