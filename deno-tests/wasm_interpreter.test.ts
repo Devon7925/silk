@@ -504,6 +504,34 @@ Deno.test("wasm interpreter: iterates range operators", () => {
   assertEquals(interpreterExports.get_value_number(resultIdx), 6);
 });
 
+Deno.test("wasm interpreter: resolves Range type bindings", () => {
+  const resultIdx = parseAndInterpret(`
+    range: Range := 0..3;
+    range.end
+  `);
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 3);
+});
+
+Deno.test("wasm interpreter: rejects Option with non-type arguments", () => {
+  parseAndExpectError("Option(1); 0");
+});
+
+Deno.test("wasm interpreter: accepts Iterator with non-type arguments", () => {
+  const resultIdx = parseAndInterpret("Iterator(1); 0");
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 0);
+});
+
+Deno.test("wasm interpreter: distinguishes Option payload types in patterns", () => {
+  const resultIdx = parseAndInterpret(`
+    value := Option(i32)::Some(1);
+    if Option(bool)::Some(flag) := value then 1 else 0
+  `);
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 0);
+});
+
 Deno.test("wasm interpreter: resolves Box type annotations", () => {
   const resultIdx = parseAndInterpret(`
     Boxed := Box(i32) @ { get = (self: Box(i32)) => self };
