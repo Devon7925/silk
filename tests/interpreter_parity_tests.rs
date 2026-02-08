@@ -49,3 +49,28 @@ fn range_type_binding_resolves_builtin_range() {
     );
     assert_eq!(result, 3);
 }
+
+#[test]
+fn empty_struct_parameter_matches_unit_argument() {
+    let result = evaluate_text_to_number(
+        "
+        check := {} => (1);
+        check{}
+        ",
+    );
+    assert_eq!(result, 1);
+}
+
+#[test]
+fn enum_builtin_rejects_value_payloads() {
+    assert!(
+        evaluate_text_to_expression(
+            "
+            Bad := enum { Value = 1 };
+            {};
+            ",
+        )
+        .is_err(),
+        "enum variants should reject non-type payload expressions",
+    );
+}

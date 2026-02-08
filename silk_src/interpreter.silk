@@ -2076,6 +2076,32 @@ enum_type_matches := {left_head: i32, left_count: i32, right_head: i32, right_co
     )
 );
 
+enum_record_payloads_are_types := {enum_head: i32, enum_count: i32} => (
+    if enum_head < 0 || enum_count < 0 then (
+        0
+    ) else (
+        mut idx := 0;
+        mut ok := 1;
+        while idx < enum_count do (
+            payload_idx := enum_head + idx * 2 + 1;
+            payload_ok := values(payload_idx) |> match {
+                Value::Number(_) => 0,
+                Value::Boolean(_) => 0,
+                Value::Char(_) => 0,
+                else => 1
+            };
+            if payload_ok == 0 then (
+                ok = 0;
+                idx = enum_count;
+            ) else (
+                idx = idx + 1;
+            );
+            {}
+        );
+        ok
+    )
+);
+
 enum_value_matches_pattern_type := {enum_type_expr: i32, enum_head: i32, enum_count: i32, span_start: i32} => (
     expected_idx := eval_expression(enum_type_expr);
     if expected_idx == -1 then (
@@ -2332,7 +2358,15 @@ bind_payload_pattern := {payload_expr: i32, payload_idx: i32, inherit_mut: i32, 
 );
 
 bind_struct_pattern := {fields_head: i32, value_idx: i32, inherit_mut: i32, inherit_target_mask: i32, inherit_export_mask: i32, inherit_wrap_mask: i32} => (
-    if Value::Record(rec_info) := values(value_idx) then (
+    if fields_head == -1 then (
+        if Value::Unit := values(value_idx) then (
+            1
+        ) else if Value::Record(rec_info) := values(value_idx) then (
+            if rec_info.count == 0 then 1 else 0
+        ) else (
+            0
+        )
+    ) else if Value::Record(rec_info) := values(value_idx) then (
         start_count := binding_state.count;
         mut current := fields_head;
         mut ok := 1;
@@ -2834,6 +2868,9 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
             if builtin_id == BUILTIN_ENUM then (
                 if Value::Record(rec_info) := values(arg_idx) then (
                     if rec_info.has_named == 0 then (
+                        set_error(span_start);
+                        -1
+                    ) else if enum_record_payloads_are_types{rec_info.head, rec_info.count} == 0 then (
                         set_error(span_start);
                         -1
                     ) else (
@@ -3903,6 +3940,9 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                 UnaryIntrinsicOperator::EnumFromStruct => (
                                     if Value::Record(rec_info) := values(operand_idx) then (
                                         if rec_info.has_named == 0 then (
+                                            set_error(span_start);
+                                            -1
+                                        ) else if enum_record_payloads_are_types{rec_info.head, rec_info.count} == 0 then (
                                             set_error(span_start);
                                             -1
                                         ) else (

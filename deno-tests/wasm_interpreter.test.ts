@@ -323,6 +323,12 @@ Deno.test("wasm interpreter: evaluates function calls", () => {
   assertEquals(interpreterExports.get_value_number(resultIdx), 5);
 });
 
+Deno.test("wasm interpreter: allows empty struct parameters with unit arguments", () => {
+  const resultIdx = parseAndInterpret("check := {} => (1); check{}");
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 1);
+});
+
 Deno.test("wasm interpreter: accesses struct properties", () => {
   const resultIdx = parseAndInterpret("point := { x = 5, y = 10 }; point.x");
   assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
@@ -407,6 +413,13 @@ Deno.test("wasm interpreter: matches enum payload literal patterns", () => {
   `);
   assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
   assertEquals(interpreterExports.get_value_number(resultIdx), 20);
+});
+
+Deno.test("wasm interpreter: rejects enum variant value payloads", () => {
+  parseAndExpectError(`
+    Bad := enum { Value = 1 };
+    {};
+  `);
 });
 
 Deno.test("wasm interpreter: destructures struct patterns", () => {
