@@ -2096,7 +2096,31 @@ bind_payload_pattern := {payload_expr: i32, payload_idx: i32, inherit_mut: i32, 
                 1
             )
         ),
-        NodeKind::Literal(_) => 0,
+        NodeKind::Literal(literal) => (
+            payload_value := values(payload_idx);
+            literal |> match {
+                ExpressionLiteral::Number(expected) => (
+                    if Value::Number(actual) := payload_value then if actual == expected then 1 else 0 else 0
+                ),
+                ExpressionLiteral::Boolean(expected) => (
+                    if Value::Boolean(actual) := payload_value then if actual == expected then 1 else 0 else 0
+                ),
+                ExpressionLiteral::Char(expected) => (
+                    if Value::Char(actual) := payload_value then if actual == expected then 1 else 0 else 0
+                ),
+                ExpressionLiteral::String(expected) => (
+                    if Value::String(actual) := payload_value then (
+                        if string_ref_equals_raw{
+                            actual.start,
+                            actual.length,
+                            expected.start,
+                            expected.length
+                        } == 1 then 1 else 0
+                    ) else 0
+                ),
+                else => 0
+            }
+        ),
         NodeKind::Operation(op) => (
             if op_is1{op.operator.start, op.operator.length, ':'} == 1 then (
                 bind_payload_pattern{op.left, payload_idx, payload_mut, inherit_target_mask, inherit_export_mask, inherit_wrap_mask}
@@ -2184,7 +2208,31 @@ bind_pattern_expr := {pattern_expr: i32, value_idx: i32, inherit_mut: i32, inher
             ) else 0;
             if bind_idx == -1 then 0 else 1
         ),
-        NodeKind::Literal(_) => 0,
+        NodeKind::Literal(literal) => (
+            value := values(value_idx);
+            literal |> match {
+                ExpressionLiteral::Number(expected) => (
+                    if Value::Number(actual) := value then if actual == expected then 1 else 0 else 0
+                ),
+                ExpressionLiteral::Boolean(expected) => (
+                    if Value::Boolean(actual) := value then if actual == expected then 1 else 0 else 0
+                ),
+                ExpressionLiteral::Char(expected) => (
+                    if Value::Char(actual) := value then if actual == expected then 1 else 0 else 0
+                ),
+                ExpressionLiteral::String(expected) => (
+                    if Value::String(actual) := value then (
+                        if string_ref_equals_raw{
+                            actual.start,
+                            actual.length,
+                            expected.start,
+                            expected.length
+                        } == 1 then 1 else 0
+                    ) else 0
+                ),
+                else => 0
+            }
+        ),
         NodeKind::Struct(info) => bind_struct_pattern{info.fields, value_idx, inherit_mut, inherit_target_mask, inherit_export_mask, inherit_wrap_mask},
         NodeKind::Operation(op) => (
             if op_is1{op.operator.start, op.operator.length, ':'} == 1 then (
@@ -2368,7 +2416,31 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
             ) else 0;
             if bind_idx == -1 then 0 else 1
         ),
-        BindingPattern::Literal(_) => 0,
+        BindingPattern::Literal(info) => (
+            value := values(value_idx);
+            info.literal |> match {
+                ExpressionLiteral::Number(expected) => (
+                    if Value::Number(actual) := value then if actual == expected then 1 else 0 else 0
+                ),
+                ExpressionLiteral::Boolean(expected) => (
+                    if Value::Boolean(actual) := value then if actual == expected then 1 else 0 else 0
+                ),
+                ExpressionLiteral::Char(expected) => (
+                    if Value::Char(actual) := value then if actual == expected then 1 else 0 else 0
+                ),
+                ExpressionLiteral::String(expected) => (
+                    if Value::String(actual) := value then (
+                        if string_ref_equals_raw{
+                            actual.start,
+                            actual.length,
+                            expected.start,
+                            expected.length
+                        } == 1 then 1 else 0
+                    ) else 0
+                ),
+                else => 0
+            }
+        ),
         BindingPattern::EnumVariant(info) => (
             if Value::Enum(enum_info) := values(value_idx) then (
                 if enum_variant_name_matches{

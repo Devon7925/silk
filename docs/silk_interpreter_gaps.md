@@ -15,6 +15,7 @@ This document tracks known feature gaps between the Rust interpreter (`src/inter
 - Binding annotations (`export`, `target`, `wrap`) are now surfaced via binding metadata in the Silk interpreter.
 - `wrap` annotation validation now mirrors Rust interpreter constraints: wrap bindings require exactly one export target, and non-function wraps are limited to wasm exports wrapped to js.
 - String indexing via call syntax (for example, `"hi"(1)`) now mirrors Rust interpreter behavior, including out-of-range failure handling.
+- Literal pattern matching now works for number/boolean/char/string literals in `match` branches and `while <pattern> := <value>` conditions, including enum payload literal patterns.
 
 **Notes**
 - This list focuses on functionality visible in the current code. Update it as the Silk interpreter adds or changes behavior.

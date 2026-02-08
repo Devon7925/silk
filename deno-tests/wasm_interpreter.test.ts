@@ -301,6 +301,20 @@ Deno.test("wasm interpreter: evaluates while loops", () => {
   assertEquals(interpreterExports.get_value_number(resultIdx), 6);
 });
 
+Deno.test("wasm interpreter: supports literal while pattern conditions", () => {
+  const resultIdx = parseAndInterpret(`
+    mut value := 3;
+    mut trips := 0;
+    while 3 := value do (
+      trips = trips + 1;
+      value = 4;
+    );
+    trips
+  `);
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 1);
+});
+
 Deno.test("wasm interpreter: evaluates function calls", () => {
   const resultIdx = parseAndInterpret(
     "add_one := (x: i32) => (x + 1); add_one 4",
@@ -357,6 +371,42 @@ Deno.test("wasm interpreter: evaluates match expressions via match builtin", () 
   `);
   assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
   assertEquals(interpreterExports.get_value_number(resultIdx), 5);
+});
+
+Deno.test("wasm interpreter: matches number literal patterns", () => {
+  const resultIdx = parseAndInterpret(`
+    2 |> match {
+      1 => 10,
+      2 => 20,
+      else => 30
+    }
+  `);
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 20);
+});
+
+Deno.test("wasm interpreter: matches string literal patterns", () => {
+  const resultIdx = parseAndInterpret(`
+    "beta" |> match {
+      "zeta" => 1,
+      "beta" => 2,
+      else => 0
+    }
+  `);
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 2);
+});
+
+Deno.test("wasm interpreter: matches enum payload literal patterns", () => {
+  const resultIdx = parseAndInterpret(`
+    Option(i32)::Some(2) |> match {
+      Option(i32)::Some(1) => 10,
+      Option(i32)::Some(2) => 20,
+      else => 30
+    }
+  `);
+  assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_NUMBER);
+  assertEquals(interpreterExports.get_value_number(resultIdx), 20);
 });
 
 Deno.test("wasm interpreter: destructures struct patterns", () => {

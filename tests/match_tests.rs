@@ -68,3 +68,72 @@ fn match_requires_exhaustive_or_else() {
         error.message
     );
 }
+
+#[test]
+fn match_supports_number_literal_patterns() {
+    let program = "
+        2 |> match {
+            1 => 10,
+            2 => 20,
+            else => 30
+        }
+    ";
+
+    let (expr, _) = evaluate_text_to_expression(program).unwrap_or_else(|err| {
+        panic!(
+            "Evaluation failed with error: {}",
+            err.render_with_source(program)
+        );
+    });
+
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 20),
+        other => panic!("Expected numeric literal, got {:?}", other),
+    }
+}
+
+#[test]
+fn match_supports_string_literal_patterns() {
+    let program = "
+        \"beta\" |> match {
+            \"zeta\" => 1,
+            \"beta\" => 2,
+            else => 0
+        }
+    ";
+
+    let (expr, _) = evaluate_text_to_expression(program).unwrap_or_else(|err| {
+        panic!(
+            "Evaluation failed with error: {}",
+            err.render_with_source(program)
+        );
+    });
+
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 2),
+        other => panic!("Expected numeric literal, got {:?}", other),
+    }
+}
+
+#[test]
+fn match_supports_literal_patterns_inside_enum_payloads() {
+    let program = "
+        Option(i32)::Some(2) |> match {
+            Option(i32)::Some(1) => 10,
+            Option(i32)::Some(2) => 20,
+            else => 30
+        }
+    ";
+
+    let (expr, _) = evaluate_text_to_expression(program).unwrap_or_else(|err| {
+        panic!(
+            "Evaluation failed with error: {}",
+            err.render_with_source(program)
+        );
+    });
+
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 20),
+        other => panic!("Expected numeric literal, got {:?}", other),
+    }
+}

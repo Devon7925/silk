@@ -68,3 +68,24 @@ fn while_condition_must_be_boolean() {
         Ok(_) => panic!("non-boolean while condition should fail"),
     }
 }
+
+#[test]
+fn while_supports_literal_pattern_conditions() {
+    let program = "
+        mut value := 3;
+        mut trips := 0;
+        while 3 := value do (
+            trips = trips + 1;
+            value = 4;
+        );
+        trips
+    ";
+
+    let (expr, _) =
+        evaluate_text_to_expression(program).unwrap_or_else(|err| panic!("{}", err.message));
+
+    match expr.kind {
+        ExpressionKind::Literal(ExpressionLiteral::Number(value)) => assert_eq!(value, 1),
+        other => panic!("Expected numeric literal, got {:?}", other),
+    }
+}
