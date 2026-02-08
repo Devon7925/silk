@@ -244,6 +244,14 @@ Deno.test("wasm interpreter: evaluates if expressions", () => {
   assertEquals(interpreterExports.get_value_number(resultIdx), 2);
 });
 
+Deno.test("wasm interpreter: rejects if branches with mismatched scalar types", () => {
+  parseAndExpectError("if true then 1 else true");
+});
+
+Deno.test("wasm interpreter: rejects if branches with mismatched unit and scalar types", () => {
+  parseAndExpectError("if true then (1;) else (2)");
+});
+
 Deno.test("wasm interpreter: returns string literals", () => {
   const resultIdx = parseAndInterpret("\"hi\"");
   assertEquals(interpreterExports.get_value_tag(resultIdx), VALUE_STRING);

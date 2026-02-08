@@ -1811,6 +1811,74 @@ value_is_type := (value_idx: i32) => (
     )
 );
 
+expression_branch_tag: (i32 -> i32) := (expr_idx: i32) => (
+    if expr_idx == -1 then (
+        -1
+    ) else (
+        nodes(expr_idx).kind |> match {
+            NodeKind::Literal(lit) => (
+                lit |> match {
+                    ExpressionLiteral::Number(_) => 0,
+                    ExpressionLiteral::Boolean(_) => 1,
+                    ExpressionLiteral::Char(_) => 2,
+                    ExpressionLiteral::String(_) => 3,
+                    ExpressionLiteral::Target(_) => 12,
+                    ExpressionLiteral::BindingAnnotation(_) => 13
+                }
+            ),
+            NodeKind::Struct(info) => (
+                if is_empty_struct(info.fields) == 1 then 4 else 6
+            ),
+            NodeKind::Diverge(_) => -2,
+            NodeKind::Block(list) => (
+                if list.count <= 0 || list.head == -1 then (
+                    4
+                ) else (
+                    mut current := list.head;
+                    while list_nodes(current).next != -1 do (
+                        current = list_nodes(current).next;
+                        {}
+                    );
+                    last_idx := list_nodes(current).value;
+                    nodes(last_idx).kind |> match {
+                        NodeKind::Literal(last_lit) => (
+                            last_lit |> match {
+                                ExpressionLiteral::Number(_) => 0,
+                                ExpressionLiteral::Boolean(_) => 1,
+                                ExpressionLiteral::Char(_) => 2,
+                                ExpressionLiteral::String(_) => 3,
+                                ExpressionLiteral::Target(_) => 12,
+                                ExpressionLiteral::BindingAnnotation(_) => 13
+                            }
+                        ),
+                        NodeKind::Struct(last_struct) => (
+                            if is_empty_struct(last_struct.fields) == 1 then 4 else 6
+                        ),
+                        NodeKind::Diverge(_) => -2,
+                        else => -1
+                    }
+                )
+            ),
+            else => -1
+        }
+    )
+);
+
+check_if_branch_type_compat := {then_expr_idx: i32, else_expr_idx: i32, span_start: i32} => (
+    then_tag := expression_branch_tag(then_expr_idx);
+    else_tag := expression_branch_tag(else_expr_idx);
+    if then_tag == -2 || else_tag == -2 then (
+        1
+    ) else if then_tag == -1 || else_tag == -1 then (
+        1
+    ) else if then_tag == else_tag then (
+        1
+    ) else (
+        set_error(span_start);
+        0
+    )
+);
+
 mark_intrinsic_string_value_as_type := (value_idx: i32) => (
     if value_idx == -1 then (
         -1
@@ -4296,7 +4364,13 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 ) else (
                     cond_value := values(cond_idx);
                     if Value::Boolean(flag) := cond_value then (
-                        if flag == 1 then (
+                        if check_if_branch_type_compat{
+                            info.then_branch,
+                            info.else_branch,
+                            span_start
+                        } == 0 then (
+                            -1
+                        ) else if flag == 1 then (
                             eval_expression(info.then_branch)
                         ) else (
                             eval_expression(info.else_branch)

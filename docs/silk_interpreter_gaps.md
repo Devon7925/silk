@@ -8,6 +8,7 @@ This document tracks known feature gaps between the Rust interpreter (`src/inter
 - Diagnostics. The Rust interpreter reports structured `Diagnostic` messages with spans; the Silk interpreter only tracks a numeric error position in `value_state.error`.
 
 **Recently Closed**
+- `if` branch compatibility checks now reject obvious mismatches in the Silk interpreter (for example, `if true then 1 else true` and `if true then (1;) else (2)`), matching Rust interpreter behavior for these branch-type errors.
 - `use "path"` imports are now supported via a file registry (`register_file`) and cached per interpreter run; path normalization and file resolution are still handled by the host.
 - `for` loops now execute iterator implementations correctly, including preserving concrete iterator types across calls.
 - Range operators (`start..end`) now iterate correctly through the builtin range `next` helper.

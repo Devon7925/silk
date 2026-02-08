@@ -74,3 +74,19 @@ fn enum_builtin_rejects_value_payloads() {
         "enum variants should reject non-type payload expressions",
     );
 }
+
+#[test]
+fn if_requires_branch_type_compatibility_for_scalars() {
+    assert!(
+        evaluate_text_to_expression("if true then 1 else true").is_err(),
+        "if branches with mismatched scalar types should be rejected",
+    );
+}
+
+#[test]
+fn if_requires_branch_type_compatibility_for_unit_and_scalar() {
+    assert!(
+        evaluate_text_to_expression("if true then (1;) else (2)").is_err(),
+        "if branches with unit/scalar mismatch should be rejected",
+    );
+}
