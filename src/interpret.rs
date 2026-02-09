@@ -9126,34 +9126,102 @@ pub fn evaluate_text_to_raw_expression(program: &str) -> Result<(Expression, Con
     interpret_program(expression, &mut context)
 }
 
+fn collapse_final_value(mut value: Expression) -> Expression {
+    while let ExpressionKind::Block(exprs) = value.kind {
+        value = exprs.last().cloned().unwrap();
+    }
+    value
+}
+
+fn wasm_interpreter_strict_mode() -> bool {
+    std::env::var_os("SILK_WASM_INTERPRETER_STRICT").is_some()
+}
+
+fn wasm_interpreter_only_mode() -> bool {
+    std::env::var_os("SILK_INTERPRETER_ONLY").is_some()
+}
+
 pub fn evaluate_text_to_expression(program: &str) -> Result<(Expression, Context), Diagnostic> {
+    if wasm_interpreter_only_mode() {
+        let value = crate::silk_interpreter::evaluate_text(program)?.ok_or_else(|| {
+            Diagnostic::new(
+                "SILK_INTERPRETER_ONLY is set, but the silk interpreter result could not be represented",
+            )
+        })?;
+        let context = intrinsic_context();
+        return Ok((collapse_final_value(value), context));
+    }
+
     let expression = loader::parse_source_block(program)?;
-    let mut context = intrinsic_context();
-    let (mut value, context) = interpret_program(expression, &mut context)?;
+    let mut metadata_context = intrinsic_context();
+    let context = interpret_program_for_context(expression.clone(), &mut metadata_context)?;
+
+    let wasm_value = match crate::silk_interpreter::evaluate_text(program) {
+        Ok(value) => value,
+        Err(err) => {
+            if wasm_interpreter_strict_mode() {
+                return Err(err);
+            }
+            None
+        }
+    };
+
+    let value = if let Some(value) = wasm_value {
+        value
+    } else {
+        let mut fallback_context = intrinsic_context();
+        let (fallback_value, _) = interpret_program(expression, &mut fallback_context)?;
+        fallback_value
+    };
 
     if std::env::var("SILK_DEBUG_EVAL_PRINT").is_ok() {
         println!("{}", value.pretty_print());
     }
 
-    while let ExpressionKind::Block(exprs) = value.kind {
-        value = exprs.last().cloned().unwrap();
-    }
-
-    Ok((value, context))
+    Ok((collapse_final_value(value), context))
 }
 
 pub fn evaluate_files_to_expression(
     files: Vec<(&str, &str)>,
     root: &str,
 ) -> Result<(Expression, Context), Diagnostic> {
+    if wasm_interpreter_only_mode() {
+        let value = crate::silk_interpreter::evaluate_files(files, root)?.ok_or_else(|| {
+            Diagnostic::new(
+                "SILK_INTERPRETER_ONLY is set, but the silk interpreter result could not be represented",
+            )
+        })?;
+        let context = intrinsic_context();
+        return Ok((collapse_final_value(value), context));
+    }
+
+    let wasm_files = files.clone();
     let file_map = loader::build_parsed_files(files)?;
     let root = loader::normalize_path(root);
     let expression = file_map
         .get(&root)
         .ok_or_else(|| Diagnostic::new(format!("Missing root source for {root}")))?
         .clone();
-    let mut context = intrinsic_context_with_files(file_map);
-    interpret_program(expression, &mut context)
+    let mut metadata_context = intrinsic_context_with_files(file_map.clone());
+    let context = interpret_program_for_context(expression.clone(), &mut metadata_context)?;
+
+    let wasm_value = match crate::silk_interpreter::evaluate_files(wasm_files, &root) {
+        Ok(value) => value,
+        Err(err) => {
+            if wasm_interpreter_strict_mode() {
+                return Err(err);
+            }
+            None
+        }
+    };
+
+    if let Some(value) = wasm_value {
+        Ok((value, context))
+    } else {
+        let mut fallback_context = intrinsic_context_with_files(file_map);
+        let (value, _) = interpret_program(expression, &mut fallback_context)?;
+        Ok((value, context))
+    }
 }
 
 #[cfg(test)]
