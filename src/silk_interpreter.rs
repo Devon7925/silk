@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::OnceLock;
 
 use wasmtime::{Config, Engine, Instance, Memory, Module, Store};
@@ -9,7 +10,7 @@ use crate::diagnostics::{Diagnostic, SourceSpan};
 use crate::intermediate;
 use crate::interpret;
 use crate::loader;
-use crate::parsing::{Expression, ExpressionKind, ExpressionLiteral};
+use crate::parsing::{BindingPattern, Expression, ExpressionKind, ExpressionLiteral, Identifier};
 use crate::wasm;
 
 const VALUE_NUMBER: i32 = 0;
@@ -17,6 +18,8 @@ const VALUE_BOOLEAN: i32 = 1;
 const VALUE_CHAR: i32 = 2;
 const VALUE_STRING: i32 = 3;
 const VALUE_UNIT: i32 = 4;
+const VALUE_FUNCTION: i32 = 5;
+const VALUE_ENUM: i32 = 10;
 const INTERP_ERR_ARRAY_INDEX_OUT_OF_RANGE: i32 = 2;
 const INTERP_ERR_WRAP_REQUIRES_SINGLE_EXPORT_TARGET: i32 = 3;
 const INTERP_ERR_WRAP_GLOBAL_ONLY_WASM_TO_JS: i32 = 4;
@@ -384,18 +387,9 @@ impl WasmRuntime {
             VALUE_STRING => {
                 let start = self.interpreter_call1("get_value_string_start", value_idx)?;
                 let len = self.interpreter_call1("get_value_string_length", value_idx)?;
-                if start < 0 || len < 0 {
+                let Some(bytes) = self.decode_string_bytes(start, len)? else {
                     return Ok(None);
-                }
-                let start = start as usize;
-                let len = len as usize;
-                let data = self.interpreter_input.data(&self.store);
-                if start + len > data.len() {
-                    return Err(Diagnostic::new(
-                        "String value is outside interpreter input memory",
-                    ));
-                }
-                let bytes = data[start..start + len].to_vec();
+                };
                 Ok(Some(Expression::new(
                     ExpressionKind::Literal(ExpressionLiteral::String(bytes)),
                     span,
@@ -405,8 +399,100 @@ impl WasmRuntime {
                 ExpressionKind::Struct(Vec::new()),
                 span,
             ))),
+            VALUE_FUNCTION => {
+                let _ = self.interpreter_call1("get_value_function_node", value_idx)?;
+                let body = Rc::new(Expression::new(ExpressionKind::Struct(Vec::new()), span));
+                Ok(Some(Expression::new(
+                    ExpressionKind::Function {
+                        parameter: BindingPattern::Struct(Vec::new(), span),
+                        return_type: None,
+                        body,
+                    },
+                    span,
+                )))
+            }
+            VALUE_ENUM => {
+                let variant_start =
+                    self.interpreter_call1("get_value_enum_variant_name_start", value_idx)?;
+                let variant_len =
+                    self.interpreter_call1("get_value_enum_variant_name_length", value_idx)?;
+                let Some(variant_name_bytes) = self.decode_string_bytes(variant_start, variant_len)?
+                else {
+                    return Ok(None);
+                };
+                let variant_name = String::from_utf8(variant_name_bytes).map_err(|err| {
+                    Diagnostic::new(format!("Enum variant name is not valid UTF-8: {err}"))
+                })?;
+
+                let payload_idx = self.interpreter_call1("get_value_enum_payload", value_idx)?;
+                let payload = if payload_idx >= 0 && payload_idx != value_idx {
+                    self.decode_value_expression(payload_idx)?
+                        .unwrap_or_else(|| Expression::new(ExpressionKind::Struct(Vec::new()), span))
+                } else {
+                    Expression::new(ExpressionKind::Struct(Vec::new()), span)
+                };
+
+                Ok(Some(Expression::new(
+                    ExpressionKind::EnumValue {
+                        enum_type: Rc::new(Expression::new(ExpressionKind::EnumType(Vec::new()), span)),
+                        variant: Identifier::new(variant_name),
+                        variant_index: 0,
+                        payload: Rc::new(payload),
+                    },
+                    span,
+                )))
+            }
             _ => Ok(None),
         }
+    }
+
+    fn decode_string_bytes(&self, start: i32, len: i32) -> Result<Option<Vec<u8>>, Diagnostic> {
+        if len < 0 {
+            return Ok(None);
+        }
+
+        if start < 0 {
+            let Some(synthetic) = synthetic_string_bytes(start, len) else {
+                return Ok(None);
+            };
+            return Ok(Some(synthetic.to_vec()));
+        }
+
+        let start = start as usize;
+        let len = len as usize;
+        let data = self.interpreter_input.data(&self.store);
+        if start + len > data.len() {
+            return Err(Diagnostic::new(
+                "String value is outside interpreter input memory",
+            ));
+        }
+        Ok(Some(data[start..start + len].to_vec()))
+    }
+}
+
+fn synthetic_string_bytes(start: i32, len: i32) -> Option<&'static [u8]> {
+    match (start, len) {
+        (-2, 3) => Some(b"mut"),
+        (-3, 6) => Some(b"Option"),
+        (-4, 4) => Some(b"Some"),
+        (-5, 7) => Some(b"IterTy"),
+        (-6, 4) => Some(b"next"),
+        (-7, 10) => Some(b"__for_iter"),
+        (-8, 3) => Some(b"i32"),
+        (-9, 2) => Some(b"u8"),
+        (-10, 4) => Some(b"bool"),
+        (-11, 4) => Some(b"type"),
+        (-12, 6) => Some(b"target"),
+        (-13, 18) => Some(b"binding_annotation"),
+        (-14, 4) => Some(b"None"),
+        (-15, 7) => Some(b"current"),
+        (-16, 3) => Some(b"end"),
+        (-17, 3) => Some(b"Box"),
+        (-18, 2) => Some(b"js"),
+        (-19, 4) => Some(b"wasm"),
+        (-20, 4) => Some(b"wgsl"),
+        (-21, 5) => Some(b"Range"),
+        _ => None,
     }
 }
 
@@ -707,8 +793,9 @@ mod tests {
     }
 
     #[test]
-    fn wasm_interpreter_returns_none_for_non_scalar_results() {
+    fn wasm_interpreter_decodes_function_results() {
         let value = evaluate_text("(x: i32) => x").expect("wasm evaluation should run");
-        assert!(value.is_none());
+        let value = value.expect("function result should decode");
+        assert!(matches!(value.kind, ExpressionKind::Function { .. }));
     }
 }

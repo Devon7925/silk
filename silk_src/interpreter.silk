@@ -5635,6 +5635,30 @@ value_tag := (value: Value) => (
     if Value::String(value) := values(idx) then value.length else 0
 );
 
+(export wasm) get_value_function_node := (idx: i32) => (
+    if Value::Function(value) := values(idx) then value.node else -1
+);
+
+(export wasm) get_value_enum_variant_name_start := (idx: i32) => (
+    if Value::Enum(value) := values(idx) then (
+        if Value::String(name) := values(value.variant_idx) then name.start else -1
+    ) else (
+        -1
+    )
+);
+
+(export wasm) get_value_enum_variant_name_length := (idx: i32) => (
+    if Value::Enum(value) := values(idx) then (
+        if Value::String(name) := values(value.variant_idx) then name.length else 0
+    ) else (
+        0
+    )
+);
+
+(export wasm) get_value_enum_payload := (idx: i32) => (
+    if Value::Enum(value) := values(idx) then value.payload else -1
+);
+
 (export wasm) get_binding_count := {} => (
     binding_state.count
 );
