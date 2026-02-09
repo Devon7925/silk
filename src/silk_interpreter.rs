@@ -17,6 +17,7 @@ const VALUE_BOOLEAN: i32 = 1;
 const VALUE_CHAR: i32 = 2;
 const VALUE_STRING: i32 = 3;
 const VALUE_UNIT: i32 = 4;
+const INTERP_ERR_ARRAY_INDEX_OUT_OF_RANGE: i32 = 2;
 
 const INTERPRETER_MODULE_CACHE_PATH: &str = "target/wasm_cache/interpreter.wasmtime";
 const INTERPRETER_MODULE_HASH_PATH: &str = "target/wasm_cache/interpreter.wasmtime.hash";
@@ -47,7 +48,8 @@ pub fn evaluate_text(program: &str) -> Result<Option<Expression>, Diagnostic> {
     let result_idx = runtime.interpreter_call1("interpret", root)?;
     let interp_error_pos = runtime.interpreter_call0("get_interp_error")?;
     if interp_error_pos != -1 {
-        return Err(interpreter_error(program, interp_error_pos));
+        let interp_error_code = runtime.interpreter_call0("get_interp_error_code")?;
+        return Err(interpreter_error(program, interp_error_pos, interp_error_code));
     }
 
     runtime.decode_value_expression(result_idx)
@@ -130,9 +132,14 @@ pub fn evaluate_files(
     let result_idx = runtime.interpreter_call1("interpret", root_idx)?;
     let interp_error_pos = runtime.interpreter_call0("get_interp_error")?;
     if interp_error_pos != -1 {
+        let interp_error_code = runtime.interpreter_call0("get_interp_error_code")?;
         let root_len = root_source.len() as i32;
         if interp_error_pos >= 0 && interp_error_pos <= root_len {
-            return Err(interpreter_error(&root_source, interp_error_pos));
+            return Err(interpreter_error(
+                &root_source,
+                interp_error_pos,
+                interp_error_code,
+            ));
         }
         return Err(Diagnostic::new("Silk wasm interpreter reported an error"));
     }
@@ -619,10 +626,14 @@ fn parse_error(source: &str, pos: i32) -> Diagnostic {
     Diagnostic::new("Parse error").with_span(span)
 }
 
-fn interpreter_error(source: &str, pos: i32) -> Diagnostic {
+fn interpreter_error(source: &str, pos: i32, code: i32) -> Diagnostic {
     let start = if pos < 0 { 0 } else { pos as usize };
     let span = SourceSpan::new(start.min(source.len()), 1);
-    Diagnostic::new("Interpreter error").with_span(span)
+    let message = match code {
+        INTERP_ERR_ARRAY_INDEX_OUT_OF_RANGE => "Array index out of range",
+        _ => "Interpreter error",
+    };
+    Diagnostic::new(message).with_span(span)
 }
 
 fn to_i32(value: usize, err: &str) -> Result<i32, Diagnostic> {
