@@ -1825,14 +1825,98 @@ type_values_equal := {left_idx: i32, right_idx: i32} => (
                 left |> match {
                     Value::String(lstr) => (
                         if Value::String(rstr) := right then (
-                            string_ref_equals_raw{lstr.start, lstr.length, rstr.start, rstr.length}
+                            if string_ref_equals_raw{lstr.start, lstr.length, rstr.start, rstr.length} == 1 then (
+                                1
+                            ) else (
+                                left_is_i32 := string_ref_equals_raw{
+                                    lstr.start,
+                                    lstr.length,
+                                    SYNTHETIC_I32_STRING.start,
+                                    SYNTHETIC_I32_STRING.length
+                                };
+                                left_is_u8 := string_ref_equals_raw{
+                                    lstr.start,
+                                    lstr.length,
+                                    SYNTHETIC_U8_STRING.start,
+                                    SYNTHETIC_U8_STRING.length
+                                };
+                                right_is_i32 := string_ref_equals_raw{
+                                    rstr.start,
+                                    rstr.length,
+                                    SYNTHETIC_I32_STRING.start,
+                                    SYNTHETIC_I32_STRING.length
+                                };
+                                right_is_u8 := string_ref_equals_raw{
+                                    rstr.start,
+                                    rstr.length,
+                                    SYNTHETIC_U8_STRING.start,
+                                    SYNTHETIC_U8_STRING.length
+                                };
+                                if (left_is_i32 == 1 && right_is_u8 == 1)
+                                    || (left_is_u8 == 1 && right_is_i32 == 1) then (
+                                    1
+                                ) else (
+                                    0
+                                )
+                            )
                         ) else 0
                     ),
                     Value::Record(lrec) => (
                         if Value::Record(rrec) := right then (
-                            if lrec.has_named == 0 && rrec.has_named == 0 && lrec.count == 1 && rrec.count == 1 then (
-                                type_values_equal{lrec.head + 1, rrec.head + 1}
-                            ) else 0
+                            if lrec.count != rrec.count then (
+                                0
+                            ) else if lrec.has_named == 1 && rrec.has_named == 1 then (
+                                mut idx := 0;
+                                mut ok := 1;
+                                while idx < lrec.count && ok == 1 do (
+                                    left_name_idx := lrec.head + idx * 2;
+                                    left_value_idx := left_name_idx + 1;
+                                    if Value::String(left_name) := values(left_name_idx) then (
+                                        right_value_idx := record_find_field_index_no_error{
+                                            rrec.head,
+                                            rrec.count,
+                                            rrec.has_named,
+                                            left_name.start,
+                                            left_name.length
+                                        };
+                                        if right_value_idx == -1 then (
+                                            ok = 0;
+                                        ) else if type_values_equal{left_value_idx, right_value_idx} == 0 then (
+                                            ok = 0;
+                                        ) else (
+                                            idx = idx + 1;
+                                        )
+                                    ) else (
+                                        ok = 0;
+                                    );
+                                    {}
+                                );
+                                ok
+                            ) else (
+                                mut idx := 0;
+                                mut ok := 1;
+                                while idx < lrec.count && ok == 1 do (
+                                    left_name_idx := lrec.head + idx * 2;
+                                    right_name_idx := rrec.head + idx * 2;
+                                    left_value_idx := left_name_idx + 1;
+                                    right_value_idx := right_name_idx + 1;
+                                    if Value::String(_) := values(left_name_idx) then (
+                                        if Value::String(_) := values(right_name_idx) then (
+                                            if type_values_equal{left_value_idx, right_value_idx} == 0 then (
+                                                ok = 0;
+                                            ) else (
+                                                idx = idx + 1;
+                                            )
+                                        ) else (
+                                            ok = 0;
+                                        )
+                                    ) else (
+                                        ok = 0;
+                                    );
+                                    {}
+                                );
+                                ok
+                            )
                         ) else 0
                     ),
                     Value::EnumType(lenum) => (
