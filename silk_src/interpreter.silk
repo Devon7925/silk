@@ -92,7 +92,7 @@ Value := enum {
     Char = i32,
     String = StringRef,
     Unit = {},
-    Function = i32,
+    Function = { node = i32, closure_head = i32, closure_count = i32 },
     Record = { head = i32, count = i32, has_named = i32 },
     Builtin = i32,
     EnumType = { head = i32, count = i32 },
@@ -765,6 +765,146 @@ add_binding := {start: i32, length: i32, value: i32, is_mut: i32} => (
         binding_wrap_mask(idx) = 0;
         binding_state.count = idx + 1;
         idx
+    )
+);
+
+add_binding_with_metadata := {
+    start: i32,
+    length: i32,
+    value_idx: i32,
+    is_mut: i32,
+    type_value_idx: i32,
+    target_mask: i32,
+    export_mask: i32,
+    wrap_mask: i32
+} => (
+    bind_idx := add_binding{start, length, value_idx, is_mut};
+    if bind_idx == -1 then (
+        -1
+    ) else (
+        binding_type_values(bind_idx) = type_value_idx;
+        binding_target_mask(bind_idx) = target_mask;
+        binding_export_mask(bind_idx) = export_mask;
+        binding_wrap_mask(bind_idx) = wrap_mask;
+        bind_idx
+    )
+);
+
+capture_closure_bindings := {} => (
+    head := value_state.count;
+    if binding_state.count <= intrinsic_state.binding_count then (
+        { head = head, count = 0 }
+    ) else (
+        idx := binding_state.count - 1;
+        name_idx := store_value(Value::String(make_string_ref{
+            binding_name_start(idx),
+            binding_name_length(idx)
+        }));
+        if name_idx == -1 then (
+            { head = -1, count = 0 }
+        ) else (
+            captured_value_idx := copy_value(binding_values(idx));
+            if captured_value_idx == -1 then (
+                { head = -1, count = 0 }
+            ) else (
+                is_mut_idx := store_value(Value::Number(binding_is_mut(idx)));
+                if is_mut_idx == -1 then (
+                    { head = -1, count = 0 }
+                ) else (
+                    type_idx := store_value(Value::Number(binding_type_values(idx)));
+                    if type_idx == -1 then (
+                        { head = -1, count = 0 }
+                    ) else (
+                        target_idx := store_value(Value::Number(binding_target_mask(idx)));
+                        if target_idx == -1 then (
+                            { head = -1, count = 0 }
+                        ) else (
+                            export_idx := store_value(Value::Number(binding_export_mask(idx)));
+                            if export_idx == -1 then (
+                                { head = -1, count = 0 }
+                            ) else (
+                                wrap_idx := store_value(Value::Number(binding_wrap_mask(idx)));
+                                if wrap_idx == -1 then (
+                                    { head = -1, count = 0 }
+                                ) else (
+                                    { head = head, count = 1 }
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    )
+);
+
+restore_closure_bindings := {head: i32, count: i32} => (
+    if count <= 0 then (
+        1
+    ) else if head < 0 then (
+        set_error(0);
+        0
+    ) else (
+        mut restored := 0;
+        mut ok := 1;
+        while restored < count && ok == 1 do (
+            base := head + restored * 7;
+            if base < 0 || base + 6 >= value_state.count then (
+                set_error(0);
+                ok = 0;
+            ) else (
+                if Value::String(name_ref) := values(base) then (
+                    restored_value_idx := copy_value(base + 1);
+                    if restored_value_idx == -1 then (
+                        ok = 0;
+                    ) else if Value::Number(restored_is_mut) := values(base + 2) then (
+                        if Value::Number(restored_type) := values(base + 3) then (
+                            if Value::Number(restored_target_mask) := values(base + 4) then (
+                                if Value::Number(restored_export_mask) := values(base + 5) then (
+                                    if Value::Number(restored_wrap_mask) := values(base + 6) then (
+                                        bind_idx := add_binding_with_metadata{
+                                            name_ref.start,
+                                            name_ref.length,
+                                            restored_value_idx,
+                                            restored_is_mut,
+                                            restored_type,
+                                            restored_target_mask,
+                                            restored_export_mask,
+                                            restored_wrap_mask
+                                        };
+                                        if bind_idx == -1 then (
+                                            ok = 0;
+                                        ) else (
+                                            restored = restored + 1;
+                                        )
+                                    ) else (
+                                        set_error(0);
+                                        ok = 0;
+                                    )
+                                ) else (
+                                    set_error(0);
+                                    ok = 0;
+                                )
+                            ) else (
+                                set_error(0);
+                                ok = 0;
+                            )
+                        ) else (
+                            set_error(0);
+                            ok = 0;
+                        )
+                    ) else (
+                        set_error(0);
+                        ok = 0;
+                    )
+                ) else (
+                    set_error(0);
+                    ok = 0;
+                )
+            );
+            {}
+        );
+        ok
     )
 );
 
@@ -2899,26 +3039,29 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                 -1
             )
         ),
-        Value::Function(fn_node) => (
-            if NodeKind::Function(fn_info) := nodes(fn_node).kind then (
+        Value::Function(fn_value) => (
+            if NodeKind::Function(fn_info) := nodes(fn_value.node).kind then (
                 runtime_state.function_depth = runtime_state.function_depth + 1;
                 enter_scope{};
-                bind_pattern_state.value_idx = arg_idx;
-                bind_pattern_state.inherit_mut = 0;
-                bind_pattern_state.inherit_target_mask = 0;
-                bind_pattern_state.inherit_export_mask = 0;
-                bind_pattern_state.inherit_wrap_mask = 0;
-                bind_ok := bind_pattern_simple(fn_info.parameter);
                 mut result_idx := -1;
-                if bind_ok == 0 then (
-                    set_error(span_start);
+                if restore_closure_bindings{fn_value.closure_head, fn_value.closure_count} == 0 then (
                     result_idx = -1;
                 ) else (
-                    result_idx = eval_expression(fn_info.body);
-                    if flow_state.kind == FLOW_RETURN then (
-                        result_idx = flow_state.value;
-                        flow_state.kind = FLOW_NONE;
-                        flow_state.value = -1;
+                    bind_pattern_state.value_idx = arg_idx;
+                    bind_pattern_state.inherit_mut = 0;
+                    bind_pattern_state.inherit_target_mask = 0;
+                    bind_pattern_state.inherit_export_mask = 0;
+                    bind_pattern_state.inherit_wrap_mask = 0;
+                    if bind_pattern_simple(fn_info.parameter) == 0 then (
+                        set_error(span_start);
+                        result_idx = -1;
+                    ) else (
+                        result_idx = eval_expression(fn_info.body);
+                        if flow_state.kind == FLOW_RETURN then (
+                            result_idx = flow_state.value;
+                            flow_state.kind = FLOW_NONE;
+                            flow_state.value = -1;
+                        );
                     );
                 );
                 exit_scope{};
@@ -2952,27 +3095,36 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
             mut branch_idx := 0;
             while branch_idx < match_info.count && matched == 0 do (
                 branch_value_idx := match_info.head + branch_idx * 2 + 1;
-                if Value::Function(branch_fn_node) := values(branch_value_idx) then (
-                    if NodeKind::Function(branch_fn) := nodes(branch_fn_node).kind then (
+                if Value::Function(branch_fn_value) := values(branch_value_idx) then (
+                    if NodeKind::Function(branch_fn) := nodes(branch_fn_value.node).kind then (
                         enter_scope{};
-                        bind_pattern_state.value_idx = arg_idx;
-                        bind_pattern_state.inherit_mut = 0;
-                        bind_pattern_state.inherit_target_mask = 0;
-                        bind_pattern_state.inherit_export_mask = 0;
-                        bind_pattern_state.inherit_wrap_mask = 0;
-                        if bind_pattern_simple(branch_fn.parameter) == 1 then (
+                        if restore_closure_bindings{
+                            branch_fn_value.closure_head,
+                            branch_fn_value.closure_count
+                        } == 0 then (
                             matched = 1;
-                            runtime_state.function_depth = runtime_state.function_depth + 1;
-                            result_idx = eval_expression(branch_fn.body);
-                            if flow_state.kind == FLOW_RETURN then (
-                                result_idx = flow_state.value;
-                                flow_state.kind = FLOW_NONE;
-                                flow_state.value = -1;
-                            );
-                            runtime_state.function_depth = runtime_state.function_depth - 1;
+                            result_idx = -1;
                             0
                         ) else (
-                            0
+                            bind_pattern_state.value_idx = arg_idx;
+                            bind_pattern_state.inherit_mut = 0;
+                            bind_pattern_state.inherit_target_mask = 0;
+                            bind_pattern_state.inherit_export_mask = 0;
+                            bind_pattern_state.inherit_wrap_mask = 0;
+                            if bind_pattern_simple(branch_fn.parameter) == 1 then (
+                                matched = 1;
+                                runtime_state.function_depth = runtime_state.function_depth + 1;
+                                result_idx = eval_expression(branch_fn.body);
+                                if flow_state.kind == FLOW_RETURN then (
+                                    result_idx = flow_state.value;
+                                    flow_state.kind = FLOW_NONE;
+                                    flow_state.value = -1;
+                                );
+                                runtime_state.function_depth = runtime_state.function_depth - 1;
+                                0
+                            ) else (
+                                0
+                            )
                         );
                         exit_scope{};
                     ) else (
@@ -3620,7 +3772,16 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 )
             ),
             NodeKind::Function(_) => (
-                store_value(Value::Function(idx))
+                closure_info := capture_closure_bindings{};
+                if value_state.error != -1 then (
+                    -1
+                ) else (
+                    store_value(Value::Function({
+                        node = idx,
+                        closure_head = closure_info.head,
+                        closure_count = closure_info.count
+                    }))
+                )
             ),
             NodeKind::BoxType(inner_idx) => (
                 inner_value_idx := eval_expression(inner_idx);
