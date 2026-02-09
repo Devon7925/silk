@@ -1695,6 +1695,55 @@ type_values_equal := {left_idx: i32, right_idx: i32} => (
                             ) else 0
                         ) else 0
                     ),
+                    Value::EnumType(lenum) => (
+                        if Value::EnumType(renum) := right then (
+                            if lenum.count != renum.count then (
+                                0
+                            ) else (
+                                mut idx := 0;
+                                mut ok := 1;
+                                while idx < lenum.count do (
+                                    left_name_idx := lenum.head + idx * 2;
+                                    right_name_idx := renum.head + idx * 2;
+                                    if Value::String(left_name) := values(left_name_idx) then (
+                                        if Value::String(right_name) := values(right_name_idx) then (
+                                            if string_ref_equals{left_name, right_name} == 0 then (
+                                                ok = 0;
+                                                idx = lenum.count;
+                                            ) else (
+                                                left_payload_idx := left_name_idx + 1;
+                                                right_payload_idx := right_name_idx + 1;
+                                                if Value::Unit := values(left_payload_idx) then (
+                                                    if Value::Unit := values(right_payload_idx) then (
+                                                        idx = idx + 1;
+                                                    ) else (
+                                                        ok = 0;
+                                                        idx = lenum.count;
+                                                    )
+                                                ) else if Value::Unit := values(right_payload_idx) then (
+                                                    ok = 0;
+                                                    idx = lenum.count;
+                                                ) else if type_values_equal{left_payload_idx, right_payload_idx} == 0 then (
+                                                    ok = 0;
+                                                    idx = lenum.count;
+                                                ) else (
+                                                    idx = idx + 1;
+                                                )
+                                            )
+                                        ) else (
+                                            ok = 0;
+                                            idx = lenum.count;
+                                        )
+                                    ) else (
+                                        ok = 0;
+                                        idx = lenum.count;
+                                    );
+                                    {}
+                                );
+                                ok
+                            )
+                        ) else 0
+                    ),
                     else => 0
                 }
             )
