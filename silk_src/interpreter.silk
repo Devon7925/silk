@@ -1860,6 +1860,23 @@ value_is_type := (value_idx: i32) => (
     )
 );
 
+block_contains_top_level_diverge := (list: ExpressionList) => (
+    mut current := list.head;
+    mut remaining := list.count;
+    mut has_diverge := 0;
+    while remaining > 0 && current != -1 && has_diverge == 0 do (
+        expr_idx := list_nodes(current).value;
+        if NodeKind::Diverge(_) := nodes(expr_idx).kind then (
+            has_diverge = 1;
+        ) else (
+            current = list_nodes(current).next;
+            remaining = remaining - 1;
+        );
+        {}
+    );
+    has_diverge
+);
+
 expression_branch_tag: (i32 -> i32) := (expr_idx: i32) => (
     if expr_idx == -1 then (
         -1
@@ -1882,6 +1899,8 @@ expression_branch_tag: (i32 -> i32) := (expr_idx: i32) => (
             NodeKind::Block(list) => (
                 if list.count <= 0 || list.head == -1 then (
                     4
+                ) else if block_contains_top_level_diverge(list) == 1 then (
+                    -2
                 ) else (
                     mut current := list.head;
                     while list_nodes(current).next != -1 do (
