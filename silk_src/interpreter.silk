@@ -139,6 +139,9 @@ FLOW_BREAK := 1;
 INTERP_ERR_NONE := 0;
 INTERP_ERR_GENERIC := 1;
 INTERP_ERR_ARRAY_INDEX_OUT_OF_RANGE := 2;
+INTERP_ERR_WRAP_REQUIRES_SINGLE_EXPORT_TARGET := 3;
+INTERP_ERR_WRAP_GLOBAL_ONLY_WASM_TO_JS := 4;
+INTERP_ERR_UNBOUND_IDENTIFIER := 5;
 
 BUILTIN_ENUM := 0;
 BUILTIN_MATCH := 1;
@@ -1714,7 +1717,7 @@ resolve_lvalue_expr_value_index := {expr_idx: i32, span_start: i32} => (
             NodeKind::Identifier(id) => (
                 bind_idx := find_binding_index(id.name);
                 if bind_idx == -1 then (
-                    set_error(span_start);
+                    set_error_with_code{span_start, INTERP_ERR_UNBOUND_IDENTIFIER};
                     -1
                 ) else (
                     binding_values(bind_idx)
@@ -2409,7 +2412,7 @@ validate_wrap_export_annotations := {value_idx: i32, export_mask: i32, wrap_mask
     if wrap_mask == 0 then (
         1
     ) else if target_mask_is_single_target(export_mask) == 0 then (
-        set_error(span_start);
+        set_error_with_code{span_start, INTERP_ERR_WRAP_REQUIRES_SINGLE_EXPORT_TARGET};
         0
     ) else (
         if Value::Function(_) := values(value_idx) then (
@@ -2418,7 +2421,7 @@ validate_wrap_export_annotations := {value_idx: i32, export_mask: i32, wrap_mask
             if export_mask == TARGET_MASK_WASM && wrap_mask == TARGET_MASK_JS then (
                 1
             ) else (
-                set_error(span_start);
+                set_error_with_code{span_start, INTERP_ERR_WRAP_GLOBAL_ONLY_WASM_TO_JS};
                 0
             )
         )
@@ -3862,7 +3865,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     if builtin != -1 then (
                         store_value(Value::Builtin(builtin))
                     ) else (
-                        set_error(span_start);
+                        set_error_with_code{span_start, INTERP_ERR_UNBOUND_IDENTIFIER};
                         -1
                     )
                 ) else (

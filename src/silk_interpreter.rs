@@ -18,6 +18,9 @@ const VALUE_CHAR: i32 = 2;
 const VALUE_STRING: i32 = 3;
 const VALUE_UNIT: i32 = 4;
 const INTERP_ERR_ARRAY_INDEX_OUT_OF_RANGE: i32 = 2;
+const INTERP_ERR_WRAP_REQUIRES_SINGLE_EXPORT_TARGET: i32 = 3;
+const INTERP_ERR_WRAP_GLOBAL_ONLY_WASM_TO_JS: i32 = 4;
+const INTERP_ERR_UNBOUND_IDENTIFIER: i32 = 5;
 
 const INTERPRETER_MODULE_CACHE_PATH: &str = "target/wasm_cache/interpreter.wasmtime";
 const INTERPRETER_MODULE_HASH_PATH: &str = "target/wasm_cache/interpreter.wasmtime.hash";
@@ -630,10 +633,35 @@ fn interpreter_error(source: &str, pos: i32, code: i32) -> Diagnostic {
     let start = if pos < 0 { 0 } else { pos as usize };
     let span = SourceSpan::new(start.min(source.len()), 1);
     let message = match code {
-        INTERP_ERR_ARRAY_INDEX_OUT_OF_RANGE => "Array index out of range",
-        _ => "Interpreter error",
+        INTERP_ERR_ARRAY_INDEX_OUT_OF_RANGE => "Array index out of range".to_string(),
+        INTERP_ERR_WRAP_REQUIRES_SINGLE_EXPORT_TARGET => {
+            "wrap annotation requires exactly one export target".to_string()
+        }
+        INTERP_ERR_WRAP_GLOBAL_ONLY_WASM_TO_JS => {
+            "wrap annotation only supports globals for wasm exports wrapped to js".to_string()
+        }
+        INTERP_ERR_UNBOUND_IDENTIFIER => {
+            let ident = extract_identifier(source, start);
+            if ident.is_empty() {
+                "Unbound identifier".to_string()
+            } else {
+                format!("Unbound identifier: {ident}")
+            }
+        }
+        _ => "Interpreter error".to_string(),
     };
     Diagnostic::new(message).with_span(span)
+}
+
+fn extract_identifier(source: &str, start: usize) -> String {
+    if start >= source.len() {
+        return String::new();
+    }
+
+    source[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect()
 }
 
 fn to_i32(value: usize, err: &str) -> Result<i32, Diagnostic> {
