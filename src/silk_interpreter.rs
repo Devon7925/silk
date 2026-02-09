@@ -21,6 +21,10 @@ const INTERP_ERR_ARRAY_INDEX_OUT_OF_RANGE: i32 = 2;
 const INTERP_ERR_WRAP_REQUIRES_SINGLE_EXPORT_TARGET: i32 = 3;
 const INTERP_ERR_WRAP_GLOBAL_ONLY_WASM_TO_JS: i32 = 4;
 const INTERP_ERR_UNBOUND_IDENTIFIER: i32 = 5;
+const INTERP_ERR_IF_BRANCH_TYPE_MISMATCH: i32 = 6;
+const INTERP_ERR_MATCH_NO_BRANCH: i32 = 7;
+const INTERP_ERR_MISSING_FIELD: i32 = 8;
+const INTERP_ERR_TRAIT_MISSING_FIELD: i32 = 9;
 
 const INTERPRETER_MODULE_CACHE_PATH: &str = "target/wasm_cache/interpreter.wasmtime";
 const INTERPRETER_MODULE_HASH_PATH: &str = "target/wasm_cache/interpreter.wasmtime.hash";
@@ -646,6 +650,24 @@ fn interpreter_error(source: &str, pos: i32, code: i32) -> Diagnostic {
                 "Unbound identifier".to_string()
             } else {
                 format!("Unbound identifier: {ident}")
+            }
+        }
+        INTERP_ERR_IF_BRANCH_TYPE_MISMATCH => "Type mismatch between if branches".to_string(),
+        INTERP_ERR_MATCH_NO_BRANCH => "No match branches matched".to_string(),
+        INTERP_ERR_MISSING_FIELD => {
+            let ident = extract_identifier(source, start);
+            if ident.is_empty() {
+                "Missing field".to_string()
+            } else {
+                format!("Missing field {ident}")
+            }
+        }
+        INTERP_ERR_TRAIT_MISSING_FIELD => {
+            let ident = extract_identifier(source, start);
+            if ident.is_empty() {
+                "Type does not implement trait: missing field".to_string()
+            } else {
+                format!("Type does not implement trait: missing field {ident}")
             }
         }
         _ => "Interpreter error".to_string(),

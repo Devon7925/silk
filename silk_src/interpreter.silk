@@ -142,6 +142,10 @@ INTERP_ERR_ARRAY_INDEX_OUT_OF_RANGE := 2;
 INTERP_ERR_WRAP_REQUIRES_SINGLE_EXPORT_TARGET := 3;
 INTERP_ERR_WRAP_GLOBAL_ONLY_WASM_TO_JS := 4;
 INTERP_ERR_UNBOUND_IDENTIFIER := 5;
+INTERP_ERR_IF_BRANCH_TYPE_MISMATCH := 6;
+INTERP_ERR_MATCH_NO_BRANCH := 7;
+INTERP_ERR_MISSING_FIELD := 8;
+INTERP_ERR_TRAIT_MISSING_FIELD := 9;
 
 BUILTIN_ENUM := 0;
 BUILTIN_MATCH := 1;
@@ -2068,7 +2072,7 @@ ensure_trait_requirements := {type_value_idx: i32, trait_expr_idx: i32, span_sta
                                 ) else 0
                             ) else 0;
                             if found_idx == -1 then (
-                                set_error(span_start);
+                                set_error_with_code{required_name.start, INTERP_ERR_TRAIT_MISSING_FIELD};
                                 ok = 0;
                             ) else (
                                 found_type_idx := value_type_values(found_idx);
@@ -2268,7 +2272,7 @@ check_if_branch_type_compat := {then_expr_idx: i32, else_expr_idx: i32, span_sta
     ) else if then_tag == else_tag then (
         1
     ) else (
-        set_error(span_start);
+        set_error_with_code{span_start, INTERP_ERR_IF_BRANCH_TYPE_MISMATCH};
         0
     )
 );
@@ -2859,6 +2863,8 @@ bind_struct_pattern := {fields_head: i32, value_idx: i32, inherit_mut: i32, inhe
                     };
                 );
                 if field_value_idx == -1 then (
+                    missing_span := if field_name.start >= 0 then field_name.start else nodes(field_node).span.start;
+                    set_error_with_code{missing_span, INTERP_ERR_MISSING_FIELD};
                     ok = 0;
                 ) else (
                     if bind_pattern_expr{field_binding.expr, field_value_idx, inherit_mut, inherit_target_mask, inherit_export_mask, inherit_wrap_mask} == 0 then (
@@ -3300,6 +3306,24 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                 -1
             )
         ),
+        Value::Record(rec_info) => (
+            if Value::Number(index_value) := values(arg_idx) then (
+                field_idx := record_value_index_by_position{
+                    rec_info.head,
+                    rec_info.count,
+                    index_value,
+                    span_start
+                };
+                if field_idx == -1 then (
+                    -1
+                ) else (
+                    field_idx
+                )
+            ) else (
+                set_error(span_start);
+                -1
+            )
+        ),
         Value::Function(fn_value) => (
             if NodeKind::Function(fn_info) := nodes(fn_value.node).kind then (
                 runtime_state.function_depth = runtime_state.function_depth + 1;
@@ -3407,7 +3431,7 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                 {}
             );
             if matched == 0 then (
-                set_error(span_start);
+                set_error_with_code{span_start, INTERP_ERR_MATCH_NO_BRANCH};
                 -1
             ) else (
                 result_idx
@@ -5099,7 +5123,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         {}
                     );
                     if matched == 0 then (
-                        set_error(span_start);
+                        set_error_with_code{span_start, INTERP_ERR_MATCH_NO_BRANCH};
                         -1
                     ) else (
                         result_idx
