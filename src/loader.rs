@@ -1,9 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{
-    diagnostics::Diagnostic,
-    parsing::Expression,
-};
+use crate::{diagnostics::Diagnostic, parsing::Expression};
 
 pub(crate) fn normalize_path(path: &str) -> String {
     let mut normalized = path.replace('\\', "/");

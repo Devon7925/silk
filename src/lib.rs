@@ -70,7 +70,8 @@ pub fn compile(
     parsed_files.insert(root.clone(), ast.clone());
 
     let interpret_start = Instant::now();
-    let mut context = interpret::intrinsic_context_with_files_and_sources(parsed_files, file_sources);
+    let mut context =
+        interpret::intrinsic_context_with_files_and_sources(parsed_files, file_sources);
     let program_context = interpret::interpret_program_for_context(ast, &mut context)?;
     if timings_enabled {
         eprintln!(

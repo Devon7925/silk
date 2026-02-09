@@ -217,10 +217,10 @@ fn compile_silk_parser_wasm() -> Result<Vec<u8>, Diagnostic> {
             .max(1);
         let start = types_source.len().saturating_sub(types_leftover.len());
         let span = SourceSpan::new(start, token_len);
-        return Err(
-            Diagnostic::new("Unexpected trailing input while compiling the parser types source")
-                .with_span(span),
-        );
+        return Err(Diagnostic::new(
+            "Unexpected trailing input while compiling the parser types source",
+        )
+        .with_span(span));
     }
     let mut file_map = HashMap::new();
     let normalized = loader::normalize_path(path);
@@ -282,8 +282,9 @@ impl WasmParser {
         let engine = wasm_engine()?;
         let module = wasm_module()?;
         let mut store = Store::new(engine, ());
-        let instance = Instance::new(&mut store, module, &[])
-            .map_err(|err| Diagnostic::new(format!("Failed to instantiate silk parser wasm: {err}")))?;
+        let instance = Instance::new(&mut store, module, &[]).map_err(|err| {
+            Diagnostic::new(format!("Failed to instantiate silk parser wasm: {err}"))
+        })?;
         let input = instance
             .get_memory(&mut store, "input")
             .ok_or_else(|| Diagnostic::new("Missing input memory export"))?;
@@ -367,9 +368,7 @@ impl WasmParser {
 
     fn parse_block(&mut self, source: &str) -> Result<Expression, Diagnostic> {
         self.write_input(source)?;
-        let root = self
-            .parse_root()
-            .map_err(|pos| parse_error(source, pos))?;
+        let root = self.parse_root().map_err(|pos| parse_error(source, pos))?;
         Ok(self.expression_from_node(root))
     }
 
@@ -425,8 +424,7 @@ impl WasmParser {
                         LValue::Identifier(Identifier::new(name), target_span)
                     }
                     1 => {
-                        let object_idx =
-                            self.call1("get_assignment_target_property_object", idx);
+                        let object_idx = self.call1("get_assignment_target_property_object", idx);
                         let prop_start = self.call1("get_assignment_target_property_start", idx);
                         let prop_len = self.call1("get_assignment_target_property_length", idx);
                         let object = self.lvalue_from_expression_node(object_idx);
@@ -459,10 +457,7 @@ impl WasmParser {
                 let argument_idx = self.call1("get_function_call_argument", idx);
                 let function = Rc::new(self.expression_from_node(function_idx));
                 let argument = Rc::new(self.expression_from_node(argument_idx));
-                Expression::new(
-                    ExpressionKind::FunctionCall { function, argument },
-                    span,
-                )
+                Expression::new(ExpressionKind::FunctionCall { function, argument }, span)
             }
             KIND_TYPE_PROPERTY => {
                 let object_idx = self.call1("get_type_property_access_object", idx);
@@ -479,7 +474,10 @@ impl WasmParser {
                 let pattern = self.binding_pattern_from_binding_node(idx);
                 let expr_idx = self.call1("get_binding_expr", idx);
                 let expr = self.expression_from_node(expr_idx);
-                Expression::new(ExpressionKind::Binding(Rc::new(Binding { pattern, expr })), span)
+                Expression::new(
+                    ExpressionKind::Binding(Rc::new(Binding { pattern, expr })),
+                    span,
+                )
             }
             KIND_BLOCK => {
                 let count = self.call1("get_block_count", idx);
@@ -627,18 +625,13 @@ impl WasmParser {
         Expression::new(ExpressionKind::Literal(literal), span)
     }
 
-    fn expression_literal_from_node(
-        &mut self,
-        idx: i32,
-    ) -> crate::parsing::ExpressionLiteral {
+    fn expression_literal_from_node(&mut self, idx: i32) -> crate::parsing::ExpressionLiteral {
         match self.call1("get_literal_tag", idx) {
             0 => crate::parsing::ExpressionLiteral::Number(self.call1("get_literal_number", idx)),
             1 => crate::parsing::ExpressionLiteral::Boolean(
                 self.call1("get_literal_boolean", idx) != 0,
             ),
-            2 => crate::parsing::ExpressionLiteral::Char(
-                self.call1("get_literal_char", idx) as u8,
-            ),
+            2 => crate::parsing::ExpressionLiteral::Char(self.call1("get_literal_char", idx) as u8),
             3 => {
                 let start = self.call1("get_literal_string_start", idx);
                 let length = self.call1("get_literal_string_length", idx);
@@ -828,10 +821,7 @@ impl WasmParser {
         }
     }
 
-    fn binding_pattern_literal_from_node(
-        &mut self,
-        idx: i32,
-    ) -> crate::parsing::ExpressionLiteral {
+    fn binding_pattern_literal_from_node(&mut self, idx: i32) -> crate::parsing::ExpressionLiteral {
         match self.call1("get_binding_pattern_literal_tag", idx) {
             0 => crate::parsing::ExpressionLiteral::Number(
                 self.call1("get_binding_pattern_literal_number", idx),
@@ -941,8 +931,10 @@ impl WasmParser {
                 crate::parsing::ExpressionLiteral::Target(target)
             }
             5 => {
-                let binding_tag =
-                    self.call1("get_function_param_pattern_literal_binding_annotation_tag", idx);
+                let binding_tag = self.call1(
+                    "get_function_param_pattern_literal_binding_annotation_tag",
+                    idx,
+                );
                 let annotation = match binding_tag {
                     0 => crate::parsing::BindingAnnotationLiteral::Mut,
                     1 => {
@@ -1046,7 +1038,8 @@ impl WasmParser {
                 if self.call1("get_kind_tag", function_idx) == KIND_TYPE_PROPERTY {
                     let object_idx = self.call1("get_type_property_access_object", function_idx);
                     let start = self.call1("get_type_property_access_property_start", function_idx);
-                    let length = self.call1("get_type_property_access_property_length", function_idx);
+                    let length =
+                        self.call1("get_type_property_access_property_length", function_idx);
                     let enum_type = self.expression_from_node(object_idx);
                     let variant = Identifier::new(self.span_string(start, length));
                     let payload_idx = self.call1("get_function_call_argument", idx);

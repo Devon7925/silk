@@ -131,9 +131,7 @@ fn collect_identifiers_from_expression(expr: &Expression, out: &mut HashSet<Iden
                 stack.push(payload_type.as_ref());
                 stack.push(enum_type.as_ref());
             }
-            ExpressionKind::FunctionType {
-                ..
-            } => {}
+            ExpressionKind::FunctionType { .. } => {}
             ExpressionKind::Function { .. } => {}
             ExpressionKind::AttachImplementation {
                 type_expr,

@@ -48,10 +48,13 @@ fn load_silk_parser_wasm() -> &'static [u8] {
         let types_path = "silk_src/types.silk";
         let types_source = fs::read_to_string(types_path).expect("read types.silk");
         let artifacts = crate::compile(
-            vec![(path, source.as_str()), ("types.silk", types_source.as_str())],
+            vec![
+                (path, source.as_str()),
+                ("types.silk", types_source.as_str()),
+            ],
             path,
         )
-            .unwrap_or_else(|err| panic!("{}", err.render_with_source(&source)));
+        .unwrap_or_else(|err| panic!("{}", err.render_with_source(&source)));
         let CompilationArtifact { content, .. } = artifacts
             .into_iter()
             .find(|artifact| matches!(artifact.kind, ArtifactKind::Wasm))
@@ -71,8 +74,7 @@ fn wasm_engine() -> &'static Engine {
 
 fn wasm_module() -> &'static Module {
     WASM_MODULE.get_or_init(|| {
-        Module::new(wasm_engine(), load_silk_parser_wasm())
-            .expect("compile parser.wasm")
+        Module::new(wasm_engine(), load_silk_parser_wasm()).expect("compile parser.wasm")
     })
 }
 
@@ -230,10 +232,7 @@ impl WasmParser {
                 let argument_idx = self.call1("get_function_call_argument", idx);
                 let function = Rc::new(self.expression_from_node(function_idx));
                 let argument = Rc::new(self.expression_from_node(argument_idx));
-                Expression::new(
-                    ExpressionKind::FunctionCall { function, argument },
-                    span,
-                )
+                Expression::new(ExpressionKind::FunctionCall { function, argument }, span)
             }
             KIND_TYPE_PROPERTY => {
                 let object_idx = self.call1("get_type_property_access_object", idx);
@@ -250,7 +249,10 @@ impl WasmParser {
                 let pattern = self.binding_pattern_from_binding_node(idx);
                 let expr_idx = self.call1("get_binding_expr", idx);
                 let expr = self.expression_from_node(expr_idx);
-                Expression::new(ExpressionKind::Binding(Rc::new(Binding { pattern, expr })), span)
+                Expression::new(
+                    ExpressionKind::Binding(Rc::new(Binding { pattern, expr })),
+                    span,
+                )
             }
             KIND_BLOCK => {
                 let count = self.call1("get_block_count", idx);
@@ -394,18 +396,13 @@ impl WasmParser {
         Expression::new(ExpressionKind::Literal(literal), span)
     }
 
-    fn expression_literal_from_node(
-        &mut self,
-        idx: i32,
-    ) -> crate::parsing::ExpressionLiteral {
+    fn expression_literal_from_node(&mut self, idx: i32) -> crate::parsing::ExpressionLiteral {
         match self.call1("get_literal_tag", idx) {
             0 => crate::parsing::ExpressionLiteral::Number(self.call1("get_literal_number", idx)),
             1 => crate::parsing::ExpressionLiteral::Boolean(
                 self.call1("get_literal_boolean", idx) != 0,
             ),
-            2 => crate::parsing::ExpressionLiteral::Char(
-                self.call1("get_literal_char", idx) as u8,
-            ),
+            2 => crate::parsing::ExpressionLiteral::Char(self.call1("get_literal_char", idx) as u8),
             3 => {
                 let start = self.call1("get_literal_string_start", idx);
                 let length = self.call1("get_literal_string_length", idx);
@@ -467,10 +464,7 @@ impl WasmParser {
         }
     }
 
-    fn binding_pattern_literal_from_node(
-        &mut self,
-        idx: i32,
-    ) -> crate::parsing::ExpressionLiteral {
+    fn binding_pattern_literal_from_node(&mut self, idx: i32) -> crate::parsing::ExpressionLiteral {
         match self.call1("get_binding_pattern_literal_tag", idx) {
             0 => crate::parsing::ExpressionLiteral::Number(
                 self.call1("get_binding_pattern_literal_number", idx),
@@ -580,8 +574,10 @@ impl WasmParser {
                 crate::parsing::ExpressionLiteral::Target(target)
             }
             5 => {
-                let binding_tag =
-                    self.call1("get_function_param_pattern_literal_binding_annotation_tag", idx);
+                let binding_tag = self.call1(
+                    "get_function_param_pattern_literal_binding_annotation_tag",
+                    idx,
+                );
                 let annotation = match binding_tag {
                     0 => crate::parsing::BindingAnnotationLiteral::Mut,
                     1 => {
@@ -699,7 +695,10 @@ impl WasmParser {
                 let start = self.call1("get_function_param_pattern_identifier_start", idx);
                 let length = self.call1("get_function_param_pattern_identifier_length", idx);
                 let name = self.span_string(start, length);
-                BindingPattern::Identifier(Identifier::new(name), self.function_param_pattern_span(idx))
+                BindingPattern::Identifier(
+                    Identifier::new(name),
+                    self.function_param_pattern_span(idx),
+                )
             }
             1 => {
                 let span = self.function_param_pattern_span(idx);
@@ -766,7 +765,10 @@ impl WasmParser {
             KIND_IDENTIFIER => {
                 let start = self.call1("get_identifier_start", idx);
                 let length = self.call1("get_identifier_length", idx);
-                BindingPattern::Identifier(Identifier::new(self.span_string(start, length)), self.node_span(idx))
+                BindingPattern::Identifier(
+                    Identifier::new(self.span_string(start, length)),
+                    self.node_span(idx),
+                )
             }
             KIND_STRUCT => {
                 let span = self.node_span(idx);
@@ -807,7 +809,8 @@ impl WasmParser {
                 if self.call1("get_kind_tag", function_idx) == KIND_TYPE_PROPERTY {
                     let object_idx = self.call1("get_type_property_access_object", function_idx);
                     let start = self.call1("get_type_property_access_property_start", function_idx);
-                    let length = self.call1("get_type_property_access_property_length", function_idx);
+                    let length =
+                        self.call1("get_type_property_access_property_length", function_idx);
                     let enum_type = self.expression_from_node(object_idx);
                     let variant = Identifier::new(self.span_string(start, length));
                     let payload_idx = self.call1("get_function_call_argument", idx);
@@ -920,8 +923,7 @@ impl WasmParser {
     }
 }
 fn parse_block_silk(source: &str) -> Expression {
-    crate::parse_block(source)
-        .unwrap_or_else(|err| panic!("{}", err.render_with_source(source)))
+    crate::parse_block(source).unwrap_or_else(|err| panic!("{}", err.render_with_source(source)))
 }
 
 fn parse_single_silk(source: &str) -> Expression {
@@ -1033,9 +1035,7 @@ fn wasm_parse_struct_literal_named_and_tuple_fields() {
     let source = "{foo = 10, 20, bar = 30}";
     let expected = parse_single_silk(source);
     let mut parser = WasmParser::new();
-    let actual = parser
-        .parse_single_expression(source)
-        .expect("wasm parse");
+    let actual = parser.parse_single_expression(source).expect("wasm parse");
     assert_eq!(actual, expected);
 }
 
@@ -1044,9 +1044,7 @@ fn wasm_parse_struct_binding_pattern_named_fields() {
     let source = "{foo = first: i32, second: i32}";
     let expected = parse_single_silk(source);
     let mut parser = WasmParser::new();
-    let actual = parser
-        .parse_single_expression(source)
-        .expect("wasm parse");
+    let actual = parser.parse_single_expression(source).expect("wasm parse");
     assert_eq!(actual, expected);
 }
 

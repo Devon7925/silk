@@ -158,7 +158,8 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
         );
         output.push_str("      const view = new Int32Array(sab);\n");
         output.push_str("      try {\n");
-        output.push_str("        if (typeof Array.prototype[Symbol.iterator] !== \"function\") {\n");
+        output
+            .push_str("        if (typeof Array.prototype[Symbol.iterator] !== \"function\") {\n");
         output.push_str("          Array.prototype[Symbol.iterator] = function* () {\n");
         output.push_str("            for (let i = 0; i < this.length; i++) { yield this[i]; }\n");
         output.push_str("          };\n");
@@ -195,7 +196,8 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
         output.push_str("        const bindGroupEntries = [];\n");
         output.push_str("        if (input && inBinding !== null) bindGroupEntries.push({ binding: inBinding, resource: { buffer: input } });\n");
         output.push_str("        if (output && outBinding !== null) bindGroupEntries.push({ binding: outBinding, resource: { buffer: output } });\n");
-        output.push_str("        if (typeof bindGroupEntries[Symbol.iterator] !== \"function\") {\n");
+        output
+            .push_str("        if (typeof bindGroupEntries[Symbol.iterator] !== \"function\") {\n");
         output.push_str("          bindGroupEntries[Symbol.iterator] = function* () {\n");
         output.push_str("            for (let i = 0; i < bindGroupEntries.length; i++) { yield bindGroupEntries[i]; }\n");
         output.push_str("          };\n");

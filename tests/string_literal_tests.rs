@@ -38,8 +38,8 @@ fn test_string_literal_index() {
 
 #[test]
 fn test_string_binding_index() {
-    let (expr, _) =
-        evaluate_text_to_expression("value := \"hi\"; value(0)").expect("Failed to index string binding");
+    let (expr, _) = evaluate_text_to_expression("value := \"hi\"; value(0)")
+        .expect("Failed to index string binding");
     match expr.kind {
         ExpressionKind::Literal(ExpressionLiteral::Char(value)) => {
             assert_eq!(value, b'h');
