@@ -86,6 +86,12 @@ EMPTY_LIST_NODE := types.EMPTY_LIST_NODE;
 
 State := types.State;
 
+TargetTag := enum {
+    Js = {},
+    Wasm = {},
+    Wgsl = {},
+};
+
 Value := enum {
     Number = i32,
     Boolean = i32,
@@ -132,43 +138,158 @@ MAX_IMPLS := 1024;
 MAX_SCOPES := 256;
 MAX_FILES := 256;
 
-FLOW_NONE := -1;
-FLOW_RETURN := 0;
-FLOW_BREAK := 1;
+FlowKind := enum {
+    None = {},
+    Return = {},
+    Break = {},
+};
 
-INTERP_ERR_NONE := 0;
-INTERP_ERR_GENERIC := 1;
-INTERP_ERR_ARRAY_INDEX_OUT_OF_RANGE := 2;
-INTERP_ERR_WRAP_REQUIRES_SINGLE_EXPORT_TARGET := 3;
-INTERP_ERR_WRAP_GLOBAL_ONLY_WASM_TO_JS := 4;
-INTERP_ERR_UNBOUND_IDENTIFIER := 5;
-INTERP_ERR_IF_BRANCH_TYPE_MISMATCH := 6;
-INTERP_ERR_MATCH_NO_BRANCH := 7;
-INTERP_ERR_MISSING_FIELD := 8;
-INTERP_ERR_TRAIT_MISSING_FIELD := 9;
+flow_kind_tag := (kind: FlowKind) => (
+    kind |> match {
+        FlowKind::None => -1,
+        FlowKind::Return => 0,
+        FlowKind::Break => 1,
+        else => -1
+    }
+);
 
-BUILTIN_ENUM := 0;
-BUILTIN_MATCH := 1;
-BUILTIN_EXPORT := 2;
-BUILTIN_TARGET := 3;
-BUILTIN_WRAP := 4;
-BUILTIN_ASM := 5;
-BUILTIN_OPTION := 6;
-BUILTIN_ITERATOR := 7;
-BUILTIN_RANGE_NEXT := 8;
-BUILTIN_USE := 9;
+flow_none := {} => flow_kind_tag(FlowKind::None);
+flow_return := {} => flow_kind_tag(FlowKind::Return);
+flow_break := {} => flow_kind_tag(FlowKind::Break);
 
-TARGET_JS := 0;
-TARGET_WASM := 1;
-TARGET_WGSL := 2;
-TARGET_MASK_JS := 1;
-TARGET_MASK_WASM := 2;
-TARGET_MASK_WGSL := 4;
+InterpError := enum {
+    None = {},
+    Generic = {},
+    ArrayIndexOutOfRange = {},
+    WrapRequiresSingleExportTarget = {},
+    WrapGlobalOnlyWasmToJs = {},
+    UnboundIdentifier = {},
+    IfBranchTypeMismatch = {},
+    MatchNoBranch = {},
+    MissingField = {},
+    TraitMissingField = {},
+};
 
-BINDING_ANN_MUT := 0;
-BINDING_ANN_EXPORT := 1;
-BINDING_ANN_TARGET := 2;
-BINDING_ANN_WRAP := 3;
+interp_error_code := (err: InterpError) => (
+    err |> match {
+        InterpError::None => 0,
+        InterpError::Generic => 1,
+        InterpError::ArrayIndexOutOfRange => 2,
+        InterpError::WrapRequiresSingleExportTarget => 3,
+        InterpError::WrapGlobalOnlyWasmToJs => 4,
+        InterpError::UnboundIdentifier => 5,
+        InterpError::IfBranchTypeMismatch => 6,
+        InterpError::MatchNoBranch => 7,
+        InterpError::MissingField => 8,
+        InterpError::TraitMissingField => 9,
+        else => 1
+    }
+);
+
+interp_err_none := {} => interp_error_code(InterpError::None);
+interp_err_generic := {} => interp_error_code(InterpError::Generic);
+interp_err_array_index_out_of_range := {} => interp_error_code(InterpError::ArrayIndexOutOfRange);
+interp_err_wrap_requires_single_export_target := {} => interp_error_code(InterpError::WrapRequiresSingleExportTarget);
+interp_err_wrap_global_only_wasm_to_js := {} => interp_error_code(InterpError::WrapGlobalOnlyWasmToJs);
+interp_err_unbound_identifier := {} => interp_error_code(InterpError::UnboundIdentifier);
+interp_err_if_branch_type_mismatch := {} => interp_error_code(InterpError::IfBranchTypeMismatch);
+interp_err_match_no_branch := {} => interp_error_code(InterpError::MatchNoBranch);
+interp_err_missing_field := {} => interp_error_code(InterpError::MissingField);
+interp_err_trait_missing_field := {} => interp_error_code(InterpError::TraitMissingField);
+
+BuiltinKind := enum {
+    Enum = {},
+    Match = {},
+    Export = {},
+    Target = {},
+    Wrap = {},
+    Asm = {},
+    Option = {},
+    Iterator = {},
+    RangeNext = {},
+    Use = {},
+};
+
+builtin_kind_tag := (kind: BuiltinKind) => (
+    kind |> match {
+        BuiltinKind::Enum => 0,
+        BuiltinKind::Match => 1,
+        BuiltinKind::Export => 2,
+        BuiltinKind::Target => 3,
+        BuiltinKind::Wrap => 4,
+        BuiltinKind::Asm => 5,
+        BuiltinKind::Option => 6,
+        BuiltinKind::Iterator => 7,
+        BuiltinKind::RangeNext => 8,
+        BuiltinKind::Use => 9,
+        else => -1
+    }
+);
+
+builtin_enum := {} => builtin_kind_tag(BuiltinKind::Enum);
+builtin_match := {} => builtin_kind_tag(BuiltinKind::Match);
+builtin_export := {} => builtin_kind_tag(BuiltinKind::Export);
+builtin_target := {} => builtin_kind_tag(BuiltinKind::Target);
+builtin_wrap := {} => builtin_kind_tag(BuiltinKind::Wrap);
+builtin_asm := {} => builtin_kind_tag(BuiltinKind::Asm);
+builtin_option := {} => builtin_kind_tag(BuiltinKind::Option);
+builtin_iterator := {} => builtin_kind_tag(BuiltinKind::Iterator);
+builtin_range_next := {} => builtin_kind_tag(BuiltinKind::RangeNext);
+builtin_use := {} => builtin_kind_tag(BuiltinKind::Use);
+
+target_tag_value := (target: TargetTag) => (
+    target |> match {
+        TargetTag::Js => 0,
+        TargetTag::Wasm => 1,
+        TargetTag::Wgsl => 2,
+        else => -1
+    }
+);
+
+target_js := {} => target_tag_value(TargetTag::Js);
+target_wasm := {} => target_tag_value(TargetTag::Wasm);
+target_wgsl := {} => target_tag_value(TargetTag::Wgsl);
+
+TargetMaskBit := enum {
+    Js = {},
+    Wasm = {},
+    Wgsl = {},
+};
+
+target_mask_bit := (mask: TargetMaskBit) => (
+    mask |> match {
+        TargetMaskBit::Js => 1,
+        TargetMaskBit::Wasm => 2,
+        TargetMaskBit::Wgsl => 4,
+        else => 0
+    }
+);
+
+target_mask_js := {} => target_mask_bit(TargetMaskBit::Js);
+target_mask_wasm := {} => target_mask_bit(TargetMaskBit::Wasm);
+target_mask_wgsl := {} => target_mask_bit(TargetMaskBit::Wgsl);
+
+BindingAnnotationKind := enum {
+    Mut = {},
+    Export = {},
+    Target = {},
+    Wrap = {},
+};
+
+binding_annotation_kind_tag := (kind: BindingAnnotationKind) => (
+    kind |> match {
+        BindingAnnotationKind::Mut => 0,
+        BindingAnnotationKind::Export => 1,
+        BindingAnnotationKind::Target => 2,
+        BindingAnnotationKind::Wrap => 3,
+        else => -1
+    }
+);
+
+binding_ann_mut := {} => binding_annotation_kind_tag(BindingAnnotationKind::Mut);
+binding_ann_export := {} => binding_annotation_kind_tag(BindingAnnotationKind::Export);
+binding_ann_target := {} => binding_annotation_kind_tag(BindingAnnotationKind::Target);
+binding_ann_wrap := {} => binding_annotation_kind_tag(BindingAnnotationKind::Wrap);
 
 EMPTY_VALUE := Value::Unit;
 
@@ -177,7 +298,7 @@ EMPTY_VALUE := Value::Unit;
 (export wasm) mut list_nodes: Box({ListNode; MAX_LIST_NODES}) := {EMPTY_LIST_NODE; MAX_LIST_NODES};
 (export wasm) mut state: Box(State) := { count = 0, cursor = 0, error = 0, list_count = 0 };
 (export wasm) mut values: Box({Value; MAX_VALUES}) := {EMPTY_VALUE; MAX_VALUES};
-(export wasm) mut value_state: Box(ValueState) := { count = 0, error = -1, error_code = INTERP_ERR_NONE };
+(export wasm) mut value_state: Box(ValueState) := { count = 0, error = -1, error_code = interp_err_none{} };
 mut value_type_values: Box({i32; MAX_VALUES}) := {-1; MAX_VALUES};
 mut value_is_box_type: Box({i32; MAX_VALUES}) := {0; MAX_VALUES};
 (export wasm) mut binding_name_start: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
@@ -204,7 +325,7 @@ mut intrinsic_state: Box(IntrinsicState) := { binding_count = 0 };
 (export wasm) mut file_path_length: Box({i32; MAX_FILES}) := {0; MAX_FILES};
 (export wasm) mut file_root_idx: Box({i32; MAX_FILES}) := {0; MAX_FILES};
 mut file_import_value: Box({i32; MAX_FILES}) := {-1; MAX_FILES};
-(export wasm) mut flow_state: Box(FlowState) := { kind = FLOW_NONE, value = -1 };
+(export wasm) mut flow_state: Box(FlowState) := { kind = flow_none{}, value = -1 };
 (export wasm) mut runtime_state: Box(RuntimeState) := {
     loop_depth = 0,
     function_depth = 0,
@@ -221,22 +342,22 @@ make_string_ref := {start: i32, length: i32} => (
 );
 
 set_error_with_code := {pos: i32, code: i32} => (
-    if value_state.error == -1 then (
-        value_state.error = pos;
-        value_state.error_code = code;
+    if value_state.error != -1 then (
         0
     ) else (
+        value_state.error = pos;
+        value_state.error_code = code;
         0
     );
     0
 );
 
 set_error: (i32 -> i32) := (pos: i32) => (
-    if value_state.error == -1 then (
-        value_state.error = pos;
-        value_state.error_code = INTERP_ERR_GENERIC;
+    if value_state.error != -1 then (
         0
     ) else (
+        value_state.error = pos;
+        value_state.error_code = interp_err_generic{};
         0
     );
     0
@@ -245,7 +366,7 @@ set_error: (i32 -> i32) := (pos: i32) => (
 reset_interpreter := {} => (
     value_state.count = 0;
     value_state.error = -1;
-    value_state.error_code = INTERP_ERR_NONE;
+    value_state.error_code = interp_err_none{};
     binding_state.count = 0;
     binding_state.scope_count = 0;
     binding_temp.start = 0;
@@ -259,7 +380,7 @@ reset_interpreter := {} => (
     annotation_temp.export_mask = 0;
     annotation_temp.wrap_mask = 0;
     impl_state.count = 0;
-    flow_state.kind = FLOW_NONE;
+    flow_state.kind = flow_none{};
     flow_state.value = -1;
     runtime_state.loop_depth = 0;
     runtime_state.function_depth = 0;
@@ -443,18 +564,29 @@ string_ref_equals_raw := {left_start: i32, left_len: i32, right_start: i32, righ
     )
 );
 
+string_ref_matches_1 := {value: StringRef, c0: u8} => (
+    if value.start < 0 || value.length != 1 then 0
+    else if input(value.start) == c0 then 1 else 0
+);
+
+string_ref_matches_2 := {value: StringRef, c0: u8, c1: u8} => (
+    if value.start < 0 || value.length != 2 then 0
+    else if input(value.start) == c0 && input(value.start + 1) == c1 then 1 else 0
+);
+
+string_ref_matches_3 := {value: StringRef, c0: u8, c1: u8, c2: u8} => (
+    if value.start < 0 || value.length != 3 then 0
+    else if input(value.start) == c0 && input(value.start + 1) == c1 && input(value.start + 2) == c2 then 1 else 0
+);
+
+string_ref_matches_4 := {value: StringRef, c0: u8, c1: u8, c2: u8, c3: u8} => (
+    if value.start < 0 || value.length != 4 then 0
+    else if input(value.start) == c0 && input(value.start + 1) == c1 && input(value.start + 2) == c2 && input(value.start + 3) == c3 then 1 else 0
+);
+
 string_ref_is_mut := (value: StringRef) => (
-    if value.start < 0 then (
-        if value.start == SYNTHETIC_MUT_STRING.start && value.length == SYNTHETIC_MUT_STRING.length then 1 else 0
-    ) else if value.length != 3 then (
-        0
-    ) else (
-        if input(value.start) == 'm' then (
-            if input(value.start + 1) == 'u' then (
-                if input(value.start + 2) == 't' then 1 else 0
-            ) else 0
-        ) else 0
-    )
+    if value.start == SYNTHETIC_MUT_STRING.start && value.length == SYNTHETIC_MUT_STRING.length then 1
+    else string_ref_matches_3{value, 'm', 'u', 't'}
 );
 
 
@@ -501,26 +633,26 @@ resolve_annotation_flags := (head: i32) => (
         if ann_value_idx == -1 then (
             ok = 0;
             current = -1;
-        ) else if flow_state.kind != FLOW_NONE then (
+        ) else if flow_state.kind != flow_none{} then (
             ok = 0;
             current = -1;
         ) else (
             if Value::BindingAnnotation(ann) := values(ann_value_idx) then (
-                if ann.kind == BINDING_ANN_MUT then (
+                if ann.kind == binding_ann_mut{} then (
                     annotation_temp.is_mut = 1;
                     0
                 ) else 0;
-                if ann.kind == BINDING_ANN_TARGET then (
+                if ann.kind == binding_ann_target{} then (
                     ann_mask := target_mask_from_tag(ann.target);
                     annotation_temp.target_mask = target_mask_or{annotation_temp.target_mask, ann_mask};
                     0
                 ) else 0;
-                if ann.kind == BINDING_ANN_EXPORT then (
+                if ann.kind == binding_ann_export{} then (
                     ann_mask := target_mask_from_tag(ann.target);
                     annotation_temp.export_mask = target_mask_or{annotation_temp.export_mask, ann_mask};
                     0
                 ) else 0;
-                if ann.kind == BINDING_ANN_WRAP then (
+                if ann.kind == binding_ann_wrap{} then (
                     ann_mask := target_mask_from_tag(ann.target);
                     annotation_temp.wrap_mask = target_mask_or{annotation_temp.wrap_mask, ann_mask};
                     0
@@ -542,9 +674,7 @@ expr_contains_mut_annotation := (expr_idx: i32) => (
         nodes(expr_idx).kind |> match {
             NodeKind::Identifier(id) => string_ref_is_mut(id.name),
             NodeKind::FunctionCall(info) => (
-                if expr_contains_mut_annotation(info.function) == 1 then 1 else (
-                    expr_contains_mut_annotation(info.argument)
-                )
+                if expr_contains_mut_annotation(info.function) == 1 || expr_contains_mut_annotation(info.argument) == 1 then 1 else 0
             ),
             else => 0
         }
@@ -698,79 +828,34 @@ ensure_binding_target_access := {binding_idx: i32, span_start: i32} => (
         1
     ) else (
         current_mask := current_binding_target_mask{};
-        if current_mask == -1 then (
+        if current_mask <= 0 || target_mask_allows{required_mask, current_mask} == 0 then (
             set_error(span_start);
             0
-        ) else if current_mask == 0 then (
-            set_error(span_start);
-            0
-        ) else if target_mask_allows{required_mask, current_mask} == 1 then (
-            1
-        ) else (
-            set_error(span_start);
-            0
-        )
+        ) else 1
     )
 );
 
 string_ref_is_js := (value: StringRef) => (
-    if value.start < 0 then (
-        if value.start == SYNTHETIC_JS_STRING.start && value.length == SYNTHETIC_JS_STRING.length then 1 else 0
-    ) else if value.length != 2 then (
-        0
-    ) else (
-        if input(value.start) == 'j' then (
-            if input(value.start + 1) == 's' then 1 else 0
-        ) else 0
-    )
+    if value.start == SYNTHETIC_JS_STRING.start && value.length == SYNTHETIC_JS_STRING.length then 1
+    else string_ref_matches_2{value, 'j', 's'}
 );
 
 string_ref_is_wasm := (value: StringRef) => (
-    if value.start < 0 then (
-        if value.start == SYNTHETIC_WASM_STRING.start && value.length == SYNTHETIC_WASM_STRING.length then 1 else 0
-    ) else if value.length != 4 then (
-        0
-    ) else (
-        if input(value.start) == 'w' then (
-            if input(value.start + 1) == 'a' then (
-                if input(value.start + 2) == 's' then (
-                    if input(value.start + 3) == 'm' then 1 else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    if value.start == SYNTHETIC_WASM_STRING.start && value.length == SYNTHETIC_WASM_STRING.length then 1
+    else string_ref_matches_4{value, 'w', 'a', 's', 'm'}
 );
 
 string_ref_is_wgsl := (value: StringRef) => (
-    if value.start < 0 then (
-        if value.start == SYNTHETIC_WGSL_STRING.start && value.length == SYNTHETIC_WGSL_STRING.length then 1 else 0
-    ) else if value.length != 4 then (
-        0
-    ) else (
-        if input(value.start) == 'w' then (
-            if input(value.start + 1) == 'g' then (
-                if input(value.start + 2) == 's' then (
-                    if input(value.start + 3) == 'l' then 1 else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    if value.start == SYNTHETIC_WGSL_STRING.start && value.length == SYNTHETIC_WGSL_STRING.length then 1
+    else string_ref_matches_4{value, 'w', 'g', 's', 'l'}
 );
 
 ensure_asm_target_allowed := {target_tag: i32, span_start: i32} => (
     current_mask := current_binding_target_mask{};
-    if current_mask == -1 then (
+    if current_mask <= 0 || target_mask_has{current_mask, target_tag} == 0 then (
         set_error(span_start);
         0
-    ) else if current_mask == 0 then (
-        set_error(span_start);
-        0
-    ) else if target_mask_has{current_mask, target_tag} == 0 then (
-        set_error(span_start);
-        0
-    ) else (
-        1
-    )
+    ) else 1
 );
 
 add_binding := {start: i32, length: i32, value: i32, is_mut: i32} => (
@@ -1071,7 +1156,7 @@ init_range_binding := {} => (
                                 if name_next == -1 then (
                                     -1
                                 ) else (
-                                    next_value := store_value(Value::Builtin(BUILTIN_RANGE_NEXT));
+                                    next_value := store_value(Value::Builtin(builtin_range_next{}));
                                     if next_value == -1 then (
                                         -1
                                     ) else (
@@ -1116,12 +1201,12 @@ init_intrinsic_context := {} => (
                 if add_intrinsic_binding{SYNTHETIC_BOOL_STRING} == -1 then -1 else (
                     if add_intrinsic_binding{SYNTHETIC_BINDING_ANNOTATION_STRING} == -1 then -1 else (
                         if add_intrinsic_binding_value{SYNTHETIC_MUT_STRING, Value::BindingAnnotation({
-                            kind = BINDING_ANN_MUT,
+                            kind = binding_ann_mut{},
                             target = -1
                         })} == -1 then -1 else (
-                            if add_intrinsic_binding_value{SYNTHETIC_JS_STRING, Value::Target(TARGET_JS)} == -1 then -1 else (
-                                if add_intrinsic_binding_value{SYNTHETIC_WASM_STRING, Value::Target(TARGET_WASM)} == -1 then -1 else (
-                                    if add_intrinsic_binding_value{SYNTHETIC_WGSL_STRING, Value::Target(TARGET_WGSL)} == -1 then -1 else (
+                            if add_intrinsic_binding_value{SYNTHETIC_JS_STRING, Value::Target(target_js{})} == -1 then -1 else (
+                                if add_intrinsic_binding_value{SYNTHETIC_WASM_STRING, Value::Target(target_wasm{})} == -1 then -1 else (
+                                    if add_intrinsic_binding_value{SYNTHETIC_WGSL_STRING, Value::Target(target_wgsl{})} == -1 then -1 else (
                                         if init_option_enum{} == -1 then -1 else (
                                             if init_range_binding{} == -1 then -1 else (
                                                 intrinsic_state.binding_count = binding_state.count;
@@ -1182,349 +1267,190 @@ extract_binding_annotations := (expr_idx: i32) => (
 );
 
 string_ref_is_enum := (value: StringRef) => (
-    if value.start < 0 then 0 else if value.length != 4 then 0 else (
-        if input(value.start) == 'e' then (
-            if input(value.start + 1) == 'n' then (
-                if input(value.start + 2) == 'u' then (
-                    if input(value.start + 3) == 'm' then 1 else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    string_ref_matches_4{value, 'e', 'n', 'u', 'm'}
 );
 
 string_ref_is_match := (value: StringRef) => (
-    if value.start < 0 then 0 else if value.length != 5 then 0 else (
-        if input(value.start) == 'm' then (
-            if input(value.start + 1) == 'a' then (
-                if input(value.start + 2) == 't' then (
-                    if input(value.start + 3) == 'c' then (
-                        if input(value.start + 4) == 'h' then 1 else 0
-                    ) else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    if value.start < 0 || value.length != 5 then 0
+    else if input(value.start) == 'm'
+        && input(value.start + 1) == 'a'
+        && input(value.start + 2) == 't'
+        && input(value.start + 3) == 'c'
+        && input(value.start + 4) == 'h'
+    then 1 else 0
 );
 
 string_ref_is_use := (value: StringRef) => (
-    if value.start < 0 then 0 else if value.length != 3 then 0 else (
-        if input(value.start) == 'u' then (
-            if input(value.start + 1) == 's' then (
-                if input(value.start + 2) == 'e' then 1 else 0
-            ) else 0
-        ) else 0
-    )
+    string_ref_matches_3{value, 'u', 's', 'e'}
 );
 
 string_ref_is_option := (value: StringRef) => (
-    if value.start < 0 then (
-        if value.start == SYNTHETIC_OPTION_STRING.start && value.length == SYNTHETIC_OPTION_STRING.length then 1 else 0
-    ) else if value.length != 6 then 0 else (
-        if input(value.start) == 'O' then (
-            if input(value.start + 1) == 'p' then (
-                if input(value.start + 2) == 't' then (
-                    if input(value.start + 3) == 'i' then (
-                        if input(value.start + 4) == 'o' then (
-                            if input(value.start + 5) == 'n' then 1 else 0
-                        ) else 0
-                    ) else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    if value.start == SYNTHETIC_OPTION_STRING.start && value.length == SYNTHETIC_OPTION_STRING.length then 1
+    else if value.start < 0 || value.length != 6 then 0
+    else if input(value.start) == 'O'
+        && input(value.start + 1) == 'p'
+        && input(value.start + 2) == 't'
+        && input(value.start + 3) == 'i'
+        && input(value.start + 4) == 'o'
+        && input(value.start + 5) == 'n'
+    then 1 else 0
 );
 
 string_ref_is_some := (value: StringRef) => (
-    if value.start < 0 then (
-        if value.start == SYNTHETIC_SOME_STRING.start && value.length == SYNTHETIC_SOME_STRING.length then 1 else 0
-    ) else if value.length != 4 then 0 else (
-        if input(value.start) == 'S' then (
-            if input(value.start + 1) == 'o' then (
-                if input(value.start + 2) == 'm' then (
-                    if input(value.start + 3) == 'e' then 1 else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    if value.start == SYNTHETIC_SOME_STRING.start && value.length == SYNTHETIC_SOME_STRING.length then 1
+    else string_ref_matches_4{value, 'S', 'o', 'm', 'e'}
 );
 
 string_ref_is_none := (value: StringRef) => (
-    if value.start < 0 then (
-        if value.start == SYNTHETIC_NONE_STRING.start && value.length == SYNTHETIC_NONE_STRING.length then 1 else 0
-    ) else if value.length != 4 then 0 else (
-        if input(value.start) == 'N' then (
-            if input(value.start + 1) == 'o' then (
-                if input(value.start + 2) == 'n' then (
-                    if input(value.start + 3) == 'e' then 1 else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    if value.start == SYNTHETIC_NONE_STRING.start && value.length == SYNTHETIC_NONE_STRING.length then 1
+    else string_ref_matches_4{value, 'N', 'o', 'n', 'e'}
 );
 
 string_ref_is_iterator := (value: StringRef) => (
-    if value.start < 0 then 0 else if value.length != 8 then 0 else (
-        if input(value.start) == 'I' then (
-            if input(value.start + 1) == 't' then (
-                if input(value.start + 2) == 'e' then (
-                    if input(value.start + 3) == 'r' then (
-                        if input(value.start + 4) == 'a' then (
-                            if input(value.start + 5) == 't' then (
-                                if input(value.start + 6) == 'o' then (
-                                    if input(value.start + 7) == 'r' then 1 else 0
-                                ) else 0
-                            ) else 0
-                        ) else 0
-                    ) else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    if value.start < 0 || value.length != 8 then 0
+    else if input(value.start) == 'I'
+        && input(value.start + 1) == 't'
+        && input(value.start + 2) == 'e'
+        && input(value.start + 3) == 'r'
+        && input(value.start + 4) == 'a'
+        && input(value.start + 5) == 't'
+        && input(value.start + 6) == 'o'
+        && input(value.start + 7) == 'r'
+    then 1 else 0
 );
 
 string_ref_is_iter_ty := (value: StringRef) => (
-    if value.start < 0 then (
-        if value.start == SYNTHETIC_ITER_TY_STRING.start && value.length == SYNTHETIC_ITER_TY_STRING.length then 1 else 0
-    ) else if value.length != 7 then 0 else (
-        if input(value.start) == 'i' then (
-            if input(value.start + 1) == 't' then (
-                if input(value.start + 2) == 'e' then (
-                    if input(value.start + 3) == 'r' then (
-                        if input(value.start + 4) == '_' then (
-                            if input(value.start + 5) == 't' then (
-                                if input(value.start + 6) == 'y' then 1 else 0
-                            ) else 0
-                        ) else 0
-                    ) else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    if value.start == SYNTHETIC_ITER_TY_STRING.start && value.length == SYNTHETIC_ITER_TY_STRING.length then 1
+    else if value.start < 0 || value.length != 7 then 0
+    else if input(value.start) == 'i'
+        && input(value.start + 1) == 't'
+        && input(value.start + 2) == 'e'
+        && input(value.start + 3) == 'r'
+        && input(value.start + 4) == '_'
+        && input(value.start + 5) == 't'
+        && input(value.start + 6) == 'y'
+    then 1 else 0
 );
 
 string_ref_is_next := (value: StringRef) => (
-    if value.start < 0 then (
-        if value.start == SYNTHETIC_NEXT_STRING.start && value.length == SYNTHETIC_NEXT_STRING.length then 1 else 0
-    ) else if value.length != 4 then 0 else (
-        if input(value.start) == 'n' then (
-            if input(value.start + 1) == 'e' then (
-                if input(value.start + 2) == 'x' then (
-                    if input(value.start + 3) == 't' then 1 else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    if value.start == SYNTHETIC_NEXT_STRING.start && value.length == SYNTHETIC_NEXT_STRING.length then 1
+    else string_ref_matches_4{value, 'n', 'e', 'x', 't'}
 );
 
 string_ref_is_for_iter := (value: StringRef) => (
-    if value.start < 0 then (
-        if value.start == SYNTHETIC_FOR_ITER_STRING.start && value.length == SYNTHETIC_FOR_ITER_STRING.length then 1 else 0
-    ) else if value.length != 10 then 0 else (
-        if input(value.start) == '_' then (
-            if input(value.start + 1) == '_' then (
-                if input(value.start + 2) == 'f' then (
-                    if input(value.start + 3) == 'o' then (
-                        if input(value.start + 4) == 'r' then (
-                            if input(value.start + 5) == '_' then (
-                                if input(value.start + 6) == 'i' then (
-                                    if input(value.start + 7) == 't' then (
-                                        if input(value.start + 8) == 'e' then (
-                                            if input(value.start + 9) == 'r' then 1 else 0
-                                        ) else 0
-                                    ) else 0
-                                ) else 0
-                            ) else 0
-                        ) else 0
-                    ) else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    if value.start == SYNTHETIC_FOR_ITER_STRING.start && value.length == SYNTHETIC_FOR_ITER_STRING.length then 1
+    else if value.start < 0 || value.length != 10 then 0
+    else if input(value.start) == '_'
+        && input(value.start + 1) == '_'
+        && input(value.start + 2) == 'f'
+        && input(value.start + 3) == 'o'
+        && input(value.start + 4) == 'r'
+        && input(value.start + 5) == '_'
+        && input(value.start + 6) == 'i'
+        && input(value.start + 7) == 't'
+        && input(value.start + 8) == 'e'
+        && input(value.start + 9) == 'r'
+    then 1 else 0
 );
 
 string_ref_is_current := (value: StringRef) => (
-    if value.start < 0 then (
-        if value.start == SYNTHETIC_CURRENT_STRING.start && value.length == SYNTHETIC_CURRENT_STRING.length then 1 else 0
-    ) else if value.length != 7 then 0 else (
-        if input(value.start) == 'c' then (
-            if input(value.start + 1) == 'u' then (
-                if input(value.start + 2) == 'r' then (
-                    if input(value.start + 3) == 'r' then (
-                        if input(value.start + 4) == 'e' then (
-                            if input(value.start + 5) == 'n' then (
-                                if input(value.start + 6) == 't' then 1 else 0
-                            ) else 0
-                        ) else 0
-                    ) else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    if value.start == SYNTHETIC_CURRENT_STRING.start && value.length == SYNTHETIC_CURRENT_STRING.length then 1
+    else if value.start < 0 || value.length != 7 then 0
+    else if input(value.start) == 'c'
+        && input(value.start + 1) == 'u'
+        && input(value.start + 2) == 'r'
+        && input(value.start + 3) == 'r'
+        && input(value.start + 4) == 'e'
+        && input(value.start + 5) == 'n'
+        && input(value.start + 6) == 't'
+    then 1 else 0
 );
 
 string_ref_is_end := (value: StringRef) => (
-    if value.start < 0 then (
-        if value.start == SYNTHETIC_END_STRING.start && value.length == SYNTHETIC_END_STRING.length then 1 else 0
-    ) else if value.length != 3 then 0 else (
-        if input(value.start) == 'e' then (
-            if input(value.start + 1) == 'n' then (
-                if input(value.start + 2) == 'd' then 1 else 0
-            ) else 0
-        ) else 0
-    )
+    if value.start == SYNTHETIC_END_STRING.start && value.length == SYNTHETIC_END_STRING.length then 1
+    else string_ref_matches_3{value, 'e', 'n', 'd'}
 );
 
 string_ref_is_range := (value: StringRef) => (
-    if value.start < 0 then (
-        if value.start == SYNTHETIC_RANGE_STRING.start && value.length == SYNTHETIC_RANGE_STRING.length then 1 else 0
-    ) else if value.length != 5 then 0 else (
-        if input(value.start) == 'R' then (
-            if input(value.start + 1) == 'a' then (
-                if input(value.start + 2) == 'n' then (
-                    if input(value.start + 3) == 'g' then (
-                        if input(value.start + 4) == 'e' then 1 else 0
-                    ) else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    if value.start == SYNTHETIC_RANGE_STRING.start && value.length == SYNTHETIC_RANGE_STRING.length then 1
+    else if value.start < 0 || value.length != 5 then 0
+    else if input(value.start) == 'R'
+        && input(value.start + 1) == 'a'
+        && input(value.start + 2) == 'n'
+        && input(value.start + 3) == 'g'
+        && input(value.start + 4) == 'e'
+    then 1 else 0
 );
 
 string_ref_is_i32 := (value: StringRef) => (
-    if value.start < 0 then 0 else if value.length != 3 then 0 else (
-        if input(value.start) == 'i' then (
-            if input(value.start + 1) == '3' then (
-                if input(value.start + 2) == '2' then 1 else 0
-            ) else 0
-        ) else 0
-    )
+    string_ref_matches_3{value, 'i', '3', '2'}
 );
 
 string_ref_is_u8 := (value: StringRef) => (
-    if value.start < 0 then 0 else if value.length != 2 then 0 else (
-        if input(value.start) == 'u' then (
-            if input(value.start + 1) == '8' then 1 else 0
-        ) else 0
-    )
+    string_ref_matches_2{value, 'u', '8'}
 );
 
 string_ref_is_bool := (value: StringRef) => (
-    if value.start < 0 then 0 else if value.length != 4 then 0 else (
-        if input(value.start) == 'b' then (
-            if input(value.start + 1) == 'o' then (
-                if input(value.start + 2) == 'o' then (
-                    if input(value.start + 3) == 'l' then 1 else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    string_ref_matches_4{value, 'b', 'o', 'o', 'l'}
 );
 
 string_ref_is_type := (value: StringRef) => (
-    if value.start < 0 then 0 else if value.length != 4 then 0 else (
-        if input(value.start) == 't' then (
-            if input(value.start + 1) == 'y' then (
-                if input(value.start + 2) == 'p' then (
-                    if input(value.start + 3) == 'e' then 1 else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    string_ref_matches_4{value, 't', 'y', 'p', 'e'}
 );
 
 string_ref_is_target := (value: StringRef) => (
-    if value.start < 0 then 0 else if value.length != 6 then 0 else (
-        if input(value.start) == 't' then (
-            if input(value.start + 1) == 'a' then (
-                if input(value.start + 2) == 'r' then (
-                    if input(value.start + 3) == 'g' then (
-                        if input(value.start + 4) == 'e' then (
-                            if input(value.start + 5) == 't' then 1 else 0
-                        ) else 0
-                    ) else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    if value.start < 0 || value.length != 6 then 0
+    else if input(value.start) == 't'
+        && input(value.start + 1) == 'a'
+        && input(value.start + 2) == 'r'
+        && input(value.start + 3) == 'g'
+        && input(value.start + 4) == 'e'
+        && input(value.start + 5) == 't'
+    then 1 else 0
 );
 
 string_ref_is_binding_annotation := (value: StringRef) => (
-    if value.start < 0 then 0 else if value.length != 18 then 0 else (
-        if input(value.start) == 'b' then (
-            if input(value.start + 1) == 'i' then (
-                if input(value.start + 2) == 'n' then (
-                    if input(value.start + 3) == 'd' then (
-                        if input(value.start + 4) == 'i' then (
-                            if input(value.start + 5) == 'n' then (
-                                if input(value.start + 6) == 'g' then (
-                                    if input(value.start + 7) == '_' then (
-                                        if input(value.start + 8) == 'a' then (
-                                            if input(value.start + 9) == 'n' then (
-                                                if input(value.start + 10) == 'n' then (
-                                                    if input(value.start + 11) == 'o' then (
-                                                        if input(value.start + 12) == 't' then (
-                                                            if input(value.start + 13) == 'a' then (
-                                                                if input(value.start + 14) == 't' then (
-                                                                    if input(value.start + 15) == 'i' then (
-                                                                        if input(value.start + 16) == 'o' then (
-                                                                            if input(value.start + 17) == 'n' then 1 else 0
-                                                                        ) else 0
-                                                                    ) else 0
-                                                                ) else 0
-                                                            ) else 0
-                                                        ) else 0
-                                                    ) else 0
-                                                ) else 0
-                                            ) else 0
-                                        ) else 0
-                                    ) else 0
-                                ) else 0
-                            ) else 0
-                        ) else 0
-                    ) else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    if value.start < 0 || value.length != 18 then 0
+    else if input(value.start) == 'b'
+        && input(value.start + 1) == 'i'
+        && input(value.start + 2) == 'n'
+        && input(value.start + 3) == 'd'
+        && input(value.start + 4) == 'i'
+        && input(value.start + 5) == 'n'
+        && input(value.start + 6) == 'g'
+        && input(value.start + 7) == '_'
+        && input(value.start + 8) == 'a'
+        && input(value.start + 9) == 'n'
+        && input(value.start + 10) == 'n'
+        && input(value.start + 11) == 'o'
+        && input(value.start + 12) == 't'
+        && input(value.start + 13) == 'a'
+        && input(value.start + 14) == 't'
+        && input(value.start + 15) == 'i'
+        && input(value.start + 16) == 'o'
+        && input(value.start + 17) == 'n'
+    then 1 else 0
 );
 
 string_ref_is_underscore := (value: StringRef) => (
-    if value.start < 0 then 0 else if value.length != 1 then 0 else (
-        if input(value.start) == '_' then 1 else 0
-    )
+    string_ref_matches_1{value, '_'}
 );
 
 string_ref_is_else := (value: StringRef) => (
-    if value.start < 0 then 0 else if value.length != 4 then 0 else (
-        if input(value.start) == 'e' then (
-            if input(value.start + 1) == 'l' then (
-                if input(value.start + 2) == 's' then (
-                    if input(value.start + 3) == 'e' then 1 else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    string_ref_matches_4{value, 'e', 'l', 's', 'e'}
 );
 
 builtin_from_identifier := (name: StringRef) => (
-    if string_ref_is_enum(name) == 1 then BUILTIN_ENUM else (
-        if string_ref_is_match(name) == 1 then BUILTIN_MATCH else (
-            if string_ref_is_option(name) == 1 then BUILTIN_OPTION else (
-                if string_ref_is_iterator(name) == 1 then BUILTIN_ITERATOR else (
-                    if string_ref_is_export(name) == 1 then BUILTIN_EXPORT else (
-                    if string_ref_is_target(name) == 1 then BUILTIN_TARGET else (
-                        if string_ref_is_wrap(name) == 1 then BUILTIN_WRAP else (
-                            if string_ref_is_asm(name) == 1 then BUILTIN_ASM else (
-                                if string_ref_is_use(name) == 1 then BUILTIN_USE else -1
-                            )
-                        )
-                    )
-                )
-            )
-        )
-        )
-    )
+    if string_ref_is_enum(name) == 1 then builtin_enum{}
+    else if string_ref_is_match(name) == 1 then builtin_match{}
+    else if string_ref_is_option(name) == 1 then builtin_option{}
+    else if string_ref_is_iterator(name) == 1 then builtin_iterator{}
+    else if string_ref_is_export(name) == 1 then builtin_export{}
+    else if string_ref_is_target(name) == 1 then builtin_target{}
+    else if string_ref_is_wrap(name) == 1 then builtin_wrap{}
+    else if string_ref_is_asm(name) == 1 then builtin_asm{}
+    else if string_ref_is_use(name) == 1 then builtin_use{}
+    else -1
 );
 
 string_ref_to_i32 := {start: i32, length: i32} => (
@@ -1553,10 +1479,10 @@ string_ref_to_i32 := {start: i32, length: i32} => (
 
 record_value_index_by_position := {start: i32, count: i32, index: i32, span_start: i32} => (
     if index < 0 then (
-        set_error_with_code{span_start, INTERP_ERR_ARRAY_INDEX_OUT_OF_RANGE};
+        set_error_with_code{span_start, interp_err_array_index_out_of_range{}};
         -1
     ) else if index >= count then (
-        set_error_with_code{span_start, INTERP_ERR_ARRAY_INDEX_OUT_OF_RANGE};
+        set_error_with_code{span_start, interp_err_array_index_out_of_range{}};
         -1
     ) else (
         start + index * 2 + 1
@@ -1604,41 +1530,22 @@ record_find_field_index := {start: i32, count: i32, has_named: i32, name_start: 
 );
 
 string_ref_is_export := (value: StringRef) => (
-    if value.start < 0 then 0 else if value.length != 6 then 0 else (
-        if input(value.start) == 'e' then (
-            if input(value.start + 1) == 'x' then (
-                if input(value.start + 2) == 'p' then (
-                    if input(value.start + 3) == 'o' then (
-                        if input(value.start + 4) == 'r' then (
-                            if input(value.start + 5) == 't' then 1 else 0
-                        ) else 0
-                    ) else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    if value.start < 0 || value.length != 6 then 0
+    else if input(value.start) == 'e'
+        && input(value.start + 1) == 'x'
+        && input(value.start + 2) == 'p'
+        && input(value.start + 3) == 'o'
+        && input(value.start + 4) == 'r'
+        && input(value.start + 5) == 't'
+    then 1 else 0
 );
 
 string_ref_is_wrap := (value: StringRef) => (
-    if value.start < 0 then 0 else if value.length != 4 then 0 else (
-        if input(value.start) == 'w' then (
-            if input(value.start + 1) == 'r' then (
-                if input(value.start + 2) == 'a' then (
-                    if input(value.start + 3) == 'p' then 1 else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    string_ref_matches_4{value, 'w', 'r', 'a', 'p'}
 );
 
 string_ref_is_asm := (value: StringRef) => (
-    if value.start < 0 then 0 else if value.length != 3 then 0 else (
-        if input(value.start) == 'a' then (
-            if input(value.start + 1) == 's' then (
-                if input(value.start + 2) == 'm' then 1 else 0
-            ) else 0
-        ) else 0
-    )
+    string_ref_matches_3{value, 'a', 's', 'm'}
 );
 
 record_value_index_by_position_no_error := {start: i32, count: i32, index: i32} => (
@@ -1721,7 +1628,7 @@ resolve_lvalue_expr_value_index := {expr_idx: i32, span_start: i32} => (
             NodeKind::Identifier(id) => (
                 bind_idx := find_binding_index(id.name);
                 if bind_idx == -1 then (
-                    set_error_with_code{span_start, INTERP_ERR_UNBOUND_IDENTIFIER};
+                    set_error_with_code{span_start, interp_err_unbound_identifier{}};
                     -1
                 ) else (
                     binding_values(bind_idx)
@@ -1731,7 +1638,7 @@ resolve_lvalue_expr_value_index := {expr_idx: i32, span_start: i32} => (
                 obj_idx := resolve_lvalue_expr_value_index{access.object, span_start};
                 if obj_idx == -1 then (
                     -1
-                ) else if flow_state.kind != FLOW_NONE then (
+                ) else if flow_state.kind != flow_none{} then (
                     obj_idx
                 ) else (
                     if Value::Record(struct_info) := values(obj_idx) then (
@@ -1755,7 +1662,7 @@ resolve_lvalue_expr_value_index := {expr_idx: i32, span_start: i32} => (
                         obj_idx := resolve_lvalue_expr_value_index{access.object, span_start};
                         if obj_idx == -1 then (
                             -1
-                        ) else if flow_state.kind != FLOW_NONE then (
+                        ) else if flow_state.kind != flow_none{} then (
                             obj_idx
                         ) else (
                             if Value::Record(struct_info) := values(obj_idx) then (
@@ -1780,13 +1687,13 @@ resolve_lvalue_expr_value_index := {expr_idx: i32, span_start: i32} => (
                     arr_idx := resolve_lvalue_expr_value_index{call.function, span_start};
                     if arr_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != FLOW_NONE then (
+                    ) else if flow_state.kind != flow_none{} then (
                         arr_idx
                     ) else (
                         index_idx := eval_expression(call.argument);
                         if index_idx == -1 then (
                             -1
-                        ) else if flow_state.kind != FLOW_NONE then (
+                        ) else if flow_state.kind != flow_none{} then (
                             index_idx
                         ) else (
                             if Value::Number(index_value) := values(index_idx) then (
@@ -2029,13 +1936,13 @@ ensure_trait_requirements := {type_value_idx: i32, trait_expr_idx: i32, span_sta
         trait_idx := eval_expression(trait_expr_idx);
         if trait_idx == -1 then (
             0
-        ) else if flow_state.kind != FLOW_NONE then (
+        ) else if flow_state.kind != flow_none{} then (
             0
         ) else (
             required_idx := apply_function_value{trait_idx, type_value_idx, span_start};
             if required_idx == -1 then (
                 0
-            ) else if flow_state.kind != FLOW_NONE then (
+            ) else if flow_state.kind != flow_none{} then (
                 0
             ) else (
                 if Value::Record(required_info) := values(required_idx) then (
@@ -2072,7 +1979,7 @@ ensure_trait_requirements := {type_value_idx: i32, trait_expr_idx: i32, span_sta
                                 ) else 0
                             ) else 0;
                             if found_idx == -1 then (
-                                set_error_with_code{required_name.start, INTERP_ERR_TRAIT_MISSING_FIELD};
+                                set_error_with_code{required_name.start, interp_err_trait_missing_field{}};
                                 ok = 0;
                             ) else (
                                 found_type_idx := value_type_values(found_idx);
@@ -2272,7 +2179,7 @@ check_if_branch_type_compat := {then_expr_idx: i32, else_expr_idx: i32, span_sta
     ) else if then_tag == else_tag then (
         1
     ) else (
-        set_error_with_code{span_start, INTERP_ERR_IF_BRANCH_TYPE_MISMATCH};
+        set_error_with_code{span_start, interp_err_if_branch_type_mismatch{}};
         0
     )
 );
@@ -2339,93 +2246,81 @@ is_empty_struct := (fields: i32) => (
 
 target_literal_tag := (target: TargetLiteral) => (
     target |> match {
-        TargetLiteral::JSTarget => TARGET_JS,
-        TargetLiteral::WasmTarget => TARGET_WASM,
-        TargetLiteral::WgslTarget => TARGET_WGSL,
-        else => -1
+        TargetLiteral::JSTarget => target_js{},
+        TargetLiteral::WasmTarget => target_wasm{},
+        TargetLiteral::WgslTarget => target_wgsl{},
+        else => target_js{}
     }
 );
 
 target_mask_from_tag := (target_tag: i32) => (
-    if target_tag == TARGET_JS then TARGET_MASK_JS else (
-        if target_tag == TARGET_WASM then TARGET_MASK_WASM else (
-            if target_tag == TARGET_WGSL then TARGET_MASK_WGSL else 0
-        )
-    )
+    if target_tag == target_js{} then target_mask_js{}
+    else if target_tag == target_wasm{} then target_mask_wasm{}
+    else if target_tag == target_wgsl{} then target_mask_wgsl{}
+    else 0
+);
+
+target_tag_is_wgsl := (target_tag: i32) => if target_tag == target_wgsl{} then 1 else 0;
+
+target_tags_equal := {left: i32, right: i32} => (
+    if left == right then 1 else 0
 );
 
 target_mask_has := {mask: i32, target_tag: i32} => (
-    if target_tag == TARGET_JS then (
+    if target_tag == target_js{} then (
         if mask == 1 || mask == 3 || mask == 5 || mask == 7 then 1 else 0
-    ) else if target_tag == TARGET_WASM then (
+    ) else if target_tag == target_wasm{} then (
         if mask == 2 || mask == 3 || mask == 6 || mask == 7 then 1 else 0
-    ) else if target_tag == TARGET_WGSL then (
+    ) else if target_tag == target_wgsl{} then (
         if mask == 4 || mask == 5 || mask == 6 || mask == 7 then 1 else 0
     ) else (
         0
     )
 );
 
+binding_annotation_equals := {left_kind: i32, left_target: i32, right_kind: i32, right_target: i32} => (
+    if left_kind == right_kind && left_target == right_target then 1 else 0
+);
+
 target_mask_or := {left: i32, right: i32} => (
-    mut result := left;
-    if target_mask_has{right, TARGET_JS} == 1 && target_mask_has{result, TARGET_JS} == 0 then (
-        result = result + TARGET_MASK_JS;
-        0
-    ) else 0;
-    if target_mask_has{right, TARGET_WASM} == 1 && target_mask_has{result, TARGET_WASM} == 0 then (
-        result = result + TARGET_MASK_WASM;
-        0
-    ) else 0;
-    if target_mask_has{right, TARGET_WGSL} == 1 && target_mask_has{result, TARGET_WGSL} == 0 then (
-        result = result + TARGET_MASK_WGSL;
-        0
-    ) else 0;
-    result
+    js := if target_mask_has{left, target_js{}} == 1 || target_mask_has{right, target_js{}} == 1 then target_mask_js{} else 0;
+    wasm := if target_mask_has{left, target_wasm{}} == 1 || target_mask_has{right, target_wasm{}} == 1 then target_mask_wasm{} else 0;
+    wgsl := if target_mask_has{left, target_wgsl{}} == 1 || target_mask_has{right, target_wgsl{}} == 1 then target_mask_wgsl{} else 0;
+    js + wasm + wgsl
 );
 
 target_mask_and := {left: i32, right: i32} => (
-    mut result := 0;
-    if target_mask_has{left, TARGET_JS} == 1 && target_mask_has{right, TARGET_JS} == 1 then (
-        result = result + TARGET_MASK_JS;
-        0
-    ) else 0;
-    if target_mask_has{left, TARGET_WASM} == 1 && target_mask_has{right, TARGET_WASM} == 1 then (
-        result = result + TARGET_MASK_WASM;
-        0
-    ) else 0;
-    if target_mask_has{left, TARGET_WGSL} == 1 && target_mask_has{right, TARGET_WGSL} == 1 then (
-        result = result + TARGET_MASK_WGSL;
-        0
-    ) else 0;
-    result
+    js := if target_mask_has{left, target_js{}} == 1 && target_mask_has{right, target_js{}} == 1 then target_mask_js{} else 0;
+    wasm := if target_mask_has{left, target_wasm{}} == 1 && target_mask_has{right, target_wasm{}} == 1 then target_mask_wasm{} else 0;
+    wgsl := if target_mask_has{left, target_wgsl{}} == 1 && target_mask_has{right, target_wgsl{}} == 1 then target_mask_wgsl{} else 0;
+    js + wasm + wgsl
 );
 
 target_mask_allows := {required: i32, current: i32} => (
-    if target_mask_has{current, TARGET_JS} == 1 && target_mask_has{required, TARGET_JS} == 0 then 0 else (
-        if target_mask_has{current, TARGET_WASM} == 1 && target_mask_has{required, TARGET_WASM} == 0 then 0 else (
-            if target_mask_has{current, TARGET_WGSL} == 1 && target_mask_has{required, TARGET_WGSL} == 0 then 0 else 1
-        )
-    )
+    js_blocked := target_mask_has{current, target_js{}} == 1 && target_mask_has{required, target_js{}} == 0;
+    wasm_blocked := target_mask_has{current, target_wasm{}} == 1 && target_mask_has{required, target_wasm{}} == 0;
+    wgsl_blocked := target_mask_has{current, target_wgsl{}} == 1 && target_mask_has{required, target_wgsl{}} == 0;
+    if js_blocked || wasm_blocked || wgsl_blocked then 0 else 1
 );
 
 target_mask_is_single_target := (mask: i32) => (
-    if mask == TARGET_MASK_JS || mask == TARGET_MASK_WASM || mask == TARGET_MASK_WGSL then 1 else 0
+    if mask == target_mask_js{} || mask == target_mask_wasm{} || mask == target_mask_wgsl{} then 1 else 0
 );
 
 validate_wrap_export_annotations := {value_idx: i32, export_mask: i32, wrap_mask: i32, span_start: i32} => (
     if wrap_mask == 0 then (
         1
     ) else if target_mask_is_single_target(export_mask) == 0 then (
-        set_error_with_code{span_start, INTERP_ERR_WRAP_REQUIRES_SINGLE_EXPORT_TARGET};
+        set_error_with_code{span_start, interp_err_wrap_requires_single_export_target{}};
         0
     ) else (
         if Value::Function(_) := values(value_idx) then (
             1
         ) else (
-            if export_mask == TARGET_MASK_WASM && wrap_mask == TARGET_MASK_JS then (
+            if export_mask == target_mask_wasm{} && wrap_mask == target_mask_js{} then (
                 1
             ) else (
-                set_error_with_code{span_start, INTERP_ERR_WRAP_GLOBAL_ONLY_WASM_TO_JS};
+                set_error_with_code{span_start, interp_err_wrap_global_only_wasm_to_js{}};
                 0
             )
         )
@@ -2434,17 +2329,17 @@ validate_wrap_export_annotations := {value_idx: i32, export_mask: i32, wrap_mask
 
 binding_annotation_from_literal := (ann: BindingAnnotationLiteral) => (
     ann |> match {
-        BindingAnnotationLiteral::Mut => Value::BindingAnnotation({ kind = BINDING_ANN_MUT, target = -1 }),
+        BindingAnnotationLiteral::Mut => Value::BindingAnnotation({ kind = binding_ann_mut{}, target = -1 }),
         BindingAnnotationLiteral::Export(target) => Value::BindingAnnotation({
-            kind = BINDING_ANN_EXPORT,
+            kind = binding_ann_export{},
             target = target_literal_tag(target)
         }),
         BindingAnnotationLiteral::Target(target) => Value::BindingAnnotation({
-            kind = BINDING_ANN_TARGET,
+            kind = binding_ann_target{},
             target = target_literal_tag(target)
         }),
         BindingAnnotationLiteral::Wrap(target) => Value::BindingAnnotation({
-            kind = BINDING_ANN_WRAP,
+            kind = binding_ann_wrap{},
             target = target_literal_tag(target)
         }),
         else => Value::Unit
@@ -2572,7 +2467,7 @@ enum_value_matches_pattern_type := {enum_type_expr: i32, enum_head: i32, enum_co
     expected_idx := eval_expression(enum_type_expr);
     if expected_idx == -1 then (
         -1
-    ) else if flow_state.kind != FLOW_NONE then (
+    ) else if flow_state.kind != flow_none{} then (
         -1
     ) else (
         if Value::EnumType(expected_enum) := values(expected_idx) then (
@@ -2613,13 +2508,7 @@ string_ref_equals_synthetic := {synthetic_start: i32, synthetic_len: i32, input_
         ) else if synthetic_start == SYNTHETIC_RANGE_STRING.start then (
             string_ref_is_range(input_ref)
         ) else if synthetic_start == SYNTHETIC_BOX_STRING.start then (
-            if input_ref.start < 0 then 0 else if input_ref.length != 3 then 0 else (
-                if input(input_ref.start) == 'b' then (
-                    if input(input_ref.start + 1) == 'o' then (
-                        if input(input_ref.start + 2) == 'x' then 1 else 0
-                    ) else 0
-                ) else 0
-            )
+            string_ref_matches_3{input_ref, 'b', 'o', 'x'}
         ) else if synthetic_start == SYNTHETIC_I32_STRING.start then (
             string_ref_is_i32(input_ref)
         ) else if synthetic_start == SYNTHETIC_U8_STRING.start then (
@@ -2645,21 +2534,11 @@ string_ref_equals_synthetic := {synthetic_start: i32, synthetic_len: i32, input_
 );
 
 span_is_underscore := {start: i32, length: i32} => (
-    if start < 0 then 0 else if length != 1 then 0 else (
-        if input(start) == '_' then 1 else 0
-    )
+    string_ref_is_underscore(make_string_ref{start, length})
 );
 
 span_is_else := {start: i32, length: i32} => (
-    if start < 0 then 0 else if length != 4 then 0 else (
-        if input(start) == 'e' then (
-            if input(start + 1) == 'l' then (
-                if input(start + 2) == 's' then (
-                    if input(start + 3) == 'e' then 1 else 0
-                ) else 0
-            ) else 0
-        ) else 0
-    )
+    string_ref_is_else(make_string_ref{start, length})
 );
 
 add_binding_if_named := {start: i32, length: i32, value_idx: i32, is_mut: i32} => (
@@ -2864,7 +2743,7 @@ bind_struct_pattern := {fields_head: i32, value_idx: i32, inherit_mut: i32, inhe
                 );
                 if field_value_idx == -1 then (
                     missing_span := if field_name.start >= 0 then field_name.start else nodes(field_node).span.start;
-                    set_error_with_code{missing_span, INTERP_ERR_MISSING_FIELD};
+                    set_error_with_code{missing_span, interp_err_missing_field{}};
                     ok = 0;
                 ) else (
                     if bind_pattern_expr{field_binding.expr, field_value_idx, inherit_mut, inherit_target_mask, inherit_export_mask, inherit_wrap_mask} == 0 then (
@@ -2940,7 +2819,7 @@ bind_pattern_expr := {pattern_expr: i32, value_idx: i32, inherit_mut: i32, inher
                 type_idx := eval_expression(op.right);
                 if type_idx == -1 then (
                     0
-                ) else if flow_state.kind != FLOW_NONE then (
+                ) else if flow_state.kind != flow_none{} then (
                     0
                 ) else (
                     resolve_binding_from_expr(op.left);
@@ -3087,7 +2966,7 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
                             if type_idx == -1 then (
                                 0
                             ) else (
-                                if flow_state.kind != FLOW_NONE then (
+                                if flow_state.kind != flow_none{} then (
                                     0
                                 ) else (
                                     resolve_binding_from_expr(op.left);
@@ -3141,7 +3020,7 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
                         used_precomputed_type = 1;
                         {}
                     ) else (
-                        if flow_state.kind != FLOW_NONE then (
+                        if flow_state.kind != flow_none{} then (
                             type_idx = -1;
                             used_precomputed_type = 1;
                             {}
@@ -3172,7 +3051,7 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
             );
             if type_idx == -1 then (
                 0
-            ) else if flow_state.kind != FLOW_NONE then (
+            ) else if flow_state.kind != flow_none{} then (
                 0
             ) else if trait_expr_idx != -1 && ensure_trait_requirements{value_idx, trait_expr_idx, nodes(info.type_expr).span.start} == 0 then (
                 0
@@ -3293,7 +3172,7 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
         Value::String(string_value) => (
             if Value::Number(index_value) := values(arg_idx) then (
                 if index_value < 0 || index_value >= string_value.length then (
-                    set_error_with_code{span_start, INTERP_ERR_ARRAY_INDEX_OUT_OF_RANGE};
+                    set_error_with_code{span_start, interp_err_array_index_out_of_range{}};
                     -1
                 ) else if string_value.start < 0 then (
                     set_error(span_start);
@@ -3342,9 +3221,9 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                         result_idx = -1;
                     ) else (
                         result_idx = eval_expression(fn_info.body);
-                        if flow_state.kind == FLOW_RETURN then (
+                        if flow_state.kind == flow_return{} then (
                             result_idx = flow_state.value;
-                            flow_state.kind = FLOW_NONE;
+                            flow_state.kind = flow_none{};
                             flow_state.value = -1;
                         );
                     );
@@ -3400,9 +3279,9 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                                 matched = 1;
                                 runtime_state.function_depth = runtime_state.function_depth + 1;
                                 result_idx = eval_expression(branch_fn.body);
-                                if flow_state.kind == FLOW_RETURN then (
+                                if flow_state.kind == flow_return{} then (
                                     result_idx = flow_state.value;
-                                    flow_state.kind = FLOW_NONE;
+                                    flow_state.kind = flow_none{};
                                     flow_state.value = -1;
                                 );
                                 runtime_state.function_depth = runtime_state.function_depth - 1;
@@ -3431,14 +3310,14 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                 {}
             );
             if matched == 0 then (
-                set_error_with_code{span_start, INTERP_ERR_MATCH_NO_BRANCH};
+                set_error_with_code{span_start, interp_err_match_no_branch{}};
                 -1
             ) else (
                 result_idx
             )
         ),
         Value::Builtin(builtin_id) => (
-            if builtin_id == BUILTIN_ENUM then (
+            if builtin_id == builtin_enum{} then (
                 if Value::Record(rec_info) := values(arg_idx) then (
                     if rec_info.has_named == 0 then (
                         set_error(span_start);
@@ -3458,14 +3337,14 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                     set_error(span_start);
                     -1
                 )
-            ) else if builtin_id == BUILTIN_MATCH then (
+            ) else if builtin_id == builtin_match{} then (
                 if Value::Record(rec_info) := values(arg_idx) then (
                     store_value(Value::MatchFunction({ head = rec_info.head, count = rec_info.count }))
                 ) else (
                     set_error(span_start);
                     -1
                 )
-            ) else if builtin_id == BUILTIN_OPTION then (
+            ) else if builtin_id == builtin_option{} then (
                 option_enum_idx := option_enum_from_type{arg_idx, span_start};
                 if option_enum_idx == -1 then (
                     set_error(span_start);
@@ -3473,7 +3352,7 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                 ) else (
                     option_enum_idx
                 )
-            ) else if builtin_id == BUILTIN_ITERATOR then (
+            ) else if builtin_id == builtin_iterator{} then (
                 if runtime_state.option_enum_idx == -1 then (
                     set_error(span_start);
                     -1
@@ -3542,14 +3421,14 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                     )
                     )
                 )
-            ) else if builtin_id == BUILTIN_EXPORT || builtin_id == BUILTIN_TARGET || builtin_id == BUILTIN_WRAP then (
+            ) else if builtin_id == builtin_export{} || builtin_id == builtin_target{} || builtin_id == builtin_wrap{} then (
                 if Value::Target(target_tag) := values(arg_idx) then (
-                    if builtin_id == BUILTIN_WRAP && target_tag == TARGET_WGSL then (
+                    if builtin_id == builtin_wrap{} && target_tag_is_wgsl(target_tag) == 1 then (
                         set_error(span_start);
                         -1
                     ) else (
-                        kind := if builtin_id == BUILTIN_EXPORT then BINDING_ANN_EXPORT else (
-                            if builtin_id == BUILTIN_TARGET then BINDING_ANN_TARGET else BINDING_ANN_WRAP
+                        kind := if builtin_id == builtin_export{} then binding_ann_export{} else (
+                            if builtin_id == builtin_target{} then binding_ann_target{} else binding_ann_wrap{}
                         );
                         store_value(Value::BindingAnnotation({ kind = kind, target = target_tag }))
                     )
@@ -3557,21 +3436,21 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                     set_error(span_start);
                     -1
                 )
-            ) else if builtin_id == BUILTIN_ASM then (
+            ) else if builtin_id == builtin_asm{} then (
                 if Value::Target(target_tag) := values(arg_idx) then (
                     store_value(Value::AsmFunction(target_tag))
                 ) else (
                     set_error(span_start);
                     -1
                 )
-            ) else if builtin_id == BUILTIN_USE then (
+            ) else if builtin_id == builtin_use{} then (
                 if Value::String(path_ref) := values(arg_idx) then (
                     eval_use_from_string{path_ref, span_start}
                 ) else (
                     set_error(span_start);
                     -1
                 )
-            ) else if builtin_id == BUILTIN_RANGE_NEXT then (
+            ) else if builtin_id == builtin_range_next{} then (
                 if Value::Record(range_info) := values(arg_idx) then (
                     if range_info.count < 2 then (
                         set_error(span_start);
@@ -3762,6 +3641,10 @@ eval_import_root := {root_idx: i32, span_start: i32} => (
     saved_flow_value := flow_state.value;
     saved_loop_depth := runtime_state.loop_depth;
     saved_function_depth := runtime_state.function_depth;
+    saved_option_enum_idx := runtime_state.option_enum_idx;
+    saved_option_i32_enum_idx := runtime_state.option_i32_enum_idx;
+    saved_type_value_idx := runtime_state.type_value_idx;
+    saved_range_type_idx := runtime_state.range_type_idx;
     saved_bind_value := bind_pattern_state.value_idx;
     saved_bind_inherit_mut := bind_pattern_state.inherit_mut;
     saved_bind_inherit_target := bind_pattern_state.inherit_target_mask;
@@ -3783,7 +3666,7 @@ eval_import_root := {root_idx: i32, span_start: i32} => (
     binding_state.scope_count = 0;
     binding_target_state.depth = 0;
     binding_target_state.acc_mask = 0;
-    flow_state.kind = FLOW_NONE;
+    flow_state.kind = flow_none{};
     flow_state.value = -1;
     runtime_state.loop_depth = 0;
     runtime_state.function_depth = 0;
@@ -3803,8 +3686,8 @@ eval_import_root := {root_idx: i32, span_start: i32} => (
 
     enter_scope{};
     mut result_idx := eval_expression(root_idx);
-    if flow_state.kind != FLOW_NONE then (
-        flow_state.kind = FLOW_NONE;
+    if flow_state.kind != flow_none{} then (
+        flow_state.kind = flow_none{};
         flow_state.value = -1;
         set_error(span_start);
         result_idx = -1;
@@ -3824,6 +3707,10 @@ eval_import_root := {root_idx: i32, span_start: i32} => (
     flow_state.value = saved_flow_value;
     runtime_state.loop_depth = saved_loop_depth;
     runtime_state.function_depth = saved_function_depth;
+    runtime_state.option_enum_idx = saved_option_enum_idx;
+    runtime_state.option_i32_enum_idx = saved_option_i32_enum_idx;
+    runtime_state.type_value_idx = saved_type_value_idx;
+    runtime_state.range_type_idx = saved_range_type_idx;
     bind_pattern_state.value_idx = saved_bind_value;
     bind_pattern_state.inherit_mut = saved_bind_inherit_mut;
     bind_pattern_state.inherit_target_mask = saved_bind_inherit_target;
@@ -3844,7 +3731,7 @@ eval_import_root := {root_idx: i32, span_start: i32} => (
 eval_expression: (i32 -> i32) := (idx: i32) => (
     if value_state.error != -1 then (
         -1
-    ) else if flow_state.kind != FLOW_NONE then (
+    ) else if flow_state.kind != flow_none{} then (
         flow_state.value
     ) else (
         span_start := nodes(idx).span.start;
@@ -3889,7 +3776,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     if builtin != -1 then (
                         store_value(Value::Builtin(builtin))
                     ) else (
-                        set_error_with_code{span_start, INTERP_ERR_UNBOUND_IDENTIFIER};
+                        set_error_with_code{span_start, interp_err_unbound_identifier{}};
                         -1
                     )
                 ) else (
@@ -3911,7 +3798,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     pop_binding_target_mask{};
                     if value_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != FLOW_NONE then (
+                    ) else if flow_state.kind != flow_none{} then (
                         value_idx
                     ) else (
                         bind_pattern_state.value_idx = value_idx;
@@ -3932,7 +3819,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 value_idx := eval_expression(info.expr);
                 if value_idx == -1 then (
                     -1
-                ) else if flow_state.kind != FLOW_NONE then (
+                ) else if flow_state.kind != flow_none{} then (
                     value_idx
                 ) else (
                     info.target |> match {
@@ -3969,7 +3856,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                 -1
                             ) else (
                                 obj_idx := resolve_lvalue_expr_value_index{target_info.object, span_start};
-                                if flow_state.kind != FLOW_NONE then (
+                                if flow_state.kind != flow_none{} then (
                                     flow_state.value
                                 ) else if obj_idx == -1 then (
                                     -1
@@ -4010,7 +3897,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                 -1
                             ) else (
                                 arr_idx := resolve_lvalue_expr_value_index{target_info.array, span_start};
-                                if flow_state.kind != FLOW_NONE then (
+                                if flow_state.kind != flow_none{} then (
                                     flow_state.value
                                 ) else if arr_idx == -1 then (
                                     -1
@@ -4018,7 +3905,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                     index_idx := eval_expression(target_info.index);
                                     if index_idx == -1 then (
                                         -1
-                                    ) else if flow_state.kind != FLOW_NONE then (
+                                    ) else if flow_state.kind != flow_none{} then (
                                         flow_state.value
                                     ) else (
                                         if Value::Number(index_value) := values(index_idx) then (
@@ -4072,7 +3959,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 inner_value_idx := eval_expression(inner_idx);
                 if inner_value_idx == -1 then (
                     -1
-                ) else if flow_state.kind != FLOW_NONE then (
+                ) else if flow_state.kind != flow_none{} then (
                     inner_value_idx
                 ) else if value_is_type(inner_value_idx) == 0 then (
                     set_error(span_start);
@@ -4105,7 +3992,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 param_value_idx := eval_expression(info.parameter);
                 if param_value_idx == -1 then (
                     -1
-                ) else if flow_state.kind != FLOW_NONE then (
+                ) else if flow_state.kind != flow_none{} then (
                     param_value_idx
                 ) else if value_is_type(param_value_idx) == 0 then (
                     set_error(span_start);
@@ -4114,7 +4001,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     ret_value_idx := eval_expression(info.return_type);
                     if ret_value_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != FLOW_NONE then (
+                    ) else if flow_state.kind != flow_none{} then (
                         ret_value_idx
                     ) else if value_is_type(ret_value_idx) == 0 then (
                         set_error(span_start);
@@ -4155,7 +4042,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     obj_idx := eval_expression(access.object);
                     if obj_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != FLOW_NONE then (
+                    ) else if flow_state.kind != flow_none{} then (
                         obj_idx
                     ) else (
                         if info.argument == access.object then (
@@ -4203,7 +4090,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                         payload_value_idx := eval_expression(info.argument);
                                         if payload_value_idx == -1 then (
                                             -1
-                                        ) else if flow_state.kind != FLOW_NONE then (
+                                        ) else if flow_state.kind != flow_none{} then (
                                             payload_value_idx
                                         ) else (
                                             store_value(Value::Enum({
@@ -4250,7 +4137,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                     arg_idx := eval_expression(info.argument);
                                     if arg_idx == -1 then (
                                         -1
-                                    ) else if flow_state.kind != FLOW_NONE then (
+                                    ) else if flow_state.kind != flow_none{} then (
                                         arg_idx
                                     ) else (
                                         apply_function_value{prop_idx, arg_idx, span_start}
@@ -4263,13 +4150,13 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     func_idx := eval_expression(info.function);
                     if func_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != FLOW_NONE then (
+                    ) else if flow_state.kind != flow_none{} then (
                         func_idx
                     ) else (
                         arg_idx := eval_expression(info.argument);
                         if arg_idx == -1 then (
                             -1
-                        ) else if flow_state.kind != FLOW_NONE then (
+                        ) else if flow_state.kind != flow_none{} then (
                             arg_idx
                         ) else (
                             apply_function_value{func_idx, arg_idx, span_start}
@@ -4281,13 +4168,13 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 type_idx := eval_expression(info.type_expr);
                 if type_idx == -1 then (
                     -1
-                ) else if flow_state.kind != FLOW_NONE then (
+                ) else if flow_state.kind != flow_none{} then (
                     type_idx
                 ) else (
                     impl_idx := eval_expression(info.implementation);
                     if impl_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != FLOW_NONE then (
+                    ) else if flow_state.kind != flow_none{} then (
                         impl_idx
                     ) else (
                         if Value::Record(_) := values(impl_idx) then (
@@ -4309,13 +4196,13 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         left_idx := eval_expression(bin.left);
                         if left_idx == -1 then (
                             -1
-                        ) else if flow_state.kind != FLOW_NONE then (
+                        ) else if flow_state.kind != flow_none{} then (
                             left_idx
                         ) else (
                             right_idx := eval_expression(bin.right);
                             if right_idx == -1 then (
                                 -1
-                            ) else if flow_state.kind != FLOW_NONE then (
+                            ) else if flow_state.kind != flow_none{} then (
                                 right_idx
                             ) else (
                                 left := values(left_idx);
@@ -4507,7 +4394,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         operand_idx := eval_expression(unary.operand);
                         if operand_idx == -1 then (
                             -1
-                        ) else if flow_state.kind != FLOW_NONE then (
+                        ) else if flow_state.kind != flow_none{} then (
                             operand_idx
                         ) else (
                             unary.operator |> match {
@@ -4587,7 +4474,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                 UnaryIntrinsicOperator::BindingAnnotationExportFromTarget => (
                                     if Value::Target(target_tag) := values(operand_idx) then (
                                         store_value(Value::BindingAnnotation({
-                                            kind = BINDING_ANN_EXPORT,
+                                            kind = binding_ann_export{},
                                             target = target_tag
                                         }))
                                     ) else (
@@ -4598,7 +4485,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                 UnaryIntrinsicOperator::BindingAnnotationTargetFromTarget => (
                                     if Value::Target(target_tag) := values(operand_idx) then (
                                         store_value(Value::BindingAnnotation({
-                                            kind = BINDING_ANN_TARGET,
+                                            kind = binding_ann_target{},
                                             target = target_tag
                                         }))
                                     ) else (
@@ -4608,12 +4495,12 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                 ),
                                 UnaryIntrinsicOperator::BindingAnnotationWrapFromTarget => (
                                     if Value::Target(target_tag) := values(operand_idx) then (
-                                        if target_tag == TARGET_WGSL then (
+                                        if target_tag_is_wgsl(target_tag) == 1 then (
                                             set_error(span_start);
                                             -1
                                         ) else (
                                             store_value(Value::BindingAnnotation({
-                                                kind = BINDING_ANN_WRAP,
+                                                kind = binding_ann_wrap{},
                                                 target = target_tag
                                             }))
                                         )
@@ -4641,7 +4528,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         code_idx := eval_expression(info.code);
                         if code_idx == -1 then (
                             -1
-                        ) else if flow_state.kind != FLOW_NONE then (
+                        ) else if flow_state.kind != flow_none{} then (
                             code_idx
                         ) else (
                             target_tag := target_literal_tag(info.target);
@@ -4668,13 +4555,13 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 left_idx := eval_expression(info.left);
                 if left_idx == -1 then (
                     -1
-                ) else if flow_state.kind != FLOW_NONE then (
+                ) else if flow_state.kind != flow_none{} then (
                     left_idx
                 ) else (
                     right_idx := eval_expression(info.right);
                     if right_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != FLOW_NONE then (
+                    ) else if flow_state.kind != flow_none{} then (
                         right_idx
                     ) else (
                         op_start := info.operator.start;
@@ -4741,7 +4628,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                                                 if name_idx4 == -1 then (
                                                                     -1
                                                                 ) else (
-                                                                    next_idx := store_value(Value::Builtin(BUILTIN_RANGE_NEXT));
+                                                                    next_idx := store_value(Value::Builtin(builtin_range_next{}));
                                                                     if next_idx == -1 then (
                                                                         -1
                                                                     ) else (
@@ -4833,9 +4720,9 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         ) else if Value::Target(lv) := left then (
                             if Value::Target(rv) := right then (
                                 if op_is2{op_start, op_len, '=', '='} == 1 then (
-                                    store_value(Value::Boolean(if lv == rv then 1 else 0))
+                                    store_value(Value::Boolean(target_tags_equal{lv, rv}))
                                 ) else if op_is2{op_start, op_len, '!', '='} == 1 then (
-                                    store_value(Value::Boolean(if lv != rv then 1 else 0))
+                                    store_value(Value::Boolean(if target_tags_equal{lv, rv} == 1 then 0 else 1))
                                 ) else (
                                     set_error(span_start);
                                     -1
@@ -4848,11 +4735,11 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                             if Value::BindingAnnotation(rv) := right then (
                                 if op_is2{op_start, op_len, '=', '='} == 1 then (
                                     store_value(Value::Boolean(
-                                        if lv.kind == rv.kind && lv.target == rv.target then 1 else 0
+                                        binding_annotation_equals{lv.kind, lv.target, rv.kind, rv.target}
                                     ))
                                 ) else if op_is2{op_start, op_len, '!', '='} == 1 then (
                                     store_value(Value::Boolean(
-                                        if lv.kind == rv.kind && lv.target == rv.target then 0 else 1
+                                        if binding_annotation_equals{lv.kind, lv.target, rv.kind, rv.target} == 1 then 0 else 1
                                     ))
                                 ) else (
                                     set_error(span_start);
@@ -4873,7 +4760,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 cond_idx := eval_expression(info.condition);
                 if cond_idx == -1 then (
                     -1
-                ) else if flow_state.kind != FLOW_NONE then (
+                ) else if flow_state.kind != flow_none{} then (
                     cond_idx
                 ) else (
                     cond_value := values(cond_idx);
@@ -4902,7 +4789,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 mut last_idx: i32 := store_value(Value::Unit);
                 while count < list.count && current != -1 do (
                     last_idx = eval_expression(list_nodes(current).value);
-                    if value_state.error != -1 || flow_state.kind != FLOW_NONE then (
+                    if value_state.error != -1 || flow_state.kind != flow_none{} then (
                         current = -1;
                         0
                     ) else (
@@ -4924,13 +4811,13 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     if value_state.error != -1 then (
                         done = 1;
                         0
-                    ) else if flow_state.kind == FLOW_BREAK then (
+                    ) else if flow_state.kind == flow_break{} then (
                         last_idx = flow_state.value;
-                        flow_state.kind = FLOW_NONE;
+                        flow_state.kind = flow_none{};
                         flow_state.value = -1;
                         done = 1;
                         0
-                    ) else if flow_state.kind == FLOW_RETURN then (
+                    ) else if flow_state.kind == flow_return{} then (
                         done = 1;
                         0
                     ) else (
@@ -4952,7 +4839,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                             if value_idx == -1 then (
                                 -1
                             ) else (
-                                flow_state.kind = FLOW_BREAK;
+                                flow_state.kind = flow_break{};
                                 flow_state.value = value_idx;
                                 value_idx
                             )
@@ -4967,7 +4854,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                             if value_idx == -1 then (
                                 -1
                             ) else (
-                                flow_state.kind = FLOW_RETURN;
+                                flow_state.kind = flow_return{};
                                 flow_state.value = value_idx;
                                 value_idx
                             )
@@ -4991,7 +4878,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         last_idx = eval_expression(variant_binding.expr);
                         if last_idx == -1 then (
                             current = -1;
-                        ) else if flow_state.kind != FLOW_NONE then (
+                        ) else if flow_state.kind != flow_none{} then (
                             current = -1;
                         ) else if value_is_type(last_idx) == 0 then (
                             type_ok = 0;
@@ -5018,7 +4905,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 );
                 if value_state.error != -1 then (
                     -1
-                ) else if flow_state.kind != FLOW_NONE then (
+                ) else if flow_state.kind != flow_none{} then (
                     last_idx
                 ) else if type_ok == 0 then (
                     set_error(span_start);
@@ -5086,7 +4973,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 value_idx := eval_expression(info.value);
                 if value_idx == -1 then (
                     -1
-                ) else if flow_state.kind != FLOW_NONE then (
+                ) else if flow_state.kind != flow_none{} then (
                     value_idx
                 ) else (
                     mut matched := 0;
@@ -5123,7 +5010,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         {}
                     );
                     if matched == 0 then (
-                        set_error_with_code{span_start, INTERP_ERR_MATCH_NO_BRANCH};
+                        set_error_with_code{span_start, interp_err_match_no_branch{}};
                         -1
                     ) else (
                         result_idx
@@ -5134,13 +5021,13 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 enum_idx := eval_expression(info.enum_type);
                 if enum_idx == -1 then (
                     -1
-                ) else if flow_state.kind != FLOW_NONE then (
+                ) else if flow_state.kind != flow_none{} then (
                     enum_idx
                 ) else (
                     payload_idx := eval_expression(info.payload);
                     if payload_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != FLOW_NONE then (
+                    ) else if flow_state.kind != flow_none{} then (
                         payload_idx
                     ) else (
                         if Value::EnumType(enum_info) := values(enum_idx) then (
@@ -5173,13 +5060,13 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 enum_idx := eval_expression(info.enum_type);
                 if enum_idx == -1 then (
                     -1
-                ) else if flow_state.kind != FLOW_NONE then (
+                ) else if flow_state.kind != flow_none{} then (
                     enum_idx
                 ) else (
                     payload_type_idx := eval_expression(info.payload_type);
                     if payload_type_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != FLOW_NONE then (
+                    ) else if flow_state.kind != flow_none{} then (
                         payload_type_idx
                     ) else if value_is_type(payload_type_idx) == 0 then (
                         set_error(span_start);
@@ -5223,19 +5110,19 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 array_idx := eval_expression(info.array);
                 if array_idx == -1 then (
                     -1
-                ) else if flow_state.kind != FLOW_NONE then (
+                ) else if flow_state.kind != flow_none{} then (
                     array_idx
                 ) else (
                     index_idx := eval_expression(info.index);
                     if index_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != FLOW_NONE then (
+                    ) else if flow_state.kind != flow_none{} then (
                         index_idx
                     ) else (
                         if Value::Number(index_value) := values(index_idx) then (
                             if Value::String(string_value) := values(array_idx) then (
                                 if index_value < 0 || index_value >= string_value.length then (
-                                    set_error_with_code{span_start, INTERP_ERR_ARRAY_INDEX_OUT_OF_RANGE};
+                                    set_error_with_code{span_start, interp_err_array_index_out_of_range{}};
                                     -1
                                 ) else if string_value.start < 0 then (
                                     set_error(span_start);
@@ -5270,7 +5157,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 obj_idx := eval_expression(info.object);
                 if obj_idx == -1 then (
                     -1
-                ) else if flow_state.kind != FLOW_NONE then (
+                ) else if flow_state.kind != flow_none{} then (
                     obj_idx
                 ) else (
                     obj_val := values(obj_idx);
@@ -5364,14 +5251,14 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 value_idx := eval_expression(info.value);
                 if value_idx == -1 then (
                     -1
-                ) else if flow_state.kind != FLOW_NONE then (
+                ) else if flow_state.kind != flow_none{} then (
                     value_idx
                 ) else (
                     count_is_literal := if NodeKind::Literal(ExpressionLiteral::Number(_)) := nodes(info.count).kind then 1 else 0;
                     count_idx := eval_expression(info.count);
                     if count_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != FLOW_NONE then (
+                    ) else if flow_state.kind != flow_none{} then (
                         count_idx
                     ) else (
                         if Value::Number(count_value) := values(count_idx) then (
@@ -5435,7 +5322,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                             last_idx = eval_expression(field_binding.expr);
                             if last_idx == -1 then (
                                 current = -1;
-                            ) else if flow_state.kind != FLOW_NONE then (
+                            ) else if flow_state.kind != flow_none{} then (
                                 current = -1;
                             ) else (
                                 if value_is_type(last_idx) == 0 then (
@@ -5465,7 +5352,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     );
                     if value_state.error != -1 then (
                         -1
-                    ) else if flow_state.kind != FLOW_NONE then (
+                    ) else if flow_state.kind != flow_none{} then (
                         last_idx
                     ) else (
                         start_idx := value_state.count;
@@ -5569,13 +5456,14 @@ value_tag := (value: Value) => (
         exit_scope{};
         -1
     ) else (
+        mut result_idx := -1;
         if NodeKind::Block(list) := nodes(root).kind then (
             mut current := list.head;
             mut count := 0;
-            mut last_idx: i32 := store_value(Value::Unit);
+            result_idx = store_value(Value::Unit);
             while count < list.count && current != -1 do (
-                last_idx = eval_expression(list_nodes(current).value);
-                if value_state.error != -1 || flow_state.kind != FLOW_NONE then (
+                result_idx = eval_expression(list_nodes(current).value);
+                if value_state.error != -1 || flow_state.kind != flow_none{} then (
                     current = -1;
                     0
                 ) else (
@@ -5585,21 +5473,15 @@ value_tag := (value: Value) => (
                 );
                 {}
             );
-            if value_state.error != -1 then (
-                exit_scope{};
-                -1
-            ) else (
-                last_idx
-            )
+            0
         ) else (
-            result_idx := eval_expression(root);
-            if value_state.error != -1 then (
-                exit_scope{};
-                -1
-            ) else (
-                result_idx
-            )
-        )
+            result_idx = eval_expression(root);
+            0
+        );
+        if value_state.error != -1 then (
+            exit_scope{};
+            -1
+        ) else result_idx
     )
 );
 
