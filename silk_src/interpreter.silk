@@ -92,6 +92,19 @@ TargetTag := enum {
     Wgsl = {},
 };
 
+BindingAnnotationValue := enum {
+    Mut = {},
+    Export = TargetTag,
+    Target = TargetTag,
+    Wrap = TargetTag,
+};
+
+FlowKind := enum {
+    None = {},
+    Return = {},
+    Break = {},
+};
+
 Value := enum {
     Number = i32,
     Boolean = i32,
@@ -105,10 +118,10 @@ Value := enum {
     EnumConstructor = { enum_head = i32, enum_count = i32, variant_idx = i32, expects_payload = i32 },
     Enum = { enum_head = i32, enum_count = i32, variant_idx = i32, payload = i32 },
     MatchFunction = { head = i32, count = i32 },
-    Target = i32,
-    BindingAnnotation = { kind = i32, target = i32 },
-    AsmFunction = i32,
-    InlineAssembly = { target = i32, code = StringRef },
+    Target = TargetTag,
+    BindingAnnotation = BindingAnnotationValue,
+    AsmFunction = TargetTag,
+    InlineAssembly = { target = TargetTag, code = StringRef },
 };
 
 ValueState := { count = i32, error = i32, error_code = i32 };
@@ -121,7 +134,7 @@ FileState := { count = i32 };
 IntrinsicState := { binding_count = i32 };
 AnnotationTemp := { is_mut = i32, target_mask = i32, export_mask = i32, wrap_mask = i32 };
 
-FlowState := { kind = i32, value = i32 };
+FlowState := { kind = FlowKind, value = i32 };
 RuntimeState := {
     loop_depth = i32,
     function_depth = i32,
@@ -138,24 +151,26 @@ MAX_IMPLS := 1024;
 MAX_SCOPES := 256;
 MAX_FILES := 256;
 
-FlowKind := enum {
-    None = {},
-    Return = {},
-    Break = {},
-};
-
-flow_kind_tag := (kind: FlowKind) => (
+flow_kind_is_none := (kind: FlowKind) => (
     kind |> match {
-        FlowKind::None => -1,
-        FlowKind::Return => 0,
-        FlowKind::Break => 1,
-        else => -1
+        FlowKind::None => 1,
+        else => 0
     }
 );
 
-flow_none := {} => flow_kind_tag(FlowKind::None);
-flow_return := {} => flow_kind_tag(FlowKind::Return);
-flow_break := {} => flow_kind_tag(FlowKind::Break);
+flow_kind_is_return := (kind: FlowKind) => (
+    kind |> match {
+        FlowKind::Return => 1,
+        else => 0
+    }
+);
+
+flow_kind_is_break := (kind: FlowKind) => (
+    kind |> match {
+        FlowKind::Break => 1,
+        else => 0
+    }
+);
 
 InterpError := enum {
     None = {},
@@ -269,28 +284,6 @@ target_mask_js := {} => target_mask_bit(TargetMaskBit::Js);
 target_mask_wasm := {} => target_mask_bit(TargetMaskBit::Wasm);
 target_mask_wgsl := {} => target_mask_bit(TargetMaskBit::Wgsl);
 
-BindingAnnotationKind := enum {
-    Mut = {},
-    Export = {},
-    Target = {},
-    Wrap = {},
-};
-
-binding_annotation_kind_tag := (kind: BindingAnnotationKind) => (
-    kind |> match {
-        BindingAnnotationKind::Mut => 0,
-        BindingAnnotationKind::Export => 1,
-        BindingAnnotationKind::Target => 2,
-        BindingAnnotationKind::Wrap => 3,
-        else => -1
-    }
-);
-
-binding_ann_mut := {} => binding_annotation_kind_tag(BindingAnnotationKind::Mut);
-binding_ann_export := {} => binding_annotation_kind_tag(BindingAnnotationKind::Export);
-binding_ann_target := {} => binding_annotation_kind_tag(BindingAnnotationKind::Target);
-binding_ann_wrap := {} => binding_annotation_kind_tag(BindingAnnotationKind::Wrap);
-
 EMPTY_VALUE := Value::Unit;
 
 (export wasm) input: Box({u8; MAX_INPUT}) := {0; MAX_INPUT};
@@ -325,7 +318,7 @@ mut intrinsic_state: Box(IntrinsicState) := { binding_count = 0 };
 (export wasm) mut file_path_length: Box({i32; MAX_FILES}) := {0; MAX_FILES};
 (export wasm) mut file_root_idx: Box({i32; MAX_FILES}) := {0; MAX_FILES};
 mut file_import_value: Box({i32; MAX_FILES}) := {-1; MAX_FILES};
-(export wasm) mut flow_state: Box(FlowState) := { kind = flow_none{}, value = -1 };
+(export wasm) mut flow_state: Box(FlowState) := { kind = FlowKind::None, value = -1 };
 (export wasm) mut runtime_state: Box(RuntimeState) := {
     loop_depth = 0,
     function_depth = 0,
@@ -380,7 +373,7 @@ reset_interpreter := {} => (
     annotation_temp.export_mask = 0;
     annotation_temp.wrap_mask = 0;
     impl_state.count = 0;
-    flow_state.kind = flow_none{};
+    flow_state.kind = FlowKind::None;
     flow_state.value = -1;
     runtime_state.loop_depth = 0;
     runtime_state.function_depth = 0;
@@ -633,30 +626,33 @@ resolve_annotation_flags := (head: i32) => (
         if ann_value_idx == -1 then (
             ok = 0;
             current = -1;
-        ) else if flow_state.kind != flow_none{} then (
+        ) else if flow_kind_is_none(flow_state.kind) == 0 then (
             ok = 0;
             current = -1;
         ) else (
             if Value::BindingAnnotation(ann) := values(ann_value_idx) then (
-                if ann.kind == binding_ann_mut{} then (
-                    annotation_temp.is_mut = 1;
-                    0
-                ) else 0;
-                if ann.kind == binding_ann_target{} then (
-                    ann_mask := target_mask_from_tag(ann.target);
-                    annotation_temp.target_mask = target_mask_or{annotation_temp.target_mask, ann_mask};
-                    0
-                ) else 0;
-                if ann.kind == binding_ann_export{} then (
-                    ann_mask := target_mask_from_tag(ann.target);
-                    annotation_temp.export_mask = target_mask_or{annotation_temp.export_mask, ann_mask};
-                    0
-                ) else 0;
-                if ann.kind == binding_ann_wrap{} then (
-                    ann_mask := target_mask_from_tag(ann.target);
-                    annotation_temp.wrap_mask = target_mask_or{annotation_temp.wrap_mask, ann_mask};
-                    0
-                ) else 0;
+                ann |> match {
+                    BindingAnnotationValue::Mut => (
+                        annotation_temp.is_mut = 1;
+                        0
+                    ),
+                    BindingAnnotationValue::Target(target) => (
+                        ann_mask := target_mask_from_target(target);
+                        annotation_temp.target_mask = target_mask_or{annotation_temp.target_mask, ann_mask};
+                        0
+                    ),
+                    BindingAnnotationValue::Export(target) => (
+                        ann_mask := target_mask_from_target(target);
+                        annotation_temp.export_mask = target_mask_or{annotation_temp.export_mask, ann_mask};
+                        0
+                    ),
+                    BindingAnnotationValue::Wrap(target) => (
+                        ann_mask := target_mask_from_target(target);
+                        annotation_temp.wrap_mask = target_mask_or{annotation_temp.wrap_mask, ann_mask};
+                        0
+                    ),
+                    else => 0
+                };
                 current = list_nodes(current).next;
             ) else (
                 set_error(nodes(ann_idx).span.start);
@@ -1200,13 +1196,10 @@ init_intrinsic_context := {} => (
             if add_intrinsic_binding{SYNTHETIC_U8_STRING} == -1 then -1 else (
                 if add_intrinsic_binding{SYNTHETIC_BOOL_STRING} == -1 then -1 else (
                     if add_intrinsic_binding{SYNTHETIC_BINDING_ANNOTATION_STRING} == -1 then -1 else (
-                        if add_intrinsic_binding_value{SYNTHETIC_MUT_STRING, Value::BindingAnnotation({
-                            kind = binding_ann_mut{},
-                            target = -1
-                        })} == -1 then -1 else (
-                            if add_intrinsic_binding_value{SYNTHETIC_JS_STRING, Value::Target(target_js{})} == -1 then -1 else (
-                                if add_intrinsic_binding_value{SYNTHETIC_WASM_STRING, Value::Target(target_wasm{})} == -1 then -1 else (
-                                    if add_intrinsic_binding_value{SYNTHETIC_WGSL_STRING, Value::Target(target_wgsl{})} == -1 then -1 else (
+                        if add_intrinsic_binding_value{SYNTHETIC_MUT_STRING, Value::BindingAnnotation(BindingAnnotationValue::Mut)} == -1 then -1 else (
+                            if add_intrinsic_binding_value{SYNTHETIC_JS_STRING, Value::Target(TargetTag::Js)} == -1 then -1 else (
+                                if add_intrinsic_binding_value{SYNTHETIC_WASM_STRING, Value::Target(TargetTag::Wasm)} == -1 then -1 else (
+                                    if add_intrinsic_binding_value{SYNTHETIC_WGSL_STRING, Value::Target(TargetTag::Wgsl)} == -1 then -1 else (
                                         if init_option_enum{} == -1 then -1 else (
                                             if init_range_binding{} == -1 then -1 else (
                                                 intrinsic_state.binding_count = binding_state.count;
@@ -1638,7 +1631,7 @@ resolve_lvalue_expr_value_index := {expr_idx: i32, span_start: i32} => (
                 obj_idx := resolve_lvalue_expr_value_index{access.object, span_start};
                 if obj_idx == -1 then (
                     -1
-                ) else if flow_state.kind != flow_none{} then (
+                ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                     obj_idx
                 ) else (
                     if Value::Record(struct_info) := values(obj_idx) then (
@@ -1662,7 +1655,7 @@ resolve_lvalue_expr_value_index := {expr_idx: i32, span_start: i32} => (
                         obj_idx := resolve_lvalue_expr_value_index{access.object, span_start};
                         if obj_idx == -1 then (
                             -1
-                        ) else if flow_state.kind != flow_none{} then (
+                        ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                             obj_idx
                         ) else (
                             if Value::Record(struct_info) := values(obj_idx) then (
@@ -1687,13 +1680,13 @@ resolve_lvalue_expr_value_index := {expr_idx: i32, span_start: i32} => (
                     arr_idx := resolve_lvalue_expr_value_index{call.function, span_start};
                     if arr_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != flow_none{} then (
+                    ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                         arr_idx
                     ) else (
                         index_idx := eval_expression(call.argument);
                         if index_idx == -1 then (
                             -1
-                        ) else if flow_state.kind != flow_none{} then (
+                        ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                             index_idx
                         ) else (
                             if Value::Number(index_value) := values(index_idx) then (
@@ -1936,13 +1929,13 @@ ensure_trait_requirements := {type_value_idx: i32, trait_expr_idx: i32, span_sta
         trait_idx := eval_expression(trait_expr_idx);
         if trait_idx == -1 then (
             0
-        ) else if flow_state.kind != flow_none{} then (
+        ) else if flow_kind_is_none(flow_state.kind) == 0 then (
             0
         ) else (
             required_idx := apply_function_value{trait_idx, type_value_idx, span_start};
             if required_idx == -1 then (
                 0
-            ) else if flow_state.kind != flow_none{} then (
+            ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                 0
             ) else (
                 if Value::Record(required_info) := values(required_idx) then (
@@ -2244,12 +2237,25 @@ is_empty_struct := (fields: i32) => (
     if fields == -1 then 1 else 0
 );
 
-target_literal_tag := (target: TargetLiteral) => (
+target_literal_value := (target: TargetLiteral) => (
     target |> match {
-        TargetLiteral::JSTarget => target_js{},
-        TargetLiteral::WasmTarget => target_wasm{},
-        TargetLiteral::WgslTarget => target_wgsl{},
-        else => target_js{}
+        TargetLiteral::JSTarget => TargetTag::Js,
+        TargetLiteral::WasmTarget => TargetTag::Wasm,
+        TargetLiteral::WgslTarget => TargetTag::Wgsl,
+        else => TargetTag::Js
+    }
+);
+
+target_literal_tag := (target: TargetLiteral) => (
+    target_tag_value(target_literal_value(target))
+);
+
+target_mask_from_target := (target_tag: TargetTag) => (
+    target_tag |> match {
+        TargetTag::Js => target_mask_js{},
+        TargetTag::Wasm => target_mask_wasm{},
+        TargetTag::Wgsl => target_mask_wgsl{},
+        else => 0
     }
 );
 
@@ -2260,10 +2266,15 @@ target_mask_from_tag := (target_tag: i32) => (
     else 0
 );
 
-target_tag_is_wgsl := (target_tag: i32) => if target_tag == target_wgsl{} then 1 else 0;
+target_tag_is_wgsl := (target_tag: TargetTag) => (
+    target_tag |> match {
+        TargetTag::Wgsl => 1,
+        else => 0
+    }
+);
 
-target_tags_equal := {left: i32, right: i32} => (
-    if left == right then 1 else 0
+target_tags_equal := {left: TargetTag, right: TargetTag} => (
+    if target_tag_value(left) == target_tag_value(right) then 1 else 0
 );
 
 target_mask_has := {mask: i32, target_tag: i32} => (
@@ -2278,8 +2289,30 @@ target_mask_has := {mask: i32, target_tag: i32} => (
     )
 );
 
-binding_annotation_equals := {left_kind: i32, left_target: i32, right_kind: i32, right_target: i32} => (
-    if left_kind == right_kind && left_target == right_target then 1 else 0
+binding_annotation_kind_tag := (ann: BindingAnnotationValue) => (
+    ann |> match {
+        BindingAnnotationValue::Mut => 0,
+        BindingAnnotationValue::Export(_) => 1,
+        BindingAnnotationValue::Target(_) => 2,
+        BindingAnnotationValue::Wrap(_) => 3,
+        else => -1
+    }
+);
+
+binding_annotation_target_tag := (ann: BindingAnnotationValue) => (
+    ann |> match {
+        BindingAnnotationValue::Mut => -1,
+        BindingAnnotationValue::Export(target) => target_tag_value(target),
+        BindingAnnotationValue::Target(target) => target_tag_value(target),
+        BindingAnnotationValue::Wrap(target) => target_tag_value(target),
+        else => -1
+    }
+);
+
+binding_annotation_equals := {left: BindingAnnotationValue, right: BindingAnnotationValue} => (
+    if binding_annotation_kind_tag(left) == binding_annotation_kind_tag(right)
+        && binding_annotation_target_tag(left) == binding_annotation_target_tag(right)
+    then 1 else 0
 );
 
 target_mask_or := {left: i32, right: i32} => (
@@ -2329,19 +2362,10 @@ validate_wrap_export_annotations := {value_idx: i32, export_mask: i32, wrap_mask
 
 binding_annotation_from_literal := (ann: BindingAnnotationLiteral) => (
     ann |> match {
-        BindingAnnotationLiteral::Mut => Value::BindingAnnotation({ kind = binding_ann_mut{}, target = -1 }),
-        BindingAnnotationLiteral::Export(target) => Value::BindingAnnotation({
-            kind = binding_ann_export{},
-            target = target_literal_tag(target)
-        }),
-        BindingAnnotationLiteral::Target(target) => Value::BindingAnnotation({
-            kind = binding_ann_target{},
-            target = target_literal_tag(target)
-        }),
-        BindingAnnotationLiteral::Wrap(target) => Value::BindingAnnotation({
-            kind = binding_ann_wrap{},
-            target = target_literal_tag(target)
-        }),
+        BindingAnnotationLiteral::Mut => Value::BindingAnnotation(BindingAnnotationValue::Mut),
+        BindingAnnotationLiteral::Export(target) => Value::BindingAnnotation(BindingAnnotationValue::Export(target_literal_value(target))),
+        BindingAnnotationLiteral::Target(target) => Value::BindingAnnotation(BindingAnnotationValue::Target(target_literal_value(target))),
+        BindingAnnotationLiteral::Wrap(target) => Value::BindingAnnotation(BindingAnnotationValue::Wrap(target_literal_value(target))),
         else => Value::Unit
     }
 );
@@ -2353,7 +2377,7 @@ eval_literal := (lit: ExpressionLiteral) => (
         ExpressionLiteral::Boolean(value) => Value::Boolean(value),
         ExpressionLiteral::Char(value) => Value::Char(value),
         ExpressionLiteral::String(value) => Value::String(value),
-        ExpressionLiteral::Target(value) => Value::Target(target_literal_tag(value)),
+        ExpressionLiteral::Target(value) => Value::Target(target_literal_value(value)),
         ExpressionLiteral::BindingAnnotation(value) => binding_annotation_from_literal(value),
         else => Value::Unit
     }
@@ -2467,7 +2491,7 @@ enum_value_matches_pattern_type := {enum_type_expr: i32, enum_head: i32, enum_co
     expected_idx := eval_expression(enum_type_expr);
     if expected_idx == -1 then (
         -1
-    ) else if flow_state.kind != flow_none{} then (
+    ) else if flow_kind_is_none(flow_state.kind) == 0 then (
         -1
     ) else (
         if Value::EnumType(expected_enum) := values(expected_idx) then (
@@ -2819,7 +2843,7 @@ bind_pattern_expr := {pattern_expr: i32, value_idx: i32, inherit_mut: i32, inher
                 type_idx := eval_expression(op.right);
                 if type_idx == -1 then (
                     0
-                ) else if flow_state.kind != flow_none{} then (
+                ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                     0
                 ) else (
                     resolve_binding_from_expr(op.left);
@@ -2966,7 +2990,7 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
                             if type_idx == -1 then (
                                 0
                             ) else (
-                                if flow_state.kind != flow_none{} then (
+                                if flow_kind_is_none(flow_state.kind) == 0 then (
                                     0
                                 ) else (
                                     resolve_binding_from_expr(op.left);
@@ -3020,7 +3044,7 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
                         used_precomputed_type = 1;
                         {}
                     ) else (
-                        if flow_state.kind != flow_none{} then (
+                        if flow_kind_is_none(flow_state.kind) == 0 then (
                             type_idx = -1;
                             used_precomputed_type = 1;
                             {}
@@ -3051,7 +3075,7 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
             );
             if type_idx == -1 then (
                 0
-            ) else if flow_state.kind != flow_none{} then (
+            ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                 0
             ) else if trait_expr_idx != -1 && ensure_trait_requirements{value_idx, trait_expr_idx, nodes(info.type_expr).span.start} == 0 then (
                 0
@@ -3221,9 +3245,9 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                         result_idx = -1;
                     ) else (
                         result_idx = eval_expression(fn_info.body);
-                        if flow_state.kind == flow_return{} then (
+                        if flow_kind_is_return(flow_state.kind) == 1 then (
                             result_idx = flow_state.value;
-                            flow_state.kind = flow_none{};
+                            flow_state.kind = FlowKind::None;
                             flow_state.value = -1;
                         );
                     );
@@ -3279,9 +3303,9 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                                 matched = 1;
                                 runtime_state.function_depth = runtime_state.function_depth + 1;
                                 result_idx = eval_expression(branch_fn.body);
-                                if flow_state.kind == flow_return{} then (
+                                if flow_kind_is_return(flow_state.kind) == 1 then (
                                     result_idx = flow_state.value;
-                                    flow_state.kind = flow_none{};
+                                    flow_state.kind = FlowKind::None;
                                     flow_state.value = -1;
                                 );
                                 runtime_state.function_depth = runtime_state.function_depth - 1;
@@ -3427,10 +3451,10 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                         set_error(span_start);
                         -1
                     ) else (
-                        kind := if builtin_id == builtin_export{} then binding_ann_export{} else (
-                            if builtin_id == builtin_target{} then binding_ann_target{} else binding_ann_wrap{}
+                        annotation := if builtin_id == builtin_export{} then BindingAnnotationValue::Export(target_tag) else (
+                            if builtin_id == builtin_target{} then BindingAnnotationValue::Target(target_tag) else BindingAnnotationValue::Wrap(target_tag)
                         );
-                        store_value(Value::BindingAnnotation({ kind = kind, target = target_tag }))
+                        store_value(Value::BindingAnnotation(annotation))
                     )
                 ) else (
                     set_error(span_start);
@@ -3522,7 +3546,7 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
             )
         ),
         Value::AsmFunction(target_tag) => (
-            if ensure_asm_target_allowed{target_tag, span_start} == 0 then (
+            if ensure_asm_target_allowed{target_tag_value(target_tag), span_start} == 0 then (
                 -1
             ) else if Value::String(code_ref) := values(arg_idx) then (
                 store_value(Value::InlineAssembly({ target = target_tag, code = code_ref }))
@@ -3666,7 +3690,7 @@ eval_import_root := {root_idx: i32, span_start: i32} => (
     binding_state.scope_count = 0;
     binding_target_state.depth = 0;
     binding_target_state.acc_mask = 0;
-    flow_state.kind = flow_none{};
+    flow_state.kind = FlowKind::None;
     flow_state.value = -1;
     runtime_state.loop_depth = 0;
     runtime_state.function_depth = 0;
@@ -3686,8 +3710,8 @@ eval_import_root := {root_idx: i32, span_start: i32} => (
 
     enter_scope{};
     mut result_idx := eval_expression(root_idx);
-    if flow_state.kind != flow_none{} then (
-        flow_state.kind = flow_none{};
+    if flow_kind_is_none(flow_state.kind) == 0 then (
+        flow_state.kind = FlowKind::None;
         flow_state.value = -1;
         set_error(span_start);
         result_idx = -1;
@@ -3731,7 +3755,7 @@ eval_import_root := {root_idx: i32, span_start: i32} => (
 eval_expression: (i32 -> i32) := (idx: i32) => (
     if value_state.error != -1 then (
         -1
-    ) else if flow_state.kind != flow_none{} then (
+    ) else if flow_kind_is_none(flow_state.kind) == 0 then (
         flow_state.value
     ) else (
         span_start := nodes(idx).span.start;
@@ -3798,7 +3822,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     pop_binding_target_mask{};
                     if value_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != flow_none{} then (
+                    ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                         value_idx
                     ) else (
                         bind_pattern_state.value_idx = value_idx;
@@ -3819,7 +3843,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 value_idx := eval_expression(info.expr);
                 if value_idx == -1 then (
                     -1
-                ) else if flow_state.kind != flow_none{} then (
+                ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                     value_idx
                 ) else (
                     info.target |> match {
@@ -3856,7 +3880,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                 -1
                             ) else (
                                 obj_idx := resolve_lvalue_expr_value_index{target_info.object, span_start};
-                                if flow_state.kind != flow_none{} then (
+                                if flow_kind_is_none(flow_state.kind) == 0 then (
                                     flow_state.value
                                 ) else if obj_idx == -1 then (
                                     -1
@@ -3897,7 +3921,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                 -1
                             ) else (
                                 arr_idx := resolve_lvalue_expr_value_index{target_info.array, span_start};
-                                if flow_state.kind != flow_none{} then (
+                                if flow_kind_is_none(flow_state.kind) == 0 then (
                                     flow_state.value
                                 ) else if arr_idx == -1 then (
                                     -1
@@ -3905,7 +3929,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                     index_idx := eval_expression(target_info.index);
                                     if index_idx == -1 then (
                                         -1
-                                    ) else if flow_state.kind != flow_none{} then (
+                                    ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                                         flow_state.value
                                     ) else (
                                         if Value::Number(index_value) := values(index_idx) then (
@@ -3959,7 +3983,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 inner_value_idx := eval_expression(inner_idx);
                 if inner_value_idx == -1 then (
                     -1
-                ) else if flow_state.kind != flow_none{} then (
+                ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                     inner_value_idx
                 ) else if value_is_type(inner_value_idx) == 0 then (
                     set_error(span_start);
@@ -3992,7 +4016,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 param_value_idx := eval_expression(info.parameter);
                 if param_value_idx == -1 then (
                     -1
-                ) else if flow_state.kind != flow_none{} then (
+                ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                     param_value_idx
                 ) else if value_is_type(param_value_idx) == 0 then (
                     set_error(span_start);
@@ -4001,7 +4025,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     ret_value_idx := eval_expression(info.return_type);
                     if ret_value_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != flow_none{} then (
+                    ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                         ret_value_idx
                     ) else if value_is_type(ret_value_idx) == 0 then (
                         set_error(span_start);
@@ -4042,7 +4066,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     obj_idx := eval_expression(access.object);
                     if obj_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != flow_none{} then (
+                    ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                         obj_idx
                     ) else (
                         if info.argument == access.object then (
@@ -4090,7 +4114,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                         payload_value_idx := eval_expression(info.argument);
                                         if payload_value_idx == -1 then (
                                             -1
-                                        ) else if flow_state.kind != flow_none{} then (
+                                        ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                                             payload_value_idx
                                         ) else (
                                             store_value(Value::Enum({
@@ -4137,7 +4161,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                     arg_idx := eval_expression(info.argument);
                                     if arg_idx == -1 then (
                                         -1
-                                    ) else if flow_state.kind != flow_none{} then (
+                                    ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                                         arg_idx
                                     ) else (
                                         apply_function_value{prop_idx, arg_idx, span_start}
@@ -4150,13 +4174,13 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     func_idx := eval_expression(info.function);
                     if func_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != flow_none{} then (
+                    ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                         func_idx
                     ) else (
                         arg_idx := eval_expression(info.argument);
                         if arg_idx == -1 then (
                             -1
-                        ) else if flow_state.kind != flow_none{} then (
+                        ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                             arg_idx
                         ) else (
                             apply_function_value{func_idx, arg_idx, span_start}
@@ -4168,13 +4192,13 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 type_idx := eval_expression(info.type_expr);
                 if type_idx == -1 then (
                     -1
-                ) else if flow_state.kind != flow_none{} then (
+                ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                     type_idx
                 ) else (
                     impl_idx := eval_expression(info.implementation);
                     if impl_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != flow_none{} then (
+                    ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                         impl_idx
                     ) else (
                         if Value::Record(_) := values(impl_idx) then (
@@ -4196,13 +4220,13 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         left_idx := eval_expression(bin.left);
                         if left_idx == -1 then (
                             -1
-                        ) else if flow_state.kind != flow_none{} then (
+                        ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                             left_idx
                         ) else (
                             right_idx := eval_expression(bin.right);
                             if right_idx == -1 then (
                                 -1
-                            ) else if flow_state.kind != flow_none{} then (
+                            ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                                 right_idx
                             ) else (
                                 left := values(left_idx);
@@ -4394,7 +4418,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         operand_idx := eval_expression(unary.operand);
                         if operand_idx == -1 then (
                             -1
-                        ) else if flow_state.kind != flow_none{} then (
+                        ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                             operand_idx
                         ) else (
                             unary.operator |> match {
@@ -4473,10 +4497,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                 ),
                                 UnaryIntrinsicOperator::BindingAnnotationExportFromTarget => (
                                     if Value::Target(target_tag) := values(operand_idx) then (
-                                        store_value(Value::BindingAnnotation({
-                                            kind = binding_ann_export{},
-                                            target = target_tag
-                                        }))
+                                        store_value(Value::BindingAnnotation(BindingAnnotationValue::Export(target_tag)))
                                     ) else (
                                         set_error(span_start);
                                         -1
@@ -4484,10 +4505,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                 ),
                                 UnaryIntrinsicOperator::BindingAnnotationTargetFromTarget => (
                                     if Value::Target(target_tag) := values(operand_idx) then (
-                                        store_value(Value::BindingAnnotation({
-                                            kind = binding_ann_target{},
-                                            target = target_tag
-                                        }))
+                                        store_value(Value::BindingAnnotation(BindingAnnotationValue::Target(target_tag)))
                                     ) else (
                                         set_error(span_start);
                                         -1
@@ -4499,10 +4517,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                             set_error(span_start);
                                             -1
                                         ) else (
-                                            store_value(Value::BindingAnnotation({
-                                                kind = binding_ann_wrap{},
-                                                target = target_tag
-                                            }))
+                                            store_value(Value::BindingAnnotation(BindingAnnotationValue::Wrap(target_tag)))
                                         )
                                     ) else (
                                         set_error(span_start);
@@ -4528,11 +4543,11 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         code_idx := eval_expression(info.code);
                         if code_idx == -1 then (
                             -1
-                        ) else if flow_state.kind != flow_none{} then (
+                        ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                             code_idx
                         ) else (
-                            target_tag := target_literal_tag(info.target);
-                            if ensure_asm_target_allowed{target_tag, span_start} == 0 then (
+                            target_tag := target_literal_value(info.target);
+                            if ensure_asm_target_allowed{target_tag_value(target_tag), span_start} == 0 then (
                                 -1
                             ) else if Value::String(code_ref) := values(code_idx) then (
                                 store_value(Value::InlineAssembly({
@@ -4555,13 +4570,13 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 left_idx := eval_expression(info.left);
                 if left_idx == -1 then (
                     -1
-                ) else if flow_state.kind != flow_none{} then (
+                ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                     left_idx
                 ) else (
                     right_idx := eval_expression(info.right);
                     if right_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != flow_none{} then (
+                    ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                         right_idx
                     ) else (
                         op_start := info.operator.start;
@@ -4735,11 +4750,11 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                             if Value::BindingAnnotation(rv) := right then (
                                 if op_is2{op_start, op_len, '=', '='} == 1 then (
                                     store_value(Value::Boolean(
-                                        binding_annotation_equals{lv.kind, lv.target, rv.kind, rv.target}
+                                        binding_annotation_equals{lv, rv}
                                     ))
                                 ) else if op_is2{op_start, op_len, '!', '='} == 1 then (
                                     store_value(Value::Boolean(
-                                        if binding_annotation_equals{lv.kind, lv.target, rv.kind, rv.target} == 1 then 0 else 1
+                                        if binding_annotation_equals{lv, rv} == 1 then 0 else 1
                                     ))
                                 ) else (
                                     set_error(span_start);
@@ -4760,7 +4775,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 cond_idx := eval_expression(info.condition);
                 if cond_idx == -1 then (
                     -1
-                ) else if flow_state.kind != flow_none{} then (
+                ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                     cond_idx
                 ) else (
                     cond_value := values(cond_idx);
@@ -4789,7 +4804,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 mut last_idx: i32 := store_value(Value::Unit);
                 while count < list.count && current != -1 do (
                     last_idx = eval_expression(list_nodes(current).value);
-                    if value_state.error != -1 || flow_state.kind != flow_none{} then (
+                    if value_state.error != -1 || flow_kind_is_none(flow_state.kind) == 0 then (
                         current = -1;
                         0
                     ) else (
@@ -4811,13 +4826,13 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     if value_state.error != -1 then (
                         done = 1;
                         0
-                    ) else if flow_state.kind == flow_break{} then (
+                    ) else if flow_kind_is_break(flow_state.kind) == 1 then (
                         last_idx = flow_state.value;
-                        flow_state.kind = flow_none{};
+                        flow_state.kind = FlowKind::None;
                         flow_state.value = -1;
                         done = 1;
                         0
-                    ) else if flow_state.kind == flow_return{} then (
+                    ) else if flow_kind_is_return(flow_state.kind) == 1 then (
                         done = 1;
                         0
                     ) else (
@@ -4839,7 +4854,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                             if value_idx == -1 then (
                                 -1
                             ) else (
-                                flow_state.kind = flow_break{};
+                                flow_state.kind = FlowKind::Break;
                                 flow_state.value = value_idx;
                                 value_idx
                             )
@@ -4854,7 +4869,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                             if value_idx == -1 then (
                                 -1
                             ) else (
-                                flow_state.kind = flow_return{};
+                                flow_state.kind = FlowKind::Return;
                                 flow_state.value = value_idx;
                                 value_idx
                             )
@@ -4878,7 +4893,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         last_idx = eval_expression(variant_binding.expr);
                         if last_idx == -1 then (
                             current = -1;
-                        ) else if flow_state.kind != flow_none{} then (
+                        ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                             current = -1;
                         ) else if value_is_type(last_idx) == 0 then (
                             type_ok = 0;
@@ -4905,7 +4920,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 );
                 if value_state.error != -1 then (
                     -1
-                ) else if flow_state.kind != flow_none{} then (
+                ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                     last_idx
                 ) else if type_ok == 0 then (
                     set_error(span_start);
@@ -4973,7 +4988,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 value_idx := eval_expression(info.value);
                 if value_idx == -1 then (
                     -1
-                ) else if flow_state.kind != flow_none{} then (
+                ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                     value_idx
                 ) else (
                     mut matched := 0;
@@ -5021,13 +5036,13 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 enum_idx := eval_expression(info.enum_type);
                 if enum_idx == -1 then (
                     -1
-                ) else if flow_state.kind != flow_none{} then (
+                ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                     enum_idx
                 ) else (
                     payload_idx := eval_expression(info.payload);
                     if payload_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != flow_none{} then (
+                    ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                         payload_idx
                     ) else (
                         if Value::EnumType(enum_info) := values(enum_idx) then (
@@ -5060,13 +5075,13 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 enum_idx := eval_expression(info.enum_type);
                 if enum_idx == -1 then (
                     -1
-                ) else if flow_state.kind != flow_none{} then (
+                ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                     enum_idx
                 ) else (
                     payload_type_idx := eval_expression(info.payload_type);
                     if payload_type_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != flow_none{} then (
+                    ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                         payload_type_idx
                     ) else if value_is_type(payload_type_idx) == 0 then (
                         set_error(span_start);
@@ -5110,13 +5125,13 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 array_idx := eval_expression(info.array);
                 if array_idx == -1 then (
                     -1
-                ) else if flow_state.kind != flow_none{} then (
+                ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                     array_idx
                 ) else (
                     index_idx := eval_expression(info.index);
                     if index_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != flow_none{} then (
+                    ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                         index_idx
                     ) else (
                         if Value::Number(index_value) := values(index_idx) then (
@@ -5157,7 +5172,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 obj_idx := eval_expression(info.object);
                 if obj_idx == -1 then (
                     -1
-                ) else if flow_state.kind != flow_none{} then (
+                ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                     obj_idx
                 ) else (
                     obj_val := values(obj_idx);
@@ -5251,14 +5266,14 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 value_idx := eval_expression(info.value);
                 if value_idx == -1 then (
                     -1
-                ) else if flow_state.kind != flow_none{} then (
+                ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                     value_idx
                 ) else (
                     count_is_literal := if NodeKind::Literal(ExpressionLiteral::Number(_)) := nodes(info.count).kind then 1 else 0;
                     count_idx := eval_expression(info.count);
                     if count_idx == -1 then (
                         -1
-                    ) else if flow_state.kind != flow_none{} then (
+                    ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                         count_idx
                     ) else (
                         if Value::Number(count_value) := values(count_idx) then (
@@ -5322,7 +5337,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                             last_idx = eval_expression(field_binding.expr);
                             if last_idx == -1 then (
                                 current = -1;
-                            ) else if flow_state.kind != flow_none{} then (
+                            ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                                 current = -1;
                             ) else (
                                 if value_is_type(last_idx) == 0 then (
@@ -5352,7 +5367,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     );
                     if value_state.error != -1 then (
                         -1
-                    ) else if flow_state.kind != flow_none{} then (
+                    ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                         last_idx
                     ) else (
                         start_idx := value_state.count;
@@ -5463,7 +5478,7 @@ value_tag := (value: Value) => (
             result_idx = store_value(Value::Unit);
             while count < list.count && current != -1 do (
                 result_idx = eval_expression(list_nodes(current).value);
-                if value_state.error != -1 || flow_state.kind != flow_none{} then (
+                if value_state.error != -1 || flow_kind_is_none(flow_state.kind) == 0 then (
                     current = -1;
                     0
                 ) else (
