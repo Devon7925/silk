@@ -143,18 +143,123 @@ pub fn evaluate_files(
     let interp_error_pos = runtime.interpreter_call0("get_interp_error")?;
     if interp_error_pos != -1 {
         let interp_error_code = runtime.interpreter_call0("get_interp_error_code")?;
-        let root_len = root_source.len() as i32;
-        if interp_error_pos >= 0 && interp_error_pos <= root_len {
-            return Err(interpreter_error(
-                &root_source,
-                interp_error_pos,
-                interp_error_code,
-            ));
+        let binding_count = runtime.interpreter_call0("get_binding_count").ok();
+        let value_count = runtime.interpreter_call0("get_value_count").ok();
+        let binding_snapshot = if std::env::var_os("SILK_DEBUG_WASM_BINDINGS").is_some() {
+            runtime.debug_binding_snapshot().ok()
+        } else {
+            None
+        };
+        if let Some((path, source, rel_pos)) = map_error_position(
+            interp_error_pos,
+            &root_path,
+            &root_source,
+            &imports,
+            import_offsets,
+        ) {
+            let mut diag = interpreter_error(source, rel_pos, interp_error_code);
+            match (binding_count, value_count) {
+                (Some(binding_count), Some(value_count)) => {
+                    diag.message = format!(
+                        "{} (code {interp_error_code}, bindings {binding_count}, values {value_count})",
+                        diag.message
+                    );
+                }
+                (Some(binding_count), None) => {
+                    diag.message = format!(
+                        "{} (code {interp_error_code}, bindings {binding_count})",
+                        diag.message
+                    );
+                }
+                (None, Some(value_count)) => {
+                    diag.message = format!(
+                        "{} (code {interp_error_code}, values {value_count})",
+                        diag.message
+                    );
+                }
+                (None, None) => {
+                    diag.message = format!("{} (code {interp_error_code})", diag.message);
+                }
+            }
+            if path != root_path {
+                diag.message = format!("{path}: {}", diag.message);
+            }
+            if let Some(snapshot) = binding_snapshot.as_deref() {
+                diag.message = format!("{}\n{}", diag.message, snapshot);
+            }
+            return Err(diag);
         }
-        return Err(Diagnostic::new("Silk wasm interpreter reported an error"));
+        match (binding_count, value_count) {
+            (Some(binding_count), Some(value_count)) => {
+                let mut message = format!(
+                    "Silk wasm interpreter reported an error (code {interp_error_code}, pos {interp_error_pos}, bindings {binding_count}, values {value_count})"
+                );
+                if let Some(snapshot) = binding_snapshot.as_deref() {
+                    message.push('\n');
+                    message.push_str(snapshot);
+                }
+                return Err(Diagnostic::new(message));
+            }
+            (Some(binding_count), None) => {
+                let mut message = format!(
+                    "Silk wasm interpreter reported an error (code {interp_error_code}, pos {interp_error_pos}, bindings {binding_count})"
+                );
+                if let Some(snapshot) = binding_snapshot.as_deref() {
+                    message.push('\n');
+                    message.push_str(snapshot);
+                }
+                return Err(Diagnostic::new(message));
+            }
+            (None, Some(value_count)) => {
+                let mut message = format!(
+                    "Silk wasm interpreter reported an error (code {interp_error_code}, pos {interp_error_pos}, values {value_count})"
+                );
+                if let Some(snapshot) = binding_snapshot.as_deref() {
+                    message.push('\n');
+                    message.push_str(snapshot);
+                }
+                return Err(Diagnostic::new(message));
+            }
+            (None, None) => {}
+        }
+        let mut message = format!(
+            "Silk wasm interpreter reported an error (code {interp_error_code}, pos {interp_error_pos})"
+        );
+        if let Some(snapshot) = binding_snapshot.as_deref() {
+            message.push('\n');
+            message.push_str(snapshot);
+        }
+        return Err(Diagnostic::new(message));
     }
 
     runtime.decode_value_expression(result_idx)
+}
+
+fn map_error_position<'a>(
+    absolute_pos: i32,
+    root_path: &'a str,
+    root_source: &'a str,
+    imports: &'a [(String, String)],
+    import_offsets: &[i32],
+) -> Option<(&'a str, &'a str, i32)> {
+    if absolute_pos < 0 {
+        return None;
+    }
+
+    let root_len = root_source.len() as i32;
+    if absolute_pos <= root_len {
+        return Some((root_path, root_source, absolute_pos));
+    }
+
+    for ((path, source), start) in imports.iter().zip(import_offsets.iter().copied()) {
+        let len = source.len() as i32;
+        let end = start.saturating_add(len);
+        if absolute_pos >= start && absolute_pos <= end {
+            return Some((path.as_str(), source.as_str(), absolute_pos - start));
+        }
+    }
+
+    None
 }
 
 struct WasmRuntime {
@@ -467,6 +572,47 @@ impl WasmRuntime {
             ));
         }
         Ok(Some(data[start..start + len].to_vec()))
+    }
+
+    fn debug_binding_snapshot(&mut self) -> Result<String, Diagnostic> {
+        let binding_count = self.interpreter_call0("get_binding_count")?;
+        let intrinsic_binding_count =
+            self.interpreter_call0("get_intrinsic_binding_count").unwrap_or(-1);
+        let debug_error_binding_count =
+            self.interpreter_call0("get_debug_error_binding_count").unwrap_or(0);
+        let debug_init_binding_count =
+            self.interpreter_call0("get_debug_init_binding_count").unwrap_or(-1);
+        let snapshot_count = if binding_count > 0 {
+            binding_count
+        } else {
+            debug_error_binding_count
+        };
+        let runtime_type_idx = self.interpreter_call0("get_runtime_type_value_idx")?;
+        let mut lines = vec![format!(
+            "wasm binding snapshot: binding_count={binding_count}, intrinsic_binding_count={intrinsic_binding_count}, debug_init_binding_count={debug_init_binding_count}, debug_error_binding_count={debug_error_binding_count}, runtime_type_value_idx={runtime_type_idx}"
+        )];
+
+        let start = (snapshot_count - 24).max(0);
+        for idx in start..snapshot_count {
+            let name_start = self.interpreter_call1("get_binding_name_start", idx)?;
+            let name_len = self.interpreter_call1("get_binding_name_length", idx)?;
+            let name = match self.decode_string_bytes(name_start, name_len)? {
+                Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                None => format!("<invalid:{name_start}:{name_len}>"),
+            };
+            let value_idx = self.interpreter_call1("get_binding_value", idx)?;
+            let binding_type_idx = self.interpreter_call1("get_binding_type_value", idx)?;
+            let value_type_idx = if value_idx >= 0 {
+                self.interpreter_call1("get_value_type_value", value_idx)?
+            } else {
+                -1
+            };
+            lines.push(format!(
+                "  [{idx}] name={name} value_idx={value_idx} binding_type_idx={binding_type_idx} value_type_idx={value_type_idx}"
+            ));
+        }
+
+        Ok(lines.join("\n"))
     }
 }
 

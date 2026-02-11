@@ -142,7 +142,7 @@ Node := { kind = NodeKind, span = SourceSpan, type_cache = TypeCache };
 
 ListNode := { next = i32, value = i32 };
 
-MAX_INPUT := 262144;
+MAX_INPUT := 524288;
 MAX_NODES := 32768;
 MAX_LIST_NODES := 65536;
 
