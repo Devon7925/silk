@@ -1,0 +1,298 @@
+types := use "types.silk";
+
+MAX_INPUT := types.MAX_INPUT;
+MAX_OUTPUT := types.MAX_INPUT;
+
+lower_status_ok := {} => (
+    0
+);
+
+lower_status_unimplemented := {} => (
+    1
+);
+
+lower_status_error := {} => (
+    2
+);
+
+lower_error_none := {} => (
+    0
+);
+
+lower_error_input_too_small := {} => (
+    1
+);
+
+lower_error_bad_magic := {} => (
+    2
+);
+
+lower_error_bad_version := {} => (
+    3
+);
+
+lower_error_header_count_mismatch := {} => (
+    4
+);
+
+lower_error_body_parse_failed := {} => (
+    5
+);
+
+lower_error_body_count_mismatch := {} => (
+    6
+);
+
+(export wasm) intermediate_payload_version := {} => (
+    3
+);
+
+(export wasm) intermediate_output_version := {} => (
+    1
+);
+
+(export wasm) input: Box({u8; MAX_INPUT}) := {0; MAX_INPUT};
+(export wasm) mut intermediate_output_memory: Box({u8; MAX_OUTPUT}) := {0; MAX_OUTPUT};
+
+LowerState := {
+    error_code = i32,
+    last_scope_count = i32,
+    last_binding_count = i32,
+    last_input_len = i32,
+    input_magic_ok = i32,
+    header_version = i32,
+    header_scope_count = i32,
+    header_binding_count = i32,
+    header_annotated_binding_count = i32,
+    parsed_binding_count = i32,
+    parsed_annotated_binding_count = i32,
+    parse_cursor = i32,
+    body_ok = i32,
+    header_ok = i32,
+    output_len = i32,
+};
+
+(export wasm) mut lower_state: Box(LowerState) := {
+    error_code = 0,
+    last_scope_count = 0,
+    last_binding_count = 0,
+    last_input_len = 0,
+    input_magic_ok = 0,
+    header_version = 0,
+    header_scope_count = 0,
+    header_binding_count = 0,
+    header_annotated_binding_count = 0,
+    parsed_binding_count = 0,
+    parsed_annotated_binding_count = 0,
+    parse_cursor = 0,
+    body_ok = 0,
+    header_ok = 0,
+    output_len = 0,
+};
+
+(export wasm) intermediate_stage_version := {} => (
+    1
+);
+
+u32_le_at := (offset: i32) => (
+    b0 := input(offset);
+    b1 := input(offset + 1);
+    b2 := input(offset + 2);
+    b3 := input(offset + 3);
+    b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+);
+
+parse_body_records := {scope_count: i32, binding_count: i32, input_len: i32} => (
+    mut cursor := 24;
+    mut parsed_bindings := 0;
+    mut parsed_annotated := 0;
+    mut body_ok := 1;
+    mut scope_idx := 0;
+    while scope_idx < scope_count && body_ok == 1 do (
+        if cursor + 8 > input_len then (
+            body_ok = 0;
+        ) else (
+            _scope_value := u32_le_at(cursor);
+            cursor = cursor + 4;
+            entry_count := u32_le_at(cursor);
+            cursor = cursor + 4;
+            mut entry_idx := 0;
+            while entry_idx < entry_count && body_ok == 1 do (
+                if cursor + 4 > input_len then (
+                    body_ok = 0;
+                ) else (
+                    name_len := u32_le_at(cursor);
+                    cursor = cursor + 4;
+                    if cursor + name_len > input_len then (
+                        body_ok = 0;
+                    ) else (
+                        cursor = cursor + name_len;
+                        if cursor + 4 > input_len then (
+                            body_ok = 0;
+                        ) else (
+                            unique_len := u32_le_at(cursor);
+                            cursor = cursor + 4;
+                            if cursor + unique_len > input_len then (
+                                body_ok = 0;
+                            ) else (
+                                cursor = cursor + unique_len;
+                                if cursor + 15 > input_len then (
+                                    body_ok = 0;
+                                ) else (
+                                    _binding_context_tag := input(cursor);
+                                    _preserve_tag := input(cursor + 1);
+                                    annotation_count := u32_le_at(cursor + 2);
+                                    _annotation_mask := u32_le_at(cursor + 6);
+                                    _value_tag := input(cursor + 10);
+                                    _value_i32 := u32_le_at(cursor + 11);
+                                    cursor = cursor + 15;
+                                    parsed_bindings = parsed_bindings + 1;
+                                    if annotation_count > 0 then (
+                                        parsed_annotated = parsed_annotated + 1;
+                                    ) else (
+                                        {}
+                                    )
+                                )
+                            )
+                        )
+                    )
+                );
+                entry_idx = entry_idx + 1;
+            );
+        );
+        scope_idx = scope_idx + 1;
+    );
+    lower_state.parse_cursor = cursor;
+    lower_state.parsed_binding_count = parsed_bindings;
+    lower_state.parsed_annotated_binding_count = parsed_annotated;
+    lower_state.body_ok = body_ok;
+    if body_ok == 0 then 0
+    else if parsed_bindings != binding_count then 0
+    else if cursor > input_len then 0
+    else if parsed_annotated != lower_state.header_annotated_binding_count then 0
+    else 1
+);
+
+(export wasm) lower_context := {scope_count: i32, binding_count: i32, input_len: i32} => (
+    lower_state.error_code = lower_error_none{};
+    lower_state.last_scope_count = scope_count;
+    lower_state.last_binding_count = binding_count;
+    lower_state.last_input_len = input_len;
+    lower_state.header_version = 0;
+    lower_state.header_scope_count = 0;
+    lower_state.header_binding_count = 0;
+    lower_state.header_annotated_binding_count = 0;
+    lower_state.parsed_binding_count = 0;
+    lower_state.parsed_annotated_binding_count = 0;
+    lower_state.parse_cursor = 0;
+    lower_state.body_ok = 0;
+    lower_state.header_ok = 0;
+    lower_state.output_len = 0;
+    lower_state.input_magic_ok = if input_len >= 8
+        && input(0) == 'S'
+        && input(1) == 'I'
+        && input(2) == 'L'
+        && input(3) == 'K'
+        && input(4) == 'I'
+        && input(5) == 'M'
+        && input(6) == 'D'
+        && input(7) == '0'
+    then 1 else 0;
+    if input_len < 24 then (
+        lower_state.error_code = lower_error_input_too_small{};
+        lower_status_error{}
+    ) else if lower_state.input_magic_ok == 0 then (
+        lower_state.error_code = lower_error_bad_magic{};
+        lower_status_error{}
+    ) else (
+        lower_state.header_version = u32_le_at(8);
+        lower_state.header_scope_count = u32_le_at(12);
+        lower_state.header_binding_count = u32_le_at(16);
+        lower_state.header_annotated_binding_count = u32_le_at(20);
+        if lower_state.header_version != intermediate_payload_version{} then (
+            lower_state.error_code = lower_error_bad_version{};
+            lower_status_error{}
+        ) else if lower_state.header_scope_count != scope_count || lower_state.header_binding_count != binding_count then (
+            lower_state.error_code = lower_error_header_count_mismatch{};
+            lower_status_error{}
+        ) else (
+            parse_ok := parse_body_records{scope_count, binding_count, input_len};
+            if parse_ok == 0 then (
+                if lower_state.body_ok == 0 then (
+                    lower_state.error_code = lower_error_body_parse_failed{};
+                ) else (
+                    lower_state.error_code = lower_error_body_count_mismatch{};
+                );
+                lower_status_error{}
+            ) else (
+                lower_state.header_ok = 1;
+                if lower_state.parsed_annotated_binding_count == 0 then (
+                    lower_state.output_len = 0;
+                    lower_status_ok{}
+                ) else (
+                    lower_status_unimplemented{}
+                )
+            )
+        )
+    )
+);
+
+(export wasm) get_lower_error_code := {} => (
+    lower_state.error_code
+);
+
+(export wasm) get_lower_last_scope_count := {} => (
+    lower_state.last_scope_count
+);
+
+(export wasm) get_lower_last_binding_count := {} => (
+    lower_state.last_binding_count
+);
+
+(export wasm) get_lower_last_input_len := {} => (
+    lower_state.last_input_len
+);
+
+(export wasm) get_lower_input_magic_ok := {} => (
+    lower_state.input_magic_ok
+);
+
+(export wasm) get_lower_header_version := {} => (
+    lower_state.header_version
+);
+
+(export wasm) get_lower_header_scope_count := {} => (
+    lower_state.header_scope_count
+);
+
+(export wasm) get_lower_header_binding_count := {} => (
+    lower_state.header_binding_count
+);
+
+(export wasm) get_lower_header_annotated_binding_count := {} => (
+    lower_state.header_annotated_binding_count
+);
+
+(export wasm) get_lower_header_ok := {} => (
+    lower_state.header_ok
+);
+
+(export wasm) get_lower_parsed_binding_count := {} => (
+    lower_state.parsed_binding_count
+);
+
+(export wasm) get_lower_parsed_annotated_binding_count := {} => (
+    lower_state.parsed_annotated_binding_count
+);
+
+(export wasm) get_lower_parse_cursor := {} => (
+    lower_state.parse_cursor
+);
+
+(export wasm) get_lower_body_ok := {} => (
+    lower_state.body_ok
+);
+
+(export wasm) get_lower_output_len := {} => (
+    lower_state.output_len
+);

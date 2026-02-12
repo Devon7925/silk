@@ -7,6 +7,7 @@ mod interpret;
 mod js;
 mod loader;
 pub mod parsing;
+mod silk_intermediate;
 mod silk_interpreter;
 mod silk_parser;
 mod wasm;
@@ -82,11 +83,12 @@ pub fn compile(
     }
 
     let intermediate_start = Instant::now();
-    let intermediate = intermediate::context_to_intermediate(&program_context);
+    let (intermediate, intermediate_backend) = silk_intermediate::lower_context(&program_context)?;
     if timings_enabled {
         eprintln!(
-            "SILK_TIMINGS lower_intermediate_ms={:.2}",
-            intermediate_start.elapsed().as_secs_f64() * 1_000.0
+            "SILK_TIMINGS lower_intermediate_ms={:.2} backend={}",
+            intermediate_start.elapsed().as_secs_f64() * 1_000.0,
+            intermediate_backend.as_str(),
         );
     }
 

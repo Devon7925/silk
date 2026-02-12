@@ -9143,9 +9143,8 @@ fn wasm_interpreter_only_mode() -> bool {
 
 pub fn evaluate_text_to_expression(program: &str) -> Result<(Expression, Context), Diagnostic> {
     if wasm_interpreter_only_mode() {
-        let value = crate::silk_interpreter::evaluate_text(program)?.ok_or_else(|| {
-            Diagnostic::new("Silk interpreter result could not be represented")
-        })?;
+        let value = crate::silk_interpreter::evaluate_text(program)?
+            .ok_or_else(|| Diagnostic::new("Silk interpreter result could not be represented"))?;
         let context = intrinsic_context();
         return Ok((collapse_final_value(value), context));
     }
@@ -9184,9 +9183,8 @@ pub fn evaluate_files_to_expression(
     root: &str,
 ) -> Result<(Expression, Context), Diagnostic> {
     if wasm_interpreter_only_mode() {
-        let value = crate::silk_interpreter::evaluate_files(files, root)?.ok_or_else(|| {
-            Diagnostic::new("Silk interpreter result could not be represented")
-        })?;
+        let value = crate::silk_interpreter::evaluate_files(files, root)?
+            .ok_or_else(|| Diagnostic::new("Silk interpreter result could not be represented"))?;
         let context = intrinsic_context();
         return Ok((collapse_final_value(value), context));
     }

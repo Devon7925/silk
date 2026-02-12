@@ -7,7 +7,6 @@ use std::sync::OnceLock;
 use wasmtime::{Config, Engine, Instance, Memory, Module, Store};
 
 use crate::diagnostics::{Diagnostic, SourceSpan};
-use crate::intermediate;
 use crate::interpret;
 use crate::loader;
 use crate::parsing::{BindingPattern, Expression, ExpressionKind, ExpressionLiteral, Identifier};
@@ -59,7 +58,11 @@ pub fn evaluate_text(program: &str) -> Result<Option<Expression>, Diagnostic> {
     let interp_error_pos = runtime.interpreter_call0("get_interp_error")?;
     if interp_error_pos != -1 {
         let interp_error_code = runtime.interpreter_call0("get_interp_error_code")?;
-        return Err(interpreter_error(program, interp_error_pos, interp_error_code));
+        return Err(interpreter_error(
+            program,
+            interp_error_pos,
+            interp_error_code,
+        ));
     }
 
     runtime.decode_value_expression(result_idx)
@@ -521,7 +524,8 @@ impl WasmRuntime {
                     self.interpreter_call1("get_value_enum_variant_name_start", value_idx)?;
                 let variant_len =
                     self.interpreter_call1("get_value_enum_variant_name_length", value_idx)?;
-                let Some(variant_name_bytes) = self.decode_string_bytes(variant_start, variant_len)?
+                let Some(variant_name_bytes) =
+                    self.decode_string_bytes(variant_start, variant_len)?
                 else {
                     return Ok(None);
                 };
@@ -532,14 +536,19 @@ impl WasmRuntime {
                 let payload_idx = self.interpreter_call1("get_value_enum_payload", value_idx)?;
                 let payload = if payload_idx >= 0 && payload_idx != value_idx {
                     self.decode_value_expression(payload_idx)?
-                        .unwrap_or_else(|| Expression::new(ExpressionKind::Struct(Vec::new()), span))
+                        .unwrap_or_else(|| {
+                            Expression::new(ExpressionKind::Struct(Vec::new()), span)
+                        })
                 } else {
                     Expression::new(ExpressionKind::Struct(Vec::new()), span)
                 };
 
                 Ok(Some(Expression::new(
                     ExpressionKind::EnumValue {
-                        enum_type: Rc::new(Expression::new(ExpressionKind::EnumType(Vec::new()), span)),
+                        enum_type: Rc::new(Expression::new(
+                            ExpressionKind::EnumType(Vec::new()),
+                            span,
+                        )),
                         variant: Identifier::new(variant_name),
                         variant_index: 0,
                         payload: Rc::new(payload),
@@ -576,12 +585,15 @@ impl WasmRuntime {
 
     fn debug_binding_snapshot(&mut self) -> Result<String, Diagnostic> {
         let binding_count = self.interpreter_call0("get_binding_count")?;
-        let intrinsic_binding_count =
-            self.interpreter_call0("get_intrinsic_binding_count").unwrap_or(-1);
-        let debug_error_binding_count =
-            self.interpreter_call0("get_debug_error_binding_count").unwrap_or(0);
-        let debug_init_binding_count =
-            self.interpreter_call0("get_debug_init_binding_count").unwrap_or(-1);
+        let intrinsic_binding_count = self
+            .interpreter_call0("get_intrinsic_binding_count")
+            .unwrap_or(-1);
+        let debug_error_binding_count = self
+            .interpreter_call0("get_debug_error_binding_count")
+            .unwrap_or(0);
+        let debug_init_binding_count = self
+            .interpreter_call0("get_debug_init_binding_count")
+            .unwrap_or(-1);
         let snapshot_count = if binding_count > 0 {
             binding_count
         } else {
@@ -833,7 +845,7 @@ fn compile_silk_interpreter_wasm() -> Result<Vec<u8>, Diagnostic> {
 
     let mut context = interpret::intrinsic_context_with_files_bootstrap(file_map);
     let program_context = interpret::interpret_program_for_context(ast, &mut context)?;
-    let intermediate = intermediate::context_to_intermediate(&program_context);
+    let (intermediate, _) = crate::silk_intermediate::lower_context(&program_context)?;
     wasm::compile_exports(&intermediate)
 }
 

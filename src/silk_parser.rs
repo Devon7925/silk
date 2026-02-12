@@ -9,7 +9,6 @@ use std::sync::OnceLock;
 use wasmtime::{Config, Engine, Instance, Memory, Module, Store};
 
 use crate::diagnostics::{Diagnostic, SourceSpan};
-use crate::intermediate;
 use crate::interpret;
 use crate::loader;
 use crate::parsing::{
@@ -229,7 +228,12 @@ fn compile_silk_parser_wasm() -> Result<Vec<u8>, Diagnostic> {
     let mut context = interpret::intrinsic_context_with_files_bootstrap(file_map);
     log_parser_rebuild("rebuild: interpreting parser.silk");
     let program_context = interpret::interpret_program_for_context(ast, &mut context)?;
-    let intermediate = intermediate::context_to_intermediate(&program_context);
+    let (intermediate, intermediate_backend) =
+        crate::silk_intermediate::lower_context(&program_context)?;
+    log_parser_rebuild(&format!(
+        "rebuild: intermediate backend={}",
+        intermediate_backend.as_str()
+    ));
     log_parser_rebuild("rebuild: compiling wasm");
     let wasm = wasm::compile_exports(&intermediate)?;
     log_parser_rebuild("rebuild: done");
