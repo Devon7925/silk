@@ -8,7 +8,7 @@ use wasmtime::{Config, Engine, Instance, Memory, Module, Store};
 use crate::diagnostics::{Diagnostic, SourceSpan};
 use crate::intermediate::{
     self, IntermediateExport, IntermediateExportType, IntermediateGlobal, IntermediateKind,
-    IntermediateResult, IntermediateType,
+    IntermediateResult, IntermediateType, IntermediateWrap,
 };
 use crate::interpret::{self, BindingContext, Context, PreserveBehavior};
 use crate::loader;
@@ -589,9 +589,9 @@ fn decode_lowered_output(
     let export_count = read_u32(output_bytes, 20)?;
     let wrapper_count = read_u32(output_bytes, 24)?;
     let inline_binding_count = read_u32(output_bytes, 28)?;
-    if function_count != 0 || wrapper_count != 0 || inline_binding_count != 0 {
+    if function_count != 0 || inline_binding_count != 0 {
         return Err(Diagnostic::new(format!(
-            "Silk intermediate output decoding for functions/wrappers/inline bindings is not implemented yet (functions={function_count}, wrappers={wrapper_count}, inline_bindings={inline_binding_count})"
+            "Silk intermediate output decoding for functions/inline bindings is not implemented yet (functions={function_count}, inline_bindings={inline_binding_count})"
         )));
     }
 
@@ -648,6 +648,43 @@ fn decode_lowered_output(
         });
     }
 
+    let mut wrappers = Vec::with_capacity(wrapper_count as usize);
+    for wrapper_idx in 0..wrapper_count {
+        let source_target_tag = read_u8_cursor(output_bytes, &mut cursor, "wrapper source target")?;
+        let wrap_target_tag = read_u8_cursor(output_bytes, &mut cursor, "wrapper wrap target")?;
+        let export_type_tag = read_u8_cursor(output_bytes, &mut cursor, "wrapper export type")?;
+        let index = read_u32_cursor(output_bytes, &mut cursor, "wrapper index")? as usize;
+        let name = read_len_prefixed_output_string(output_bytes, &mut cursor, "wrapper name")?;
+
+        let source_target = decode_output_target(source_target_tag)?;
+        let wrap_target = decode_output_target(wrap_target_tag)?;
+        let export_type = decode_output_export_type(export_type_tag)?;
+
+        match export_type {
+            IntermediateExportType::Global => {
+                if index >= globals.len() {
+                    return Err(Diagnostic::new(format!(
+                        "Silk intermediate output wrapper {wrapper_idx} references missing global index {index} (global count {})",
+                        globals.len()
+                    )));
+                }
+            }
+            IntermediateExportType::Function => {
+                return Err(Diagnostic::new(
+                    "Silk intermediate output includes function wrappers, but function decoding is not implemented yet",
+                ));
+            }
+        }
+
+        wrappers.push(IntermediateWrap {
+            source_target,
+            wrap_target,
+            name,
+            export_type,
+            index,
+        });
+    }
+
     if cursor != output_len {
         return Err(Diagnostic::new(format!(
             "Silk intermediate output trailing bytes: parsed {cursor} of {output_len}"
@@ -658,7 +695,7 @@ fn decode_lowered_output(
         functions: Vec::new(),
         globals,
         exports,
-        wrappers: Vec::new(),
+        wrappers,
         inline_bindings: HashMap::new(),
     })
 }
@@ -1170,6 +1207,49 @@ mod tests {
             IntermediateExportType::Global
         );
         assert_eq!(lowered.exports[0].index, 0);
+    }
+
+    #[test]
+    fn wasm_stage_lowers_wrapped_literal_global() {
+        let source = "(export wasm) (wrap js) answer: i32 := 42; answer";
+        let ast = crate::loader::parse_source_block(source).expect("source should parse");
+        let mut context = crate::interpret::intrinsic_context();
+        let lowered_context = crate::interpret::interpret_program_for_context(ast, &mut context)
+            .expect("source should interpret");
+
+        let lowered = lower_with_wasm(&lowered_context)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+        assert_eq!(lowered.wrappers.len(), 1);
+
+        assert_eq!(lowered.globals[0].name, "answer");
+        assert_eq!(lowered.globals[0].ty, IntermediateType::I32);
+        assert!(matches!(
+            lowered.globals[0].value,
+            IntermediateKind::Literal(ExpressionLiteral::Number(42))
+        ));
+
+        assert_eq!(lowered.exports[0].target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.exports[0].name, "answer");
+        assert_eq!(
+            lowered.exports[0].export_type,
+            IntermediateExportType::Global
+        );
+        assert_eq!(lowered.exports[0].index, 0);
+
+        assert_eq!(lowered.wrappers[0].source_target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.wrappers[0].wrap_target, TargetLiteral::JSTarget);
+        assert_eq!(lowered.wrappers[0].name, "answer");
+        assert_eq!(
+            lowered.wrappers[0].export_type,
+            IntermediateExportType::Global
+        );
+        assert_eq!(lowered.wrappers[0].index, 0);
     }
 
     #[test]

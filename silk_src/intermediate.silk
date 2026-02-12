@@ -233,6 +233,7 @@ emit_output_header := {} => (
     lower_state.output_cursor = 0;
     lower_state.output_global_count = 0;
     lower_state.output_export_count = 0;
+    lower_state.output_len = 0;
     if output_u8_at{0, 'S' + 0} == 0 then 0
     else if output_u8_at{1, 'I' + 0} == 0 then 0
     else if output_u8_at{2, 'L' + 0} == 0 then 0
@@ -302,73 +303,108 @@ lower_annotated_binding := {
     if annotation_count <= 0 then 0
     else if annotation_mask < 0 || annotation_mask > ANNOT_MASK_MAX then 1
     else if annotation_has_export_target(annotation_mask) == 0 then 0
-    else if bit_is_set{annotation_mask, ANNOT_WRAP_JS} == 1
-        || bit_is_set{annotation_mask, ANNOT_WRAP_WASM} == 1
-        || bit_is_set{annotation_mask, ANNOT_WRAP_WGSL} == 1
-    then 1
     else if binding_context_tag != 0 then 1
     else if value_tag != VALUE_TAG_NUMBER
         && value_tag != VALUE_TAG_BOOLEAN
         && value_tag != VALUE_TAG_CHAR
     then 1
     else (
-        global_index := emit_global_entry{
-            name_start,
-            name_len,
-            value_tag,
-            value_bytes_offset,
-            input_len
-        };
-        if global_index < 0 then 2 else (
-            mut emit_ok := 1;
-            if emit_ok == 1 && bit_is_set{annotation_mask, ANNOT_EXPORT_JS} == 1 then (
-                emit_ok = emit_export_entry{
-                    OUTPUT_TARGET_JS,
-                    global_index,
-                    name_start,
-                    name_len,
-                    input_len
-                };
-            ) else (
-                {}
-            );
-            if emit_ok == 1 && bit_is_set{annotation_mask, ANNOT_EXPORT_WASM} == 1 then (
-                emit_ok = emit_export_entry{
-                    OUTPUT_TARGET_WASM,
-                    global_index,
-                    name_start,
-                    name_len,
-                    input_len
-                };
-            ) else (
-                {}
-            );
-            if emit_ok == 1 && bit_is_set{annotation_mask, ANNOT_EXPORT_WGSL} == 1 then (
-                emit_ok = emit_export_entry{
-                    OUTPUT_TARGET_WGSL,
-                    global_index,
-                    name_start,
-                    name_len,
-                    input_len
-                };
-            ) else (
-                {}
-            );
-            if emit_ok == 1 then 0 else 2
+        wrap_target_count := bit_is_set{annotation_mask, ANNOT_WRAP_JS}
+            + bit_is_set{annotation_mask, ANNOT_WRAP_WASM}
+            + bit_is_set{annotation_mask, ANNOT_WRAP_WGSL};
+        export_target_count := bit_is_set{annotation_mask, ANNOT_EXPORT_JS}
+            + bit_is_set{annotation_mask, ANNOT_EXPORT_WASM}
+            + bit_is_set{annotation_mask, ANNOT_EXPORT_WGSL};
+        source_target_tag := if bit_is_set{annotation_mask, ANNOT_EXPORT_JS} == 1 then OUTPUT_TARGET_JS
+            else if bit_is_set{annotation_mask, ANNOT_EXPORT_WASM} == 1 then OUTPUT_TARGET_WASM
+            else if bit_is_set{annotation_mask, ANNOT_EXPORT_WGSL} == 1 then OUTPUT_TARGET_WGSL
+            else -1;
+        if wrap_target_count > 0 && export_target_count != 1 then 1
+        else if wrap_target_count > 0
+            && (
+                source_target_tag != OUTPUT_TARGET_WASM
+                || bit_is_set{annotation_mask, ANNOT_WRAP_WASM} == 1
+                || bit_is_set{annotation_mask, ANNOT_WRAP_WGSL} == 1
+            )
+        then 1
+        else (
+            global_index := emit_global_entry{
+                name_start,
+                name_len,
+                value_tag,
+                value_bytes_offset,
+                input_len
+            };
+            if global_index < 0 then 2 else (
+                mut emit_ok := 1;
+                if emit_ok == 1 && bit_is_set{annotation_mask, ANNOT_EXPORT_JS} == 1 then (
+                    emit_ok = emit_export_entry{
+                        OUTPUT_TARGET_JS,
+                        global_index,
+                        name_start,
+                        name_len,
+                        input_len
+                    };
+                ) else (
+                    {}
+                );
+                if emit_ok == 1 && bit_is_set{annotation_mask, ANNOT_EXPORT_WASM} == 1 then (
+                    emit_ok = emit_export_entry{
+                        OUTPUT_TARGET_WASM,
+                        global_index,
+                        name_start,
+                        name_len,
+                        input_len
+                    };
+                ) else (
+                    {}
+                );
+                if emit_ok == 1 && bit_is_set{annotation_mask, ANNOT_EXPORT_WGSL} == 1 then (
+                    emit_ok = emit_export_entry{
+                        OUTPUT_TARGET_WGSL,
+                        global_index,
+                        name_start,
+                        name_len,
+                        input_len
+                    };
+                ) else (
+                    {}
+                );
+                if emit_ok == 1 && bit_is_set{annotation_mask, ANNOT_WRAP_JS} == 1 then (
+                    if append_output_u8(source_target_tag) == 0 then (
+                        emit_ok = 0;
+                    ) else if append_output_u8(OUTPUT_TARGET_JS) == 0 then (
+                        emit_ok = 0;
+                    ) else if append_output_u8(OUTPUT_EXPORT_TYPE_GLOBAL) == 0 then (
+                        emit_ok = 0;
+                    ) else if append_output_u32(global_index) == 0 then (
+                        emit_ok = 0;
+                    ) else if append_len_prefixed_input_bytes{name_start, name_len, input_len} == 0 then (
+                        emit_ok = 0;
+                    ) else (
+                        lower_state.output_len = lower_state.output_len + 1;
+                    )
+                ) else (
+                    {}
+                );
+                if emit_ok == 1 then 0 else 2
+            )
         )
     )
 );
 
 finalize_output_payload := {} => (
+    wrapper_count := lower_state.output_len;
     if lower_state.output_global_count == 0
         && lower_state.output_export_count == 0
+        && wrapper_count == 0
     then (
         lower_state.output_len = 0;
         1
     ) else if store_output_u32_at{12, 0} == 0 then 0
     else if store_output_u32_at{16, lower_state.output_global_count} == 0 then 0
     else if store_output_u32_at{20, lower_state.output_export_count} == 0 then 0
-    else if store_output_u32_at{24, 0} == 0 then 0
+    else if store_output_u32_at{24, wrapper_count} == 0 then 0
     else if store_output_u32_at{28, 0} == 0 then 0
     else (
         lower_state.output_len = lower_state.output_cursor;

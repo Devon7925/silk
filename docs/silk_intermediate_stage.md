@@ -14,9 +14,9 @@ This document tracks the current host/wasm contract for the silk-based intermedi
 
 The host now serializes `Context` metadata into bytes, writes it into wasm `input` memory, and invokes `lower_context(scope_count, binding_count, input_len)` in `intermediate.wasm`.
 When the payload is valid, the silk stage now:
-- returns `Ok` with a serialized non-empty output for supported annotated bindings (currently exported literal globals),
+- returns `Ok` with a serialized non-empty output for supported annotated bindings (currently exported literal globals, including wasm->js wrapped globals),
 - returns `Ok` with an empty-result fast path (`get_lower_output_len() == 0`) when nothing is emitted,
-- returns `Unimplemented` for unsupported annotated lowering cases (for example function exports, `wrap` annotations, and non-literal exports), and the host falls back to the Rust lowering path (`src/intermediate.rs`).
+- returns `Unimplemented` for unsupported annotated lowering cases (for example function exports, most `wrap` annotation cases, and non-literal exports), and the host falls back to the Rust lowering path (`src/intermediate.rs`).
 
 ## Exported ABI
 
@@ -107,6 +107,16 @@ Current implemented sections after the header:
   - `u8` export type tag (`0` = function, `1` = global)
   - `u32` referenced index
   - `u32` name byte length, then name bytes
+- Wrapper records (`wrapper_count` entries):
+  - `u8` source target tag (`0` = js, `1` = wasm, `2` = wgsl)
+  - `u8` wrap target tag (`0` = js, `1` = wasm, `2` = wgsl)
+  - `u8` export type tag (`0` = function, `1` = global)
+  - `u32` referenced index
+  - `u32` name byte length, then name bytes
+
+Current wrapper coverage:
+- Supported: global wrappers for wasm exports wrapped to js (for example `(export wasm) (wrap js) answer: i32 := 42`).
+- Still unsupported in silk lowering (falls back to Rust): function wrappers and other wrapper target combinations.
 
 Current fast path note:
 - `get_lower_output_len() == 0` means the stage produced an empty `IntermediateResult`.
@@ -122,4 +132,4 @@ Current fast path note:
 
 ## Next Step
 
-Expand lowering/output coverage beyond literal global exports, especially function lowering, wrappers, and inline bindings.
+Expand lowering/output coverage beyond literal global exports, especially function lowering, function wrappers, and inline bindings.
