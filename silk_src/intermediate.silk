@@ -3,6 +3,36 @@ types := use "types.silk";
 MAX_INPUT := types.MAX_INPUT;
 MAX_OUTPUT := types.MAX_INPUT;
 
+INPUT_PAYLOAD_HEADER_LEN := 24;
+OUTPUT_PAYLOAD_HEADER_LEN := 32;
+
+ANNOT_MUT := 1;
+ANNOT_EXPORT_JS := 2;
+ANNOT_EXPORT_WASM := 4;
+ANNOT_EXPORT_WGSL := 8;
+ANNOT_TARGET_JS := 16;
+ANNOT_TARGET_WASM := 32;
+ANNOT_TARGET_WGSL := 64;
+ANNOT_WRAP_JS := 128;
+ANNOT_WRAP_WASM := 256;
+ANNOT_WRAP_WGSL := 512;
+ANNOT_MASK_MAX := 1023;
+
+VALUE_TAG_UNKNOWN := 0;
+VALUE_TAG_NUMBER := 1;
+VALUE_TAG_BOOLEAN := 2;
+VALUE_TAG_CHAR := 3;
+
+OUTPUT_TARGET_JS := 0;
+OUTPUT_TARGET_WASM := 1;
+OUTPUT_TARGET_WGSL := 2;
+
+OUTPUT_EXPORT_TYPE_FUNCTION := 0;
+OUTPUT_EXPORT_TYPE_GLOBAL := 1;
+
+OUTPUT_GLOBAL_TYPE_I32 := 0;
+OUTPUT_GLOBAL_TYPE_U8 := 1;
+
 lower_status_ok := {} => (
     0
 );
@@ -43,6 +73,10 @@ lower_error_body_count_mismatch := {} => (
     6
 );
 
+lower_error_output_encode_failed := {} => (
+    7
+);
+
 (export wasm) intermediate_payload_version := {} => (
     3
 );
@@ -70,6 +104,10 @@ LowerState := {
     body_ok = i32,
     header_ok = i32,
     output_len = i32,
+    output_cursor = i32,
+    output_global_count = i32,
+    output_export_count = i32,
+    lowering_unimplemented = i32,
 };
 
 (export wasm) mut lower_state: Box(LowerState) := {
@@ -88,6 +126,10 @@ LowerState := {
     body_ok = 0,
     header_ok = 0,
     output_len = 0,
+    output_cursor = 0,
+    output_global_count = 0,
+    output_export_count = 0,
+    lowering_unimplemented = 0,
 };
 
 (export wasm) intermediate_stage_version := {} => (
@@ -102,11 +144,246 @@ u32_le_at := (offset: i32) => (
     b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
 );
 
+byte_mod_256 := (value: i32) => (
+    value - (value / 256) * 256
+);
+
+output_u8_at := {offset: i32, value: i32} => (
+    if offset < 0 || offset >= MAX_OUTPUT then 0 else (
+        intermediate_output_memory(offset) = value;
+        1
+    )
+);
+
+store_output_u32_at := {offset: i32, value: i32} => (
+    b0 := byte_mod_256(value);
+    v1 := value / 256;
+    b1 := byte_mod_256(v1);
+    v2 := v1 / 256;
+    b2 := byte_mod_256(v2);
+    v3 := v2 / 256;
+    b3 := byte_mod_256(v3);
+    if output_u8_at{offset, b0} == 0 then 0
+    else if output_u8_at{offset + 1, b1} == 0 then 0
+    else if output_u8_at{offset + 2, b2} == 0 then 0
+    else if output_u8_at{offset + 3, b3} == 0 then 0
+    else 1
+);
+
+append_output_u8 := (value: i32) => (
+    cursor := lower_state.output_cursor;
+    if cursor < 0 || cursor >= MAX_OUTPUT then 0 else (
+        intermediate_output_memory(cursor) = value;
+        lower_state.output_cursor = cursor + 1;
+        1
+    )
+);
+
+append_output_u32 := (value: i32) => (
+    b0 := byte_mod_256(value);
+    v1 := value / 256;
+    b1 := byte_mod_256(v1);
+    v2 := v1 / 256;
+    b2 := byte_mod_256(v2);
+    v3 := v2 / 256;
+    b3 := byte_mod_256(v3);
+    if append_output_u8(b0) == 0 then 0
+    else if append_output_u8(b1) == 0 then 0
+    else if append_output_u8(b2) == 0 then 0
+    else if append_output_u8(b3) == 0 then 0
+    else 1
+);
+
+copy_input_bytes_to_output := {start: i32, length: i32, input_len: i32} => (
+    mut idx := 0;
+    mut ok := 1;
+    while idx < length && ok == 1 do (
+        src := start + idx;
+        if src < 0 || src >= input_len then (
+            ok = 0;
+        ) else (
+            ok = append_output_u8(input(src) + 0);
+        );
+        idx = idx + 1;
+    );
+    ok
+);
+
+append_len_prefixed_input_bytes := {start: i32, length: i32, input_len: i32} => (
+    if length < 0 then 0
+    else if append_output_u32(length) == 0 then 0
+    else copy_input_bytes_to_output{start, length, input_len}
+);
+
+bit_is_set := {mask: i32, bit: i32} => (
+    if bit <= 0 then 0 else (
+        q := mask / bit;
+        if q - (q / 2) * 2 == 1 then 1 else 0
+    )
+);
+
+annotation_has_export_target := (annotation_mask: i32) => (
+    if bit_is_set{annotation_mask, ANNOT_EXPORT_JS} == 1 then 1
+    else if bit_is_set{annotation_mask, ANNOT_EXPORT_WASM} == 1 then 1
+    else if bit_is_set{annotation_mask, ANNOT_EXPORT_WGSL} == 1 then 1
+    else 0
+);
+
+emit_output_header := {} => (
+    lower_state.output_cursor = 0;
+    lower_state.output_global_count = 0;
+    lower_state.output_export_count = 0;
+    if output_u8_at{0, 'S' + 0} == 0 then 0
+    else if output_u8_at{1, 'I' + 0} == 0 then 0
+    else if output_u8_at{2, 'L' + 0} == 0 then 0
+    else if output_u8_at{3, 'K' + 0} == 0 then 0
+    else if output_u8_at{4, 'I' + 0} == 0 then 0
+    else if output_u8_at{5, 'R' + 0} == 0 then 0
+    else if output_u8_at{6, 'D' + 0} == 0 then 0
+    else if output_u8_at{7, '0' + 0} == 0 then 0
+    else if store_output_u32_at{8, intermediate_output_version{}} == 0 then 0
+    else if store_output_u32_at{12, 0} == 0 then 0
+    else if store_output_u32_at{16, 0} == 0 then 0
+    else if store_output_u32_at{20, 0} == 0 then 0
+    else if store_output_u32_at{24, 0} == 0 then 0
+    else if store_output_u32_at{28, 0} == 0 then 0
+    else (
+        lower_state.output_cursor = OUTPUT_PAYLOAD_HEADER_LEN;
+        1
+    )
+);
+
+emit_global_entry := {
+    name_start: i32,
+    name_len: i32,
+    value_tag: i32,
+    value_bytes_offset: i32,
+    input_len: i32
+} => (
+    global_index := lower_state.output_global_count;
+    global_ty := if value_tag == VALUE_TAG_CHAR then OUTPUT_GLOBAL_TYPE_U8 else OUTPUT_GLOBAL_TYPE_I32;
+    if append_len_prefixed_input_bytes{name_start, name_len, input_len} == 0 then -1
+    else if append_output_u8(global_ty) == 0 then -1
+    else if append_output_u8(value_tag) == 0 then -1
+    else if copy_input_bytes_to_output{value_bytes_offset, 4, input_len} == 0 then -1
+    else (
+        lower_state.output_global_count = global_index + 1;
+        global_index
+    )
+);
+
+emit_export_entry := {
+    target_tag: i32,
+    global_index: i32,
+    name_start: i32,
+    name_len: i32,
+    input_len: i32
+} => (
+    if append_output_u8(target_tag) == 0 then 0
+    else if append_output_u8(OUTPUT_EXPORT_TYPE_GLOBAL) == 0 then 0
+    else if append_output_u32(global_index) == 0 then 0
+    else if append_len_prefixed_input_bytes{name_start, name_len, input_len} == 0 then 0
+    else (
+        lower_state.output_export_count = lower_state.output_export_count + 1;
+        1
+    )
+);
+
+lower_annotated_binding := {
+    name_start: i32,
+    name_len: i32,
+    binding_context_tag: i32,
+    annotation_count: i32,
+    annotation_mask: i32,
+    value_tag: i32,
+    value_bytes_offset: i32,
+    input_len: i32
+} => (
+    if annotation_count <= 0 then 0
+    else if annotation_mask < 0 || annotation_mask > ANNOT_MASK_MAX then 1
+    else if bit_is_set{annotation_mask, ANNOT_TARGET_JS} == 1
+        || bit_is_set{annotation_mask, ANNOT_TARGET_WASM} == 1
+        || bit_is_set{annotation_mask, ANNOT_TARGET_WGSL} == 1
+        || bit_is_set{annotation_mask, ANNOT_WRAP_JS} == 1
+        || bit_is_set{annotation_mask, ANNOT_WRAP_WASM} == 1
+        || bit_is_set{annotation_mask, ANNOT_WRAP_WGSL} == 1
+    then 1
+    else if annotation_has_export_target(annotation_mask) == 0 then 0
+    else if binding_context_tag != 0 then 1
+    else if value_tag != VALUE_TAG_NUMBER
+        && value_tag != VALUE_TAG_BOOLEAN
+        && value_tag != VALUE_TAG_CHAR
+    then 1
+    else (
+        global_index := emit_global_entry{
+            name_start,
+            name_len,
+            value_tag,
+            value_bytes_offset,
+            input_len
+        };
+        if global_index < 0 then 2 else (
+            mut emit_ok := 1;
+            if emit_ok == 1 && bit_is_set{annotation_mask, ANNOT_EXPORT_JS} == 1 then (
+                emit_ok = emit_export_entry{
+                    OUTPUT_TARGET_JS,
+                    global_index,
+                    name_start,
+                    name_len,
+                    input_len
+                };
+            ) else (
+                {}
+            );
+            if emit_ok == 1 && bit_is_set{annotation_mask, ANNOT_EXPORT_WASM} == 1 then (
+                emit_ok = emit_export_entry{
+                    OUTPUT_TARGET_WASM,
+                    global_index,
+                    name_start,
+                    name_len,
+                    input_len
+                };
+            ) else (
+                {}
+            );
+            if emit_ok == 1 && bit_is_set{annotation_mask, ANNOT_EXPORT_WGSL} == 1 then (
+                emit_ok = emit_export_entry{
+                    OUTPUT_TARGET_WGSL,
+                    global_index,
+                    name_start,
+                    name_len,
+                    input_len
+                };
+            ) else (
+                {}
+            );
+            if emit_ok == 1 then 0 else 2
+        )
+    )
+);
+
+finalize_output_payload := {} => (
+    if lower_state.output_global_count == 0 && lower_state.output_export_count == 0 then (
+        lower_state.output_len = 0;
+        1
+    ) else if store_output_u32_at{12, 0} == 0 then 0
+    else if store_output_u32_at{16, lower_state.output_global_count} == 0 then 0
+    else if store_output_u32_at{20, lower_state.output_export_count} == 0 then 0
+    else if store_output_u32_at{24, 0} == 0 then 0
+    else if store_output_u32_at{28, 0} == 0 then 0
+    else (
+        lower_state.output_len = lower_state.output_cursor;
+        1
+    )
+);
+
 parse_body_records := {scope_count: i32, binding_count: i32, input_len: i32} => (
-    mut cursor := 24;
+    mut cursor := INPUT_PAYLOAD_HEADER_LEN;
     mut parsed_bindings := 0;
     mut parsed_annotated := 0;
     mut body_ok := 1;
+    mut output_ok := emit_output_header{};
+    mut lowering_unimplemented := 0;
     mut scope_idx := 0;
     while scope_idx < scope_count && body_ok == 1 do (
         if cursor + 8 > input_len then (
@@ -123,6 +400,7 @@ parse_body_records := {scope_count: i32, binding_count: i32, input_len: i32} => 
                 ) else (
                     name_len := u32_le_at(cursor);
                     cursor = cursor + 4;
+                    name_start := cursor;
                     if cursor + name_len > input_len then (
                         body_ok = 0;
                     ) else (
@@ -139,16 +417,38 @@ parse_body_records := {scope_count: i32, binding_count: i32, input_len: i32} => 
                                 if cursor + 15 > input_len then (
                                     body_ok = 0;
                                 ) else (
-                                    _binding_context_tag := input(cursor);
+                                    binding_context_tag := input(cursor) + 0;
                                     _preserve_tag := input(cursor + 1);
                                     annotation_count := u32_le_at(cursor + 2);
-                                    _annotation_mask := u32_le_at(cursor + 6);
-                                    _value_tag := input(cursor + 10);
-                                    _value_i32 := u32_le_at(cursor + 11);
+                                    annotation_mask := u32_le_at(cursor + 6);
+                                    value_tag := input(cursor + 10) + 0;
+                                    value_bytes_offset := cursor + 11;
                                     cursor = cursor + 15;
+
                                     parsed_bindings = parsed_bindings + 1;
                                     if annotation_count > 0 then (
                                         parsed_annotated = parsed_annotated + 1;
+                                        if output_ok == 1 && lowering_unimplemented == 0 then (
+                                            lowering_result := lower_annotated_binding{
+                                                name_start,
+                                                name_len,
+                                                binding_context_tag,
+                                                annotation_count,
+                                                annotation_mask,
+                                                value_tag,
+                                                value_bytes_offset,
+                                                input_len
+                                            };
+                                            if lowering_result == 1 then (
+                                                lowering_unimplemented = 1;
+                                            ) else if lowering_result == 2 then (
+                                                output_ok = 0;
+                                            ) else (
+                                                {}
+                                            )
+                                        ) else (
+                                            {}
+                                        )
                                     ) else (
                                         {}
                                     )
@@ -166,10 +466,12 @@ parse_body_records := {scope_count: i32, binding_count: i32, input_len: i32} => 
     lower_state.parsed_binding_count = parsed_bindings;
     lower_state.parsed_annotated_binding_count = parsed_annotated;
     lower_state.body_ok = body_ok;
+    lower_state.lowering_unimplemented = lowering_unimplemented;
     if body_ok == 0 then 0
     else if parsed_bindings != binding_count then 0
     else if cursor > input_len then 0
     else if parsed_annotated != lower_state.header_annotated_binding_count then 0
+    else if output_ok == 0 then 2
     else 1
 );
 
@@ -188,6 +490,10 @@ parse_body_records := {scope_count: i32, binding_count: i32, input_len: i32} => 
     lower_state.body_ok = 0;
     lower_state.header_ok = 0;
     lower_state.output_len = 0;
+    lower_state.output_cursor = 0;
+    lower_state.output_global_count = 0;
+    lower_state.output_export_count = 0;
+    lower_state.lowering_unimplemented = 0;
     lower_state.input_magic_ok = if input_len >= 8
         && input(0) == 'S'
         && input(1) == 'I'
@@ -198,7 +504,7 @@ parse_body_records := {scope_count: i32, binding_count: i32, input_len: i32} => 
         && input(6) == 'D'
         && input(7) == '0'
     then 1 else 0;
-    if input_len < 24 then (
+    if input_len < INPUT_PAYLOAD_HEADER_LEN then (
         lower_state.error_code = lower_error_input_too_small{};
         lower_status_error{}
     ) else if lower_state.input_magic_ok == 0 then (
@@ -224,13 +530,21 @@ parse_body_records := {scope_count: i32, binding_count: i32, input_len: i32} => 
                     lower_state.error_code = lower_error_body_count_mismatch{};
                 );
                 lower_status_error{}
+            ) else if parse_ok == 2 then (
+                lower_state.error_code = lower_error_output_encode_failed{};
+                lower_status_error{}
             ) else (
                 lower_state.header_ok = 1;
-                if lower_state.parsed_annotated_binding_count == 0 then (
-                    lower_state.output_len = 0;
-                    lower_status_ok{}
-                ) else (
+                if lower_state.lowering_unimplemented == 1 then (
                     lower_status_unimplemented{}
+                ) else (
+                    finalize_ok := finalize_output_payload{};
+                    if finalize_ok == 0 then (
+                        lower_state.error_code = lower_error_output_encode_failed{};
+                        lower_status_error{}
+                    ) else (
+                        lower_status_ok{}
+                    )
                 )
             )
         )
@@ -295,4 +609,16 @@ parse_body_records := {scope_count: i32, binding_count: i32, input_len: i32} => 
 
 (export wasm) get_lower_output_len := {} => (
     lower_state.output_len
+);
+
+(export wasm) get_lower_output_global_count := {} => (
+    lower_state.output_global_count
+);
+
+(export wasm) get_lower_output_export_count := {} => (
+    lower_state.output_export_count
+);
+
+(export wasm) get_lower_lowering_unimplemented := {} => (
+    lower_state.lowering_unimplemented
 );

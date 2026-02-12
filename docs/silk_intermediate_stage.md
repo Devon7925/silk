@@ -13,7 +13,10 @@ This document tracks the current host/wasm contract for the silk-based intermedi
   - `target/wasm_cache/intermediate.wasm.hash`
 
 The host now serializes `Context` metadata into bytes, writes it into wasm `input` memory, and invokes `lower_context(scope_count, binding_count, input_len)` in `intermediate.wasm`.
-When the payload is valid and has zero annotated bindings, the silk stage returns `Ok` using an empty-result fast path (`get_lower_output_len() == 0`). Otherwise it currently returns `Unimplemented`, and the host falls back to the Rust lowering path (`src/intermediate.rs`).
+When the payload is valid, the silk stage now:
+- returns `Ok` with a serialized non-empty output for supported annotated bindings (currently exported literal globals),
+- returns `Ok` with an empty-result fast path (`get_lower_output_len() == 0`) when nothing is emitted,
+- returns `Unimplemented` for unsupported annotated lowering cases (for example function exports, wrap/target annotations), and the host falls back to the Rust lowering path (`src/intermediate.rs`).
 
 ## Exported ABI
 
@@ -38,6 +41,7 @@ When the payload is valid and has zero annotated bindings, the silk stage return
     - `4`: header scope/binding counts mismatch call arguments
     - `5`: payload body parse failed (malformed binding records)
     - `6`: payload body parsed counts mismatch header values
+    - `7`: output payload encoding failed
 
 Current debug exports in `intermediate.silk`:
 - `get_lower_last_scope_count() -> i32`
@@ -54,6 +58,9 @@ Current debug exports in `intermediate.silk`:
 - `get_lower_parse_cursor() -> i32`
 - `get_lower_body_ok() -> i32`
 - `get_lower_output_len() -> i32`
+- `get_lower_output_global_count() -> i32`
+- `get_lower_output_export_count() -> i32`
+- `get_lower_lowering_unimplemented() -> i32`
 
 ## Payload Header
 
@@ -80,7 +87,7 @@ After the header:
 
 ## Output Header
 
-For future non-empty `Ok` payloads, output payload starts with:
+Output payload starts with:
 - bytes `[0..8)`: ASCII magic `SILKIRD0`
 - bytes `[8..12)`: `u32` output format version (`1`, little-endian)
 - bytes `[12..16)`: `u32` function count
@@ -88,6 +95,18 @@ For future non-empty `Ok` payloads, output payload starts with:
 - bytes `[20..24)`: `u32` export count
 - bytes `[24..28)`: `u32` wrapper count
 - bytes `[28..32)`: `u32` inline binding count
+
+Current implemented sections after the header:
+- Global records (`global_count` entries):
+  - `u32` name byte length, then name bytes
+  - `u8` global type tag (`0` = `i32`, `1` = `u8`)
+  - `u8` literal value tag (`1` = number, `2` = boolean, `3` = char)
+  - `i32` literal value payload (little-endian)
+- Export records (`export_count` entries):
+  - `u8` target tag (`0` = js, `1` = wasm, `2` = wgsl)
+  - `u8` export type tag (`0` = function, `1` = global)
+  - `u32` referenced index
+  - `u32` name byte length, then name bytes
 
 Current fast path note:
 - `get_lower_output_len() == 0` means the stage produced an empty `IntermediateResult`.
@@ -103,4 +122,4 @@ Current fast path note:
 
 ## Next Step
 
-Implement a serialized `IntermediateResult` output format in `silk_src/intermediate.silk` and decode it in `src/silk_intermediate.rs` for `lower_context -> Ok`.
+Expand lowering/output coverage beyond literal global exports, especially function lowering, wrappers, and inline bindings.

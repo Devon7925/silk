@@ -6,7 +6,10 @@ use std::sync::OnceLock;
 use wasmtime::{Config, Engine, Instance, Memory, Module, Store};
 
 use crate::diagnostics::{Diagnostic, SourceSpan};
-use crate::intermediate::{self, IntermediateResult};
+use crate::intermediate::{
+    self, IntermediateExport, IntermediateExportType, IntermediateGlobal, IntermediateKind,
+    IntermediateResult, IntermediateType,
+};
 use crate::interpret::{self, BindingContext, Context, PreserveBehavior};
 use crate::loader;
 use crate::parsing::{BindingAnnotation, ExpressionKind, ExpressionLiteral, TargetLiteral};
@@ -31,6 +34,16 @@ const INPUT_PAYLOAD_HEADER_LEN: usize = 24;
 const OUTPUT_PAYLOAD_MAGIC: &[u8; 8] = b"SILKIRD0";
 const OUTPUT_PAYLOAD_VERSION: u32 = 1;
 const OUTPUT_PAYLOAD_HEADER_LEN: usize = 32;
+
+const OUTPUT_TARGET_JS: u8 = 0;
+const OUTPUT_TARGET_WASM: u8 = 1;
+const OUTPUT_TARGET_WGSL: u8 = 2;
+
+const OUTPUT_EXPORT_TYPE_FUNCTION: u8 = 0;
+const OUTPUT_EXPORT_TYPE_GLOBAL: u8 = 1;
+
+const OUTPUT_GLOBAL_TYPE_I32: u8 = 0;
+const OUTPUT_GLOBAL_TYPE_U8: u8 = 1;
 
 const ANNOT_MUT: u32 = 1 << 0;
 const ANNOT_EXPORT_JS: u32 = 1 << 1;
@@ -576,21 +589,75 @@ fn decode_lowered_output(
     let export_count = read_u32(output_bytes, 20)?;
     let wrapper_count = read_u32(output_bytes, 24)?;
     let inline_binding_count = read_u32(output_bytes, 28)?;
-    if function_count != 0
-        || global_count != 0
-        || export_count != 0
-        || wrapper_count != 0
-        || inline_binding_count != 0
-    {
+    if function_count != 0 || wrapper_count != 0 || inline_binding_count != 0 {
         return Err(Diagnostic::new(format!(
-            "Silk intermediate output decoding for non-empty sections is not implemented yet (functions={function_count}, globals={global_count}, exports={export_count}, wrappers={wrapper_count}, inline_bindings={inline_binding_count})"
+            "Silk intermediate output decoding for functions/wrappers/inline bindings is not implemented yet (functions={function_count}, wrappers={wrapper_count}, inline_bindings={inline_binding_count})"
+        )));
+    }
+
+    let mut cursor = OUTPUT_PAYLOAD_HEADER_LEN;
+    let mut globals = Vec::with_capacity(global_count as usize);
+    for global_idx in 0..global_count {
+        let name = read_len_prefixed_output_string(output_bytes, &mut cursor, "global name")?;
+        let ty_tag = read_u8_cursor(output_bytes, &mut cursor, "global type tag")?;
+        let value_tag = read_u8_cursor(output_bytes, &mut cursor, "global value tag")?;
+        let value_i32 = read_i32_cursor(output_bytes, &mut cursor, "global literal value")?;
+
+        let ty = decode_output_global_type(ty_tag)?;
+        let value = decode_output_literal(value_tag, value_i32).map(IntermediateKind::Literal)?;
+        globals.push(IntermediateGlobal { name, ty, value });
+
+        if std::env::var_os("SILK_DEBUG_WASM_INTERMEDIATE").is_some() {
+            eprintln!(
+                "SILK_DEBUG_WASM_INTERMEDIATE decoded_global index={global_idx} ty_tag={ty_tag} value_tag={value_tag}"
+            );
+        }
+    }
+
+    let mut exports = Vec::with_capacity(export_count as usize);
+    for export_idx in 0..export_count {
+        let target_tag = read_u8_cursor(output_bytes, &mut cursor, "export target tag")?;
+        let export_type_tag = read_u8_cursor(output_bytes, &mut cursor, "export type tag")?;
+        let index = read_u32_cursor(output_bytes, &mut cursor, "export index")? as usize;
+        let name = read_len_prefixed_output_string(output_bytes, &mut cursor, "export name")?;
+
+        let target = decode_output_target(target_tag)?;
+        let export_type = decode_output_export_type(export_type_tag)?;
+
+        match export_type {
+            IntermediateExportType::Global => {
+                if index >= globals.len() {
+                    return Err(Diagnostic::new(format!(
+                        "Silk intermediate output export {export_idx} references missing global index {index} (global count {})",
+                        globals.len()
+                    )));
+                }
+            }
+            IntermediateExportType::Function => {
+                return Err(Diagnostic::new(
+                    "Silk intermediate output includes function exports, but function decoding is not implemented yet",
+                ));
+            }
+        }
+
+        exports.push(IntermediateExport {
+            target,
+            name,
+            export_type,
+            index,
+        });
+    }
+
+    if cursor != output_len {
+        return Err(Diagnostic::new(format!(
+            "Silk intermediate output trailing bytes: parsed {cursor} of {output_len}"
         )));
     }
 
     Ok(IntermediateResult {
         functions: Vec::new(),
-        globals: Vec::new(),
-        exports: Vec::new(),
+        globals,
+        exports,
         wrappers: Vec::new(),
         inline_bindings: HashMap::new(),
     })
@@ -785,6 +852,7 @@ fn lower_error_code_message(code: i32) -> &'static str {
         4 => "input payload header counts do not match arguments",
         5 => "input payload body parse failed",
         6 => "input payload body counts do not match header",
+        7 => "output payload encoding failed",
         _ => "unknown lower error",
     }
 }
@@ -801,6 +869,101 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, Diagnostic> {
         .try_into()
         .expect("slice length already checked");
     Ok(u32::from_le_bytes(raw))
+}
+
+fn read_u8_cursor(bytes: &[u8], cursor: &mut usize, field: &str) -> Result<u8, Diagnostic> {
+    if *cursor >= bytes.len() {
+        return Err(Diagnostic::new(format!(
+            "Missing {field} at offset {} in payload of {} bytes",
+            *cursor,
+            bytes.len()
+        )));
+    }
+    let value = bytes[*cursor];
+    *cursor += 1;
+    Ok(value)
+}
+
+fn read_u32_cursor(bytes: &[u8], cursor: &mut usize, field: &str) -> Result<u32, Diagnostic> {
+    let value = read_u32(bytes, *cursor)
+        .map_err(|err| Diagnostic::new(format!("{field}: {}", err.message)))?;
+    *cursor += 4;
+    Ok(value)
+}
+
+fn read_i32_cursor(bytes: &[u8], cursor: &mut usize, field: &str) -> Result<i32, Diagnostic> {
+    let raw = read_u32_cursor(bytes, cursor, field)?;
+    Ok(i32::from_le_bytes(raw.to_le_bytes()))
+}
+
+fn read_len_prefixed_output_string(
+    bytes: &[u8],
+    cursor: &mut usize,
+    field: &str,
+) -> Result<String, Diagnostic> {
+    let len = read_u32_cursor(bytes, cursor, &format!("{field} length"))? as usize;
+    let end = (*cursor).saturating_add(len);
+    if end > bytes.len() {
+        return Err(Diagnostic::new(format!(
+            "{field} bytes exceed payload bounds: need {} bytes at offset {}, payload size {}",
+            len,
+            *cursor,
+            bytes.len()
+        )));
+    }
+    let value = String::from_utf8(bytes[*cursor..end].to_vec())
+        .map_err(|err| Diagnostic::new(format!("{field} is not valid UTF-8: {err}")))?;
+    *cursor = end;
+    Ok(value)
+}
+
+fn decode_output_target(tag: u8) -> Result<TargetLiteral, Diagnostic> {
+    match tag {
+        OUTPUT_TARGET_JS => Ok(TargetLiteral::JSTarget),
+        OUTPUT_TARGET_WASM => Ok(TargetLiteral::WasmTarget),
+        OUTPUT_TARGET_WGSL => Ok(TargetLiteral::WgslTarget),
+        _ => Err(Diagnostic::new(format!(
+            "Unsupported output target tag {tag}"
+        ))),
+    }
+}
+
+fn decode_output_export_type(tag: u8) -> Result<IntermediateExportType, Diagnostic> {
+    match tag {
+        OUTPUT_EXPORT_TYPE_FUNCTION => Ok(IntermediateExportType::Function),
+        OUTPUT_EXPORT_TYPE_GLOBAL => Ok(IntermediateExportType::Global),
+        _ => Err(Diagnostic::new(format!(
+            "Unsupported output export type tag {tag}"
+        ))),
+    }
+}
+
+fn decode_output_global_type(tag: u8) -> Result<IntermediateType, Diagnostic> {
+    match tag {
+        OUTPUT_GLOBAL_TYPE_I32 => Ok(IntermediateType::I32),
+        OUTPUT_GLOBAL_TYPE_U8 => Ok(IntermediateType::U8),
+        _ => Err(Diagnostic::new(format!(
+            "Unsupported output global type tag {tag}"
+        ))),
+    }
+}
+
+fn decode_output_literal(tag: u8, value_i32: i32) -> Result<ExpressionLiteral, Diagnostic> {
+    match tag {
+        VALUE_TAG_NUMBER => Ok(ExpressionLiteral::Number(value_i32)),
+        VALUE_TAG_BOOLEAN => Ok(ExpressionLiteral::Boolean(value_i32 != 0)),
+        VALUE_TAG_CHAR => {
+            if !(0..=u8::MAX as i32).contains(&value_i32) {
+                return Err(Diagnostic::new(format!(
+                    "Char literal value out of range for u8: {value_i32}"
+                )));
+            }
+            Ok(ExpressionLiteral::Char(value_i32 as u8))
+        }
+        _ => Err(Diagnostic::new(format!(
+            "Unsupported output literal tag {tag}"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -918,13 +1081,7 @@ mod tests {
             )
             .expect("lower_context call should succeed");
 
-        let annotated_binding_count =
-            read_u32(&payload, 20).expect("annotated binding count should decode");
-        let expected_status = if annotated_binding_count == 0 {
-            LOWER_STATUS_OK
-        } else {
-            LOWER_STATUS_UNIMPLEMENTED
-        };
+        let expected_status = LOWER_STATUS_OK;
         assert_eq!(status, expected_status);
         assert_eq!(
             call_optional_i32_export(&instance, &mut store, "get_lower_input_magic_ok"),
@@ -947,6 +1104,54 @@ mod tests {
                 "empty-result fast path should not emit payload bytes"
             );
         }
+    }
+
+    #[test]
+    fn wasm_stage_lowers_exported_literal_global() {
+        let source = "(export wasm) answer := 42; answer";
+        let ast = crate::loader::parse_source_block(source).expect("source should parse");
+        let mut context = crate::interpret::intrinsic_context();
+        let lowered_context = crate::interpret::interpret_program_for_context(ast, &mut context)
+            .expect("source should interpret");
+
+        let lowered = lower_with_wasm(&lowered_context)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.wrappers.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+
+        let global = &lowered.globals[0];
+        assert_eq!(global.name, "answer");
+        assert_eq!(global.ty, IntermediateType::I32);
+        assert!(matches!(
+            global.value,
+            IntermediateKind::Literal(ExpressionLiteral::Number(42))
+        ));
+
+        let export = &lowered.exports[0];
+        assert_eq!(export.target, TargetLiteral::WasmTarget);
+        assert_eq!(export.name, "answer");
+        assert_eq!(export.export_type, IntermediateExportType::Global);
+        assert_eq!(export.index, 0);
+    }
+
+    #[test]
+    fn wasm_stage_reports_unimplemented_for_function_exports() {
+        let source = "(export wasm) id := (x: i32) => x; id";
+        let ast = crate::loader::parse_source_block(source).expect("source should parse");
+        let mut context = crate::interpret::intrinsic_context();
+        let lowered_context = crate::interpret::interpret_program_for_context(ast, &mut context)
+            .expect("source should interpret");
+
+        let lowered = lower_with_wasm(&lowered_context).expect("wasm lowering should run");
+        assert!(
+            lowered.is_none(),
+            "function exports should still report unimplemented for now"
+        );
     }
 
     #[derive(Debug)]
