@@ -301,14 +301,11 @@ lower_annotated_binding := {
 } => (
     if annotation_count <= 0 then 0
     else if annotation_mask < 0 || annotation_mask > ANNOT_MASK_MAX then 1
-    else if bit_is_set{annotation_mask, ANNOT_TARGET_JS} == 1
-        || bit_is_set{annotation_mask, ANNOT_TARGET_WASM} == 1
-        || bit_is_set{annotation_mask, ANNOT_TARGET_WGSL} == 1
-        || bit_is_set{annotation_mask, ANNOT_WRAP_JS} == 1
+    else if annotation_has_export_target(annotation_mask) == 0 then 0
+    else if bit_is_set{annotation_mask, ANNOT_WRAP_JS} == 1
         || bit_is_set{annotation_mask, ANNOT_WRAP_WASM} == 1
         || bit_is_set{annotation_mask, ANNOT_WRAP_WGSL} == 1
     then 1
-    else if annotation_has_export_target(annotation_mask) == 0 then 0
     else if binding_context_tag != 0 then 1
     else if value_tag != VALUE_TAG_NUMBER
         && value_tag != VALUE_TAG_BOOLEAN
@@ -363,7 +360,9 @@ lower_annotated_binding := {
 );
 
 finalize_output_payload := {} => (
-    if lower_state.output_global_count == 0 && lower_state.output_export_count == 0 then (
+    if lower_state.output_global_count == 0
+        && lower_state.output_export_count == 0
+    then (
         lower_state.output_len = 0;
         1
     ) else if store_output_u32_at{12, 0} == 0 then 0

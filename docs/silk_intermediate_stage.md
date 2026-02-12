@@ -16,7 +16,7 @@ The host now serializes `Context` metadata into bytes, writes it into wasm `inpu
 When the payload is valid, the silk stage now:
 - returns `Ok` with a serialized non-empty output for supported annotated bindings (currently exported literal globals),
 - returns `Ok` with an empty-result fast path (`get_lower_output_len() == 0`) when nothing is emitted,
-- returns `Unimplemented` for unsupported annotated lowering cases (for example function exports, wrap/target annotations), and the host falls back to the Rust lowering path (`src/intermediate.rs`).
+- returns `Unimplemented` for unsupported annotated lowering cases (for example function exports, `wrap` annotations, and non-literal exports), and the host falls back to the Rust lowering path (`src/intermediate.rs`).
 
 ## Exported ABI
 

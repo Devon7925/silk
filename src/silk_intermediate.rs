@@ -1140,6 +1140,39 @@ mod tests {
     }
 
     #[test]
+    fn wasm_stage_lowers_exported_literal_global_with_target_annotation() {
+        let source = "(target wasm) base := 1; (export wasm) answer := 42; answer";
+        let ast = crate::loader::parse_source_block(source).expect("source should parse");
+        let mut context = crate::interpret::intrinsic_context();
+        let lowered_context = crate::interpret::interpret_program_for_context(ast, &mut context)
+            .expect("source should interpret");
+
+        let lowered = lower_with_wasm(&lowered_context)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.wrappers.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+
+        assert_eq!(lowered.globals[0].name, "answer");
+        assert_eq!(lowered.globals[0].ty, IntermediateType::I32);
+        assert!(matches!(
+            lowered.globals[0].value,
+            IntermediateKind::Literal(ExpressionLiteral::Number(42))
+        ));
+        assert_eq!(lowered.exports[0].target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.exports[0].name, "answer");
+        assert_eq!(
+            lowered.exports[0].export_type,
+            IntermediateExportType::Global
+        );
+        assert_eq!(lowered.exports[0].index, 0);
+    }
+
+    #[test]
     fn wasm_stage_reports_unimplemented_for_function_exports() {
         let source = "(export wasm) id := (x: i32) => x; id";
         let ast = crate::loader::parse_source_block(source).expect("source should parse");
