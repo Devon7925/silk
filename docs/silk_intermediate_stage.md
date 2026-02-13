@@ -7,129 +7,104 @@ This document tracks the current host/wasm contract for the silk-based intermedi
 - Source: `silk_src/intermediate.silk`
 - Host bridge: `src/silk_intermediate.rs`
 - Build output: `binaries/intermediate.wasm`
-- Cache:
-  - `target/wasm_cache/intermediate.wasmtime`
-  - `target/wasm_cache/intermediate.wasmtime.hash`
-  - `target/wasm_cache/intermediate.wasm.hash`
 
-The host now serializes `Context` metadata into bytes, writes it into wasm `input` memory, and invokes `lower_context(scope_count, binding_count, input_len)` in `intermediate.wasm`.
-When the payload is valid, the silk stage now:
-- returns `Ok` with a serialized non-empty output for supported annotated bindings (currently exported literal globals, including wasm->js wrapped globals),
-- returns `Ok` with an empty-result fast path (`get_lower_output_len() == 0`) when nothing is emitted,
-- returns `Unimplemented` for unsupported annotated lowering cases (for example function exports, most `wrap` annotation cases, and non-literal exports), and the host falls back to the Rust lowering path (`src/intermediate.rs`).
+The intermediate stage supports two input ABIs:
 
-## Exported ABI
+- Parser/interpreter-compatible AST input (`input`, `nodes`, `list_nodes`, `state` + `lower_context(root)`).
+- Legacy slot input for bootstrap/host fallback (`set_input_*` + `lower_context_from_slots(...)`).
 
-- `intermediate_stage_version() -> i32`
-  - Must be `> 0` for the stage to be considered valid.
+## Versions
+
+- `intermediate_stage_version() -> 3`
+- `intermediate_payload_version() -> 4`
+- `intermediate_output_version() -> 2`
+
+## Input ABI (AST, chainable)
+
+This ABI matches `interpreter.silk` input memory exactly:
+
 - `(export wasm) input: Box({u8; MAX_INPUT})`
-  - Input payload buffer written by the host before `lower_context`.
-- `(export wasm) intermediate_output_memory: Box({u8; MAX_OUTPUT})`
-  - Output payload buffer (currently reserved for future non-empty `Ok` payloads).
-- `lower_context(scope_count: i32, binding_count: i32, input_len: i32) -> i32`
-  - Status code return value:
-    - `0`: `Ok` (currently used by empty-result fast path)
-    - `1`: `Unimplemented` (host falls back to Rust lowering)
-    - `2`: `Error` (host reads `get_lower_error_code()` and reports a diagnostic)
+- `(export wasm) mut nodes: Box({Node; MAX_NODES})`
+- `(export wasm) mut list_nodes: Box({ListNode; MAX_LIST_NODES})`
+- `(export wasm) mut state: Box(State)`
+
+Lower call:
+
+- `lower_context(root: i32) -> i32`
+
+## Input ABI (Legacy slots)
+
+The host writes identifier bytes into:
+
+- `(export wasm) input: Box({u8; MAX_INPUT})`
+
+Then populates slot arrays through exports:
+
+- `reset_input_slots() -> i32`
+- `set_input_counts(binding_count: i32, value_count: i32) -> i32`
+- `set_input_value(idx: i32, tag: i32, payload_i32: i32) -> i32`
+- `set_input_binding(idx: i32, name_start: i32, name_length: i32, value_idx: i32, is_mut: i32, target_mask: i32, export_mask: i32, wrap_mask: i32) -> i32`
+
+Input value tags are interpreter-compatible:
+
+- `0`: number
+- `1`: boolean
+- `2`: char
+
+Target masks are interpreter-compatible:
+
+- `1`: js
+- `2`: wasm
+- `4`: wgsl
+
+## Output ABI
+
+Lowered output is written into struct slot arrays:
+
+- `(export wasm) mut output_globals: Box({OutputGlobalSlot; ...})`
+- `(export wasm) mut output_exports: Box({OutputExportSlot; ...})`
+- `(export wasm) mut output_wrappers: Box({OutputWrapperSlot; ...})`
+
+Host reads counts and fields through getters:
+
+- `get_lower_output_global_count()`
+- `get_lower_output_export_count()`
+- `get_lower_output_wrapper_count()`
+- `get_lower_output_global_*`
+- `get_lower_output_export_*`
+- `get_lower_output_wrapper_*`
+
+No output byte payload memory is used.
+
+## Lower Call (Legacy slots)
+
+- `lower_context_from_slots(scope_count: i32, binding_count: i32, input_len: i32) -> i32`
+
+Status codes:
+
+- `0`: ok
+- `1`: unimplemented
+- `2`: error
+
+Error code export:
+
 - `get_lower_error_code() -> i32`
-  - Optional extra error code when `lower_context` returns `2`.
-  - Current values:
-    - `0`: no error
-    - `1`: payload too small for header (`input_len < 24`)
-    - `2`: bad payload magic
-    - `3`: unsupported payload version
-    - `4`: header scope/binding counts mismatch call arguments
-    - `5`: payload body parse failed (malformed binding records)
-    - `6`: payload body parsed counts mismatch header values
-    - `7`: output payload encoding failed
 
-Current debug exports in `intermediate.silk`:
-- `get_lower_last_scope_count() -> i32`
-- `get_lower_last_binding_count() -> i32`
-- `get_lower_last_input_len() -> i32`
-- `get_lower_input_magic_ok() -> i32`
-- `get_lower_header_version() -> i32`
-- `get_lower_header_scope_count() -> i32`
-- `get_lower_header_binding_count() -> i32`
-- `get_lower_header_annotated_binding_count() -> i32`
-- `get_lower_header_ok() -> i32`
-- `get_lower_parsed_binding_count() -> i32`
-- `get_lower_parsed_annotated_binding_count() -> i32`
-- `get_lower_parse_cursor() -> i32`
-- `get_lower_body_ok() -> i32`
-- `get_lower_output_len() -> i32`
-- `get_lower_output_global_count() -> i32`
-- `get_lower_output_export_count() -> i32`
-- `get_lower_lowering_unimplemented() -> i32`
+## Debug Exports
 
-## Payload Header
+The stage keeps debug/state getters for header/body/output counters, including:
 
-The serialized context payload currently starts with:
-- bytes `[0..8)`: ASCII magic `SILKIMD0`
-- bytes `[8..12)`: `u32` payload format version (`3`, little-endian)
-- bytes `[12..16)`: `u32` scope count
-- bytes `[16..20)`: `u32` binding count
-- bytes `[20..24)`: `u32` annotated binding count (bindings with non-empty annotation list)
-
-After the header:
-- Repeated per scope:
-  - `u32` scope index
-  - `u32` entry count
-- Repeated per binding entry:
-  - `u32` name byte length, then name bytes
-  - `u32` unique byte length, then unique bytes
-  - `u8` binding context tag (`0` bound, `1` unbound-with-type, `2` unbound-without-type)
-  - `u8` preserve behavior tag (`0..3`, `255` when not bound)
-  - `u32` annotation count
-  - `u32` annotation mask (mutable/export/target/wrap target bits)
-  - `u8` value tag (`0` unknown, `1` number, `2` boolean, `3` char)
-  - `i32` value payload (number/boolean-as-0-or-1/char code)
-
-## Output Header
-
-Output payload starts with:
-- bytes `[0..8)`: ASCII magic `SILKIRD0`
-- bytes `[8..12)`: `u32` output format version (`1`, little-endian)
-- bytes `[12..16)`: `u32` function count
-- bytes `[16..20)`: `u32` global count
-- bytes `[20..24)`: `u32` export count
-- bytes `[24..28)`: `u32` wrapper count
-- bytes `[28..32)`: `u32` inline binding count
-
-Current implemented sections after the header:
-- Global records (`global_count` entries):
-  - `u32` name byte length, then name bytes
-  - `u8` global type tag (`0` = `i32`, `1` = `u8`)
-  - `u8` literal value tag (`1` = number, `2` = boolean, `3` = char)
-  - `i32` literal value payload (little-endian)
-- Export records (`export_count` entries):
-  - `u8` target tag (`0` = js, `1` = wasm, `2` = wgsl)
-  - `u8` export type tag (`0` = function, `1` = global)
-  - `u32` referenced index
-  - `u32` name byte length, then name bytes
-- Wrapper records (`wrapper_count` entries):
-  - `u8` source target tag (`0` = js, `1` = wasm, `2` = wgsl)
-  - `u8` wrap target tag (`0` = js, `1` = wasm, `2` = wgsl)
-  - `u8` export type tag (`0` = function, `1` = global)
-  - `u32` referenced index
-  - `u32` name byte length, then name bytes
-
-Current wrapper coverage:
-- Supported: global wrappers for wasm exports wrapped to js (for example `(export wasm) (wrap js) answer: i32 := 42`).
-- Still unsupported in silk lowering (falls back to Rust): function wrappers and other wrapper target combinations.
-
-Current fast path note:
-- `get_lower_output_len() == 0` means the stage produced an empty `IntermediateResult`.
+- `get_lower_last_scope_count`
+- `get_lower_last_binding_count`
+- `get_lower_last_input_len`
+- `get_lower_header_*`
+- `get_lower_parsed_*`
+- `get_lower_output_len`
+- `get_lower_output_*_count`
+- `get_lower_lowering_unimplemented`
 
 ## Host Flags
 
 - `SILK_DISABLE_WASM_INTERMEDIATE=1`
-  - Disable wasm intermediate stage; always use Rust fallback.
 - `SILK_WASM_INTERMEDIATE_STRICT=1`
-  - Do not fall back; fail when silk intermediate is unavailable/unimplemented/errors.
 - `SILK_DEBUG_WASM_INTERMEDIATE=1`
-  - Print fallback reason before Rust fallback.
-
-## Next Step
-
-Expand lowering/output coverage beyond literal global exports, especially function lowering, function wrappers, and inline bindings.

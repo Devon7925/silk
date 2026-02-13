@@ -86,11 +86,7 @@ EMPTY_LIST_NODE := types.EMPTY_LIST_NODE;
 
 State := types.State;
 
-TargetTag := enum {
-    Js = {},
-    Wasm = {},
-    Wgsl = {},
-};
+TargetTag := types.TargetTag;
 
 BindingAnnotationValue := enum {
     Mut = {},
@@ -267,11 +263,19 @@ builtin_iterator := {} => builtin_kind_tag(BuiltinKind::Iterator);
 builtin_range_next := {} => builtin_kind_tag(BuiltinKind::RangeNext);
 builtin_use := {} => builtin_kind_tag(BuiltinKind::Use);
 
+TARGET_JS := types.TARGET_JS;
+TARGET_WASM := types.TARGET_WASM;
+TARGET_WGSL := types.TARGET_WGSL;
+
+TARGET_MASK_JS := types.TARGET_MASK_JS;
+TARGET_MASK_WASM := types.TARGET_MASK_WASM;
+TARGET_MASK_WGSL := types.TARGET_MASK_WGSL;
+
 target_tag_value := (target: TargetTag) => (
     target |> match {
-        TargetTag::Js => 0,
-        TargetTag::Wasm => 1,
-        TargetTag::Wgsl => 2,
+        TargetTag::Js => TARGET_JS,
+        TargetTag::Wasm => TARGET_WASM,
+        TargetTag::Wgsl => TARGET_WGSL,
         else => -1
     }
 );
@@ -280,17 +284,13 @@ target_js := {} => target_tag_value(TargetTag::Js);
 target_wasm := {} => target_tag_value(TargetTag::Wasm);
 target_wgsl := {} => target_tag_value(TargetTag::Wgsl);
 
-TargetMaskBit := enum {
-    Js = {},
-    Wasm = {},
-    Wgsl = {},
-};
+TargetMaskBit := types.TargetMaskBit;
 
 target_mask_bit := (mask: TargetMaskBit) => (
     mask |> match {
-        TargetMaskBit::Js => 1,
-        TargetMaskBit::Wasm => 2,
-        TargetMaskBit::Wgsl => 4,
+        TargetMaskBit::Js => TARGET_MASK_JS,
+        TargetMaskBit::Wasm => TARGET_MASK_WASM,
+        TargetMaskBit::Wgsl => TARGET_MASK_WGSL,
         else => 0
     }
 );
@@ -298,6 +298,59 @@ target_mask_bit := (mask: TargetMaskBit) => (
 target_mask_js := {} => target_mask_bit(TargetMaskBit::Js);
 target_mask_wasm := {} => target_mask_bit(TargetMaskBit::Wasm);
 target_mask_wgsl := {} => target_mask_bit(TargetMaskBit::Wgsl);
+
+target_mask_from_target := (target_tag: TargetTag) => (
+    target_tag |> match {
+        TargetTag::Js => target_mask_js{},
+        TargetTag::Wasm => target_mask_wasm{},
+        TargetTag::Wgsl => target_mask_wgsl{},
+        else => 0
+    }
+);
+
+target_mask_from_tag := (target_tag: i32) => (
+    if target_tag == target_js{} then target_mask_js{}
+    else if target_tag == target_wasm{} then target_mask_wasm{}
+    else if target_tag == target_wgsl{} then target_mask_wgsl{}
+    else 0
+);
+
+target_mask_has := {mask: i32, target_tag: i32} => (
+    if target_tag == target_js{} then (
+        if mask == 1 || mask == 3 || mask == 5 || mask == 7 then 1 else 0
+    ) else if target_tag == target_wasm{} then (
+        if mask == 2 || mask == 3 || mask == 6 || mask == 7 then 1 else 0
+    ) else if target_tag == target_wgsl{} then (
+        if mask == 4 || mask == 5 || mask == 6 || mask == 7 then 1 else 0
+    ) else (
+        0
+    )
+);
+
+target_mask_or := {left: i32, right: i32} => (
+    js := if target_mask_has{left, target_js{}} == 1 || target_mask_has{right, target_js{}} == 1 then target_mask_js{} else 0;
+    wasm := if target_mask_has{left, target_wasm{}} == 1 || target_mask_has{right, target_wasm{}} == 1 then target_mask_wasm{} else 0;
+    wgsl := if target_mask_has{left, target_wgsl{}} == 1 || target_mask_has{right, target_wgsl{}} == 1 then target_mask_wgsl{} else 0;
+    js + wasm + wgsl
+);
+
+target_mask_and := {left: i32, right: i32} => (
+    js := if target_mask_has{left, target_js{}} == 1 && target_mask_has{right, target_js{}} == 1 then target_mask_js{} else 0;
+    wasm := if target_mask_has{left, target_wasm{}} == 1 && target_mask_has{right, target_wasm{}} == 1 then target_mask_wasm{} else 0;
+    wgsl := if target_mask_has{left, target_wgsl{}} == 1 && target_mask_has{right, target_wgsl{}} == 1 then target_mask_wgsl{} else 0;
+    js + wasm + wgsl
+);
+
+target_mask_allows := {required: i32, current: i32} => (
+    js_blocked := target_mask_has{current, target_js{}} == 1 && target_mask_has{required, target_js{}} == 0;
+    wasm_blocked := target_mask_has{current, target_wasm{}} == 1 && target_mask_has{required, target_wasm{}} == 0;
+    wgsl_blocked := target_mask_has{current, target_wgsl{}} == 1 && target_mask_has{required, target_wgsl{}} == 0;
+    if js_blocked || wasm_blocked || wgsl_blocked then 0 else 1
+);
+
+target_mask_is_single_target := (mask: i32) => (
+    if mask == target_mask_js{} || mask == target_mask_wasm{} || mask == target_mask_wgsl{} then 1 else 0
+);
 
 EMPTY_VALUE := Value::Unit;
 EMPTY_VALUE_SLOT := { value = EMPTY_VALUE, type_value = -1, is_box_type = 0 };
@@ -2468,22 +2521,6 @@ target_literal_tag := (target: TargetLiteral) => (
     target_tag_value(target_literal_value(target))
 );
 
-target_mask_from_target := (target_tag: TargetTag) => (
-    target_tag |> match {
-        TargetTag::Js => target_mask_js{},
-        TargetTag::Wasm => target_mask_wasm{},
-        TargetTag::Wgsl => target_mask_wgsl{},
-        else => 0
-    }
-);
-
-target_mask_from_tag := (target_tag: i32) => (
-    if target_tag == target_js{} then target_mask_js{}
-    else if target_tag == target_wasm{} then target_mask_wasm{}
-    else if target_tag == target_wgsl{} then target_mask_wgsl{}
-    else 0
-);
-
 target_tag_is_wgsl := (target_tag: TargetTag) => (
     target_tag |> match {
         TargetTag::Wgsl => 1,
@@ -2493,18 +2530,6 @@ target_tag_is_wgsl := (target_tag: TargetTag) => (
 
 target_tags_equal := {left: TargetTag, right: TargetTag} => (
     if target_tag_value(left) == target_tag_value(right) then 1 else 0
-);
-
-target_mask_has := {mask: i32, target_tag: i32} => (
-    if target_tag == target_js{} then (
-        if mask == 1 || mask == 3 || mask == 5 || mask == 7 then 1 else 0
-    ) else if target_tag == target_wasm{} then (
-        if mask == 2 || mask == 3 || mask == 6 || mask == 7 then 1 else 0
-    ) else if target_tag == target_wgsl{} then (
-        if mask == 4 || mask == 5 || mask == 6 || mask == 7 then 1 else 0
-    ) else (
-        0
-    )
 );
 
 binding_annotation_kind_tag := (ann: BindingAnnotationValue) => (
@@ -2531,31 +2556,6 @@ binding_annotation_equals := {left: BindingAnnotationValue, right: BindingAnnota
     if binding_annotation_kind_tag(left) == binding_annotation_kind_tag(right)
         && binding_annotation_target_tag(left) == binding_annotation_target_tag(right)
     then 1 else 0
-);
-
-target_mask_or := {left: i32, right: i32} => (
-    js := if target_mask_has{left, target_js{}} == 1 || target_mask_has{right, target_js{}} == 1 then target_mask_js{} else 0;
-    wasm := if target_mask_has{left, target_wasm{}} == 1 || target_mask_has{right, target_wasm{}} == 1 then target_mask_wasm{} else 0;
-    wgsl := if target_mask_has{left, target_wgsl{}} == 1 || target_mask_has{right, target_wgsl{}} == 1 then target_mask_wgsl{} else 0;
-    js + wasm + wgsl
-);
-
-target_mask_and := {left: i32, right: i32} => (
-    js := if target_mask_has{left, target_js{}} == 1 && target_mask_has{right, target_js{}} == 1 then target_mask_js{} else 0;
-    wasm := if target_mask_has{left, target_wasm{}} == 1 && target_mask_has{right, target_wasm{}} == 1 then target_mask_wasm{} else 0;
-    wgsl := if target_mask_has{left, target_wgsl{}} == 1 && target_mask_has{right, target_wgsl{}} == 1 then target_mask_wgsl{} else 0;
-    js + wasm + wgsl
-);
-
-target_mask_allows := {required: i32, current: i32} => (
-    js_blocked := target_mask_has{current, target_js{}} == 1 && target_mask_has{required, target_js{}} == 0;
-    wasm_blocked := target_mask_has{current, target_wasm{}} == 1 && target_mask_has{required, target_wasm{}} == 0;
-    wgsl_blocked := target_mask_has{current, target_wgsl{}} == 1 && target_mask_has{required, target_wgsl{}} == 0;
-    if js_blocked || wasm_blocked || wgsl_blocked then 0 else 1
-);
-
-target_mask_is_single_target := (mask: i32) => (
-    if mask == target_mask_js{} || mask == target_mask_wasm{} || mask == target_mask_wgsl{} then 1 else 0
 );
 
 validate_wrap_export_annotations := {value_idx: i32, export_mask: i32, wrap_mask: i32, span_start: i32} => (

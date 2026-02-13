@@ -9,6 +9,26 @@ TargetLiteral := enum {
     WgslTarget = {},
 };
 
+TargetTag := enum {
+    Js = {},
+    Wasm = {},
+    Wgsl = {},
+};
+
+TargetMaskBit := enum {
+    Js = {},
+    Wasm = {},
+    Wgsl = {},
+};
+
+TARGET_JS := 0;
+TARGET_WASM := 1;
+TARGET_WGSL := 2;
+
+TARGET_MASK_JS := 1;
+TARGET_MASK_WASM := 2;
+TARGET_MASK_WGSL := 4;
+
 BindingAnnotationLiteral := enum {
     Mut = {},
     Export = TargetLiteral,
@@ -165,6 +185,14 @@ State := { count = i32, cursor = i32, error = i32, list_count = i32 };
     SourceSpan = SourceSpan,
     Identifier = Identifier,
     TargetLiteral = TargetLiteral,
+    TargetTag = TargetTag,
+    TargetMaskBit = TargetMaskBit,
+    TARGET_JS = TARGET_JS,
+    TARGET_WASM = TARGET_WASM,
+    TARGET_WGSL = TARGET_WGSL,
+    TARGET_MASK_JS = TARGET_MASK_JS,
+    TARGET_MASK_WASM = TARGET_MASK_WASM,
+    TARGET_MASK_WGSL = TARGET_MASK_WGSL,
     BindingAnnotationLiteral = BindingAnnotationLiteral,
     ExpressionLiteral = ExpressionLiteral,
     IntrinsicType = IntrinsicType,

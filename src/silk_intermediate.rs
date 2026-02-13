@@ -10,7 +10,7 @@ use crate::intermediate::{
     self, IntermediateExport, IntermediateExportType, IntermediateGlobal, IntermediateKind,
     IntermediateResult, IntermediateType, IntermediateWrap,
 };
-use crate::interpret::{self, BindingContext, Context, PreserveBehavior};
+use crate::interpret::{self, BindingContext, Context};
 use crate::loader;
 use crate::parsing::{BindingAnnotation, ExpressionKind, ExpressionLiteral, TargetLiteral};
 use crate::wasm;
@@ -27,39 +27,27 @@ const LOWER_STATUS_OK: i32 = 0;
 const LOWER_STATUS_UNIMPLEMENTED: i32 = 1;
 const LOWER_STATUS_ERROR: i32 = 2;
 
-const INPUT_PAYLOAD_MAGIC: &[u8; 8] = b"SILKIMD0";
-const INPUT_PAYLOAD_VERSION: u32 = 3;
-const INPUT_PAYLOAD_HEADER_LEN: usize = 24;
+const INPUT_VALUE_TAG_NUMBER: i32 = 0;
+const INPUT_VALUE_TAG_BOOLEAN: i32 = 1;
+const INPUT_VALUE_TAG_CHAR: i32 = 2;
 
-const OUTPUT_PAYLOAD_MAGIC: &[u8; 8] = b"SILKIRD0";
-const OUTPUT_PAYLOAD_VERSION: u32 = 1;
-const OUTPUT_PAYLOAD_HEADER_LEN: usize = 32;
+const TARGET_MASK_JS: i32 = 1;
+const TARGET_MASK_WASM: i32 = 2;
+const TARGET_MASK_WGSL: i32 = 4;
 
-const OUTPUT_TARGET_JS: u8 = 0;
-const OUTPUT_TARGET_WASM: u8 = 1;
-const OUTPUT_TARGET_WGSL: u8 = 2;
+const OUTPUT_TARGET_JS: i32 = 0;
+const OUTPUT_TARGET_WASM: i32 = 1;
+const OUTPUT_TARGET_WGSL: i32 = 2;
 
-const OUTPUT_EXPORT_TYPE_FUNCTION: u8 = 0;
-const OUTPUT_EXPORT_TYPE_GLOBAL: u8 = 1;
+const OUTPUT_EXPORT_TYPE_FUNCTION: i32 = 0;
+const OUTPUT_EXPORT_TYPE_GLOBAL: i32 = 1;
 
-const OUTPUT_GLOBAL_TYPE_I32: u8 = 0;
-const OUTPUT_GLOBAL_TYPE_U8: u8 = 1;
+const OUTPUT_GLOBAL_TYPE_I32: i32 = 0;
+const OUTPUT_GLOBAL_TYPE_U8: i32 = 1;
 
-const ANNOT_MUT: u32 = 1 << 0;
-const ANNOT_EXPORT_JS: u32 = 1 << 1;
-const ANNOT_EXPORT_WASM: u32 = 1 << 2;
-const ANNOT_EXPORT_WGSL: u32 = 1 << 3;
-const ANNOT_TARGET_JS: u32 = 1 << 4;
-const ANNOT_TARGET_WASM: u32 = 1 << 5;
-const ANNOT_TARGET_WGSL: u32 = 1 << 6;
-const ANNOT_WRAP_JS: u32 = 1 << 7;
-const ANNOT_WRAP_WASM: u32 = 1 << 8;
-const ANNOT_WRAP_WGSL: u32 = 1 << 9;
-
-const VALUE_TAG_UNKNOWN: u8 = 0;
-const VALUE_TAG_NUMBER: u8 = 1;
-const VALUE_TAG_BOOLEAN: u8 = 2;
-const VALUE_TAG_CHAR: u8 = 3;
+const OUTPUT_VALUE_TAG_NUMBER: i32 = 1;
+const OUTPUT_VALUE_TAG_BOOLEAN: i32 = 2;
+const OUTPUT_VALUE_TAG_CHAR: i32 = 3;
 
 static INTERMEDIATE_WASM_BYTES: OnceLock<Result<Vec<u8>, Diagnostic>> = OnceLock::new();
 static WASM_ENGINE: OnceLock<Result<Engine, Diagnostic>> = OnceLock::new();
@@ -79,6 +67,30 @@ impl IntermediateLoweringBackend {
             IntermediateLoweringBackend::RustFallback => "rust_fallback",
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct EncodedValueSlot {
+    tag: i32,
+    payload_i32: i32,
+}
+
+#[derive(Debug, Clone)]
+struct EncodedBindingSlot {
+    name_start: i32,
+    name_length: i32,
+    value_idx: i32,
+    is_mut: i32,
+    target_mask: i32,
+    export_mask: i32,
+    wrap_mask: i32,
+}
+
+#[derive(Debug, Clone)]
+struct EncodedContextSlots {
+    input_bytes: Vec<u8>,
+    values: Vec<EncodedValueSlot>,
+    bindings: Vec<EncodedBindingSlot>,
 }
 
 pub(crate) fn lower_context(
@@ -142,14 +154,15 @@ fn lower_with_wasm(context: &Context) -> Result<Option<IntermediateResult>, Diag
         Diagnostic::new(format!("Failed to instantiate intermediate wasm: {err}"))
     })?;
 
-    let payload = encode_context_payload(context)?;
-    write_input_payload(&mut store, &instance, &payload)?;
+    let encoded = encode_context_slots(context)?;
+    write_input_payload(&mut store, &instance, &encoded.input_bytes)?;
+    write_input_slots(&mut store, &instance, &encoded)?;
 
     let lower_func = instance
-        .get_typed_func::<(i32, i32, i32), i32>(&mut store, "lower_context")
+        .get_typed_func::<(i32, i32, i32), i32>(&mut store, "lower_context_from_slots")
         .map_err(|err| {
             Diagnostic::new(format!(
-                "Missing intermediate export `lower_context`: {err}"
+                "Missing intermediate export `lower_context_from_slots`: {err}"
             ))
         })?;
     let scope_count = to_i32(
@@ -157,25 +170,27 @@ fn lower_with_wasm(context: &Context) -> Result<Option<IntermediateResult>, Diag
         "Context scope count exceeds i32 while lowering with silk intermediate wasm",
     )?;
     let binding_count = to_i32(
-        context.bindings.iter().map(|scope| scope.len()).sum(),
+        encoded.bindings.len(),
         "Context binding count exceeds i32 while lowering with silk intermediate wasm",
     )?;
-    let payload_len = to_i32(
-        payload.len(),
-        "Serialized context payload exceeds i32 while lowering with silk intermediate wasm",
+    let input_len = to_i32(
+        encoded.input_bytes.len(),
+        "Serialized intermediate input bytes exceed i32 while lowering with silk intermediate wasm",
     )?;
     let status = lower_func
-        .call(&mut store, (scope_count, binding_count, payload_len))
+        .call(&mut store, (scope_count, binding_count, input_len))
         .map_err(|err| {
-            Diagnostic::new(format!("Intermediate call `lower_context` failed: {err}"))
+            Diagnostic::new(format!(
+                "Intermediate call `lower_context_from_slots` failed: {err}"
+            ))
         })?;
 
     match status {
         LOWER_STATUS_OK => {
-            let lowered = decode_lowered_output(&mut store, &instance)?;
+            let lowered = decode_lowered_output(&mut store, &instance, &encoded.input_bytes)?;
             if std::env::var_os("SILK_DEBUG_WASM_INTERMEDIATE").is_some() {
                 eprintln!(
-                    "SILK_DEBUG_WASM_INTERMEDIATE status=ok scope_count={scope_count} binding_count={binding_count} payload_len={payload_len}"
+                    "SILK_DEBUG_WASM_INTERMEDIATE status=ok scope_count={scope_count} binding_count={binding_count} input_len={input_len}"
                 );
                 log_optional_debug_export(&instance, &mut store, "get_lower_header_ok");
                 log_optional_debug_export(
@@ -202,7 +217,7 @@ fn lower_with_wasm(context: &Context) -> Result<Option<IntermediateResult>, Diag
                 .unwrap_or(0);
             if std::env::var_os("SILK_DEBUG_WASM_INTERMEDIATE").is_some() {
                 eprintln!(
-                    "SILK_DEBUG_WASM_INTERMEDIATE status=error code={error_code} scope_count={scope_count} binding_count={binding_count} payload_len={payload_len}"
+                    "SILK_DEBUG_WASM_INTERMEDIATE status=error code={error_code} scope_count={scope_count} binding_count={binding_count} input_len={input_len}"
                 );
                 log_optional_debug_export(&instance, &mut store, "get_lower_input_magic_ok");
                 log_optional_debug_export(&instance, &mut store, "get_lower_header_version");
@@ -225,6 +240,7 @@ fn lower_with_wasm(context: &Context) -> Result<Option<IntermediateResult>, Diag
                 log_optional_debug_export(&instance, &mut store, "get_lower_last_scope_count");
                 log_optional_debug_export(&instance, &mut store, "get_lower_last_binding_count");
                 log_optional_debug_export(&instance, &mut store, "get_lower_last_input_len");
+                log_optional_debug_export(&instance, &mut store, "get_lower_output_wrapper_count");
             }
             Err(Diagnostic::new(format!(
                 "Silk intermediate wasm reported an error: {} (code {error_code})",
@@ -272,8 +288,11 @@ fn probe_stage_ready() -> Result<bool, Diagnostic> {
     }
 
     Ok(instance
-        .get_typed_func::<(i32, i32, i32), i32>(&mut store, "lower_context")
-        .is_ok())
+        .get_typed_func::<(i32, i32, i32), i32>(&mut store, "lower_context_from_slots")
+        .is_ok()
+        && instance
+            .get_typed_func::<i32, i32>(&mut store, "lower_context")
+            .is_ok())
 }
 
 fn intermediate_wasm_bytes() -> Result<&'static [u8], Diagnostic> {
@@ -321,7 +340,9 @@ fn intermediate_module() -> Result<&'static Module, Diagnostic> {
         }
 
         let module = Module::new(engine, bytes).map_err(|err| {
-            Diagnostic::new(format!("Failed to compile intermediate.wasm: {err}"))
+            Diagnostic::new(format!(
+                "Failed to compile intermediate.wasm: {err} ({err:?})"
+            ))
         })?;
         save_cached_intermediate_module(&module);
         Ok(module)
@@ -522,26 +543,20 @@ fn write_memory_payload(
 fn decode_lowered_output(
     store: &mut Store<()>,
     instance: &Instance,
+    input_bytes: &[u8],
 ) -> Result<IntermediateResult, Diagnostic> {
-    let output_len = instance
-        .get_typed_func::<(), i32>(&mut *store, "get_lower_output_len")
-        .map_err(|err| {
-            Diagnostic::new(format!(
-                "Missing intermediate export `get_lower_output_len`: {err}"
-            ))
-        })?
-        .call(&mut *store, ())
-        .map_err(|err| {
-            Diagnostic::new(format!(
-                "Intermediate call `get_lower_output_len` failed: {err}"
-            ))
-        })?;
-    if output_len < 0 {
+    let global_count = call_required_i32_export(instance, store, "get_lower_output_global_count")?;
+    let export_count = call_required_i32_export(instance, store, "get_lower_output_export_count")?;
+    let wrapper_count =
+        call_required_i32_export(instance, store, "get_lower_output_wrapper_count")?;
+
+    if global_count < 0 || export_count < 0 || wrapper_count < 0 {
         return Err(Diagnostic::new(format!(
-            "Silk intermediate wasm returned negative output length {output_len}"
+            "Silk intermediate returned negative output counts (globals={global_count}, exports={export_count}, wrappers={wrapper_count})"
         )));
     }
-    if output_len == 0 {
+
+    if global_count == 0 && export_count == 0 && wrapper_count == 0 {
         return Ok(IntermediateResult {
             functions: Vec::new(),
             globals: Vec::new(),
@@ -551,144 +566,197 @@ fn decode_lowered_output(
         });
     }
 
-    let output = instance
-        .get_memory(&mut *store, "intermediate_output_memory")
-        .ok_or_else(|| {
-            Diagnostic::new("Intermediate export `intermediate_output_memory` memory not found")
-        })?;
-    let bytes = output.data(&*store);
-    let output_len = output_len as usize;
-    if output_len > bytes.len() {
-        return Err(Diagnostic::new(format!(
-            "Silk intermediate wasm output length {output_len} exceeds output memory size {}",
-            bytes.len()
-        )));
-    }
-    if output_len < OUTPUT_PAYLOAD_HEADER_LEN {
-        return Err(Diagnostic::new(format!(
-            "Silk intermediate wasm output too small ({output_len} bytes)"
-        )));
-    }
-    let output_bytes = &bytes[..output_len];
+    let get_global_name_start = required_i32_to_i32_export(
+        instance,
+        store,
+        "get_lower_output_global_name_start",
+    )?;
+    let get_global_name_length = required_i32_to_i32_export(
+        instance,
+        store,
+        "get_lower_output_global_name_length",
+    )?;
+    let get_global_type_tag =
+        required_i32_to_i32_export(instance, store, "get_lower_output_global_type_tag")?;
+    let get_global_value_tag =
+        required_i32_to_i32_export(instance, store, "get_lower_output_global_value_tag")?;
+    let get_global_value_i32 =
+        required_i32_to_i32_export(instance, store, "get_lower_output_global_value_i32")?;
 
-    if &output_bytes[0..8] != OUTPUT_PAYLOAD_MAGIC {
-        return Err(Diagnostic::new(
-            "Silk intermediate wasm output magic mismatch",
-        ));
-    }
-    let output_version = read_u32(output_bytes, 8)?;
-    if output_version != OUTPUT_PAYLOAD_VERSION {
-        return Err(Diagnostic::new(format!(
-            "Silk intermediate wasm output version mismatch: expected {}, got {output_version}",
-            OUTPUT_PAYLOAD_VERSION
-        )));
-    }
-
-    let function_count = read_u32(output_bytes, 12)?;
-    let global_count = read_u32(output_bytes, 16)?;
-    let export_count = read_u32(output_bytes, 20)?;
-    let wrapper_count = read_u32(output_bytes, 24)?;
-    let inline_binding_count = read_u32(output_bytes, 28)?;
-    if function_count != 0 || inline_binding_count != 0 {
-        return Err(Diagnostic::new(format!(
-            "Silk intermediate output decoding for functions/inline bindings is not implemented yet (functions={function_count}, inline_bindings={inline_binding_count})"
-        )));
-    }
-
-    let mut cursor = OUTPUT_PAYLOAD_HEADER_LEN;
     let mut globals = Vec::with_capacity(global_count as usize);
-    for global_idx in 0..global_count {
-        let name = read_len_prefixed_output_string(output_bytes, &mut cursor, "global name")?;
-        let ty_tag = read_u8_cursor(output_bytes, &mut cursor, "global type tag")?;
-        let value_tag = read_u8_cursor(output_bytes, &mut cursor, "global value tag")?;
-        let value_i32 = read_i32_cursor(output_bytes, &mut cursor, "global literal value")?;
+    for idx in 0..global_count {
+        let name_start = get_global_name_start.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_global_name_start` failed: {err}"
+            ))
+        })?;
+        let name_length = get_global_name_length.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_global_name_length` failed: {err}"
+            ))
+        })?;
+        let name = decode_name_from_input(input_bytes, name_start, name_length)?;
+        let ty_tag = get_global_type_tag.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_global_type_tag` failed: {err}"
+            ))
+        })?;
+        let value_tag = get_global_value_tag.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_global_value_tag` failed: {err}"
+            ))
+        })?;
+        let value_i32 = get_global_value_i32.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_global_value_i32` failed: {err}"
+            ))
+        })?;
 
         let ty = decode_output_global_type(ty_tag)?;
         let value = decode_output_literal(value_tag, value_i32).map(IntermediateKind::Literal)?;
         globals.push(IntermediateGlobal { name, ty, value });
-
-        if std::env::var_os("SILK_DEBUG_WASM_INTERMEDIATE").is_some() {
-            eprintln!(
-                "SILK_DEBUG_WASM_INTERMEDIATE decoded_global index={global_idx} ty_tag={ty_tag} value_tag={value_tag}"
-            );
-        }
     }
 
+    let get_export_target_tag =
+        required_i32_to_i32_export(instance, store, "get_lower_output_export_target_tag")?;
+    let get_export_type_tag =
+        required_i32_to_i32_export(instance, store, "get_lower_output_export_type_tag")?;
+    let get_export_index =
+        required_i32_to_i32_export(instance, store, "get_lower_output_export_index")?;
+    let get_export_name_start =
+        required_i32_to_i32_export(instance, store, "get_lower_output_export_name_start")?;
+    let get_export_name_length =
+        required_i32_to_i32_export(instance, store, "get_lower_output_export_name_length")?;
+
     let mut exports = Vec::with_capacity(export_count as usize);
-    for export_idx in 0..export_count {
-        let target_tag = read_u8_cursor(output_bytes, &mut cursor, "export target tag")?;
-        let export_type_tag = read_u8_cursor(output_bytes, &mut cursor, "export type tag")?;
-        let index = read_u32_cursor(output_bytes, &mut cursor, "export index")? as usize;
-        let name = read_len_prefixed_output_string(output_bytes, &mut cursor, "export name")?;
+    for idx in 0..export_count {
+        let target_tag = get_export_target_tag.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_export_target_tag` failed: {err}"
+            ))
+        })?;
+        let export_type_tag = get_export_type_tag.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_export_type_tag` failed: {err}"
+            ))
+        })?;
+        let item_index = get_export_index.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_export_index` failed: {err}"
+            ))
+        })? as usize;
+        let name_start = get_export_name_start.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_export_name_start` failed: {err}"
+            ))
+        })?;
+        let name_length = get_export_name_length.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_export_name_length` failed: {err}"
+            ))
+        })?;
+        let name = decode_name_from_input(input_bytes, name_start, name_length)?;
 
         let target = decode_output_target(target_tag)?;
         let export_type = decode_output_export_type(export_type_tag)?;
-
-        match export_type {
-            IntermediateExportType::Global => {
-                if index >= globals.len() {
-                    return Err(Diagnostic::new(format!(
-                        "Silk intermediate output export {export_idx} references missing global index {index} (global count {})",
-                        globals.len()
-                    )));
-                }
-            }
-            IntermediateExportType::Function => {
-                return Err(Diagnostic::new(
-                    "Silk intermediate output includes function exports, but function decoding is not implemented yet",
-                ));
-            }
+        if matches!(export_type, IntermediateExportType::Global) && item_index >= globals.len() {
+            return Err(Diagnostic::new(format!(
+                "Silk intermediate output export {idx} references missing global index {item_index} (global count {})",
+                globals.len()
+            )));
         }
-
+        if matches!(export_type, IntermediateExportType::Function) {
+            return Err(Diagnostic::new(
+                "Silk intermediate output includes function exports, but function decoding is not implemented yet",
+            ));
+        }
         exports.push(IntermediateExport {
             target,
             name,
             export_type,
-            index,
+            index: item_index,
         });
     }
 
+    let get_wrapper_source_target_tag = required_i32_to_i32_export(
+        instance,
+        store,
+        "get_lower_output_wrapper_source_target_tag",
+    )?;
+    let get_wrapper_wrap_target_tag = required_i32_to_i32_export(
+        instance,
+        store,
+        "get_lower_output_wrapper_wrap_target_tag",
+    )?;
+    let get_wrapper_export_type_tag = required_i32_to_i32_export(
+        instance,
+        store,
+        "get_lower_output_wrapper_export_type_tag",
+    )?;
+    let get_wrapper_index =
+        required_i32_to_i32_export(instance, store, "get_lower_output_wrapper_index")?;
+    let get_wrapper_name_start =
+        required_i32_to_i32_export(instance, store, "get_lower_output_wrapper_name_start")?;
+    let get_wrapper_name_length =
+        required_i32_to_i32_export(instance, store, "get_lower_output_wrapper_name_length")?;
+
     let mut wrappers = Vec::with_capacity(wrapper_count as usize);
-    for wrapper_idx in 0..wrapper_count {
-        let source_target_tag = read_u8_cursor(output_bytes, &mut cursor, "wrapper source target")?;
-        let wrap_target_tag = read_u8_cursor(output_bytes, &mut cursor, "wrapper wrap target")?;
-        let export_type_tag = read_u8_cursor(output_bytes, &mut cursor, "wrapper export type")?;
-        let index = read_u32_cursor(output_bytes, &mut cursor, "wrapper index")? as usize;
-        let name = read_len_prefixed_output_string(output_bytes, &mut cursor, "wrapper name")?;
+    for idx in 0..wrapper_count {
+        let source_target_tag = get_wrapper_source_target_tag
+            .call(&mut *store, idx)
+            .map_err(|err| {
+                Diagnostic::new(format!(
+                    "Intermediate call `get_lower_output_wrapper_source_target_tag` failed: {err}"
+                ))
+            })?;
+        let wrap_target_tag = get_wrapper_wrap_target_tag.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_wrapper_wrap_target_tag` failed: {err}"
+            ))
+        })?;
+        let export_type_tag = get_wrapper_export_type_tag.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_wrapper_export_type_tag` failed: {err}"
+            ))
+        })?;
+        let item_index = get_wrapper_index.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_wrapper_index` failed: {err}"
+            ))
+        })? as usize;
+        let name_start = get_wrapper_name_start.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_wrapper_name_start` failed: {err}"
+            ))
+        })?;
+        let name_length = get_wrapper_name_length.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_wrapper_name_length` failed: {err}"
+            ))
+        })?;
+        let name = decode_name_from_input(input_bytes, name_start, name_length)?;
 
         let source_target = decode_output_target(source_target_tag)?;
         let wrap_target = decode_output_target(wrap_target_tag)?;
         let export_type = decode_output_export_type(export_type_tag)?;
-
-        match export_type {
-            IntermediateExportType::Global => {
-                if index >= globals.len() {
-                    return Err(Diagnostic::new(format!(
-                        "Silk intermediate output wrapper {wrapper_idx} references missing global index {index} (global count {})",
-                        globals.len()
-                    )));
-                }
-            }
-            IntermediateExportType::Function => {
-                return Err(Diagnostic::new(
-                    "Silk intermediate output includes function wrappers, but function decoding is not implemented yet",
-                ));
-            }
+        if matches!(export_type, IntermediateExportType::Global) && item_index >= globals.len() {
+            return Err(Diagnostic::new(format!(
+                "Silk intermediate output wrapper {idx} references missing global index {item_index} (global count {})",
+                globals.len()
+            )));
         }
-
+        if matches!(export_type, IntermediateExportType::Function) {
+            return Err(Diagnostic::new(
+                "Silk intermediate output includes function wrappers, but function decoding is not implemented yet",
+            ));
+        }
         wrappers.push(IntermediateWrap {
             source_target,
             wrap_target,
             name,
             export_type,
-            index,
+            index: item_index,
         });
-    }
-
-    if cursor != output_len {
-        return Err(Diagnostic::new(format!(
-            "Silk intermediate output trailing bytes: parsed {cursor} of {output_len}"
-        )));
     }
 
     Ok(IntermediateResult {
@@ -700,37 +768,120 @@ fn decode_lowered_output(
     })
 }
 
-fn encode_context_payload(context: &Context) -> Result<Vec<u8>, Diagnostic> {
-    let scope_count = context.bindings.len();
-    let binding_count: usize = context.bindings.iter().map(|scope| scope.len()).sum();
-    let annotated_binding_count = context
-        .bindings
-        .iter()
-        .flat_map(|scope| scope.values())
-        .filter(|(_, annotations)| !annotations.is_empty())
-        .count();
+fn write_input_slots(
+    store: &mut Store<()>,
+    instance: &Instance,
+    encoded: &EncodedContextSlots,
+) -> Result<(), Diagnostic> {
+    let reset = instance
+        .get_typed_func::<(), i32>(&mut *store, "reset_input_slots")
+        .map_err(|err| {
+            Diagnostic::new(format!("Missing intermediate export `reset_input_slots`: {err}"))
+        })?;
+    let set_counts = instance
+        .get_typed_func::<(i32, i32), i32>(&mut *store, "set_input_counts")
+        .map_err(|err| {
+            Diagnostic::new(format!("Missing intermediate export `set_input_counts`: {err}"))
+        })?;
+    let set_value = instance
+        .get_typed_func::<(i32, i32, i32), i32>(&mut *store, "set_input_value")
+        .map_err(|err| {
+            Diagnostic::new(format!("Missing intermediate export `set_input_value`: {err}"))
+        })?;
+    let set_binding = instance
+        .get_typed_func::<(i32, i32, i32, i32, i32, i32, i32, i32), i32>(
+            &mut *store,
+            "set_input_binding",
+        )
+        .map_err(|err| {
+            Diagnostic::new(format!("Missing intermediate export `set_input_binding`: {err}"))
+        })?;
 
-    let mut out =
-        Vec::with_capacity(INPUT_PAYLOAD_HEADER_LEN + 16 + binding_count.saturating_mul(80));
-    out.extend_from_slice(INPUT_PAYLOAD_MAGIC);
-    push_u32(&mut out, INPUT_PAYLOAD_VERSION);
-    push_u32(
-        &mut out,
-        u32::try_from(scope_count)
-            .map_err(|_| Diagnostic::new("Context scope count exceeds u32 while encoding"))?,
-    );
-    push_u32(
-        &mut out,
-        u32::try_from(binding_count)
-            .map_err(|_| Diagnostic::new("Context binding count exceeds u32 while encoding"))?,
-    );
-    push_u32(
-        &mut out,
-        u32::try_from(annotated_binding_count)
-            .map_err(|_| Diagnostic::new("Annotated binding count exceeds u32 while encoding"))?,
-    );
+    let reset_ok = reset.call(&mut *store, ()).map_err(|err| {
+        Diagnostic::new(format!("Intermediate call `reset_input_slots` failed: {err}"))
+    })?;
+    if reset_ok != 1 {
+        return Err(Diagnostic::new(
+            "Intermediate call `reset_input_slots` reported failure",
+        ));
+    }
 
-    for (scope_index, scope) in context.bindings.iter().enumerate() {
+    let binding_count = to_i32(
+        encoded.bindings.len(),
+        "Encoded binding count exceeds i32 while writing intermediate input",
+    )?;
+    let value_count = to_i32(
+        encoded.values.len(),
+        "Encoded value count exceeds i32 while writing intermediate input",
+    )?;
+    let counts_ok = set_counts
+        .call(&mut *store, (binding_count, value_count))
+        .map_err(|err| {
+            Diagnostic::new(format!("Intermediate call `set_input_counts` failed: {err}"))
+        })?;
+    if counts_ok != 1 {
+        return Err(Diagnostic::new(
+            "Intermediate call `set_input_counts` reported failure",
+        ));
+    }
+
+    for (idx, value) in encoded.values.iter().enumerate() {
+        let idx = to_i32(
+            idx,
+            "Encoded value index exceeds i32 while writing intermediate input",
+        )?;
+        let ok = set_value
+            .call(&mut *store, (idx, value.tag, value.payload_i32))
+            .map_err(|err| {
+                Diagnostic::new(format!("Intermediate call `set_input_value` failed: {err}"))
+            })?;
+        if ok != 1 {
+            return Err(Diagnostic::new(format!(
+                "Intermediate call `set_input_value` reported failure at index {idx}"
+            )));
+        }
+    }
+
+    for (idx, binding) in encoded.bindings.iter().enumerate() {
+        let idx = to_i32(
+            idx,
+            "Encoded binding index exceeds i32 while writing intermediate input",
+        )?;
+        let ok = set_binding
+            .call(
+                &mut *store,
+                (
+                    idx,
+                    binding.name_start,
+                    binding.name_length,
+                    binding.value_idx,
+                    binding.is_mut,
+                    binding.target_mask,
+                    binding.export_mask,
+                    binding.wrap_mask,
+                ),
+            )
+            .map_err(|err| {
+                Diagnostic::new(format!(
+                    "Intermediate call `set_input_binding` failed: {err}"
+                ))
+            })?;
+        if ok != 1 {
+            return Err(Diagnostic::new(format!(
+                "Intermediate call `set_input_binding` reported failure at index {idx}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn encode_context_slots(context: &Context) -> Result<EncodedContextSlots, Diagnostic> {
+    let mut input_bytes = Vec::new();
+    let mut values = Vec::new();
+    let mut bindings = Vec::new();
+
+    for scope in &context.bindings {
         let mut entries: Vec<_> = scope.iter().collect();
         entries.sort_by(|(left_id, _), (right_id, _)| {
             left_id
@@ -739,222 +890,156 @@ fn encode_context_payload(context: &Context) -> Result<Vec<u8>, Diagnostic> {
                 .then(left_id.name.cmp(&right_id.name))
         });
 
-        push_u32(
-            &mut out,
-            u32::try_from(scope_index)
-                .map_err(|_| Diagnostic::new("Scope index exceeds u32 while encoding"))?,
-        );
-        push_u32(
-            &mut out,
-            u32::try_from(entries.len())
-                .map_err(|_| Diagnostic::new("Scope entry count exceeds u32 while encoding"))?,
-        );
-
         for (identifier, (binding_context, annotations)) in entries {
-            let annotation_mask = annotation_mask(annotations);
-            let (value_tag, value_i32) = binding_value_summary(binding_context);
-            push_string(&mut out, &identifier.name)?;
-            push_string(&mut out, &identifier.unique)?;
-            push_u8(&mut out, binding_context_tag(binding_context));
-            push_u8(&mut out, binding_context_preserve(binding_context));
-            push_u32(
-                &mut out,
-                u32::try_from(annotations.len())
-                    .map_err(|_| Diagnostic::new("Annotation count exceeds u32 while encoding"))?,
-            );
-            push_u32(&mut out, annotation_mask);
-            push_u8(&mut out, value_tag);
-            push_i32(&mut out, value_i32);
+            let name_start = to_i32(
+                input_bytes.len(),
+                "Input name buffer cursor exceeds i32 while encoding intermediate input",
+            )?;
+            input_bytes.extend_from_slice(identifier.name.as_bytes());
+            let name_length = to_i32(
+                identifier.name.len(),
+                "Binding name length exceeds i32 while encoding intermediate input",
+            )?;
+
+            let value_idx = to_i32(
+                values.len(),
+                "Encoded value index exceeds i32 while encoding intermediate input",
+            )?;
+            values.push(binding_value_slot(binding_context));
+
+            let (is_mut, target_mask, export_mask, wrap_mask) = annotation_masks(annotations);
+            bindings.push(EncodedBindingSlot {
+                name_start,
+                name_length,
+                value_idx,
+                is_mut,
+                target_mask,
+                export_mask,
+                wrap_mask,
+            });
         }
     }
 
-    Ok(out)
+    Ok(EncodedContextSlots {
+        input_bytes,
+        values,
+        bindings,
+    })
 }
 
-fn push_u8(out: &mut Vec<u8>, value: u8) {
-    out.push(value);
-}
+fn annotation_masks(annotations: &[BindingAnnotation]) -> (i32, i32, i32, i32) {
+    let mut is_mut = 0;
+    let mut target_mask = 0;
+    let mut export_mask = 0;
+    let mut wrap_mask = 0;
 
-fn push_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_i32(out: &mut Vec<u8>, value: i32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn push_string(out: &mut Vec<u8>, value: &str) -> Result<(), Diagnostic> {
-    push_u32(
-        out,
-        u32::try_from(value.len())
-            .map_err(|_| Diagnostic::new("String length exceeds u32 while encoding"))?,
-    );
-    out.extend_from_slice(value.as_bytes());
-    Ok(())
-}
-
-fn annotation_mask(annotations: &[BindingAnnotation]) -> u32 {
-    let mut mask = 0u32;
     for annotation in annotations {
         match annotation {
-            BindingAnnotation::Mutable(_) => {
-                mask |= ANNOT_MUT;
-            }
+            BindingAnnotation::Mutable(_) => is_mut = 1,
             BindingAnnotation::Export(expr, _) => {
                 if let ExpressionKind::Literal(ExpressionLiteral::Target(target)) = &expr.kind {
-                    mask |= export_target_bit(target);
+                    export_mask |= target_mask_bit(target);
                 }
             }
-            BindingAnnotation::Target(target, _) => {
-                mask |= target_target_bit(target);
-            }
-            BindingAnnotation::Wrap(target, _) => {
-                mask |= wrap_target_bit(target);
-            }
+            BindingAnnotation::Target(target, _) => target_mask |= target_mask_bit(target),
+            BindingAnnotation::Wrap(target, _) => wrap_mask |= target_mask_bit(target),
         }
     }
-    mask
+
+    (is_mut, target_mask, export_mask, wrap_mask)
 }
 
-fn export_target_bit(target: &TargetLiteral) -> u32 {
+fn target_mask_bit(target: &TargetLiteral) -> i32 {
     match target {
-        TargetLiteral::JSTarget => ANNOT_EXPORT_JS,
-        TargetLiteral::WasmTarget => ANNOT_EXPORT_WASM,
-        TargetLiteral::WgslTarget => ANNOT_EXPORT_WGSL,
+        TargetLiteral::JSTarget => TARGET_MASK_JS,
+        TargetLiteral::WasmTarget => TARGET_MASK_WASM,
+        TargetLiteral::WgslTarget => TARGET_MASK_WGSL,
     }
 }
 
-fn target_target_bit(target: &TargetLiteral) -> u32 {
-    match target {
-        TargetLiteral::JSTarget => ANNOT_TARGET_JS,
-        TargetLiteral::WasmTarget => ANNOT_TARGET_WASM,
-        TargetLiteral::WgslTarget => ANNOT_TARGET_WGSL,
-    }
-}
-
-fn wrap_target_bit(target: &TargetLiteral) -> u32 {
-    match target {
-        TargetLiteral::JSTarget => ANNOT_WRAP_JS,
-        TargetLiteral::WasmTarget => ANNOT_WRAP_WASM,
-        TargetLiteral::WgslTarget => ANNOT_WRAP_WGSL,
-    }
-}
-
-fn binding_value_summary(binding: &BindingContext) -> (u8, i32) {
+fn binding_value_slot(binding: &BindingContext) -> EncodedValueSlot {
     match binding {
         BindingContext::Bound(expr, _, _) => match &expr.kind {
-            ExpressionKind::Literal(ExpressionLiteral::Number(value)) => (VALUE_TAG_NUMBER, *value),
-            ExpressionKind::Literal(ExpressionLiteral::Boolean(value)) => {
-                (VALUE_TAG_BOOLEAN, if *value { 1 } else { 0 })
-            }
-            ExpressionKind::Literal(ExpressionLiteral::Char(value)) => {
-                (VALUE_TAG_CHAR, *value as i32)
-            }
-            _ => (VALUE_TAG_UNKNOWN, 0),
+            ExpressionKind::Literal(ExpressionLiteral::Number(value)) => EncodedValueSlot {
+                tag: INPUT_VALUE_TAG_NUMBER,
+                payload_i32: *value,
+            },
+            ExpressionKind::Literal(ExpressionLiteral::Boolean(value)) => EncodedValueSlot {
+                tag: INPUT_VALUE_TAG_BOOLEAN,
+                payload_i32: if *value { 1 } else { 0 },
+            },
+            ExpressionKind::Literal(ExpressionLiteral::Char(value)) => EncodedValueSlot {
+                tag: INPUT_VALUE_TAG_CHAR,
+                payload_i32: *value as i32,
+            },
+            _ => EncodedValueSlot {
+                tag: -1,
+                payload_i32: 0,
+            },
         },
-        _ => (VALUE_TAG_UNKNOWN, 0),
+        _ => EncodedValueSlot {
+            tag: -1,
+            payload_i32: 0,
+        },
     }
 }
 
-fn binding_context_tag(binding: &BindingContext) -> u8 {
-    match binding {
-        BindingContext::Bound(_, _, _) => 0,
-        BindingContext::UnboundWithType(_) => 1,
-        BindingContext::UnboundWithoutType => 2,
+fn decode_name_from_input(input_bytes: &[u8], start: i32, len: i32) -> Result<String, Diagnostic> {
+    if start < 0 || len < 0 {
+        return Err(Diagnostic::new(format!(
+            "Invalid name span from intermediate output: start={start} len={len}"
+        )));
     }
+    let start = start as usize;
+    let len = len as usize;
+    let end = start.saturating_add(len);
+    if end > input_bytes.len() {
+        return Err(Diagnostic::new(format!(
+            "Intermediate output name span exceeds input buffer bounds: start={start} len={len} input_len={}",
+            input_bytes.len()
+        )));
+    }
+    String::from_utf8(input_bytes[start..end].to_vec())
+        .map_err(|err| Diagnostic::new(format!("Intermediate output name is not UTF-8: {err}")))
 }
 
-fn binding_context_preserve(binding: &BindingContext) -> u8 {
-    match binding {
-        BindingContext::Bound(_, behavior, _) => preserve_behavior_tag(*behavior),
-        _ => 255,
-    }
+fn call_required_i32_export(
+    instance: &Instance,
+    store: &mut Store<()>,
+    export: &str,
+) -> Result<i32, Diagnostic> {
+    instance
+        .get_typed_func::<(), i32>(&mut *store, export)
+        .map_err(|err| Diagnostic::new(format!("Missing intermediate export `{export}`: {err}")))?
+        .call(&mut *store, ())
+        .map_err(|err| Diagnostic::new(format!("Intermediate call `{export}` failed: {err}")))
 }
 
-fn preserve_behavior_tag(behavior: PreserveBehavior) -> u8 {
-    match behavior {
-        PreserveBehavior::PreserveUsage => 0,
-        PreserveBehavior::PreserveUsageInLoops => 1,
-        PreserveBehavior::PreserveBinding => 2,
-        PreserveBehavior::Inline => 3,
-    }
+fn required_i32_to_i32_export(
+    instance: &Instance,
+    store: &mut Store<()>,
+    export: &str,
+) -> Result<wasmtime::TypedFunc<i32, i32>, Diagnostic> {
+    instance
+        .get_typed_func::<i32, i32>(&mut *store, export)
+        .map_err(|err| Diagnostic::new(format!("Missing intermediate export `{export}`: {err}")))
 }
 
 fn lower_error_code_message(code: i32) -> &'static str {
     match code {
         0 => "none",
-        1 => "input payload too small for header",
-        2 => "input payload magic mismatch",
-        3 => "input payload version mismatch",
-        4 => "input payload header counts do not match arguments",
-        5 => "input payload body parse failed",
-        6 => "input payload body counts do not match header",
+        1 => "input bytes are out of bounds",
+        2 => "input format magic mismatch",
+        3 => "input format version mismatch",
+        4 => "input binding counts do not match arguments",
+        5 => "input slot parse failed",
+        6 => "input slot counts do not match header",
         7 => "output payload encoding failed",
         _ => "unknown lower error",
     }
 }
 
-fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, Diagnostic> {
-    let end = offset.saturating_add(4);
-    if end > bytes.len() {
-        return Err(Diagnostic::new(format!(
-            "Missing u32 field at offset {offset} in payload of {} bytes",
-            bytes.len()
-        )));
-    }
-    let raw: [u8; 4] = bytes[offset..end]
-        .try_into()
-        .expect("slice length already checked");
-    Ok(u32::from_le_bytes(raw))
-}
-
-fn read_u8_cursor(bytes: &[u8], cursor: &mut usize, field: &str) -> Result<u8, Diagnostic> {
-    if *cursor >= bytes.len() {
-        return Err(Diagnostic::new(format!(
-            "Missing {field} at offset {} in payload of {} bytes",
-            *cursor,
-            bytes.len()
-        )));
-    }
-    let value = bytes[*cursor];
-    *cursor += 1;
-    Ok(value)
-}
-
-fn read_u32_cursor(bytes: &[u8], cursor: &mut usize, field: &str) -> Result<u32, Diagnostic> {
-    let value = read_u32(bytes, *cursor)
-        .map_err(|err| Diagnostic::new(format!("{field}: {}", err.message)))?;
-    *cursor += 4;
-    Ok(value)
-}
-
-fn read_i32_cursor(bytes: &[u8], cursor: &mut usize, field: &str) -> Result<i32, Diagnostic> {
-    let raw = read_u32_cursor(bytes, cursor, field)?;
-    Ok(i32::from_le_bytes(raw.to_le_bytes()))
-}
-
-fn read_len_prefixed_output_string(
-    bytes: &[u8],
-    cursor: &mut usize,
-    field: &str,
-) -> Result<String, Diagnostic> {
-    let len = read_u32_cursor(bytes, cursor, &format!("{field} length"))? as usize;
-    let end = (*cursor).saturating_add(len);
-    if end > bytes.len() {
-        return Err(Diagnostic::new(format!(
-            "{field} bytes exceed payload bounds: need {} bytes at offset {}, payload size {}",
-            len,
-            *cursor,
-            bytes.len()
-        )));
-    }
-    let value = String::from_utf8(bytes[*cursor..end].to_vec())
-        .map_err(|err| Diagnostic::new(format!("{field} is not valid UTF-8: {err}")))?;
-    *cursor = end;
-    Ok(value)
-}
-
-fn decode_output_target(tag: u8) -> Result<TargetLiteral, Diagnostic> {
+fn decode_output_target(tag: i32) -> Result<TargetLiteral, Diagnostic> {
     match tag {
         OUTPUT_TARGET_JS => Ok(TargetLiteral::JSTarget),
         OUTPUT_TARGET_WASM => Ok(TargetLiteral::WasmTarget),
@@ -965,7 +1050,7 @@ fn decode_output_target(tag: u8) -> Result<TargetLiteral, Diagnostic> {
     }
 }
 
-fn decode_output_export_type(tag: u8) -> Result<IntermediateExportType, Diagnostic> {
+fn decode_output_export_type(tag: i32) -> Result<IntermediateExportType, Diagnostic> {
     match tag {
         OUTPUT_EXPORT_TYPE_FUNCTION => Ok(IntermediateExportType::Function),
         OUTPUT_EXPORT_TYPE_GLOBAL => Ok(IntermediateExportType::Global),
@@ -975,7 +1060,7 @@ fn decode_output_export_type(tag: u8) -> Result<IntermediateExportType, Diagnost
     }
 }
 
-fn decode_output_global_type(tag: u8) -> Result<IntermediateType, Diagnostic> {
+fn decode_output_global_type(tag: i32) -> Result<IntermediateType, Diagnostic> {
     match tag {
         OUTPUT_GLOBAL_TYPE_I32 => Ok(IntermediateType::I32),
         OUTPUT_GLOBAL_TYPE_U8 => Ok(IntermediateType::U8),
@@ -985,11 +1070,11 @@ fn decode_output_global_type(tag: u8) -> Result<IntermediateType, Diagnostic> {
     }
 }
 
-fn decode_output_literal(tag: u8, value_i32: i32) -> Result<ExpressionLiteral, Diagnostic> {
+fn decode_output_literal(tag: i32, value_i32: i32) -> Result<ExpressionLiteral, Diagnostic> {
     match tag {
-        VALUE_TAG_NUMBER => Ok(ExpressionLiteral::Number(value_i32)),
-        VALUE_TAG_BOOLEAN => Ok(ExpressionLiteral::Boolean(value_i32 != 0)),
-        VALUE_TAG_CHAR => {
+        OUTPUT_VALUE_TAG_NUMBER => Ok(ExpressionLiteral::Number(value_i32)),
+        OUTPUT_VALUE_TAG_BOOLEAN => Ok(ExpressionLiteral::Boolean(value_i32 != 0)),
+        OUTPUT_VALUE_TAG_CHAR => {
             if !(0..=u8::MAX as i32).contains(&value_i32) {
                 return Err(Diagnostic::new(format!(
                     "Char literal value out of range for u8: {value_i32}"
@@ -1008,93 +1093,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn context_payload_has_expected_header_counts() {
-        let source = "x := 1; y := 2; x + y";
-        let ast = crate::loader::parse_source_block(source).expect("source should parse");
-        let mut context = crate::interpret::intrinsic_context();
-        let lowered_context = crate::interpret::interpret_program_for_context(ast, &mut context)
-            .expect("source should interpret");
+    fn context_slots_follow_interpreter_binding_and_value_shape() {
+        let source = "(target wasm) base := 1; (export wasm) (wrap js) answer := 42; mut flag := true; ch := 'a'; answer";
+        let lowered_context = interpreted_context(source);
+        let encoded = encode_context_slots(&lowered_context).expect("slots should encode");
 
-        let payload = encode_context_payload(&lowered_context).expect("payload should encode");
-        assert!(
-            payload.len() >= INPUT_PAYLOAD_HEADER_LEN,
-            "payload should include header"
-        );
-        assert_eq!(&payload[0..8], INPUT_PAYLOAD_MAGIC);
-        assert_eq!(
-            read_u32(&payload, 8).expect("payload version should decode"),
-            INPUT_PAYLOAD_VERSION
-        );
-        assert_eq!(
-            read_u32(&payload, 12).expect("scope count should decode"),
-            lowered_context.bindings.len() as u32
-        );
-        assert_eq!(
-            read_u32(&payload, 16).expect("binding count should decode"),
-            lowered_context
-                .bindings
-                .iter()
-                .map(|scope| scope.len())
-                .sum::<usize>() as u32
-        );
-        assert_eq!(
-            read_u32(&payload, 20).expect("annotated binding count should decode"),
-            lowered_context
-                .bindings
-                .iter()
-                .flat_map(|scope| scope.values())
-                .filter(|(_, annotations)| !annotations.is_empty())
-                .count() as u32
-        );
+        let base = find_binding(&encoded, "base");
+        assert_eq!(base.is_mut, 0);
+        assert_eq!(base.target_mask, TARGET_MASK_WASM);
+        assert_eq!(base.export_mask, 0);
+        assert_eq!(base.wrap_mask, 0);
+
+        let answer = find_binding(&encoded, "answer");
+        assert_eq!(answer.is_mut, 0);
+        assert_eq!(answer.target_mask, 0);
+        assert_eq!(answer.export_mask, TARGET_MASK_WASM);
+        assert_eq!(answer.wrap_mask, TARGET_MASK_JS);
+        let answer_value = &encoded.values[answer.value_idx as usize];
+        assert_eq!(answer_value.tag, INPUT_VALUE_TAG_NUMBER);
+        assert_eq!(answer_value.payload_i32, 42);
+
+        let flag = find_binding(&encoded, "flag");
+        assert_eq!(flag.is_mut, 1);
+        let flag_value = &encoded.values[flag.value_idx as usize];
+        assert_eq!(flag_value.tag, INPUT_VALUE_TAG_BOOLEAN);
+        assert_eq!(flag_value.payload_i32, 1);
+
+        let ch = find_binding(&encoded, "ch");
+        let ch_value = &encoded.values[ch.value_idx as usize];
+        assert_eq!(ch_value.tag, INPUT_VALUE_TAG_CHAR);
+        assert_eq!(ch_value.payload_i32, b'a' as i32);
     }
 
     #[test]
-    fn preserve_behavior_encoding_is_stable() {
-        assert_eq!(preserve_behavior_tag(PreserveBehavior::PreserveUsage), 0);
-        assert_eq!(
-            preserve_behavior_tag(PreserveBehavior::PreserveUsageInLoops),
-            1
-        );
-        assert_eq!(preserve_behavior_tag(PreserveBehavior::PreserveBinding), 2);
-        assert_eq!(preserve_behavior_tag(PreserveBehavior::Inline), 3);
-    }
-
-    #[test]
-    fn payload_includes_annotation_mask_and_literal_summary() {
-        let source = "(export wasm) answer := 42; answer";
-        let ast = crate::loader::parse_source_block(source).expect("source should parse");
-        let mut context = crate::interpret::intrinsic_context();
-        let lowered_context = crate::interpret::interpret_program_for_context(ast, &mut context)
-            .expect("source should interpret");
-
-        let payload = encode_context_payload(&lowered_context).expect("payload should encode");
-        let records = parse_binding_records(&payload).expect("payload records should parse");
-        let answer = records
-            .iter()
-            .find(|record| record.name == "answer")
-            .expect("answer binding should exist");
-
-        assert!(answer.annotation_count > 0);
-        assert_ne!(answer.annotation_mask & ANNOT_EXPORT_WASM, 0);
-        assert_eq!(answer.value_tag, VALUE_TAG_NUMBER);
-        assert_eq!(answer.value_i32, 42);
-    }
-
-    #[test]
-    fn wasm_stage_accepts_payload_header_and_returns_known_status() {
+    fn wasm_stage_accepts_slot_input_and_returns_known_status() {
+        if !wasm_stage_available() {
+            return;
+        }
         let source = "x := 1; y := x + 2; y";
-        let ast = crate::loader::parse_source_block(source).expect("source should parse");
-        let mut context = crate::interpret::intrinsic_context();
-        let lowered_context = crate::interpret::interpret_program_for_context(ast, &mut context)
-            .expect("source should interpret");
-
-        let payload = encode_context_payload(&lowered_context).expect("payload should encode");
-        let scope_count = lowered_context.bindings.len();
-        let binding_count = lowered_context
-            .bindings
-            .iter()
-            .map(|scope| scope.len())
-            .sum::<usize>();
+        let lowered_context = interpreted_context(source);
+        let encoded = encode_context_slots(&lowered_context).expect("slots should encode");
 
         let engine = wasm_engine().expect("wasm engine should initialize");
         let module = intermediate_module().expect("intermediate module should initialize");
@@ -1102,28 +1140,25 @@ mod tests {
         let instance =
             Instance::new(&mut store, module, &[]).expect("intermediate instance should create");
 
-        write_input_payload(&mut store, &instance, &payload).expect("payload should be written");
+        write_input_payload(&mut store, &instance, &encoded.input_bytes)
+            .expect("input bytes should be written");
+        write_input_slots(&mut store, &instance, &encoded).expect("input slots should be written");
         let lower = instance
-            .get_typed_func::<(i32, i32, i32), i32>(&mut store, "lower_context")
-            .expect("lower_context export should exist");
+            .get_typed_func::<(i32, i32, i32), i32>(&mut store, "lower_context_from_slots")
+            .expect("lower_context_from_slots export should exist");
 
         let status = lower
             .call(
                 &mut store,
                 (
-                    scope_count as i32,
-                    binding_count as i32,
-                    payload.len() as i32,
+                    lowered_context.bindings.len() as i32,
+                    encoded.bindings.len() as i32,
+                    encoded.input_bytes.len() as i32,
                 ),
             )
-            .expect("lower_context call should succeed");
+            .expect("lower_context_from_slots call should succeed");
 
-        let expected_status = LOWER_STATUS_OK;
-        assert_eq!(status, expected_status);
-        assert_eq!(
-            call_optional_i32_export(&instance, &mut store, "get_lower_input_magic_ok"),
-            Some(1)
-        );
+        assert_eq!(status, LOWER_STATUS_OK);
         assert_eq!(
             call_optional_i32_export(&instance, &mut store, "get_lower_header_ok"),
             Some(1)
@@ -1132,24 +1167,27 @@ mod tests {
             call_optional_i32_export(&instance, &mut store, "get_lower_error_code"),
             Some(0)
         );
-        if expected_status == LOWER_STATUS_OK {
-            let output_len =
-                call_optional_i32_export(&instance, &mut store, "get_lower_output_len")
-                    .expect("get_lower_output_len should exist");
-            assert_eq!(
-                output_len, 0,
-                "empty-result fast path should not emit payload bytes"
-            );
-        }
+        assert_eq!(
+            call_optional_i32_export(&instance, &mut store, "get_lower_output_global_count"),
+            Some(0)
+        );
+        assert_eq!(
+            call_optional_i32_export(&instance, &mut store, "get_lower_output_export_count"),
+            Some(0)
+        );
+        assert_eq!(
+            call_optional_i32_export(&instance, &mut store, "get_lower_output_wrapper_count"),
+            Some(0)
+        );
     }
 
     #[test]
     fn wasm_stage_lowers_exported_literal_global() {
+        if !wasm_stage_available() {
+            return;
+        }
         let source = "(export wasm) answer := 42; answer";
-        let ast = crate::loader::parse_source_block(source).expect("source should parse");
-        let mut context = crate::interpret::intrinsic_context();
-        let lowered_context = crate::interpret::interpret_program_for_context(ast, &mut context)
-            .expect("source should interpret");
+        let lowered_context = interpreted_context(source);
 
         let lowered = lower_with_wasm(&lowered_context)
             .expect("wasm lowering should run")
@@ -1178,11 +1216,11 @@ mod tests {
 
     #[test]
     fn wasm_stage_lowers_exported_literal_global_with_target_annotation() {
+        if !wasm_stage_available() {
+            return;
+        }
         let source = "(target wasm) base := 1; (export wasm) answer := 42; answer";
-        let ast = crate::loader::parse_source_block(source).expect("source should parse");
-        let mut context = crate::interpret::intrinsic_context();
-        let lowered_context = crate::interpret::interpret_program_for_context(ast, &mut context)
-            .expect("source should interpret");
+        let lowered_context = interpreted_context(source);
 
         let lowered = lower_with_wasm(&lowered_context)
             .expect("wasm lowering should run")
@@ -1211,11 +1249,11 @@ mod tests {
 
     #[test]
     fn wasm_stage_lowers_wrapped_literal_global() {
+        if !wasm_stage_available() {
+            return;
+        }
         let source = "(export wasm) (wrap js) answer: i32 := 42; answer";
-        let ast = crate::loader::parse_source_block(source).expect("source should parse");
-        let mut context = crate::interpret::intrinsic_context();
-        let lowered_context = crate::interpret::interpret_program_for_context(ast, &mut context)
-            .expect("source should interpret");
+        let lowered_context = interpreted_context(source);
 
         let lowered = lower_with_wasm(&lowered_context)
             .expect("wasm lowering should run")
@@ -1253,12 +1291,53 @@ mod tests {
     }
 
     #[test]
+    fn wasm_stage_lowers_non_exported_mut_literal_global() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "mut counter := 7; counter";
+        let lowered_context = interpreted_context(source);
+
+        let lowered = lower_with_wasm(&lowered_context)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 0);
+        assert_eq!(lowered.wrappers.len(), 0);
+
+        assert_eq!(lowered.globals[0].name, "counter");
+        assert_eq!(lowered.globals[0].ty, IntermediateType::I32);
+        assert!(matches!(
+            lowered.globals[0].value,
+            IntermediateKind::Literal(ExpressionLiteral::Number(7))
+        ));
+    }
+
+    #[test]
+    fn wasm_stage_reports_unimplemented_for_non_literal_mut_global() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "mut point := { x = 1, y = 2 }; point";
+        let lowered_context = interpreted_context(source);
+
+        let lowered = lower_with_wasm(&lowered_context).expect("wasm lowering should run");
+        assert!(
+            lowered.is_none(),
+            "non-literal mutable globals should still report unimplemented"
+        );
+    }
+
+    #[test]
     fn wasm_stage_reports_unimplemented_for_function_exports() {
+        if !wasm_stage_available() {
+            return;
+        }
         let source = "(export wasm) id := (x: i32) => x; id";
-        let ast = crate::loader::parse_source_block(source).expect("source should parse");
-        let mut context = crate::interpret::intrinsic_context();
-        let lowered_context = crate::interpret::interpret_program_for_context(ast, &mut context)
-            .expect("source should interpret");
+        let lowered_context = interpreted_context(source);
 
         let lowered = lower_with_wasm(&lowered_context).expect("wasm lowering should run");
         assert!(
@@ -1267,90 +1346,40 @@ mod tests {
         );
     }
 
-    #[derive(Debug)]
-    struct ParsedBindingRecord {
-        name: String,
-        annotation_count: u32,
-        annotation_mask: u32,
-        value_tag: u8,
-        value_i32: i32,
+    fn interpreted_context(source: &str) -> Context {
+        let ast = crate::loader::parse_source_block(source).expect("source should parse");
+        let mut context = crate::interpret::intrinsic_context();
+        crate::interpret::interpret_program_for_context(ast, &mut context)
+            .expect("source should interpret")
     }
 
-    fn parse_binding_records(bytes: &[u8]) -> Result<Vec<ParsedBindingRecord>, String> {
-        if bytes.len() < INPUT_PAYLOAD_HEADER_LEN {
-            return Err("payload too small".to_string());
-        }
-        if &bytes[0..8] != INPUT_PAYLOAD_MAGIC {
-            return Err("payload magic mismatch".to_string());
-        }
-        let _version = read_u32(bytes, 8).map_err(|err| err.message.clone())?;
-        let scope_count = read_u32(bytes, 12).map_err(|err| err.message.clone())?;
-        let _binding_count = read_u32(bytes, 16).map_err(|err| err.message.clone())?;
-        let _annotated_count = read_u32(bytes, 20).map_err(|err| err.message.clone())?;
-
-        let mut cursor = INPUT_PAYLOAD_HEADER_LEN;
-        let mut records = Vec::new();
-        for _ in 0..scope_count {
-            let _scope_index = read_u32(bytes, cursor).map_err(|err| err.message.clone())?;
-            cursor += 4;
-            let entry_count = read_u32(bytes, cursor).map_err(|err| err.message.clone())?;
-            cursor += 4;
-
-            for _ in 0..entry_count {
-                let name = read_len_prefixed_string(bytes, &mut cursor)?;
-                let _unique = read_len_prefixed_string(bytes, &mut cursor)?;
-                let _binding_context_tag = read_u8(bytes, &mut cursor)?;
-                let _preserve_tag = read_u8(bytes, &mut cursor)?;
-                let annotation_count =
-                    read_u32(bytes, cursor).map_err(|err| err.message.clone())?;
-                cursor += 4;
-                let annotation_mask = read_u32(bytes, cursor).map_err(|err| err.message.clone())?;
-                cursor += 4;
-                let value_tag = read_u8(bytes, &mut cursor)?;
-                let value_i32 = read_i32(bytes, &mut cursor)?;
-
-                records.push(ParsedBindingRecord {
-                    name,
-                    annotation_count,
-                    annotation_mask,
-                    value_tag,
-                    value_i32,
-                });
+    fn find_binding<'a>(encoded: &'a EncodedContextSlots, name: &str) -> &'a EncodedBindingSlot {
+        for binding in &encoded.bindings {
+            let binding_name = decode_name_from_input(
+                &encoded.input_bytes,
+                binding.name_start,
+                binding.name_length,
+            )
+            .expect("binding name should decode");
+            if binding_name == name {
+                return binding;
             }
         }
-
-        Ok(records)
+        panic!("missing binding {name}");
     }
 
-    fn read_u8(bytes: &[u8], cursor: &mut usize) -> Result<u8, String> {
-        if *cursor >= bytes.len() {
-            return Err("unexpected end while reading u8".to_string());
+    fn wasm_stage_available() -> bool {
+        match stage_ready() {
+            Ok(true) => true,
+            Ok(false) => {
+                eprintln!("skipping wasm-stage test: stage is not ready");
+                false
+            }
+            Err(err) => {
+                eprintln!("skipping wasm-stage test: {}", err.message);
+                false
+            }
         }
-        let value = bytes[*cursor];
-        *cursor += 1;
-        Ok(value)
     }
 
-    fn read_i32(bytes: &[u8], cursor: &mut usize) -> Result<i32, String> {
-        if cursor.saturating_add(4) > bytes.len() {
-            return Err("unexpected end while reading i32".to_string());
-        }
-        let raw: [u8; 4] = bytes[*cursor..*cursor + 4]
-            .try_into()
-            .map_err(|_| "failed to read i32 bytes".to_string())?;
-        *cursor += 4;
-        Ok(i32::from_le_bytes(raw))
-    }
-
-    fn read_len_prefixed_string(bytes: &[u8], cursor: &mut usize) -> Result<String, String> {
-        let len = read_u32(bytes, *cursor).map_err(|err| err.message.clone())? as usize;
-        *cursor += 4;
-        if cursor.saturating_add(len) > bytes.len() {
-            return Err("unexpected end while reading string bytes".to_string());
-        }
-        let text = String::from_utf8(bytes[*cursor..*cursor + len].to_vec())
-            .map_err(|err| format!("invalid utf8 in payload string: {err}"))?;
-        *cursor += len;
-        Ok(text)
-    }
 }

@@ -2061,8 +2061,7 @@ fn emit_load_from_memory(
                 emit_load_from_memory(func, field_ty, type_ctx, temp_local, offset, memory_index)?;
                 offset = offset.saturating_add(wasm_type_size(field_ty) as u32);
             }
-            let type_index = type_ctx
-                .get_type_index(&WasmType::Struct(sorted_fields))
+            let type_index = stable_type_index(type_ctx, &WasmType::Struct(sorted_fields))
                 .ok_or_else(|| {
                     Diagnostic::new("Struct type not found in context")
                         .with_span(SourceSpan::default())
@@ -2079,7 +2078,7 @@ fn emit_load_from_memory(
                 length: *length,
                 field_names: field_names.clone(),
             };
-            let type_index = type_ctx.get_type_index(&array_type).ok_or_else(|| {
+            let type_index = stable_type_index(type_ctx, &array_type).ok_or_else(|| {
                 Diagnostic::new("Array type not found in context").with_span(SourceSpan::default())
             })?;
             let element_size = wasm_type_size(element);
@@ -2094,6 +2093,20 @@ fn emit_load_from_memory(
         }
     }
     Ok(())
+}
+
+fn stable_type_index(type_ctx: &TypeContext, ty: &WasmType) -> Option<u32> {
+    if let Some(index) = type_ctx.get_type_index(ty)
+        && let Some(existing) = type_ctx.types.get(index as usize)
+        && existing == ty
+    {
+        return Some(index);
+    }
+    type_ctx
+        .types
+        .iter()
+        .position(|existing| existing == ty)
+        .map(|index| index as u32)
 }
 
 fn collect_boxed_store_leaves(
@@ -2873,9 +2886,9 @@ fn emit_expression(
                                         .with_span(SourceSpan::default())
                                     })?;
 
-                                let type_index = type_ctx
-                                    .get_type_index(&WasmType::Struct(fields.clone()))
-                                    .expect("Type should be registered");
+                                let type_index =
+                                    stable_type_index(type_ctx, &WasmType::Struct(fields.clone()))
+                                        .expect("Type should be registered");
 
                                 let full_target_expr = lvalue_to_intermediate(&target);
 
@@ -2905,8 +2918,7 @@ fn emit_expression(
                                         ))
                                         .with_span(SourceSpan::default())
                                     })? as u32;
-                                let type_index = type_ctx
-                                    .get_type_index(&object_type)
+                                let type_index = stable_type_index(type_ctx, &object_type)
                                     .expect("Type should be registered");
                                 let full_target_expr = lvalue_to_intermediate(&target);
                                 tasks.push(EmitTask::Eval(full_target_expr));
@@ -3047,8 +3059,7 @@ fn emit_expression(
                                 continue;
                             }
                         } else {
-                            let type_index = type_ctx
-                                .get_type_index(&array_type)
+                            let type_index = stable_type_index(type_ctx, &array_type)
                                 .expect("Type should be registered");
                             tasks.push(EmitTask::Eval(full_target_expr));
                             tasks.push(EmitTask::Instr(Instruction::ArraySet(type_index)));
@@ -3439,8 +3450,8 @@ fn emit_expression(
                         field_types.push((name.name.clone(), ty));
                     }
 
-                    let type_index = type_ctx
-                        .get_type_index(&WasmType::Struct(field_types))
+                    let type_index =
+                        stable_type_index(type_ctx, &WasmType::Struct(field_types))
                         .ok_or_else(|| {
                             Diagnostic::new("Struct type not found in context")
                                 .with_span(SourceSpan::default())
@@ -3463,7 +3474,7 @@ fn emit_expression(
                         length: items.len(),
                         field_names,
                     };
-                    let type_index = type_ctx.get_type_index(&array_type).ok_or_else(|| {
+                    let type_index = stable_type_index(type_ctx, &array_type).ok_or_else(|| {
                         Diagnostic::new("Array type not found in context")
                             .with_span(SourceSpan::default())
                     })?;
@@ -3568,9 +3579,9 @@ fn emit_expression(
                                     .with_span(SourceSpan::default())
                                 })?;
 
-                            let type_index = type_ctx
-                                .get_type_index(&WasmType::Struct(fields.clone()))
-                                .expect("Type should be registered");
+                            let type_index =
+                                stable_type_index(type_ctx, &WasmType::Struct(fields.clone()))
+                                    .expect("Type should be registered");
 
                             let instr = match field_type {
                                 WasmType::U8 => Instruction::StructGetU {
@@ -3606,8 +3617,7 @@ fn emit_expression(
                                 length,
                                 field_names: field_names.clone(),
                             };
-                            let type_index = type_ctx
-                                .get_type_index(&array_type)
+                            let type_index = stable_type_index(type_ctx, &array_type)
                                 .expect("Type should be registered");
 
                             let instr = match element.as_ref() {
@@ -3653,8 +3663,7 @@ fn emit_expression(
                         });
                         tasks.push(EmitTask::EvalValue((*index).clone()));
                     } else {
-                        let type_index = type_ctx
-                            .get_type_index(&array_type)
+                        let type_index = stable_type_index(type_ctx, &array_type)
                             .expect("Type should be registered");
                         let instr = match array_element.as_ref() {
                             WasmType::U8 => Instruction::ArrayGetU(type_index),
