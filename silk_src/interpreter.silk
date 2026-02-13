@@ -145,6 +145,20 @@ RuntimeState := {
 };
 BindPatternState := { value_idx = i32, inherit_mut = i32, inherit_target_mask = i32, inherit_export_mask = i32, inherit_wrap_mask = i32 };
 DebugState := { error_binding_count = i32, init_binding_count = i32 };
+ValueSlot := { value = Value, type_value = i32, is_box_type = i32 };
+BindingSlot := {
+    name_start = i32,
+    name_length = i32,
+    value = i32,
+    is_mut = i32,
+    type_value = i32,
+    target_mask = i32,
+    export_mask = i32,
+    wrap_mask = i32
+};
+ImplementationSlot := { type_value = i32, value = i32 };
+ScopeSlot := { scope = i32, binding_target = i32, scope_backup = i32, binding_target_backup = i32 };
+FileSlot := { path_start = i32, path_length = i32, root_idx = i32, import_value = i32 };
 
 MAX_VALUES := 200000;
 MAX_BINDINGS := 4096;
@@ -286,39 +300,37 @@ target_mask_wasm := {} => target_mask_bit(TargetMaskBit::Wasm);
 target_mask_wgsl := {} => target_mask_bit(TargetMaskBit::Wgsl);
 
 EMPTY_VALUE := Value::Unit;
+EMPTY_VALUE_SLOT := { value = EMPTY_VALUE, type_value = -1, is_box_type = 0 };
+EMPTY_BINDING_SLOT := {
+    name_start = 0,
+    name_length = 0,
+    value = 0,
+    is_mut = 0,
+    type_value = -1,
+    target_mask = 0,
+    export_mask = 0,
+    wrap_mask = 0
+};
+EMPTY_IMPLEMENTATION_SLOT := { type_value = 0, value = 0 };
+EMPTY_SCOPE_SLOT := { scope = 0, binding_target = 0, scope_backup = 0, binding_target_backup = 0 };
+EMPTY_FILE_SLOT := { path_start = 0, path_length = 0, root_idx = 0, import_value = -1 };
 
 (export wasm) input: Box({u8; MAX_INPUT}) := {0; MAX_INPUT};
 (export wasm) mut nodes: Box({Node; MAX_NODES}) := {EMPTY_NODE; MAX_NODES};
 (export wasm) mut list_nodes: Box({ListNode; MAX_LIST_NODES}) := {EMPTY_LIST_NODE; MAX_LIST_NODES};
 (export wasm) mut state: Box(State) := { count = 0, cursor = 0, error = 0, list_count = 0 };
-(export wasm) mut values: Box({Value; MAX_VALUES}) := {EMPTY_VALUE; MAX_VALUES};
+(export wasm) mut values: Box({ValueSlot; MAX_VALUES}) := {EMPTY_VALUE_SLOT; MAX_VALUES};
 (export wasm) mut value_state: Box(ValueState) := { count = 0, error = -1, error_code = interp_err_none{} };
-mut value_type_values: Box({i32; MAX_VALUES}) := {-1; MAX_VALUES};
-mut value_is_box_type: Box({i32; MAX_VALUES}) := {0; MAX_VALUES};
-(export wasm) mut binding_name_start: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
-(export wasm) mut binding_name_length: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
-(export wasm) mut binding_values: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
-(export wasm) mut binding_is_mut: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
-(export wasm) mut binding_type_values: Box({i32; MAX_BINDINGS}) := {-1; MAX_BINDINGS};
-mut binding_target_mask: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
-(export wasm) mut binding_export_mask: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
-(export wasm) mut binding_wrap_mask: Box({i32; MAX_BINDINGS}) := {0; MAX_BINDINGS};
+(export wasm) mut bindings: Box({BindingSlot; MAX_BINDINGS}) := {EMPTY_BINDING_SLOT; MAX_BINDINGS};
 (export wasm) mut binding_state: Box(BindingState) := { count = 0, scope_count = 0 };
 (export wasm) mut binding_temp: Box(BindingTemp) := { start = 0, length = 0, is_mut = 0, ok = 0 };
 (export wasm) mut binding_target_state: Box(BindingTargetState) := { depth = 0, acc_mask = 0 };
-(export wasm) mut impl_type_values: Box({i32; MAX_IMPLS}) := {0; MAX_IMPLS};
-(export wasm) mut impl_value_values: Box({i32; MAX_IMPLS}) := {0; MAX_IMPLS};
+(export wasm) mut implementations: Box({ImplementationSlot; MAX_IMPLS}) := {EMPTY_IMPLEMENTATION_SLOT; MAX_IMPLS};
 (export wasm) mut impl_state: Box(ImplementationState) := { count = 0 };
-(export wasm) mut scope_stack: Box({i32; MAX_SCOPES}) := {0; MAX_SCOPES};
-mut binding_target_stack: Box({i32; MAX_SCOPES}) := {0; MAX_SCOPES};
-mut scope_stack_backup: Box({i32; MAX_SCOPES}) := {0; MAX_SCOPES};
-mut binding_target_stack_backup: Box({i32; MAX_SCOPES}) := {0; MAX_SCOPES};
+(export wasm) mut scopes: Box({ScopeSlot; MAX_SCOPES}) := {EMPTY_SCOPE_SLOT; MAX_SCOPES};
 mut intrinsic_state: Box(IntrinsicState) := { binding_count = 0 };
 (export wasm) mut file_state: Box(FileState) := { count = 0 };
-(export wasm) mut file_path_start: Box({i32; MAX_FILES}) := {0; MAX_FILES};
-(export wasm) mut file_path_length: Box({i32; MAX_FILES}) := {0; MAX_FILES};
-(export wasm) mut file_root_idx: Box({i32; MAX_FILES}) := {0; MAX_FILES};
-mut file_import_value: Box({i32; MAX_FILES}) := {-1; MAX_FILES};
+(export wasm) mut files: Box({FileSlot; MAX_FILES}) := {EMPTY_FILE_SLOT; MAX_FILES};
 mut debug_state: Box(DebugState) := { error_binding_count = 0, init_binding_count = 0 };
 (export wasm) mut flow_state: Box(FlowState) := { kind = FlowKind::None, value = -1 };
 (export wasm) mut runtime_state: Box(RuntimeState) := {
@@ -409,10 +421,10 @@ reset_interpreter := {} => (
         -1
     ) else (
         idx := file_state.count;
-        file_path_start(idx) = path_start;
-        file_path_length(idx) = path_length;
-        file_root_idx(idx) = root_idx;
-        file_import_value(idx) = -1;
+        files(idx).path_start = path_start;
+        files(idx).path_length = path_length;
+        files(idx).root_idx = root_idx;
+        files(idx).import_value = -1;
         file_state.count = idx + 1;
         idx
     )
@@ -421,7 +433,7 @@ reset_interpreter := {} => (
 reset_import_cache := {} => (
     mut idx := 0;
     while idx < file_state.count do (
-        file_import_value(idx) = -1;
+        files(idx).import_value = -1;
         idx = idx + 1;
         {}
     );
@@ -433,7 +445,7 @@ enter_scope := {} => (
         set_error(0);
         0
     ) else (
-        scope_stack(binding_state.scope_count) = binding_state.count;
+        scopes(binding_state.scope_count).scope = binding_state.count;
         binding_state.scope_count = binding_state.scope_count + 1;
         0
     )
@@ -445,7 +457,7 @@ exit_scope := {} => (
         0
     ) else (
         binding_state.scope_count = binding_state.scope_count - 1;
-        binding_state.count = scope_stack(binding_state.scope_count);
+        binding_state.count = scopes(binding_state.scope_count).scope;
         0
     )
 );
@@ -453,7 +465,7 @@ exit_scope := {} => (
 save_scope_stack := (count: i32) => (
     mut idx := 0;
     while idx < count do (
-        scope_stack_backup(idx) = scope_stack(idx);
+        scopes(idx).scope_backup = scopes(idx).scope;
         idx = idx + 1;
         {}
     );
@@ -463,7 +475,7 @@ save_scope_stack := (count: i32) => (
 restore_scope_stack := (count: i32) => (
     mut idx := 0;
     while idx < count do (
-        scope_stack(idx) = scope_stack_backup(idx);
+        scopes(idx).scope = scopes(idx).scope_backup;
         idx = idx + 1;
         {}
     );
@@ -473,7 +485,7 @@ restore_scope_stack := (count: i32) => (
 save_binding_target_stack := (count: i32) => (
     mut idx := 0;
     while idx < count do (
-        binding_target_stack_backup(idx) = binding_target_stack(idx);
+        scopes(idx).binding_target_backup = scopes(idx).binding_target;
         idx = idx + 1;
         {}
     );
@@ -483,7 +495,7 @@ save_binding_target_stack := (count: i32) => (
 restore_binding_target_stack := (count: i32) => (
     mut idx := 0;
     while idx < count do (
-        binding_target_stack(idx) = binding_target_stack_backup(idx);
+        scopes(idx).binding_target = scopes(idx).binding_target_backup;
         idx = idx + 1;
         {}
     );
@@ -495,7 +507,7 @@ push_binding_target_mask := (mask: i32) => (
         set_error(0);
         0
     ) else (
-        binding_target_stack(binding_target_state.depth) = mask;
+        scopes(binding_target_state.depth).binding_target = mask;
         binding_target_state.depth = binding_target_state.depth + 1;
         1
     )
@@ -512,7 +524,7 @@ pop_binding_target_mask := {} => (
 );
 
 current_binding_target_mask := {} => (
-    if binding_target_state.depth <= 0 then -1 else binding_target_stack(binding_target_state.depth - 1)
+    if binding_target_state.depth <= 0 then -1 else scopes(binding_target_state.depth - 1).binding_target
 );
 
 string_ref_equals := {left: StringRef, right: StringRef} => (
@@ -636,7 +648,7 @@ resolve_annotation_flags := (head: i32) => (
             ok = 0;
             current = -1;
         ) else (
-            if Value::BindingAnnotation(ann) := values(ann_value_idx) then (
+            if Value::BindingAnnotation(ann) := values(ann_value_idx).value then (
                 ann |> match {
                     BindingAnnotationValue::Mut => (
                         annotation_temp.is_mut = 1;
@@ -768,8 +780,8 @@ find_binding_index := (name: StringRef) => (
     mut found := -1;
     while idx >= 0 do (
         if string_ref_equals_raw{
-            binding_name_start(idx),
-            binding_name_length(idx),
+            bindings(idx).name_start,
+            bindings(idx).name_length,
             name.start,
             name.length
         } == 1 then (
@@ -788,8 +800,8 @@ find_file_index := (name: StringRef) => (
     mut found := -1;
     while idx >= 0 do (
         if string_ref_equals_raw{
-            file_path_start(idx),
-            file_path_length(idx),
+            files(idx).path_start,
+            files(idx).path_length,
             name.start,
             name.length
         } == 1 then (
@@ -809,15 +821,15 @@ eval_use_from_string := {path_ref: StringRef, span_start: i32} => (
         set_error(span_start);
         -1
     ) else (
-        cached_idx := file_import_value(file_idx);
+        cached_idx := files(file_idx).import_value;
         if cached_idx != -1 then (
             cached_idx
         ) else (
-            import_idx := eval_import_root{file_root_idx(file_idx), span_start};
+            import_idx := eval_import_root{files(file_idx).root_idx, span_start};
             if import_idx == -1 then (
                 -1
             ) else (
-                file_import_value(file_idx) = import_idx;
+                files(file_idx).import_value = import_idx;
                 import_idx
             )
         )
@@ -825,7 +837,7 @@ eval_use_from_string := {path_ref: StringRef, span_start: i32} => (
 );
 
 ensure_binding_target_access := {binding_idx: i32, span_start: i32} => (
-    required_mask := binding_target_mask(binding_idx);
+    required_mask := bindings(binding_idx).target_mask;
     if required_mask == 0 then (
         1
     ) else (
@@ -866,14 +878,14 @@ add_binding := {start: i32, length: i32, value: i32, is_mut: i32} => (
         -1
     ) else (
         idx := binding_state.count;
-        binding_name_start(idx) = start;
-        binding_name_length(idx) = length;
-        binding_values(idx) = value;
-        binding_is_mut(idx) = is_mut;
-        binding_type_values(idx) = -1;
-        binding_target_mask(idx) = 0;
-        binding_export_mask(idx) = 0;
-        binding_wrap_mask(idx) = 0;
+        bindings(idx).name_start = start;
+        bindings(idx).name_length = length;
+        bindings(idx).value = value;
+        bindings(idx).is_mut = is_mut;
+        bindings(idx).type_value = -1;
+        bindings(idx).target_mask = 0;
+        bindings(idx).export_mask = 0;
+        bindings(idx).wrap_mask = 0;
         binding_state.count = idx + 1;
         idx
     )
@@ -893,10 +905,10 @@ add_binding_with_metadata := {
     if bind_idx == -1 then (
         -1
     ) else (
-        binding_type_values(bind_idx) = type_value_idx;
-        binding_target_mask(bind_idx) = target_mask;
-        binding_export_mask(bind_idx) = export_mask;
-        binding_wrap_mask(bind_idx) = wrap_mask;
+        bindings(bind_idx).type_value = type_value_idx;
+        bindings(bind_idx).target_mask = target_mask;
+        bindings(bind_idx).export_mask = export_mask;
+        bindings(bind_idx).wrap_mask = wrap_mask;
         bind_idx
     )
 );
@@ -908,33 +920,33 @@ capture_closure_bindings := {} => (
     ) else (
         idx := binding_state.count - 1;
         name_idx := store_value(Value::String(make_string_ref{
-            binding_name_start(idx),
-            binding_name_length(idx)
+            bindings(idx).name_start,
+            bindings(idx).name_length
         }));
         if name_idx == -1 then (
             { head = -1, count = 0 }
         ) else (
-            captured_value_idx := copy_value(binding_values(idx));
+            captured_value_idx := copy_value(bindings(idx).value);
             if captured_value_idx == -1 then (
                 { head = -1, count = 0 }
             ) else (
-                is_mut_idx := store_value(Value::Number(binding_is_mut(idx)));
+                is_mut_idx := store_value(Value::Number(bindings(idx).is_mut));
                 if is_mut_idx == -1 then (
                     { head = -1, count = 0 }
                 ) else (
-                    type_idx := store_value(Value::Number(binding_type_values(idx)));
+                    type_idx := store_value(Value::Number(bindings(idx).type_value));
                     if type_idx == -1 then (
                         { head = -1, count = 0 }
                     ) else (
-                        target_idx := store_value(Value::Number(binding_target_mask(idx)));
+                        target_idx := store_value(Value::Number(bindings(idx).target_mask));
                         if target_idx == -1 then (
                             { head = -1, count = 0 }
                         ) else (
-                            export_idx := store_value(Value::Number(binding_export_mask(idx)));
+                            export_idx := store_value(Value::Number(bindings(idx).export_mask));
                             if export_idx == -1 then (
                                 { head = -1, count = 0 }
                             ) else (
-                                wrap_idx := store_value(Value::Number(binding_wrap_mask(idx)));
+                                wrap_idx := store_value(Value::Number(bindings(idx).wrap_mask));
                                 if wrap_idx == -1 then (
                                     { head = -1, count = 0 }
                                 ) else (
@@ -964,15 +976,15 @@ restore_closure_bindings := {head: i32, count: i32} => (
                 set_error(0);
                 ok = 0;
             ) else (
-                if Value::String(name_ref) := values(base) then (
+                if Value::String(name_ref) := values(base).value then (
                     restored_value_idx := copy_value(base + 1);
                     if restored_value_idx == -1 then (
                         ok = 0;
-                    ) else if Value::Number(restored_is_mut) := values(base + 2) then (
-                        if Value::Number(restored_type) := values(base + 3) then (
-                            if Value::Number(restored_target_mask) := values(base + 4) then (
-                                if Value::Number(restored_export_mask) := values(base + 5) then (
-                                    if Value::Number(restored_wrap_mask) := values(base + 6) then (
+                    ) else if Value::Number(restored_is_mut) := values(base + 2).value then (
+                        if Value::Number(restored_type) := values(base + 3).value then (
+                            if Value::Number(restored_target_mask) := values(base + 4).value then (
+                                if Value::Number(restored_export_mask) := values(base + 5).value then (
+                                    if Value::Number(restored_wrap_mask) := values(base + 6).value then (
                                         bind_idx := add_binding_with_metadata{
                                             name_ref.start,
                                             name_ref.length,
@@ -1045,7 +1057,7 @@ add_intrinsic_binding := {name: StringRef} => (
             if runtime_state.type_value_idx == -1 then (
                 -1
             ) else (
-                value_type_values(value_idx) = runtime_state.type_value_idx;
+                values(value_idx).type_value = runtime_state.type_value_idx;
                 bind_idx
             )
         )
@@ -1101,7 +1113,7 @@ init_option_enum := {} => (
     if type_bind_idx == -1 then (
         -1
     ) else (
-        type_value_idx := binding_values(type_bind_idx);
+        type_value_idx := bindings(type_bind_idx).value;
         option_type_idx := option_enum_from_type{type_value_idx, 0};
         if option_type_idx == -1 then (
             -1
@@ -1111,7 +1123,7 @@ init_option_enum := {} => (
             if i32_bind_idx == -1 then (
                 -1
             ) else (
-                option_i32_idx := option_enum_from_type{binding_values(i32_bind_idx), 0};
+                option_i32_idx := option_enum_from_type{bindings(i32_bind_idx).value, 0};
                 if option_i32_idx == -1 then (
                     -1
                 ) else (
@@ -1128,7 +1140,7 @@ init_range_binding := {} => (
     if i32_bind_idx == -1 then (
         -1
     ) else (
-        i32_type_idx := binding_values(i32_bind_idx);
+        i32_type_idx := bindings(i32_bind_idx).value;
         range_type_start := value_state.count;
         name_current := store_value(Value::String(SYNTHETIC_CURRENT_STRING));
         if name_current == -1 then (
@@ -1516,7 +1528,7 @@ record_find_field_index := {start: i32, count: i32, has_named: i32, name_start: 
         mut idx := 0;
         while idx < count do (
             name_idx := start + idx * 2;
-            if Value::String(name_ref) := values(name_idx) then (
+            if Value::String(name_ref) := values(name_idx).value then (
                 if string_ref_equals_raw{
                     name_ref.start,
                     name_ref.length,
@@ -1603,7 +1615,7 @@ record_find_field_index_no_error := {start: i32, count: i32, has_named: i32, nam
         mut idx := 0;
         while idx < count do (
             name_idx := start + idx * 2;
-            if Value::String(name_ref) := values(name_idx) then (
+            if Value::String(name_ref) := values(name_idx).value then (
                 if string_ref_equals_raw{
                     name_ref.start,
                     name_ref.length,
@@ -1640,7 +1652,7 @@ materialize_repeated_record := {record_idx: i32, span_start: i32} => (
     if record_idx == -1 then (
         -1
     ) else (
-        if Value::Record(rec_info) := values(record_idx) then (
+        if Value::Record(rec_info) := values(record_idx).value then (
             if rec_info.has_named != -1 || rec_info.count <= 1 then (
                 record_idx
             ) else (
@@ -1649,11 +1661,11 @@ materialize_repeated_record := {record_idx: i32, span_start: i32} => (
                 start_idx := value_state.count;
                 mut idx := 0;
                 while idx < rec_info.count do (
-                    name_idx := store_value(values(source_name_idx));
+                    name_idx := store_value(values(source_name_idx).value);
                     if name_idx == -1 then (
                         idx = rec_info.count;
                     ) else (
-                        value_idx := store_value(values(source_value_idx));
+                        value_idx := store_value(values(source_value_idx).value);
                         if value_idx == -1 then (
                             idx = rec_info.count;
                         ) else (
@@ -1665,7 +1677,7 @@ materialize_repeated_record := {record_idx: i32, span_start: i32} => (
                 if value_state.error != -1 then (
                     -1
                 ) else (
-                    values(record_idx) = Value::Record({ head = start_idx, count = rec_info.count, has_named = 0 });
+                    values(record_idx).value = Value::Record({ head = start_idx, count = rec_info.count, has_named = 0 });
                     record_idx
                 )
             )
@@ -1710,7 +1722,7 @@ resolve_lvalue_expr_value_index := {expr_idx: i32, span_start: i32} => (
                     set_error_with_code{span_start, interp_err_unbound_identifier{}};
                     -1
                 ) else (
-                    binding_values(bind_idx)
+                    bindings(bind_idx).value
                 )
             ),
             NodeKind::TypePropertyAccess(access) => (
@@ -1720,7 +1732,7 @@ resolve_lvalue_expr_value_index := {expr_idx: i32, span_start: i32} => (
                 ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                     obj_idx
                 ) else (
-                    if Value::Record(struct_info) := values(obj_idx) then (
+                    if Value::Record(struct_info) := values(obj_idx).value then (
                         record_find_field_index{
                             struct_info.head,
                             struct_info.count,
@@ -1744,7 +1756,7 @@ resolve_lvalue_expr_value_index := {expr_idx: i32, span_start: i32} => (
                         ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                             obj_idx
                         ) else (
-                            if Value::Record(struct_info) := values(obj_idx) then (
+                            if Value::Record(struct_info) := values(obj_idx).value then (
                                 record_find_field_index{
                                     struct_info.head,
                                     struct_info.count,
@@ -1775,8 +1787,8 @@ resolve_lvalue_expr_value_index := {expr_idx: i32, span_start: i32} => (
                         ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                             index_idx
                         ) else (
-                            if Value::Number(index_value) := values(index_idx) then (
-                                if Value::Record(struct_info) := values(arr_idx) then (
+                            if Value::Number(index_value) := values(index_idx).value then (
+                                if Value::Record(struct_info) := values(arr_idx).value then (
                                     arr_idx2 := if struct_info.has_named == -1 then (
                                         materialize_repeated_record{arr_idx, span_start}
                                     ) else (
@@ -1785,7 +1797,7 @@ resolve_lvalue_expr_value_index := {expr_idx: i32, span_start: i32} => (
                                     if arr_idx2 == -1 then (
                                         -1
                                     ) else (
-                                        if Value::Record(struct_info2) := values(arr_idx2) then (
+                                        if Value::Record(struct_info2) := values(arr_idx2).value then (
                                             record_value_index_by_position{
                                                 struct_info2.head,
                                                 struct_info2.count,
@@ -1824,8 +1836,8 @@ impl_add := {type_idx: i32, impl_idx: i32} => (
         -1
     ) else (
         idx := impl_state.count;
-        impl_type_values(idx) = type_idx;
-        impl_value_values(idx) = impl_idx;
+        implementations(idx).type_value = type_idx;
+        implementations(idx).value = impl_idx;
         impl_state.count = idx + 1;
         idx
     )
@@ -1834,8 +1846,8 @@ impl_add := {type_idx: i32, impl_idx: i32} => (
 type_values_equal := {left_idx: i32, right_idx: i32} => (
     if left_idx < 0 || right_idx < 0 then 0 else (
         if left_idx == right_idx then 1 else (
-            left := values(left_idx);
-            right := values(right_idx);
+            left := values(left_idx).value;
+            right := values(right_idx).value;
             if value_is_box_type_flag(left_idx) == 1 || value_is_box_type_flag(right_idx) == 1 then (
                 if value_is_box_type_flag(left_idx) == 1 && value_is_box_type_flag(right_idx) == 1 then (
                     if Value::Record(lrec) := left then (
@@ -1896,7 +1908,7 @@ type_values_equal := {left_idx: i32, right_idx: i32} => (
                                 while idx < lrec.count && ok == 1 do (
                                     left_name_idx := lrec.head + idx * 2;
                                     left_value_idx := left_name_idx + 1;
-                                    if Value::String(left_name) := values(left_name_idx) then (
+                                    if Value::String(left_name) := values(left_name_idx).value then (
                                         right_value_idx := record_find_field_index_no_error{
                                             rrec.head,
                                             rrec.count,
@@ -1947,8 +1959,8 @@ type_values_equal := {left_idx: i32, right_idx: i32} => (
                                     };
                                     if left_name_idx == -1 || right_name_idx == -1 || left_value_idx == -1 || right_value_idx == -1 then (
                                         ok = 0;
-                                    ) else if Value::String(_) := values(left_name_idx) then (
-                                        if Value::String(_) := values(right_name_idx) then (
+                                    ) else if Value::String(_) := values(left_name_idx).value then (
+                                        if Value::String(_) := values(right_name_idx).value then (
                                             if type_values_equal{left_value_idx, right_value_idx} == 0 then (
                                                 ok = 0;
                                             ) else (
@@ -1976,22 +1988,22 @@ type_values_equal := {left_idx: i32, right_idx: i32} => (
                                 while idx < lenum.count do (
                                     left_name_idx := lenum.head + idx * 2;
                                     right_name_idx := renum.head + idx * 2;
-                                    if Value::String(left_name) := values(left_name_idx) then (
-                                        if Value::String(right_name) := values(right_name_idx) then (
+                                    if Value::String(left_name) := values(left_name_idx).value then (
+                                        if Value::String(right_name) := values(right_name_idx).value then (
                                             if string_ref_equals{left_name, right_name} == 0 then (
                                                 ok = 0;
                                                 idx = lenum.count;
                                             ) else (
                                                 left_payload_idx := left_name_idx + 1;
                                                 right_payload_idx := right_name_idx + 1;
-                                                if Value::Unit := values(left_payload_idx) then (
-                                                    if Value::Unit := values(right_payload_idx) then (
+                                                if Value::Unit := values(left_payload_idx).value then (
+                                                    if Value::Unit := values(right_payload_idx).value then (
                                                         idx = idx + 1;
                                                     ) else (
                                                         ok = 0;
                                                         idx = lenum.count;
                                                     )
-                                                ) else if Value::Unit := values(right_payload_idx) then (
+                                                ) else if Value::Unit := values(right_payload_idx).value then (
                                                     ok = 0;
                                                     idx = lenum.count;
                                                 ) else if type_values_equal{left_payload_idx, right_payload_idx} == 0 then (
@@ -2029,11 +2041,11 @@ impl_find := (type_idx: i32) => (
         mut idx := impl_state.count - 1;
         mut found := -1;
         while idx >= 0 do (
-            if impl_type_values(idx) == type_idx then (
-                found = impl_value_values(idx);
+            if implementations(idx).type_value == type_idx then (
+                found = implementations(idx).value;
                 idx = -1;
-            ) else if type_values_equal{impl_type_values(idx), type_idx} == 1 then (
-                found = impl_value_values(idx);
+            ) else if type_values_equal{implementations(idx).type_value, type_idx} == 1 then (
+                found = implementations(idx).value;
                 idx = -1;
             ) else (
                 idx = idx - 1;
@@ -2061,7 +2073,7 @@ ensure_trait_requirements := {type_value_idx: i32, trait_expr_idx: i32, span_sta
             ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                 0
             ) else (
-                if Value::Record(required_info) := values(required_idx) then (
+                if Value::Record(required_info) := values(required_idx).value then (
                     mut field_idx := 0;
                     mut ok := 1;
                     while field_idx < required_info.count && ok == 1 do (
@@ -2080,9 +2092,9 @@ ensure_trait_requirements := {type_value_idx: i32, trait_expr_idx: i32, span_sta
                         if required_name_idx == -1 || required_value_idx == -1 then (
                             set_error(span_start);
                             ok = 0;
-                        ) else if Value::String(required_name) := values(required_name_idx) then (
+                        ) else if Value::String(required_name) := values(required_name_idx).value then (
                             mut found_idx := -1;
-                            if Value::Record(type_info) := values(type_value_idx) then (
+                            if Value::Record(type_info) := values(type_value_idx).value then (
                                 found_idx = record_find_field_index_no_error{
                                     type_info.head,
                                     type_info.count,
@@ -2095,7 +2107,7 @@ ensure_trait_requirements := {type_value_idx: i32, trait_expr_idx: i32, span_sta
                             if found_idx == -1 then (
                                 impl_idx := impl_find(type_value_idx);
                                 if impl_idx != -1 then (
-                                    if Value::Record(impl_info) := values(impl_idx) then (
+                                    if Value::Record(impl_info) := values(impl_idx).value then (
                                         found_idx = record_find_field_index_no_error{
                                             impl_info.head,
                                             impl_info.count,
@@ -2111,7 +2123,7 @@ ensure_trait_requirements := {type_value_idx: i32, trait_expr_idx: i32, span_sta
                                 set_error_with_code{required_name.start, interp_err_trait_missing_field{}};
                                 ok = 0;
                             ) else (
-                                found_type_idx := value_type_values(found_idx);
+                                found_type_idx := values(found_idx).type_value;
                                 if found_type_idx != -1 then (
                                     if type_values_equal{found_type_idx, required_value_idx} == 0 then (
                                         set_error(span_start);
@@ -2159,9 +2171,9 @@ store_value := (value: Value) => (
         -1
     ) else (
         idx := value_state.count;
-        values(idx) = value;
-        value_type_values(idx) = -1;
-        value_is_box_type(idx) = 0;
+        values(idx).value = value;
+        values(idx).type_value = -1;
+        values(idx).is_box_type = 0;
         value_state.count = value_state.count + 1;
         idx
     )
@@ -2171,13 +2183,13 @@ copy_value := (idx: i32) => (
     if idx == -1 then (
         -1
     ) else (
-        new_idx := store_value(values(idx));
+        new_idx := store_value(values(idx).value);
         if new_idx == -1 then (
             -1
         ) else (
-            value_is_box_type(new_idx) = value_is_box_type(idx);
-            if value_type_values(idx) != -1 then (
-                value_type_values(new_idx) = value_type_values(idx);
+            values(new_idx).is_box_type = values(idx).is_box_type;
+            if values(idx).type_value != -1 then (
+                values(new_idx).type_value = values(idx).type_value;
                 0
             ) else (
                 0
@@ -2204,7 +2216,7 @@ mark_value_as_type := (value_idx: i32) => (
         if runtime_state.type_value_idx == -1 then (
             -1
         ) else (
-            value_type_values(value_idx) = runtime_state.type_value_idx;
+            values(value_idx).type_value = runtime_state.type_value_idx;
             value_idx
         )
     )
@@ -2214,7 +2226,7 @@ value_is_type_value := (type_idx: i32) => (
     if type_idx == -1 then (
         0
     ) else if runtime_state.type_value_idx == -1 then (
-        if Value::String(type_name) := values(type_idx) then (
+        if Value::String(type_name) := values(type_idx).value then (
             if string_ref_is_type(type_name) == 1 then 1 else 0
         ) else (
             0
@@ -2228,7 +2240,7 @@ value_is_type := (value_idx: i32) => (
     if value_idx == -1 then (
         0
     ) else (
-        value_is_type_value(value_type_values(value_idx))
+        value_is_type_value(values(value_idx).type_value)
     )
 );
 
@@ -2238,7 +2250,7 @@ value_is_type_like := (value_idx: i32) => (
     ) else if value_is_type(value_idx) == 1 then (
         1
     ) else (
-        value := values(value_idx);
+        value := values(value_idx).value;
         value |> match {
             Value::Unit => 1,
             Value::String(name_ref) => (
@@ -2280,7 +2292,7 @@ value_is_type_like := (value_idx: i32) => (
                 mut ok := 1;
                 while idx < enum_info.count && ok == 1 do (
                     payload_idx := enum_info.head + idx * 2 + 1;
-                    if Value::Unit := values(payload_idx) then (
+                    if Value::Unit := values(payload_idx).value then (
                         idx = idx + 1;
                     ) else if value_is_type_like(payload_idx) == 1 then (
                         idx = idx + 1;
@@ -2387,7 +2399,7 @@ mark_intrinsic_string_value_as_type := (value_idx: i32) => (
     if value_idx == -1 then (
         -1
     ) else (
-        value := values(value_idx);
+        value := values(value_idx).value;
         if Value::String(name_ref) := value then (
             if name_ref.start < 0 then (
                 if (name_ref.start == SYNTHETIC_I32_STRING.start && name_ref.length == SYNTHETIC_I32_STRING.length)
@@ -2397,7 +2409,7 @@ mark_intrinsic_string_value_as_type := (value_idx: i32) => (
                     || (name_ref.start == SYNTHETIC_TARGET_STRING.start && name_ref.length == SYNTHETIC_TARGET_STRING.length)
                     || (name_ref.start == SYNTHETIC_BINDING_ANNOTATION_STRING.start && name_ref.length == SYNTHETIC_BINDING_ANNOTATION_STRING.length)
                 then (
-                    if value_type_values(value_idx) == -1 then (
+                    if values(value_idx).type_value == -1 then (
                         mark_value_as_type(value_idx)
                     ) else (
                         value_idx
@@ -2418,7 +2430,7 @@ mark_value_as_box_type := (value_idx: i32) => (
     if value_idx == -1 then (
         -1
     ) else (
-        value_is_box_type(value_idx) = 1;
+        values(value_idx).is_box_type = 1;
         value_idx
     )
 );
@@ -2427,10 +2439,10 @@ value_is_box_type_flag := (value_idx: i32) => (
     if value_idx == -1 then (
         0
     ) else (
-        if value_is_box_type(value_idx) == 1 then 1 else (
-            if Value::Record(rec_info) := values(value_idx) then (
+        if values(value_idx).is_box_type == 1 then 1 else (
+            if Value::Record(rec_info) := values(value_idx).value then (
                 if rec_info.count == 1 && rec_info.has_named == 0 then (
-                    if Value::String(name_ref) := values(rec_info.head) then (
+                    if Value::String(name_ref) := values(rec_info.head).value then (
                         if name_ref.start == SYNTHETIC_BOX_STRING.start && name_ref.length == SYNTHETIC_BOX_STRING.length then 1 else 0
                     ) else 0
                 ) else 0
@@ -2553,7 +2565,7 @@ validate_wrap_export_annotations := {value_idx: i32, export_mask: i32, wrap_mask
         set_error_with_code{span_start, interp_err_wrap_requires_single_export_target{}};
         0
     ) else (
-        if Value::Function(_) := values(value_idx) then (
+        if Value::Function(_) := values(value_idx).value then (
             1
         ) else (
             if export_mask == target_mask_wasm{} && wrap_mask == target_mask_js{} then (
@@ -2595,7 +2607,7 @@ enum_variant_name_matches := {enum_head: i32, enum_count: i32, variant_idx: i32,
     ) else if variant_idx < enum_head || variant_idx >= enum_head + enum_count * 2 then (
         0
     ) else (
-        if Value::String(stored_name) := values(variant_idx) then (
+        if Value::String(stored_name) := values(variant_idx).value then (
             string_ref_equals_raw{
                 stored_name.start,
                 stored_name.length,
@@ -2619,8 +2631,8 @@ enum_type_matches := {left_head: i32, left_count: i32, right_head: i32, right_co
         while idx < left_count do (
             left_name_idx := left_head + idx * 2;
             right_name_idx := right_head + idx * 2;
-            if Value::String(left_name) := values(left_name_idx) then (
-                if Value::String(right_name) := values(right_name_idx) then (
+            if Value::String(left_name) := values(left_name_idx).value then (
+                if Value::String(right_name) := values(right_name_idx).value then (
                     if string_ref_equals{left_name, right_name} == 0 then (
                         ok = 0;
                         idx = left_count;
@@ -2629,12 +2641,12 @@ enum_type_matches := {left_head: i32, left_count: i32, right_head: i32, right_co
                         right_payload_idx := right_head + idx * 2 + 1;
                         mut left_has := 0;
                         mut right_has := 0;
-                        if Value::Unit := values(left_payload_idx) then (
+                        if Value::Unit := values(left_payload_idx).value then (
                             left_has = 0;
                         ) else (
                             left_has = 1;
                         );
-                        if Value::Unit := values(right_payload_idx) then (
+                        if Value::Unit := values(right_payload_idx).value then (
                             right_has = 0;
                         ) else (
                             right_has = 1;
@@ -2675,7 +2687,7 @@ enum_record_payloads_are_types := {enum_head: i32, enum_count: i32} => (
         mut ok := 1;
         while idx < enum_count do (
             payload_idx := enum_head + idx * 2 + 1;
-            payload_ok := values(payload_idx) |> match {
+            payload_ok := values(payload_idx).value |> match {
                 Value::Number(_) => 0,
                 Value::Boolean(_) => 0,
                 Value::Char(_) => 0,
@@ -2700,7 +2712,7 @@ enum_value_matches_pattern_type := {enum_type_expr: i32, enum_head: i32, enum_co
     ) else if flow_kind_is_none(flow_state.kind) == 0 then (
         -1
     ) else (
-        if Value::EnumType(expected_enum) := values(expected_idx) then (
+        if Value::EnumType(expected_enum) := values(expected_idx).value then (
             enum_type_matches{
                 enum_head,
                 enum_count,
@@ -2890,14 +2902,14 @@ bind_payload_pattern := {payload_expr: i32, payload_idx: i32, inherit_mut: i32, 
             if bind_idx == -1 then (
                 0
             ) else (
-                binding_target_mask(bind_idx) = inherit_target_mask;
-                binding_export_mask(bind_idx) = inherit_export_mask;
-                binding_wrap_mask(bind_idx) = inherit_wrap_mask;
+                bindings(bind_idx).target_mask = inherit_target_mask;
+                bindings(bind_idx).export_mask = inherit_export_mask;
+                bindings(bind_idx).wrap_mask = inherit_wrap_mask;
                 1
             )
         ),
         NodeKind::Literal(literal) => (
-            payload_value := values(payload_idx);
+            payload_value := values(payload_idx).value;
             literal |> match {
                 ExpressionLiteral::Number(expected) => (
                     if Value::Number(actual) := payload_value then if actual == expected then 1 else 0 else 0
@@ -2934,14 +2946,14 @@ bind_payload_pattern := {payload_expr: i32, payload_idx: i32, inherit_mut: i32, 
 
 bind_struct_pattern := {fields_head: i32, value_idx: i32, inherit_mut: i32, inherit_target_mask: i32, inherit_export_mask: i32, inherit_wrap_mask: i32} => (
     if fields_head == -1 then (
-        if Value::Unit := values(value_idx) then (
+        if Value::Unit := values(value_idx).value then (
             1
-        ) else if Value::Record(rec_info) := values(value_idx) then (
+        ) else if Value::Record(rec_info) := values(value_idx).value then (
             if rec_info.count == 0 then 1 else 0
         ) else (
             0
         )
-    ) else if Value::Record(rec_info) := values(value_idx) then (
+    ) else if Value::Record(rec_info) := values(value_idx).value then (
         start_count := binding_state.count;
         mut current := fields_head;
         mut ok := 1;
@@ -3004,15 +3016,15 @@ bind_pattern_expr := {pattern_expr: i32, value_idx: i32, inherit_mut: i32, inher
         NodeKind::Identifier(info) => (
             bind_idx := add_binding_if_named{info.name.start, info.name.length, value_idx, inherit_mut};
             if bind_idx >= 0 then (
-                binding_target_mask(bind_idx) = inherit_target_mask;
-                binding_export_mask(bind_idx) = inherit_export_mask;
-                binding_wrap_mask(bind_idx) = inherit_wrap_mask;
+                bindings(bind_idx).target_mask = inherit_target_mask;
+                bindings(bind_idx).export_mask = inherit_export_mask;
+                bindings(bind_idx).wrap_mask = inherit_wrap_mask;
                 0
             ) else 0;
-            if value_type_values(value_idx) != -1 then (
+            if values(value_idx).type_value != -1 then (
                 if info.name.length > 0 && span_is_underscore{info.name.start, info.name.length} == 0 && span_is_else{info.name.start, info.name.length} == 0 then (
                     if bind_idx >= 0 then (
-                        binding_type_values(bind_idx) = value_type_values(value_idx);
+                        bindings(bind_idx).type_value = values(value_idx).type_value;
                         0
                     ) else 0
                 ) else 0
@@ -3020,7 +3032,7 @@ bind_pattern_expr := {pattern_expr: i32, value_idx: i32, inherit_mut: i32, inher
             if bind_idx == -1 then 0 else 1
         ),
         NodeKind::Literal(literal) => (
-            value := values(value_idx);
+            value := values(value_idx).value;
             literal |> match {
                 ExpressionLiteral::Number(expected) => (
                     if Value::Number(actual) := value then if actual == expected then 1 else 0 else 0
@@ -3062,13 +3074,13 @@ bind_pattern_expr := {pattern_expr: i32, value_idx: i32, inherit_mut: i32, inher
                         bind_name := make_string_ref{name_start, name_len};
                         bind_idx := find_binding_index(bind_name);
                         if bind_idx != -1 then (
-                            existing_type := value_type_values(value_idx);
+                            existing_type := values(value_idx).type_value;
                             if existing_type == -1 then (
-                                binding_type_values(bind_idx) = type_idx;
-                                value_type_values(value_idx) = type_idx;
+                                bindings(bind_idx).type_value = type_idx;
+                                values(value_idx).type_value = type_idx;
                                 0
                             ) else (
-                                binding_type_values(bind_idx) = existing_type;
+                                bindings(bind_idx).type_value = existing_type;
                                 0
                             )
                         ) else (
@@ -3084,7 +3096,7 @@ bind_pattern_expr := {pattern_expr: i32, value_idx: i32, inherit_mut: i32, inher
             )
         ),
         NodeKind::TypePropertyAccess(info: TypePropertyAccessInfo) => (
-            if Value::Enum(enum_info) := values(value_idx) then (
+            if Value::Enum(enum_info) := values(value_idx).value then (
                 type_matches := enum_value_matches_pattern_type{
                     info.object,
                     enum_info.enum_head,
@@ -3114,7 +3126,7 @@ bind_pattern_expr := {pattern_expr: i32, value_idx: i32, inherit_mut: i32, inher
         ),
         NodeKind::FunctionCall(call) => (
             if NodeKind::TypePropertyAccess(access) := nodes(call.function).kind then (
-                if Value::Enum(enum_info) := values(value_idx) then (
+                if Value::Enum(enum_info) := values(value_idx).value then (
                     type_matches := enum_value_matches_pattern_type{
                         access.object,
                         enum_info.enum_head,
@@ -3209,13 +3221,13 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
                                         bind_name := make_string_ref{name_start, name_len};
                                         bind_idx := find_binding_index(bind_name);
                                         if bind_idx != -1 then (
-                                            existing_type := value_type_values(value_idx);
+                                            existing_type := values(value_idx).type_value;
                                             if existing_type == -1 then (
-                                                binding_type_values(bind_idx) = type_idx;
-                                                value_type_values(value_idx) = type_idx;
+                                                bindings(bind_idx).type_value = type_idx;
+                                                values(value_idx).type_value = type_idx;
                                                 0
                                             ) else (
-                                                binding_type_values(bind_idx) = existing_type;
+                                                bindings(bind_idx).type_value = existing_type;
                                                 0
                                             )
                                         ) else (
@@ -3296,13 +3308,13 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
                     bind_name := make_string_ref{name_start, name_len};
                     bind_idx := find_binding_index(bind_name);
                     if bind_idx != -1 then (
-                        existing_type := value_type_values(value_idx);
+                        existing_type := values(value_idx).type_value;
                         if existing_type == -1 then (
-                            binding_type_values(bind_idx) = type_idx;
-                            value_type_values(value_idx) = type_idx;
+                            bindings(bind_idx).type_value = type_idx;
+                            values(value_idx).type_value = type_idx;
                             0
                         ) else (
-                            binding_type_values(bind_idx) = existing_type;
+                            bindings(bind_idx).type_value = existing_type;
                             0
                         )
                     ) else (
@@ -3316,10 +3328,10 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
         ),
         BindingPattern::Identifier(info) => (
             bind_idx := add_binding_if_named{info.name.name.start, info.name.name.length, value_idx, inherit_mut};
-            if value_type_values(value_idx) != -1 then (
+            if values(value_idx).type_value != -1 then (
                 if info.name.name.length > 0 && span_is_underscore{info.name.name.start, info.name.name.length} == 0 && span_is_else{info.name.name.start, info.name.name.length} == 0 then (
                     if bind_idx >= 0 then (
-                        binding_type_values(bind_idx) = value_type_values(value_idx);
+                        bindings(bind_idx).type_value = values(value_idx).type_value;
                         0
                     ) else 0
                 ) else 0
@@ -3327,7 +3339,7 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
             if bind_idx == -1 then 0 else 1
         ),
         BindingPattern::Literal(info) => (
-            value := values(value_idx);
+            value := values(value_idx).value;
             info.literal |> match {
                 ExpressionLiteral::Number(expected) => (
                     if Value::Number(actual) := value then if actual == expected then 1 else 0 else 0
@@ -3352,7 +3364,7 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
             }
         ),
         BindingPattern::EnumVariant(info) => (
-            if Value::Enum(enum_info) := values(value_idx) then (
+            if Value::Enum(enum_info) := values(value_idx).value then (
                 type_matches := enum_value_matches_pattern_type{
                     info.enum_type,
                     enum_info.enum_head,
@@ -3398,10 +3410,10 @@ bind_pattern_simple: (BindingPattern -> i32) := (pattern: BindingPattern) => (
 );
 
 apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
-    func_val := values(func_idx);
+    func_val := values(func_idx).value;
     func_val |> match {
         Value::String(string_value) => (
-            if Value::Number(index_value) := values(arg_idx) then (
+            if Value::Number(index_value) := values(arg_idx).value then (
                 if index_value < 0 || index_value >= string_value.length then (
                     set_error_with_code{span_start, interp_err_array_index_out_of_range{}};
                     -1
@@ -3417,7 +3429,7 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
             )
         ),
         Value::Record(rec_info) => (
-            if Value::Number(index_value) := values(arg_idx) then (
+            if Value::Number(index_value) := values(arg_idx).value then (
                 field_idx := record_value_index_by_position{
                     rec_info.head,
                     rec_info.count,
@@ -3491,7 +3503,7 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
             mut branch_idx := 0;
             while branch_idx < match_info.count && matched == 0 do (
                 branch_value_idx := match_info.head + branch_idx * 2 + 1;
-                if Value::Function(branch_fn_value) := values(branch_value_idx) then (
+                if Value::Function(branch_fn_value) := values(branch_value_idx).value then (
                     if NodeKind::Function(branch_fn) := nodes(branch_fn_value.node).kind then (
                         enter_scope{};
                         if restore_closure_bindings{
@@ -3550,7 +3562,7 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
         ),
         Value::Builtin(builtin_id) => (
             if builtin_id == builtin_enum{} then (
-                if Value::Record(rec_info) := values(arg_idx) then (
+                if Value::Record(rec_info) := values(arg_idx).value then (
                     if rec_info.has_named == 0 then (
                         set_error(span_start);
                         -1
@@ -3570,7 +3582,7 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                     -1
                 )
             ) else if builtin_id == builtin_match{} then (
-                if Value::Record(rec_info) := values(arg_idx) then (
+                if Value::Record(rec_info) := values(arg_idx).value then (
                     store_value(Value::MatchFunction({ head = rec_info.head, count = rec_info.count }))
                 ) else (
                     set_error(span_start);
@@ -3599,7 +3611,7 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                     if name_idx == -1 then (
                         -1
                     ) else (
-                        param_idx := store_value(values(arg_idx));
+                        param_idx := store_value(values(arg_idx).value);
                         if param_idx == -1 then (
                             -1
                         ) else (
@@ -3607,7 +3619,7 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                             if name_idx2 == -1 then (
                                 -1
                             ) else (
-                                ret_idx := store_value(values(runtime_state.option_enum_idx));
+                                ret_idx := store_value(values(runtime_state.option_enum_idx).value);
                                 if ret_idx == -1 then (
                                     -1
                                 ) else (
@@ -3623,7 +3635,7 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                                         if name_idx3 == -1 then (
                                             -1
                                         ) else (
-                                            iter_ty_idx := copy_value(binding_values(type_bind_idx));
+                                            iter_ty_idx := copy_value(bindings(type_bind_idx).value);
                                             if iter_ty_idx == -1 then (
                                                 -1
                                             ) else (
@@ -3631,7 +3643,7 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                                                 if name_idx4 == -1 then (
                                                     -1
                                                 ) else (
-                                                    next_idx := store_value(values(fn_type_idx));
+                                                    next_idx := store_value(values(fn_type_idx).value);
                                                     if next_idx == -1 then (
                                                         -1
                                                     ) else (
@@ -3654,7 +3666,7 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                     )
                 )
             ) else if builtin_id == builtin_export{} || builtin_id == builtin_target{} || builtin_id == builtin_wrap{} then (
-                if Value::Target(target_tag) := values(arg_idx) then (
+                if Value::Target(target_tag) := values(arg_idx).value then (
                     if builtin_id == builtin_wrap{} && target_tag_is_wgsl(target_tag) == 1 then (
                         set_error(span_start);
                         -1
@@ -3669,40 +3681,40 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                     -1
                 )
             ) else if builtin_id == builtin_asm{} then (
-                if Value::Target(target_tag) := values(arg_idx) then (
+                if Value::Target(target_tag) := values(arg_idx).value then (
                     store_value(Value::AsmFunction(target_tag))
                 ) else (
                     set_error(span_start);
                     -1
                 )
             ) else if builtin_id == builtin_use{} then (
-                if Value::String(path_ref) := values(arg_idx) then (
+                if Value::String(path_ref) := values(arg_idx).value then (
                     eval_use_from_string{path_ref, span_start}
                 ) else (
                     set_error(span_start);
                     -1
                 )
             ) else if builtin_id == builtin_range_next{} then (
-                if Value::Record(range_info) := values(arg_idx) then (
+                if Value::Record(range_info) := values(arg_idx).value then (
                     if range_info.count < 2 then (
                         set_error(span_start);
                         -1
                     ) else (
                         current_idx := range_info.head + 1;
                         end_idx := range_info.head + 3;
-                        if Value::Number(curr) := values(current_idx) then (
-                            if Value::Number(end_val) := values(end_idx) then (
+                        if Value::Number(curr) := values(current_idx).value then (
+                            if Value::Number(end_val) := values(end_idx).value then (
                                 if curr < end_val then (
                                     payload_idx := store_value(Value::Number(curr));
                                     if payload_idx == -1 then (
                                         -1
                                     ) else (
-                                        values(current_idx) = Value::Number(curr + 1);
+                                        values(current_idx).value = Value::Number(curr + 1);
                                         if runtime_state.option_i32_enum_idx == -1 then (
                                             set_error(span_start);
                                             -1
                                         ) else (
-                                            if Value::EnumType(enum_info) := values(runtime_state.option_i32_enum_idx) then (
+                                            if Value::EnumType(enum_info) := values(runtime_state.option_i32_enum_idx).value then (
                                                 variant_idx := enum_info.head;
                                                 store_value(Value::Enum({
                                                     enum_head = enum_info.head,
@@ -3721,7 +3733,7 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                                         set_error(span_start);
                                         -1
                                     ) else (
-                                        if Value::EnumType(enum_info) := values(runtime_state.option_i32_enum_idx) then (
+                                        if Value::EnumType(enum_info) := values(runtime_state.option_i32_enum_idx).value then (
                                             variant_idx := enum_info.head + 2;
                                             store_value(Value::Enum({
                                                 enum_head = enum_info.head,
@@ -3756,7 +3768,7 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
         Value::AsmFunction(target_tag) => (
             if ensure_asm_target_allowed{target_tag_value(target_tag), span_start} == 0 then (
                 -1
-            ) else if Value::String(code_ref) := values(arg_idx) then (
+            ) else if Value::String(code_ref) := values(arg_idx).value then (
                 store_value(Value::InlineAssembly({ target = target_tag, code = code_ref }))
             ) else (
                 set_error(span_start);
@@ -3775,14 +3787,14 @@ apply_impl_method := {object_idx: i32, object_expr: i32, property: StringRef, sp
     if NodeKind::Identifier(id) := nodes(object_expr).kind then (
         bind_idx := find_binding_index(id.name);
         if bind_idx != -1 then (
-            type_idx = binding_type_values(bind_idx);
+            type_idx = bindings(bind_idx).type_value;
             0
         ) else 0;
         0
     ) else 0;
     if type_idx == -1 then (
         if object_idx != -1 then (
-            type_idx = value_type_values(object_idx);
+            type_idx = values(object_idx).type_value;
             0
         ) else 0
     ) else 0;
@@ -3795,7 +3807,7 @@ apply_impl_method := {object_idx: i32, object_expr: i32, property: StringRef, sp
             set_error(span_start);
             -1
         ) else (
-            if Value::Record(impl_info) := values(impl_idx) then (
+            if Value::Record(impl_info) := values(impl_idx).value then (
                 method_idx := record_find_field_index_no_error{
                     impl_info.head,
                     impl_info.count,
@@ -3822,14 +3834,14 @@ apply_impl_property := {object_expr: i32, object_value_idx: i32, property_start:
     if NodeKind::Identifier(id) := nodes(object_expr).kind then (
         bind_idx := find_binding_index(id.name);
         if bind_idx != -1 then (
-            type_idx = binding_type_values(bind_idx);
+            type_idx = bindings(bind_idx).type_value;
             0
         ) else 0;
         0
     ) else 0;
     if type_idx == -1 then (
         if object_value_idx != -1 then (
-            type_idx = value_type_values(object_value_idx);
+            type_idx = values(object_value_idx).type_value;
             0
         ) else 0
     ) else 0;
@@ -3842,7 +3854,7 @@ apply_impl_property := {object_expr: i32, object_value_idx: i32, property_start:
             set_error(span_start);
             -1
         ) else (
-            if Value::Record(impl_info) := values(impl_idx) then (
+            if Value::Record(impl_info) := values(impl_idx).value then (
                 field_idx := record_find_field_index_no_error{
                     impl_info.head,
                     impl_info.count,
@@ -4022,7 +4034,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     if ensure_binding_target_access{binding_idx, span_start} == 0 then (
                         -1
                     ) else (
-                        binding_values(binding_idx)
+                        bindings(binding_idx).value
                     )
                 )
             ),
@@ -4069,13 +4081,13 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                 -1
                             ) else if ensure_binding_target_access{idx, span_start} == 0 then (
                                 -1
-                            ) else if binding_is_mut(idx) == 0 then (
+                            ) else if bindings(idx).is_mut == 0 then (
                                 set_error(span_start);
                                 -1
                             ) else (
-                                binding_values(idx) = value_idx;
-                                if binding_type_values(idx) != -1 then (
-                                    value_type_values(value_idx) = binding_type_values(idx);
+                                bindings(idx).value = value_idx;
+                                if bindings(idx).type_value != -1 then (
+                                    values(value_idx).type_value = bindings(idx).type_value;
                                     0
                                 ) else (
                                     0
@@ -4090,7 +4102,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                 -1
                             ) else if ensure_binding_target_access{root_idx, span_start} == 0 then (
                                 -1
-                            ) else if binding_is_mut(root_idx) == 0 then (
+                            ) else if bindings(root_idx).is_mut == 0 then (
                                 set_error(span_start);
                                 -1
                             ) else (
@@ -4100,7 +4112,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                 ) else if obj_idx == -1 then (
                                     -1
                                 ) else (
-                                    if Value::Record(struct_info) := values(obj_idx) then (
+                                    if Value::Record(struct_info) := values(obj_idx).value then (
                                         field_idx := record_find_field_index{
                                             struct_info.head,
                                             struct_info.count,
@@ -4112,9 +4124,9 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                         if field_idx == -1 then (
                                             -1
                                         ) else (
-                                            values(field_idx) = values(value_idx);
-                                            value_type_values(field_idx) = value_type_values(value_idx);
-                                            value_is_box_type(field_idx) = value_is_box_type(value_idx);
+                                            values(field_idx).value = values(value_idx).value;
+                                            values(field_idx).type_value = values(value_idx).type_value;
+                                            values(field_idx).is_box_type = values(value_idx).is_box_type;
                                             value_idx
                                         )
                                     ) else (
@@ -4131,7 +4143,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                 -1
                             ) else if ensure_binding_target_access{root_idx, span_start} == 0 then (
                                 -1
-                            ) else if binding_is_mut(root_idx) == 0 then (
+                            ) else if bindings(root_idx).is_mut == 0 then (
                                 set_error(span_start);
                                 -1
                             ) else (
@@ -4147,8 +4159,8 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                     ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                                         flow_state.value
                                     ) else (
-                                        if Value::Number(index_value) := values(index_idx) then (
-                                            if Value::Record(struct_info) := values(arr_idx) then (
+                                        if Value::Number(index_value) := values(index_idx).value then (
+                                            if Value::Record(struct_info) := values(arr_idx).value then (
                                                 arr_idx2 := if struct_info.has_named == -1 then (
                                                     materialize_repeated_record{arr_idx, span_start}
                                                 ) else (
@@ -4157,7 +4169,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                                 if arr_idx2 == -1 then (
                                                     -1
                                                 ) else (
-                                                    if Value::Record(struct_info2) := values(arr_idx2) then (
+                                                    if Value::Record(struct_info2) := values(arr_idx2).value then (
                                                         field_idx := record_value_index_by_position{
                                                             struct_info2.head,
                                                             struct_info2.count,
@@ -4168,9 +4180,9 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                                         if field_idx == -1 then (
                                                             -1
                                                         ) else (
-                                                            values(field_idx) = values(value_idx);
-                                                            value_type_values(field_idx) = value_type_values(value_idx);
-                                                            value_is_box_type(field_idx) = value_is_box_type(value_idx);
+                                                            values(field_idx).value = values(value_idx).value;
+                                                            values(field_idx).type_value = values(value_idx).type_value;
+                                                            values(field_idx).is_box_type = values(value_idx).is_box_type;
                                                             value_idx
                                                         )
                                                     ) else (
@@ -4227,7 +4239,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     if name_idx == -1 then (
                         -1
                     ) else (
-                        val_idx := store_value(values(inner_value_idx));
+                        val_idx := store_value(values(inner_value_idx).value);
                         if val_idx == -1 then (
                             -1
                         ) else (
@@ -4266,7 +4278,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         if name_idx == -1 then (
                             -1
                         ) else (
-                            param_idx := store_value(values(param_value_idx));
+                            param_idx := store_value(values(param_value_idx).value);
                             if param_idx == -1 then (
                                 -1
                             ) else (
@@ -4274,7 +4286,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                 if name_idx2 == -1 then (
                                     -1
                                 ) else (
-                                    ret_idx := store_value(values(ret_value_idx));
+                                    ret_idx := store_value(values(ret_value_idx).value);
                                     if ret_idx == -1 then (
                                         -1
                                     ) else (
@@ -4300,7 +4312,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         obj_idx
                     ) else (
                         if info.argument == access.object then (
-                            obj_val := values(obj_idx);
+                            obj_val := values(obj_idx).value;
                             if Value::Record(struct_info) := obj_val then (
                                 field_idx := record_find_field_index_no_error{
                                     struct_info.head,
@@ -4318,7 +4330,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                 apply_impl_method{obj_idx, access.object, access.property, span_start}
                             )
                         ) else (
-                            obj_val := values(obj_idx);
+                            obj_val := values(obj_idx).value;
                             if Value::EnumType(enum_info) := obj_val then (
                                 payload_idx := record_find_field_index_no_error{
                                     enum_info.head,
@@ -4332,7 +4344,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                     -1
                                 ) else (
                                     variant_idx := payload_idx - 1;
-                                    expects_payload := if Value::Unit := values(payload_idx) then 0 else 1;
+                                    expects_payload := if Value::Unit := values(payload_idx).value then 0 else 1;
                                     if expects_payload == 0 then (
                                         store_value(Value::Enum({
                                             enum_head = enum_info.head,
@@ -4431,7 +4443,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                         impl_idx
                     ) else (
-                        if Value::Record(_) := values(impl_idx) then (
+                        if Value::Record(_) := values(impl_idx).value then (
                             if impl_add{type_idx, impl_idx} == -1 then (
                                 -1
                             ) else (
@@ -4459,8 +4471,8 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                             ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                                 right_idx
                             ) else (
-                                left := values(left_idx);
-                                right := values(right_idx);
+                                left := values(left_idx).value;
+                                right := values(right_idx).value;
                                 bin.operator |> match {
                                     BinaryIntrinsicOperator::I32Add => (
                                         if Value::Number(lv) := left then (
@@ -4653,7 +4665,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         ) else (
                             unary.operator |> match {
                                 UnaryIntrinsicOperator::BooleanNot => (
-                                    if Value::Boolean(flag) := values(operand_idx) then (
+                                    if Value::Boolean(flag) := values(operand_idx).value then (
                                         store_value(Value::Boolean(if flag == 1 then 0 else 1))
                                     ) else (
                                         set_error(span_start);
@@ -4661,7 +4673,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                     )
                                 ),
                                 UnaryIntrinsicOperator::EnumFromStruct => (
-                                    if Value::Record(rec_info) := values(operand_idx) then (
+                                    if Value::Record(rec_info) := values(operand_idx).value then (
                                         if rec_info.has_named == 0 then (
                                             set_error(span_start);
                                             -1
@@ -4682,7 +4694,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                     )
                                 ),
                                 UnaryIntrinsicOperator::MatchFromStruct => (
-                                    if Value::Record(rec_info) := values(operand_idx) then (
+                                    if Value::Record(rec_info) := values(operand_idx).value then (
                                         store_value(Value::MatchFunction({ head = rec_info.head, count = rec_info.count }))
                                     ) else (
                                         set_error(span_start);
@@ -4690,7 +4702,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                     )
                                 ),
                                 UnaryIntrinsicOperator::UseFromString => (
-                                    if Value::String(path_ref) := values(operand_idx) then (
+                                    if Value::String(path_ref) := values(operand_idx).value then (
                                         eval_use_from_string{path_ref, span_start}
                                     ) else (
                                         set_error(span_start);
@@ -4710,7 +4722,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                         if name_idx == -1 then (
                                             -1
                                         ) else (
-                                            val_idx := store_value(values(operand_idx));
+                                            val_idx := store_value(values(operand_idx).value);
                                             if val_idx == -1 then (
                                                 -1
                                             ) else (
@@ -4726,7 +4738,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                     )
                                 ),
                                 UnaryIntrinsicOperator::BindingAnnotationExportFromTarget => (
-                                    if Value::Target(target_tag) := values(operand_idx) then (
+                                    if Value::Target(target_tag) := values(operand_idx).value then (
                                         store_value(Value::BindingAnnotation(BindingAnnotationValue::Export(target_tag)))
                                     ) else (
                                         set_error(span_start);
@@ -4734,7 +4746,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                     )
                                 ),
                                 UnaryIntrinsicOperator::BindingAnnotationTargetFromTarget => (
-                                    if Value::Target(target_tag) := values(operand_idx) then (
+                                    if Value::Target(target_tag) := values(operand_idx).value then (
                                         store_value(Value::BindingAnnotation(BindingAnnotationValue::Target(target_tag)))
                                     ) else (
                                         set_error(span_start);
@@ -4742,7 +4754,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                     )
                                 ),
                                 UnaryIntrinsicOperator::BindingAnnotationWrapFromTarget => (
-                                    if Value::Target(target_tag) := values(operand_idx) then (
+                                    if Value::Target(target_tag) := values(operand_idx).value then (
                                         if target_tag_is_wgsl(target_tag) == 1 then (
                                             set_error(span_start);
                                             -1
@@ -4755,7 +4767,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                     )
                                 ),
                                 UnaryIntrinsicOperator::AssemblyFromTarget => (
-                                    if Value::Target(target_tag) := values(operand_idx) then (
+                                    if Value::Target(target_tag) := values(operand_idx).value then (
                                         store_value(Value::AsmFunction(target_tag))
                                     ) else (
                                         set_error(span_start);
@@ -4779,7 +4791,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                             target_tag := target_literal_value(info.target);
                             if ensure_asm_target_allowed{target_tag_value(target_tag), span_start} == 0 then (
                                 -1
-                            ) else if Value::String(code_ref) := values(code_idx) then (
+                            ) else if Value::String(code_ref) := values(code_idx).value then (
                                 store_value(Value::InlineAssembly({
                                     target = target_tag,
                                     code = code_ref
@@ -4811,8 +4823,8 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     ) else (
                         op_start := info.operator.start;
                         op_len := info.operator.length;
-                        left := values(left_idx);
-                        right := values(right_idx);
+                        left := values(left_idx).value;
+                        right := values(right_idx).value;
                         if Value::Number(lv) := left then (
                             if Value::Number(rv) := right then (
                                 if op_is1{op_start, op_len, '+'} == 1 then (
@@ -4882,7 +4894,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                                                             -1
                                                                         ) else (
                                                                             if runtime_state.range_type_idx != -1 then (
-                                                                                value_type_values(range_idx) = runtime_state.range_type_idx;
+                                                                                values(range_idx).type_value = runtime_state.range_type_idx;
                                                                                 0
                                                                             ) else (
                                                                                 0
@@ -5008,7 +5020,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                     cond_idx
                 ) else (
-                    cond_value := values(cond_idx);
+                    cond_value := values(cond_idx).value;
                     if Value::Boolean(flag) := cond_value then (
                         if check_if_branch_type_compat{
                             info.then_branch,
@@ -5276,7 +5288,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                         payload_idx
                     ) else (
-                        if Value::EnumType(enum_info) := values(enum_idx) then (
+                        if Value::EnumType(enum_info) := values(enum_idx).value then (
                             payload_slot := record_find_field_index_no_error{
                                 enum_info.head,
                                 enum_info.count,
@@ -5318,8 +5330,8 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                         set_error(span_start);
                         -1
                     ) else (
-                        if Value::EnumType(enum_info) := values(enum_idx) then (
-                            expects_payload := if Value::Unit := values(payload_type_idx) then 0 else 1;
+                        if Value::EnumType(enum_info) := values(enum_idx).value then (
+                            expects_payload := if Value::Unit := values(payload_type_idx).value then 0 else 1;
                             payload_slot := record_find_field_index_no_error{
                                 enum_info.head,
                                 enum_info.count,
@@ -5365,8 +5377,8 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                         index_idx
                     ) else (
-                        if Value::Number(index_value) := values(index_idx) then (
-                            if Value::String(string_value) := values(array_idx) then (
+                        if Value::Number(index_value) := values(index_idx).value then (
+                            if Value::String(string_value) := values(array_idx).value then (
                                 if index_value < 0 || index_value >= string_value.length then (
                                     set_error_with_code{span_start, interp_err_array_index_out_of_range{}};
                                     -1
@@ -5376,7 +5388,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                 ) else (
                                     store_value(Value::Char(input(string_value.start + index_value) + 0))
                                 )
-                            ) else if Value::Record(struct_info) := values(array_idx) then (
+                            ) else if Value::Record(struct_info) := values(array_idx).value then (
                                 field_idx := record_value_index_by_position{
                                     struct_info.head,
                                     struct_info.count,
@@ -5407,7 +5419,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                 ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                     obj_idx
                 ) else (
-                    obj_val := values(obj_idx);
+                    obj_val := values(obj_idx).value;
                     if Value::EnumType(enum_info) := obj_val then (
                         payload_idx := record_find_field_index_no_error{
                             enum_info.head,
@@ -5421,7 +5433,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                             -1
                         ) else (
                             variant_idx := payload_idx - 1;
-                            expects_payload := if Value::Unit := values(payload_idx) then 0 else 1;
+                            expects_payload := if Value::Unit := values(payload_idx).value then 0 else 1;
                             if expects_payload == 0 then (
                                 store_value(Value::Enum({
                                     enum_head = enum_info.head,
@@ -5459,7 +5471,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                             if copied_idx == -1 then (
                                 -1
                             ) else (
-                                copied_val := values(copied_idx);
+                                copied_val := values(copied_idx).value;
                                 if Value::String(name_ref) := copied_val then (
                                     if name_ref.start < 0 then (
                                         if (name_ref.start == SYNTHETIC_I32_STRING.start && name_ref.length == SYNTHETIC_I32_STRING.length)
@@ -5507,7 +5519,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                         count_idx
                     ) else (
-                        if Value::Number(count_value) := values(count_idx) then (
+                        if Value::Number(count_value) := values(count_idx).value then (
                             if count_value < 0 then (
                                 set_error(span_start);
                                 -1
@@ -5527,7 +5539,7 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                     if name_idx == -1 then (
                                         -1
                                     ) else (
-                                        val_idx := store_value(values(value_idx));
+                                        val_idx := store_value(values(value_idx).value);
                                         if val_idx == -1 then (
                                             -1
                                         ) else (
@@ -5745,51 +5757,51 @@ value_tag := (value: Value) => (
 );
 
 (export wasm) get_value_tag := (idx: i32) => (
-    value_tag(values(idx))
+    value_tag(values(idx).value)
 );
 
 (export wasm) get_value_number := (idx: i32) => (
-    if Value::Number(value) := values(idx) then value else 0
+    if Value::Number(value) := values(idx).value then value else 0
 );
 
 (export wasm) get_value_boolean := (idx: i32) => (
-    if Value::Boolean(value) := values(idx) then value else 0
+    if Value::Boolean(value) := values(idx).value then value else 0
 );
 
 (export wasm) get_value_char := (idx: i32) => (
-    if Value::Char(value) := values(idx) then value else 0
+    if Value::Char(value) := values(idx).value then value else 0
 );
 
 (export wasm) get_value_string_start := (idx: i32) => (
-    if Value::String(value) := values(idx) then value.start else -1
+    if Value::String(value) := values(idx).value then value.start else -1
 );
 
 (export wasm) get_value_string_length := (idx: i32) => (
-    if Value::String(value) := values(idx) then value.length else 0
+    if Value::String(value) := values(idx).value then value.length else 0
 );
 
 (export wasm) get_value_function_node := (idx: i32) => (
-    if Value::Function(value) := values(idx) then value.node else -1
+    if Value::Function(value) := values(idx).value then value.node else -1
 );
 
 (export wasm) get_value_enum_variant_name_start := (idx: i32) => (
-    if Value::Enum(value) := values(idx) then (
-        if Value::String(name) := values(value.variant_idx) then name.start else -1
+    if Value::Enum(value) := values(idx).value then (
+        if Value::String(name) := values(value.variant_idx).value then name.start else -1
     ) else (
         -1
     )
 );
 
 (export wasm) get_value_enum_variant_name_length := (idx: i32) => (
-    if Value::Enum(value) := values(idx) then (
-        if Value::String(name) := values(value.variant_idx) then name.length else 0
+    if Value::Enum(value) := values(idx).value then (
+        if Value::String(name) := values(value.variant_idx).value then name.length else 0
     ) else (
         0
     )
 );
 
 (export wasm) get_value_enum_payload := (idx: i32) => (
-    if Value::Enum(value) := values(idx) then value.payload else -1
+    if Value::Enum(value) := values(idx).value then value.payload else -1
 );
 
 (export wasm) get_binding_count := {} => (
@@ -5801,23 +5813,23 @@ value_tag := (value: Value) => (
 );
 
 (export wasm) get_binding_name_start := (idx: i32) => (
-    binding_name_start(idx)
+    bindings(idx).name_start
 );
 
 (export wasm) get_binding_name_length := (idx: i32) => (
-    binding_name_length(idx)
+    bindings(idx).name_length
 );
 
 (export wasm) get_binding_target_mask := (idx: i32) => (
-    binding_target_mask(idx)
+    bindings(idx).target_mask
 );
 
 (export wasm) get_binding_export_mask := (idx: i32) => (
-    binding_export_mask(idx)
+    bindings(idx).export_mask
 );
 
 (export wasm) get_binding_wrap_mask := (idx: i32) => (
-    binding_wrap_mask(idx)
+    bindings(idx).wrap_mask
 );
 
 (export wasm) get_intrinsic_binding_count := {} => (
@@ -5833,15 +5845,15 @@ value_tag := (value: Value) => (
 );
 
 (export wasm) get_binding_value := (idx: i32) => (
-    binding_values(idx)
+    bindings(idx).value
 );
 
 (export wasm) get_binding_type_value := (idx: i32) => (
-    binding_type_values(idx)
+    bindings(idx).type_value
 );
 
 (export wasm) get_value_type_value := (idx: i32) => (
-    value_type_values(idx)
+    values(idx).type_value
 );
 
 (export wasm) get_runtime_type_value_idx := {} => (

@@ -2515,37 +2515,99 @@ fn emit_expression(
                                         }
                                     };
 
-                                    let store_instr = match field_type {
-                                        WasmType::U8 => {
-                                            Instruction::I32Store8(memarg(0, 0, memory_index))
-                                        }
-                                        WasmType::I32 | WasmType::Box { .. } => {
-                                            Instruction::I32Store(memarg(0, 2, memory_index))
-                                        }
-                                        _ => {
-                                            return Err(Diagnostic::new(
-                                                "Boxed struct field assignment only supports i32 or u8 fields"
+                                    let full_target_expr = lvalue_to_intermediate(&target);
+                                    if matches!(
+                                        &field_type,
+                                        WasmType::U8 | WasmType::I32 | WasmType::Box { .. }
+                                    ) {
+                                        let store_instr = match field_type {
+                                            WasmType::U8 => {
+                                                Instruction::I32Store8(memarg(0, 0, memory_index))
+                                            }
+                                            WasmType::I32 | WasmType::Box { .. } => {
+                                                Instruction::I32Store(memarg(0, 2, memory_index))
+                                            }
+                                            _ => unreachable!(
+                                                "non-leaf boxed struct field assignment checked above"
+                                            ),
+                                        };
+                                        tasks.push(EmitTask::Eval(full_target_expr));
+                                        tasks.push(EmitTask::Instr(store_instr));
+                                        tasks.push(EmitTask::EvalWithType {
+                                            expr: (*value).clone(),
+                                            expected: field_type,
+                                        });
+                                        tasks.push(EmitTask::Instr(Instruction::I32Add));
+                                        tasks.push(EmitTask::Instr(Instruction::I32Const(
+                                            field_offset,
+                                        )));
+                                        tasks.push(EmitTask::Instr(Instruction::LocalGet(
+                                            temp_local,
+                                        )));
+                                        tasks.push(EmitTask::Instr(Instruction::LocalSet(
+                                            temp_local,
+                                        )));
+                                        tasks.push(EmitTask::Instr(Instruction::I32Mul));
+                                        tasks.push(EmitTask::Instr(Instruction::I32Const(
+                                            element_size,
+                                        )));
+                                        tasks.push(EmitTask::EvalValue((**index).clone()));
+                                    } else {
+                                        let base_local = box_base_local.ok_or_else(|| {
+                                            Diagnostic::new(
+                                                "Boxed array assignment requires a temporary local"
                                                     .to_string(),
                                             )
-                                            .with_span(SourceSpan::default()));
+                                            .with_span(SourceSpan::default())
+                                        })?;
+                                        let store_fields = collect_boxed_store_leaves(
+                                            value.as_ref(),
+                                            &field_type,
+                                            field_offset,
+                                        )?;
+                                        tasks.push(EmitTask::Eval(full_target_expr));
+                                        for (field_expr, field_type, field_offset) in
+                                            store_fields.into_iter().rev()
+                                        {
+                                            let field_store = match field_type {
+                                                WasmType::U8 => Instruction::I32Store8(memarg(
+                                                    0,
+                                                    0,
+                                                    memory_index,
+                                                )),
+                                                WasmType::I32 | WasmType::Box { .. } => {
+                                                    Instruction::I32Store(memarg(
+                                                        0,
+                                                        2,
+                                                        memory_index,
+                                                    ))
+                                                }
+                                                _ => unreachable!(
+                                                    "collect_boxed_store_leaves should emit only leaf field types"
+                                                ),
+                                            };
+                                            tasks.push(EmitTask::Instr(field_store));
+                                            tasks.push(EmitTask::EvalWithType {
+                                                expr: field_expr,
+                                                expected: field_type,
+                                            });
+                                            tasks.push(EmitTask::Instr(Instruction::I32Add));
+                                            tasks.push(EmitTask::Instr(Instruction::I32Const(
+                                                field_offset,
+                                            )));
+                                            tasks.push(EmitTask::Instr(Instruction::LocalGet(
+                                                base_local,
+                                            )));
                                         }
-                                    };
-                                    let full_target_expr = lvalue_to_intermediate(&target);
-                                    tasks.push(EmitTask::Eval(full_target_expr));
-                                    tasks.push(EmitTask::Instr(store_instr));
-                                    tasks.push(EmitTask::EvalWithType {
-                                        expr: (*value).clone(),
-                                        expected: field_type,
-                                    });
-                                    tasks.push(EmitTask::Instr(Instruction::I32Add));
-                                    tasks
-                                        .push(EmitTask::Instr(Instruction::I32Const(field_offset)));
-                                    tasks.push(EmitTask::Instr(Instruction::LocalGet(temp_local)));
-                                    tasks.push(EmitTask::Instr(Instruction::LocalSet(temp_local)));
-                                    tasks.push(EmitTask::Instr(Instruction::I32Mul));
-                                    tasks
-                                        .push(EmitTask::Instr(Instruction::I32Const(element_size)));
-                                    tasks.push(EmitTask::EvalValue((**index).clone()));
+                                        tasks.push(EmitTask::Instr(Instruction::LocalSet(
+                                            base_local,
+                                        )));
+                                        tasks.push(EmitTask::Instr(Instruction::I32Mul));
+                                        tasks.push(EmitTask::Instr(Instruction::I32Const(
+                                            element_size,
+                                        )));
+                                        tasks.push(EmitTask::EvalValue((**index).clone()));
+                                    }
                                     continue;
                                 }
                             }
