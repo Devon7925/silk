@@ -60,8 +60,9 @@ pub fn compile(
     let root = loader::normalize_path(root);
     let root_source = file_sources
         .get(&root)
-        .ok_or_else(|| Diagnostic::new(format!("Missing root source for {root}")))?;
-    let ast = loader::parse_source_block(root_source)?;
+        .ok_or_else(|| Diagnostic::new(format!("Missing root source for {root}")))?
+        .clone();
+    let ast = loader::parse_source_block(&root_source)?;
     if timings_enabled {
         eprintln!(
             "SILK_TIMINGS parse_files_ms={:.2}",
@@ -83,7 +84,8 @@ pub fn compile(
     }
 
     let intermediate_start = Instant::now();
-    let (intermediate, intermediate_backend) = silk_intermediate::lower_context(&program_context)?;
+    let (intermediate, intermediate_backend) =
+        silk_intermediate::lower_context(&program_context, &root_source)?;
     if timings_enabled {
         eprintln!(
             "SILK_TIMINGS lower_intermediate_ms={:.2} backend={}",

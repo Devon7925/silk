@@ -3,8 +3,6 @@ types := use "types.silk";
 MAX_INPUT := types.MAX_INPUT;
 MAX_NODES := types.MAX_NODES;
 MAX_LIST_NODES := types.MAX_LIST_NODES;
-MAX_VALUES := 8192;
-MAX_BINDINGS := 4096;
 MAX_OUTPUT_GLOBALS := 4096;
 MAX_OUTPUT_EXPORTS := 12288;
 MAX_OUTPUT_WRAPPERS := 12288;
@@ -13,6 +11,7 @@ StringRef := types.StringRef;
 TargetLiteral := types.TargetLiteral;
 BindingAnnotationLiteral := types.BindingAnnotationLiteral;
 ExpressionLiteral := types.ExpressionLiteral;
+IntrinsicType := types.IntrinsicType;
 BindingPattern := types.BindingPattern;
 NodeKind := types.NodeKind;
 Node := types.Node;
@@ -24,6 +23,10 @@ EMPTY_LIST_NODE := types.EMPTY_LIST_NODE;
 INPUT_VALUE_NUMBER := 0;
 INPUT_VALUE_BOOLEAN := 1;
 INPUT_VALUE_CHAR := 2;
+
+INPUT_VALUE_TYPE_UNKNOWN := 0;
+INPUT_VALUE_TYPE_I32 := 1;
+INPUT_VALUE_TYPE_U8 := 2;
 
 TARGET_MASK_JS := types.TARGET_MASK_JS;
 TARGET_MASK_WASM := types.TARGET_MASK_WASM;
@@ -61,19 +64,16 @@ LowerError := enum {
     OutputEncodeFailed = {},
 };
 
-InputValueSlot := {
-    tag = i32,
-    payload_i32 = i32,
+LowerBindingResult := enum {
+    Ok = {},
+    Unimplemented = {},
+    OutputError = {},
+    InputError = {},
 };
 
-InputBindingSlot := {
-    name_start = i32,
-    name_length = i32,
-    value_idx = i32,
-    is_mut = i32,
-    target_mask = i32,
-    export_mask = i32,
-    wrap_mask = i32,
+WrapperSourceTarget := enum {
+    Missing = {},
+    Target = i32,
 };
 
 OutputGlobalSlot := {
@@ -99,21 +99,6 @@ OutputWrapperSlot := {
     index = i32,
     name_start = i32,
     name_length = i32,
-};
-
-EMPTY_INPUT_VALUE_SLOT := {
-    tag = -1,
-    payload_i32 = 0,
-};
-
-EMPTY_INPUT_BINDING_SLOT := {
-    name_start = 0,
-    name_length = 0,
-    value_idx = -1,
-    is_mut = 0,
-    target_mask = 0,
-    export_mask = 0,
-    wrap_mask = 0,
 };
 
 EMPTY_OUTPUT_GLOBAL_SLOT := {
@@ -186,7 +171,7 @@ lower_error_output_encode_failed := {} => (
 );
 
 (export wasm) intermediate_payload_version := {} => (
-    4
+    6
 );
 
 (export wasm) intermediate_output_version := {} => (
@@ -197,9 +182,6 @@ lower_error_output_encode_failed := {} => (
 (export wasm) mut nodes: Box({Node; MAX_NODES}) := {EMPTY_NODE; MAX_NODES};
 (export wasm) mut list_nodes: Box({ListNode; MAX_LIST_NODES}) := {EMPTY_LIST_NODE; MAX_LIST_NODES};
 (export wasm) mut state: Box(State) := { count = 0, cursor = 0, error = 0, list_count = 0 };
-
-(export wasm) mut input_values: Box({InputValueSlot; MAX_VALUES}) := {EMPTY_INPUT_VALUE_SLOT; MAX_VALUES};
-(export wasm) mut input_bindings: Box({InputBindingSlot; MAX_BINDINGS}) := {EMPTY_INPUT_BINDING_SLOT; MAX_BINDINGS};
 
 (export wasm) mut output_globals: Box({OutputGlobalSlot; MAX_OUTPUT_GLOBALS}) := {EMPTY_OUTPUT_GLOBAL_SLOT; MAX_OUTPUT_GLOBALS};
 (export wasm) mut output_exports: Box({OutputExportSlot; MAX_OUTPUT_EXPORTS}) := {EMPTY_OUTPUT_EXPORT_SLOT; MAX_OUTPUT_EXPORTS};
@@ -224,8 +206,6 @@ LowerState := {
     output_global_count = i32,
     output_export_count = i32,
     output_wrapper_count = i32,
-    input_binding_count = i32,
-    input_value_count = i32,
     lowering_unimplemented = i32,
 };
 
@@ -248,8 +228,6 @@ LowerState := {
     output_global_count = 0,
     output_export_count = 0,
     output_wrapper_count = 0,
-    input_binding_count = 0,
-    input_value_count = 0,
     lowering_unimplemented = 0,
 };
 
@@ -268,6 +246,7 @@ BindingExtractState := {
     target_mask = i32,
     export_mask = i32,
     wrap_mask = i32,
+    value_type_tag = i32,
 };
 
 LiteralExtractState := {
@@ -289,6 +268,7 @@ mut binding_extract_state: Box(BindingExtractState) := {
     target_mask = 0,
     export_mask = 0,
     wrap_mask = 0,
+    value_type_tag = INPUT_VALUE_TYPE_UNKNOWN,
 };
 mut literal_extract_state: Box(LiteralExtractState) := {
     tag = -1,
@@ -296,7 +276,7 @@ mut literal_extract_state: Box(LiteralExtractState) := {
 };
 
 (export wasm) intermediate_stage_version := {} => (
-    3
+    5
 );
 
 target_mask_has := {mask: i32, bit: i32} => (
@@ -517,6 +497,7 @@ reset_binding_extract_state := {} => (
     binding_extract_state.target_mask = 0;
     binding_extract_state.export_mask = 0;
     binding_extract_state.wrap_mask = 0;
+    binding_extract_state.value_type_tag = INPUT_VALUE_TYPE_UNKNOWN;
     1
 );
 
@@ -556,6 +537,38 @@ resolve_binding_name_from_expr := (expr_idx: i32) => (
     )
 );
 
+value_type_tag_from_type_expr := (expr_idx: i32) => (
+    if expr_idx == -1 then INPUT_VALUE_TYPE_UNKNOWN else (
+        nodes(expr_idx).kind |> match {
+            NodeKind::IntrinsicType(ty) => (
+                ty |> match {
+                    IntrinsicType::U8 => INPUT_VALUE_TYPE_U8,
+                    IntrinsicType::I32 => INPUT_VALUE_TYPE_I32,
+                    IntrinsicType::Boolean => INPUT_VALUE_TYPE_I32,
+                    else => INPUT_VALUE_TYPE_UNKNOWN
+                }
+            ),
+            else => INPUT_VALUE_TYPE_UNKNOWN
+        }
+    )
+);
+
+value_type_tag_from_pattern_expr := (expr_idx: i32) => (
+    if expr_idx == -1 then INPUT_VALUE_TYPE_UNKNOWN else (
+        nodes(expr_idx).kind |> match {
+            NodeKind::Operation(info) => (
+                if info.operator.length == 1 && info.operator.start >= 0 && input(info.operator.start) == ':' then (
+                    value_type_tag_from_type_expr(info.right)
+                ) else (
+                    INPUT_VALUE_TYPE_UNKNOWN
+                )
+            ),
+            NodeKind::FunctionCall(info) => value_type_tag_from_pattern_expr(info.argument),
+            else => INPUT_VALUE_TYPE_UNKNOWN
+        }
+    )
+);
+
 resolve_binding_pattern := (pattern: BindingPattern) => (
     reset_binding_extract_state{};
     pattern |> match {
@@ -563,7 +576,12 @@ resolve_binding_pattern := (pattern: BindingPattern) => (
             set_binding_name{info.name.name.start, info.name.name.length};
             binding_extract_state.ok
         ),
-        BindingPattern::TypeHint(info) => resolve_binding_name_from_expr(info.pattern),
+        BindingPattern::TypeHint(info) => (
+            if resolve_binding_name_from_expr(info.pattern) == 0 then 0 else (
+                binding_extract_state.value_type_tag = value_type_tag_from_type_expr(info.type_expr);
+                binding_extract_state.ok
+            )
+        ),
         BindingPattern::Annotated(info) => (
             if reset_annotation_state{} == 0 then (
                 0
@@ -576,6 +594,7 @@ resolve_binding_pattern := (pattern: BindingPattern) => (
                 binding_extract_state.target_mask = annotation_state.target_mask;
                 binding_extract_state.export_mask = annotation_state.export_mask;
                 binding_extract_state.wrap_mask = annotation_state.wrap_mask;
+                binding_extract_state.value_type_tag = value_type_tag_from_pattern_expr(info.pattern);
                 binding_extract_state.ok
             )
         ),
@@ -618,83 +637,16 @@ extract_literal_value := (expr_idx: i32) => (
     )
 );
 
-append_binding_from_node := (node_idx: i32) => (
-    if node_idx < 0 || node_idx >= MAX_NODES then (
-        0
-    ) else if lower_state.input_binding_count < 0 || lower_state.input_binding_count >= MAX_BINDINGS then (
-        0
-    ) else if lower_state.input_value_count < 0 || lower_state.input_value_count >= MAX_VALUES then (
-        0
-    ) else (
-        if NodeKind::Binding(binding) := nodes(node_idx).kind then (
-            binding_idx := lower_state.input_binding_count;
-            value_idx := lower_state.input_value_count;
-            extract_literal_value(binding.expr);
-            input_values(value_idx).tag = literal_extract_state.tag;
-            input_values(value_idx).payload_i32 = literal_extract_state.payload_i32;
-
-            input_bindings(binding_idx).name_start = 0;
-            input_bindings(binding_idx).name_length = 0;
-            input_bindings(binding_idx).value_idx = value_idx;
-            input_bindings(binding_idx).is_mut = 0;
-            input_bindings(binding_idx).target_mask = 0;
-            input_bindings(binding_idx).export_mask = 0;
-            input_bindings(binding_idx).wrap_mask = 0;
-
-            if resolve_binding_pattern(binding.pattern) == 1 then (
-                input_bindings(binding_idx).name_start = binding_extract_state.name_start;
-                input_bindings(binding_idx).name_length = binding_extract_state.name_length;
-                input_bindings(binding_idx).is_mut = binding_extract_state.is_mut;
-                input_bindings(binding_idx).target_mask = binding_extract_state.target_mask;
-                input_bindings(binding_idx).export_mask = binding_extract_state.export_mask;
-                input_bindings(binding_idx).wrap_mask = binding_extract_state.wrap_mask;
-                {}
-            ) else (
-                {}
-            );
-
-            lower_state.input_binding_count = binding_idx + 1;
-            lower_state.input_value_count = value_idx + 1;
-            1
-        ) else (
-            1
-        )
-    )
-);
-
-populate_input_slots_from_ast := (root: i32) => (
-    if reset_input_slots{} == 0 then (
-        0
-    ) else if root < 0 || root >= MAX_NODES then (
-        0
-    ) else (
-        if NodeKind::Block(list) := nodes(root).kind then (
-            mut current := list.head;
-            mut count := 0;
-            mut ok := 1;
-            while count < list.count && current != -1 && ok == 1 do (
-                ok = append_binding_from_node(list_nodes(current).value);
-                current = list_nodes(current).next;
-                count = count + 1;
-                {}
-            );
-            ok
-        ) else (
-            append_binding_from_node(root)
-        )
-    )
-);
-
-binding_has_any_annotations := (binding: InputBindingSlot) => (
-    if binding.is_mut != 0
-        || binding.target_mask != 0
-        || binding.export_mask != 0
-        || binding.wrap_mask != 0
+binding_has_any_annotations := {} => (
+    if binding_extract_state.is_mut != 0
+        || binding_extract_state.target_mask != 0
+        || binding_extract_state.export_mask != 0
+        || binding_extract_state.wrap_mask != 0
     then 1 else 0
 );
 
-binding_should_materialize := (binding: InputBindingSlot) => (
-    if binding.is_mut != 0 || binding.export_mask != 0 || binding.wrap_mask != 0 then 1 else 0
+binding_should_materialize := {} => (
+    if binding_extract_state.is_mut != 0 || binding_extract_state.export_mask != 0 then 1 else 0
 );
 
 output_value_tag_from_input_tag := (tag: i32) => (
@@ -711,6 +663,13 @@ safe_name_bounds := {start: i32, length: i32, input_len: i32} => (
     else 1
 );
 
+resolve_wrapper_source_target := {} => (
+    if target_count(binding_extract_state.wrap_mask) == 0 then WrapperSourceTarget::Missing{} else (
+        source_target_tag := first_target_tag(binding_extract_state.export_mask);
+        if source_target_tag < 0 then WrapperSourceTarget::Missing{} else WrapperSourceTarget::Target(source_target_tag)
+    )
+);
+
 reset_output_slots := {} => (
     lower_state.output_len = 0;
     lower_state.output_global_count = 0;
@@ -722,12 +681,12 @@ reset_output_slots := {} => (
 emit_global_entry := {
     name_start: i32,
     name_length: i32,
+    ty_tag: i32,
     value_tag: i32,
     value_i32: i32
 } => (
     idx := lower_state.output_global_count;
     if idx < 0 || idx >= MAX_OUTPUT_GLOBALS then -1 else (
-        ty_tag := if value_tag == VALUE_TAG_CHAR then OUTPUT_GLOBAL_TYPE_U8 else OUTPUT_GLOBAL_TYPE_I32;
         output_globals(idx).name_start = name_start;
         output_globals(idx).name_length = name_length;
         output_globals(idx).ty_tag = ty_tag;
@@ -776,101 +735,106 @@ emit_wrapper_entry := {
     )
 );
 
-lower_binding_record := {
-    binding_idx: i32,
-    input_len: i32,
-    value_count: i32
-} => (
-    if binding_idx < 0 || binding_idx >= MAX_BINDINGS then 3 else (
-        binding := input_bindings(binding_idx);
-        if safe_name_bounds{binding.name_start, binding.name_length, input_len} == 0 then 3
-        else if binding.export_mask < 0 || binding.wrap_mask < 0 || binding.target_mask < 0 then 3
-        else if binding_should_materialize(binding) == 0 then 0
-        else if binding.value_idx < 0 || binding.value_idx >= value_count || binding.value_idx >= MAX_VALUES then 1
-        else (
-            value := input_values(binding.value_idx);
-            value_tag := output_value_tag_from_input_tag(value.tag);
-            if value_tag == VALUE_TAG_UNKNOWN then 1 else (
-                export_count := target_count(binding.export_mask);
-                wrap_count := target_count(binding.wrap_mask);
-                source_target_tag := first_target_tag(binding.export_mask);
-                global_index := emit_global_entry{
-                    binding.name_start,
-                    binding.name_length,
-                    value_tag,
-                    value.payload_i32
-                };
-                if global_index < 0 then 2 else (
-                    mut emit_ok := 1;
-                    if emit_ok == 1 && target_mask_has{binding.export_mask, TARGET_MASK_JS} == 1 then (
-                        emit_ok = emit_export_entry{
-                            OUTPUT_TARGET_JS,
-                            global_index,
-                            binding.name_start,
-                            binding.name_length
-                        };
-                    ) else (
-                        {}
-                    );
-                    if emit_ok == 1 && target_mask_has{binding.export_mask, TARGET_MASK_WASM} == 1 then (
-                        emit_ok = emit_export_entry{
-                            OUTPUT_TARGET_WASM,
-                            global_index,
-                            binding.name_start,
-                            binding.name_length
-                        };
-                    ) else (
-                        {}
-                    );
-                    if emit_ok == 1 && target_mask_has{binding.export_mask, TARGET_MASK_WGSL} == 1 then (
-                        emit_ok = emit_export_entry{
-                            OUTPUT_TARGET_WGSL,
-                            global_index,
-                            binding.name_start,
-                            binding.name_length
-                        };
-                    ) else (
-                        {}
-                    );
-                    if emit_ok == 0 then 2
-                    else if wrap_count == 0 then 0
-                    else if export_count != 1 || source_target_tag < 0 then 1
-                    else (
-                        if emit_ok == 1 && target_mask_has{binding.wrap_mask, TARGET_MASK_JS} == 1 && source_target_tag != OUTPUT_TARGET_JS then (
-                            emit_ok = emit_wrapper_entry{
-                                source_target_tag,
-                                OUTPUT_TARGET_JS,
-                                global_index,
-                                binding.name_start,
-                                binding.name_length
-                            };
-                        ) else (
-                            {}
-                        );
-                        if emit_ok == 1 && target_mask_has{binding.wrap_mask, TARGET_MASK_WASM} == 1 && source_target_tag != OUTPUT_TARGET_WASM then (
-                            emit_ok = emit_wrapper_entry{
-                                source_target_tag,
-                                OUTPUT_TARGET_WASM,
-                                global_index,
-                                binding.name_start,
-                                binding.name_length
-                            };
-                        ) else (
-                            {}
-                        );
-                        if emit_ok == 1 && target_mask_has{binding.wrap_mask, TARGET_MASK_WGSL} == 1 && source_target_tag != OUTPUT_TARGET_WGSL then (
-                            emit_ok = emit_wrapper_entry{
-                                source_target_tag,
-                                OUTPUT_TARGET_WGSL,
-                                global_index,
-                                binding.name_start,
-                                binding.name_length
-                            };
-                        ) else (
-                            {}
-                        );
-                        if emit_ok == 1 then 0 else 2
-                    )
+resolve_output_global_type_tag := (value_tag: i32) => (
+    if binding_extract_state.value_type_tag == INPUT_VALUE_TYPE_U8 then OUTPUT_GLOBAL_TYPE_U8
+    else if binding_extract_state.value_type_tag == INPUT_VALUE_TYPE_I32 then OUTPUT_GLOBAL_TYPE_I32
+    else if value_tag == VALUE_TAG_CHAR then OUTPUT_GLOBAL_TYPE_U8
+    else OUTPUT_GLOBAL_TYPE_I32
+);
+
+lower_binding_expr := {expr_idx: i32, input_len: i32} => (
+    if safe_name_bounds{binding_extract_state.name_start, binding_extract_state.name_length, input_len} == 0 then LowerBindingResult::InputError{}
+    else if binding_extract_state.export_mask < 0 || binding_extract_state.wrap_mask < 0 || binding_extract_state.target_mask < 0 then LowerBindingResult::InputError{}
+    else if binding_should_materialize{} == 0 then LowerBindingResult::Ok{}
+    else (
+        extract_literal_value(expr_idx);
+        value_tag := output_value_tag_from_input_tag(literal_extract_state.tag);
+        if value_tag == VALUE_TAG_UNKNOWN then LowerBindingResult::Unimplemented{} else (
+            global_type_tag := resolve_output_global_type_tag(value_tag);
+            global_index := emit_global_entry{
+                binding_extract_state.name_start,
+                binding_extract_state.name_length,
+                global_type_tag,
+                value_tag,
+                literal_extract_state.payload_i32
+            };
+            if global_index < 0 then LowerBindingResult::OutputError{} else (
+                mut emit_ok := 1;
+                if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_JS} == 1 then (
+                    emit_ok = emit_export_entry{
+                        OUTPUT_TARGET_JS,
+                        global_index,
+                        binding_extract_state.name_start,
+                        binding_extract_state.name_length
+                    };
+                ) else (
+                    {}
+                );
+                if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_WASM} == 1 then (
+                    emit_ok = emit_export_entry{
+                        OUTPUT_TARGET_WASM,
+                        global_index,
+                        binding_extract_state.name_start,
+                        binding_extract_state.name_length
+                    };
+                ) else (
+                    {}
+                );
+                if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_WGSL} == 1 then (
+                    emit_ok = emit_export_entry{
+                        OUTPUT_TARGET_WGSL,
+                        global_index,
+                        binding_extract_state.name_start,
+                        binding_extract_state.name_length
+                    };
+                ) else (
+                    {}
+                );
+                if emit_ok == 0 then LowerBindingResult::OutputError{}
+                else (
+                    wrapper_source_target := resolve_wrapper_source_target{};
+                    wrapper_source_target |> match {
+                        WrapperSourceTarget::Missing => (
+                            LowerBindingResult::Ok{}
+                        ),
+                        WrapperSourceTarget::Target(source_target_tag) => (
+                            if emit_ok == 1 && target_mask_has{binding_extract_state.wrap_mask, TARGET_MASK_JS} == 1 && source_target_tag != OUTPUT_TARGET_JS then (
+                                emit_ok = emit_wrapper_entry{
+                                    source_target_tag,
+                                    OUTPUT_TARGET_JS,
+                                    global_index,
+                                    binding_extract_state.name_start,
+                                    binding_extract_state.name_length
+                                };
+                            ) else (
+                                {}
+                            );
+                            if emit_ok == 1 && target_mask_has{binding_extract_state.wrap_mask, TARGET_MASK_WASM} == 1 && source_target_tag != OUTPUT_TARGET_WASM then (
+                                emit_ok = emit_wrapper_entry{
+                                    source_target_tag,
+                                    OUTPUT_TARGET_WASM,
+                                    global_index,
+                                    binding_extract_state.name_start,
+                                    binding_extract_state.name_length
+                                };
+                            ) else (
+                                {}
+                            );
+                            if emit_ok == 1 && target_mask_has{binding_extract_state.wrap_mask, TARGET_MASK_WGSL} == 1 && source_target_tag != OUTPUT_TARGET_WGSL then (
+                                emit_ok = emit_wrapper_entry{
+                                    source_target_tag,
+                                    OUTPUT_TARGET_WGSL,
+                                    global_index,
+                                    binding_extract_state.name_start,
+                                    binding_extract_state.name_length
+                                };
+                            ) else (
+                                {}
+                            );
+                            if emit_ok == 1 then LowerBindingResult::Ok{} else LowerBindingResult::OutputError{}
+                        ),
+                        else => LowerBindingResult::OutputError{}
+                    }
                 )
             )
         )
@@ -892,7 +856,36 @@ finalize_output_payload := {} => (
     )
 );
 
-parse_body_records := {binding_count: i32, input_len: i32, value_count: i32} => (
+count_bindings_in_root := (root: i32) => (
+    if root < 0 || root >= MAX_NODES then -1 else (
+        if NodeKind::Block(list) := nodes(root).kind then (
+            mut current := list.head;
+            mut idx := 0;
+            mut binding_count := 0;
+            while idx < list.count && current != -1 do (
+                node_idx := list_nodes(current).value;
+                if node_idx >= 0 && node_idx < MAX_NODES then (
+                    if NodeKind::Binding(binding) := nodes(node_idx).kind then (
+                        binding_count = binding_count + 1;
+                        {}
+                    ) else (
+                        {}
+                    )
+                ) else (
+                    {}
+                );
+                current = list_nodes(current).next;
+                idx = idx + 1;
+                {}
+            );
+            binding_count
+        ) else (
+            if NodeKind::Binding(binding) := nodes(root).kind then 1 else 0
+        )
+    )
+);
+
+parse_body_records := {root: i32, binding_count: i32, input_len: i32} => (
     mut idx := 0;
     mut parsed_bindings := 0;
     mut parsed_annotated := 0;
@@ -900,35 +893,102 @@ parse_body_records := {binding_count: i32, input_len: i32, value_count: i32} => 
     mut output_ok := reset_output_slots{};
     mut lowering_unimplemented := 0;
 
-    while idx < binding_count && body_ok == 1 do (
-        if idx < 0 || idx >= MAX_BINDINGS then (
-            body_ok = 0;
-        ) else (
-            binding := input_bindings(idx);
-            if binding_has_any_annotations(binding) == 1 then (
-                parsed_annotated = parsed_annotated + 1;
-            ) else (
-                {}
-            );
-
-            if output_ok == 1 && lowering_unimplemented == 0 then (
-                lowering_result := lower_binding_record{idx, input_len, value_count};
-                if lowering_result == 1 then (
-                    lowering_unimplemented = 1;
-                ) else if lowering_result == 2 then (
-                    output_ok = 0;
-                ) else if lowering_result == 3 then (
+    if root < 0 || root >= MAX_NODES then (
+        body_ok = 0;
+    ) else if NodeKind::Block(list) := nodes(root).kind then (
+        mut current := list.head;
+        while idx < list.count && current != -1 && body_ok == 1 do (
+            node_idx := list_nodes(current).value;
+            if node_idx < 0 || node_idx >= MAX_NODES then (
+                body_ok = 0;
+            ) else if NodeKind::Binding(binding) := nodes(node_idx).kind then (
+                if resolve_binding_pattern(binding.pattern) == 0 then (
                     body_ok = 0;
                 ) else (
-                    {}
+                    parsed_bindings = parsed_bindings + 1;
+                    if binding_has_any_annotations{} == 1 then (
+                        parsed_annotated = parsed_annotated + 1;
+                    ) else (
+                        {}
+                    );
+
+                    if output_ok == 1 && lowering_unimplemented == 0 then (
+                        lowering_result := lower_binding_expr{binding.expr, input_len};
+                        lowering_result |> match {
+                            LowerBindingResult::Ok => (
+                                {}
+                            ),
+                            LowerBindingResult::Unimplemented => (
+                                lowering_unimplemented = 1;
+                                {}
+                            ),
+                            LowerBindingResult::OutputError => (
+                                output_ok = 0;
+                                {}
+                            ),
+                            LowerBindingResult::InputError => (
+                                body_ok = 0;
+                                {}
+                            ),
+                            else => (
+                                output_ok = 0;
+                                {}
+                            )
+                        }
+                    ) else (
+                        {}
+                    )
                 )
             ) else (
                 {}
             );
-
-            parsed_bindings = parsed_bindings + 1;
+            current = list_nodes(current).next;
+            idx = idx + 1;
+            {}
         );
-        idx = idx + 1;
+    ) else (
+        if NodeKind::Binding(binding) := nodes(root).kind then (
+            parsed_bindings = 1;
+            if resolve_binding_pattern(binding.pattern) == 0 then (
+                body_ok = 0;
+            ) else (
+                if binding_has_any_annotations{} == 1 then (
+                    parsed_annotated = 1;
+                ) else (
+                    {}
+                );
+
+                if output_ok == 1 && lowering_unimplemented == 0 then (
+                    lowering_result := lower_binding_expr{binding.expr, input_len};
+                    lowering_result |> match {
+                        LowerBindingResult::Ok => (
+                            {}
+                        ),
+                        LowerBindingResult::Unimplemented => (
+                            lowering_unimplemented = 1;
+                            {}
+                        ),
+                        LowerBindingResult::OutputError => (
+                            output_ok = 0;
+                            {}
+                        ),
+                        LowerBindingResult::InputError => (
+                            body_ok = 0;
+                            {}
+                        ),
+                        else => (
+                            output_ok = 0;
+                            {}
+                        )
+                    }
+                ) else (
+                    {}
+                )
+            )
+        ) else (
+            parsed_bindings = 0;
+        );
+        idx = 1;
     );
 
     lower_state.parse_cursor = idx;
@@ -944,57 +1004,9 @@ parse_body_records := {binding_count: i32, input_len: i32, value_count: i32} => 
     else 1
 );
 
-(export wasm) reset_input_slots := {} => (
-    lower_state.input_binding_count = 0;
-    lower_state.input_value_count = 0;
-    1
-);
-
-(export wasm) set_input_counts := {binding_count: i32, value_count: i32} => (
-    if binding_count < 0 || binding_count > MAX_BINDINGS then 0
-    else if value_count < 0 || value_count > MAX_VALUES then 0
-    else (
-        lower_state.input_binding_count = binding_count;
-        lower_state.input_value_count = value_count;
-        1
-    )
-);
-
-(export wasm) set_input_value := {idx: i32, tag: i32, payload_i32: i32} => (
-    if idx < 0 || idx >= MAX_VALUES then 0
-    else (
-        input_values(idx).tag = tag;
-        input_values(idx).payload_i32 = payload_i32;
-        1
-    )
-);
-
-(export wasm) set_input_binding := {
-    idx: i32,
-    name_start: i32,
-    name_length: i32,
-    value_idx: i32,
-    is_mut: i32,
-    target_mask: i32,
-    export_mask: i32,
-    wrap_mask: i32
-} => (
-    if idx < 0 || idx >= MAX_BINDINGS then 0
-    else (
-        input_bindings(idx).name_start = name_start;
-        input_bindings(idx).name_length = name_length;
-        input_bindings(idx).value_idx = value_idx;
-        input_bindings(idx).is_mut = is_mut;
-        input_bindings(idx).target_mask = target_mask;
-        input_bindings(idx).export_mask = export_mask;
-        input_bindings(idx).wrap_mask = wrap_mask;
-        1
-    )
-);
-
-run_lower_context := {scope_count: i32, binding_count: i32, input_len: i32} => (
+run_lower_context := {root: i32, binding_count: i32, input_len: i32} => (
     lower_state.error_code = lower_error_none{};
-    lower_state.last_scope_count = scope_count;
+    lower_state.last_scope_count = 1;
     lower_state.last_binding_count = binding_count;
     lower_state.last_input_len = input_len;
     lower_state.input_magic_ok = 0;
@@ -1015,23 +1027,17 @@ run_lower_context := {scope_count: i32, binding_count: i32, input_len: i32} => (
 
     lower_state.input_magic_ok = if input_len >= 0 && input_len <= MAX_INPUT then 1 else 0;
     lower_state.header_version = intermediate_payload_version{};
-    lower_state.header_scope_count = scope_count;
+    lower_state.header_scope_count = 1;
     lower_state.header_binding_count = binding_count;
 
     if lower_state.input_magic_ok == 0 then (
         lower_state.error_code = lower_error_input_too_small{};
         lower_status_error{}
-    ) else if binding_count < 0 || binding_count > MAX_BINDINGS then (
+    ) else if binding_count < 0 then (
         lower_state.error_code = lower_error_header_count_mismatch{};
-        lower_status_error{}
-    ) else if binding_count != lower_state.input_binding_count then (
-        lower_state.error_code = lower_error_header_count_mismatch{};
-        lower_status_error{}
-    ) else if lower_state.input_value_count < 0 || lower_state.input_value_count > MAX_VALUES then (
-        lower_state.error_code = lower_error_body_parse_failed{};
         lower_status_error{}
     ) else (
-        parse_ok := parse_body_records{binding_count, input_len, lower_state.input_value_count};
+        parse_ok := parse_body_records{root, binding_count, input_len};
         if parse_ok == 0 then (
             if lower_state.body_ok == 0 then (
                 lower_state.error_code = lower_error_body_parse_failed{};
@@ -1059,13 +1065,10 @@ run_lower_context := {scope_count: i32, binding_count: i32, input_len: i32} => (
     )
 );
 
-(export wasm) lower_context_from_slots := {scope_count: i32, binding_count: i32, input_len: i32} => (
-    run_lower_context{scope_count, binding_count, input_len}
-);
-
 (export wasm) lower_context := (root: i32) => (
     input_len := if state.cursor >= 0 && state.cursor <= MAX_INPUT then state.cursor else MAX_INPUT;
-    if populate_input_slots_from_ast(root) == 0 then (
+    binding_count := count_bindings_in_root(root);
+    if binding_count < 0 then (
         lower_state.error_code = lower_error_body_parse_failed{};
         lower_state.last_scope_count = 1;
         lower_state.last_binding_count = 0;
@@ -1087,7 +1090,7 @@ run_lower_context := {scope_count: i32, binding_count: i32, input_len: i32} => (
         lower_state.lowering_unimplemented = 0;
         lower_status_error{}
     ) else (
-        run_lower_context{1, lower_state.input_binding_count, input_len}
+        run_lower_context{root, binding_count, input_len}
     )
 );
 

@@ -229,7 +229,7 @@ fn compile_silk_parser_wasm() -> Result<Vec<u8>, Diagnostic> {
     log_parser_rebuild("rebuild: interpreting parser.silk");
     let program_context = interpret::interpret_program_for_context(ast, &mut context)?;
     let (intermediate, intermediate_backend) =
-        crate::silk_intermediate::lower_context(&program_context)?;
+        crate::silk_intermediate::lower_context(&program_context, &source)?;
     log_parser_rebuild(&format!(
         "rebuild: intermediate backend={}",
         intermediate_backend.as_str()

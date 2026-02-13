@@ -8,15 +8,15 @@ This document tracks the current host/wasm contract for the silk-based intermedi
 - Host bridge: `src/silk_intermediate.rs`
 - Build output: `binaries/intermediate.wasm`
 
-The intermediate stage supports two input ABIs:
-
-- Parser/interpreter-compatible AST input (`input`, `nodes`, `list_nodes`, `state` + `lower_context(root)`).
-- Legacy slot input for bootstrap/host fallback (`set_input_*` + `lower_context_from_slots(...)`).
+The intermediate stage now uses a single AST-memory ABI only.
+The host parses source with `parser.wasm`, runs `interpreter.wasm` on that AST, then copies
+`input` / `nodes` / `list_nodes` / `state` from interpreter memory into the intermediate module
+and calls `lower_context(root)`.
 
 ## Versions
 
-- `intermediate_stage_version() -> 3`
-- `intermediate_payload_version() -> 4`
+- `intermediate_stage_version() -> 5`
+- `intermediate_payload_version() -> 6`
 - `intermediate_output_version() -> 2`
 
 ## Input ABI (AST, chainable)
@@ -31,31 +31,6 @@ This ABI matches `interpreter.silk` input memory exactly:
 Lower call:
 
 - `lower_context(root: i32) -> i32`
-
-## Input ABI (Legacy slots)
-
-The host writes identifier bytes into:
-
-- `(export wasm) input: Box({u8; MAX_INPUT})`
-
-Then populates slot arrays through exports:
-
-- `reset_input_slots() -> i32`
-- `set_input_counts(binding_count: i32, value_count: i32) -> i32`
-- `set_input_value(idx: i32, tag: i32, payload_i32: i32) -> i32`
-- `set_input_binding(idx: i32, name_start: i32, name_length: i32, value_idx: i32, is_mut: i32, target_mask: i32, export_mask: i32, wrap_mask: i32) -> i32`
-
-Input value tags are interpreter-compatible:
-
-- `0`: number
-- `1`: boolean
-- `2`: char
-
-Target masks are interpreter-compatible:
-
-- `1`: js
-- `2`: wasm
-- `4`: wgsl
 
 ## Output ABI
 
@@ -76,10 +51,6 @@ Host reads counts and fields through getters:
 
 No output byte payload memory is used.
 
-## Lower Call (Legacy slots)
-
-- `lower_context_from_slots(scope_count: i32, binding_count: i32, input_len: i32) -> i32`
-
 Status codes:
 
 - `0`: ok
@@ -89,6 +60,16 @@ Status codes:
 Error code export:
 
 - `get_lower_error_code() -> i32`
+
+## Current Lowering Behavior
+
+- Literal globals are lowered for bindings that are syntactically materialized in AST (`mut` or `export` annotation).
+- Global type emission uses AST information (`: u8` hints and char literals map to `u8`; otherwise `i32`).
+- Wrap annotations no longer force an `unimplemented` result when no export source exists.
+  - For inline literal bindings with only `(wrap ...)`, the stage emits no globals/exports/wrappers.
+- Wrappers are emitted for multi-target exports when a wrap target is present.
+  - Source target selection is deterministic from the export mask priority (`js`, then `wasm`, then `wgsl`).
+- The stage still reports `unimplemented` for unsupported value shapes (for example non-literal mutable globals and function exports/wrappers).
 
 ## Debug Exports
 

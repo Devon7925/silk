@@ -10,13 +10,15 @@ use crate::intermediate::{
     self, IntermediateExport, IntermediateExportType, IntermediateGlobal, IntermediateKind,
     IntermediateResult, IntermediateType, IntermediateWrap,
 };
-use crate::interpret::{self, BindingContext, Context};
+use crate::interpret::{self, Context};
 use crate::loader;
-use crate::parsing::{BindingAnnotation, ExpressionKind, ExpressionLiteral, TargetLiteral};
+use crate::parsing::{ExpressionLiteral, TargetLiteral};
 use crate::wasm;
 
 const INTERMEDIATE_SOURCE_PATH: &str = "silk_src/intermediate.silk";
 const TYPES_SOURCE_PATH: &str = "silk_src/types.silk";
+const PARSER_WASM_PATH: &str = "binaries/parser.wasm";
+const INTERPRETER_WASM_PATH: &str = "binaries/interpreter.wasm";
 const INTERMEDIATE_WASM_PATH: &str = "binaries/intermediate.wasm";
 
 const INTERMEDIATE_MODULE_CACHE_PATH: &str = "target/wasm_cache/intermediate.wasmtime";
@@ -26,14 +28,6 @@ const INTERMEDIATE_WASM_HASH_PATH: &str = "target/wasm_cache/intermediate.wasm.h
 const LOWER_STATUS_OK: i32 = 0;
 const LOWER_STATUS_UNIMPLEMENTED: i32 = 1;
 const LOWER_STATUS_ERROR: i32 = 2;
-
-const INPUT_VALUE_TAG_NUMBER: i32 = 0;
-const INPUT_VALUE_TAG_BOOLEAN: i32 = 1;
-const INPUT_VALUE_TAG_CHAR: i32 = 2;
-
-const TARGET_MASK_JS: i32 = 1;
-const TARGET_MASK_WASM: i32 = 2;
-const TARGET_MASK_WGSL: i32 = 4;
 
 const OUTPUT_TARGET_JS: i32 = 0;
 const OUTPUT_TARGET_WASM: i32 = 1;
@@ -51,6 +45,8 @@ const OUTPUT_VALUE_TAG_CHAR: i32 = 3;
 
 static INTERMEDIATE_WASM_BYTES: OnceLock<Result<Vec<u8>, Diagnostic>> = OnceLock::new();
 static WASM_ENGINE: OnceLock<Result<Engine, Diagnostic>> = OnceLock::new();
+static PARSER_MODULE: OnceLock<Result<Module, Diagnostic>> = OnceLock::new();
+static INTERPRETER_MODULE: OnceLock<Result<Module, Diagnostic>> = OnceLock::new();
 static INTERMEDIATE_MODULE: OnceLock<Result<Module, Diagnostic>> = OnceLock::new();
 static STAGE_READY: OnceLock<Result<bool, Diagnostic>> = OnceLock::new();
 
@@ -69,32 +65,9 @@ impl IntermediateLoweringBackend {
     }
 }
 
-#[derive(Debug, Clone)]
-struct EncodedValueSlot {
-    tag: i32,
-    payload_i32: i32,
-}
-
-#[derive(Debug, Clone)]
-struct EncodedBindingSlot {
-    name_start: i32,
-    name_length: i32,
-    value_idx: i32,
-    is_mut: i32,
-    target_mask: i32,
-    export_mask: i32,
-    wrap_mask: i32,
-}
-
-#[derive(Debug, Clone)]
-struct EncodedContextSlots {
-    input_bytes: Vec<u8>,
-    values: Vec<EncodedValueSlot>,
-    bindings: Vec<EncodedBindingSlot>,
-}
-
 pub(crate) fn lower_context(
     context: &Context,
+    source: &str,
 ) -> Result<(IntermediateResult, IntermediateLoweringBackend), Diagnostic> {
     if std::env::var_os("SILK_DISABLE_WASM_INTERMEDIATE").is_some() {
         return Ok((
@@ -103,7 +76,7 @@ pub(crate) fn lower_context(
         ));
     }
 
-    match lower_with_wasm(context) {
+    match lower_with_wasm(source) {
         Ok(Some(intermediate)) => Ok((intermediate, IntermediateLoweringBackend::SilkWasm)),
         Ok(None) => {
             if wasm_intermediate_strict_mode() {
@@ -138,7 +111,7 @@ fn wasm_intermediate_strict_mode() -> bool {
     std::env::var_os("SILK_WASM_INTERMEDIATE_STRICT").is_some()
 }
 
-fn lower_with_wasm(context: &Context) -> Result<Option<IntermediateResult>, Diagnostic> {
+fn lower_with_wasm(source: &str) -> Result<Option<IntermediateResult>, Diagnostic> {
     if fs::metadata(INTERMEDIATE_SOURCE_PATH).is_err() {
         return Ok(None);
     }
@@ -148,49 +121,107 @@ fn lower_with_wasm(context: &Context) -> Result<Option<IntermediateResult>, Diag
     }
 
     let engine = wasm_engine()?;
+    let parser_module = parser_module()?;
+    let interpreter_module = interpreter_module()?;
     let module = intermediate_module()?;
     let mut store = Store::new(engine, ());
+    let parser_instance = Instance::new(&mut store, parser_module, &[]).map_err(|err| {
+        Diagnostic::new(format!("Failed to instantiate parser wasm: {err}"))
+    })?;
+    let interpreter_instance =
+        Instance::new(&mut store, interpreter_module, &[]).map_err(|err| {
+            Diagnostic::new(format!("Failed to instantiate interpreter wasm: {err}"))
+        })?;
     let instance = Instance::new(&mut store, module, &[]).map_err(|err| {
         Diagnostic::new(format!("Failed to instantiate intermediate wasm: {err}"))
     })?;
 
-    let encoded = encode_context_slots(context)?;
-    write_input_payload(&mut store, &instance, &encoded.input_bytes)?;
-    write_input_slots(&mut store, &instance, &encoded)?;
+    write_input_payload(&mut store, &parser_instance, source.as_bytes())?;
+
+    let parse_func = parser_instance
+        .get_typed_func::<(), i32>(&mut store, "parse")
+        .map_err(|err| Diagnostic::new(format!("Missing parser export `parse`: {err}")))?;
+    let root = parse_func
+        .call(&mut store, ())
+        .map_err(|err| Diagnostic::new(format!("Parser call `parse` failed: {err}")))?;
+    let parse_error = parser_instance
+        .get_typed_func::<(), i32>(&mut store, "get_state_error")
+        .map_err(|err| Diagnostic::new(format!("Missing parser export `get_state_error`: {err}")))?
+        .call(&mut store, ())
+        .map_err(|err| Diagnostic::new(format!("Parser call `get_state_error` failed: {err}")))?;
+    if parse_error != -1 {
+        let start = parse_error.max(0) as usize;
+        return Err(Diagnostic::new("Parse error while preparing intermediate lowering")
+            .with_span(SourceSpan::new(start.min(source.len()), 1)));
+    }
+
+    copy_named_memory(&mut store, &parser_instance, &interpreter_instance, "input")?;
+    copy_named_memory(&mut store, &parser_instance, &interpreter_instance, "nodes")?;
+    copy_named_memory(
+        &mut store,
+        &parser_instance,
+        &interpreter_instance,
+        "list_nodes",
+    )?;
+    copy_named_memory(&mut store, &parser_instance, &interpreter_instance, "state")?;
+
+    let interpret_func = interpreter_instance
+        .get_typed_func::<i32, i32>(&mut store, "interpret")
+        .map_err(|err| Diagnostic::new(format!("Missing interpreter export `interpret`: {err}")))?;
+    let _result = interpret_func
+        .call(&mut store, root)
+        .map_err(|err| Diagnostic::new(format!("Interpreter call `interpret` failed: {err}")))?;
+    let interp_error = interpreter_instance
+        .get_typed_func::<(), i32>(&mut store, "get_interp_error")
+        .map_err(|err| {
+            Diagnostic::new(format!(
+                "Missing interpreter export `get_interp_error`: {err}"
+            ))
+        })?
+        .call(&mut store, ())
+        .map_err(|err| Diagnostic::new(format!("Interpreter call `get_interp_error` failed: {err}")))?;
+    if interp_error != -1 {
+        let interp_error_code = interpreter_instance
+            .get_typed_func::<(), i32>(&mut store, "get_interp_error_code")
+            .ok()
+            .and_then(|func| func.call(&mut store, ()).ok())
+            .unwrap_or(0);
+        let start = interp_error.max(0) as usize;
+        return Err(Diagnostic::new(format!(
+            "Interpreter error while preparing intermediate lowering: {} (code {interp_error_code})",
+            interpreter_error_code_message(interp_error_code)
+        ))
+        .with_span(SourceSpan::new(start.min(source.len()), 1)));
+    }
+
+    copy_named_memory(&mut store, &interpreter_instance, &instance, "input")?;
+    copy_named_memory(&mut store, &interpreter_instance, &instance, "nodes")?;
+    copy_named_memory(
+        &mut store,
+        &interpreter_instance,
+        &instance,
+        "list_nodes",
+    )?;
+    copy_named_memory(&mut store, &interpreter_instance, &instance, "state")?;
 
     let lower_func = instance
-        .get_typed_func::<(i32, i32, i32), i32>(&mut store, "lower_context_from_slots")
+        .get_typed_func::<i32, i32>(&mut store, "lower_context")
         .map_err(|err| {
-            Diagnostic::new(format!(
-                "Missing intermediate export `lower_context_from_slots`: {err}"
-            ))
+            Diagnostic::new(format!("Missing intermediate export `lower_context`: {err}"))
         })?;
-    let scope_count = to_i32(
-        context.bindings.len(),
-        "Context scope count exceeds i32 while lowering with silk intermediate wasm",
-    )?;
-    let binding_count = to_i32(
-        encoded.bindings.len(),
-        "Context binding count exceeds i32 while lowering with silk intermediate wasm",
-    )?;
-    let input_len = to_i32(
-        encoded.input_bytes.len(),
-        "Serialized intermediate input bytes exceed i32 while lowering with silk intermediate wasm",
-    )?;
     let status = lower_func
-        .call(&mut store, (scope_count, binding_count, input_len))
+        .call(&mut store, root)
         .map_err(|err| {
-            Diagnostic::new(format!(
-                "Intermediate call `lower_context_from_slots` failed: {err}"
-            ))
+            Diagnostic::new(format!("Intermediate call `lower_context` failed: {err}"))
         })?;
 
     match status {
         LOWER_STATUS_OK => {
-            let lowered = decode_lowered_output(&mut store, &instance, &encoded.input_bytes)?;
+            let lowered = decode_lowered_output(&mut store, &instance, source.as_bytes())?;
             if std::env::var_os("SILK_DEBUG_WASM_INTERMEDIATE").is_some() {
                 eprintln!(
-                    "SILK_DEBUG_WASM_INTERMEDIATE status=ok scope_count={scope_count} binding_count={binding_count} input_len={input_len}"
+                    "SILK_DEBUG_WASM_INTERMEDIATE status=ok root={root} input_len={}",
+                    source.len()
                 );
                 log_optional_debug_export(&instance, &mut store, "get_lower_header_ok");
                 log_optional_debug_export(
@@ -217,7 +248,8 @@ fn lower_with_wasm(context: &Context) -> Result<Option<IntermediateResult>, Diag
                 .unwrap_or(0);
             if std::env::var_os("SILK_DEBUG_WASM_INTERMEDIATE").is_some() {
                 eprintln!(
-                    "SILK_DEBUG_WASM_INTERMEDIATE status=error code={error_code} scope_count={scope_count} binding_count={binding_count} input_len={input_len}"
+                    "SILK_DEBUG_WASM_INTERMEDIATE status=error code={error_code} root={root} input_len={}",
+                    source.len()
                 );
                 log_optional_debug_export(&instance, &mut store, "get_lower_input_magic_ok");
                 log_optional_debug_export(&instance, &mut store, "get_lower_header_version");
@@ -263,8 +295,16 @@ fn stage_ready() -> Result<bool, Diagnostic> {
 
 fn probe_stage_ready() -> Result<bool, Diagnostic> {
     let engine = wasm_engine()?;
+    let parser = parser_module()?;
+    let interpreter = interpreter_module()?;
     let module = intermediate_module()?;
     let mut store = Store::new(engine, ());
+    let _parser_instance = Instance::new(&mut store, parser, &[]).map_err(|err| {
+        Diagnostic::new(format!("Failed to instantiate parser wasm: {err}"))
+    })?;
+    let interpreter_instance = Instance::new(&mut store, interpreter, &[]).map_err(|err| {
+        Diagnostic::new(format!("Failed to instantiate interpreter wasm: {err}"))
+    })?;
     let instance = Instance::new(&mut store, module, &[]).map_err(|err| {
         Diagnostic::new(format!("Failed to instantiate intermediate wasm: {err}"))
     })?;
@@ -288,10 +328,13 @@ fn probe_stage_ready() -> Result<bool, Diagnostic> {
     }
 
     Ok(instance
-        .get_typed_func::<(i32, i32, i32), i32>(&mut store, "lower_context_from_slots")
+        .get_typed_func::<i32, i32>(&mut store, "lower_context")
         .is_ok()
-        && instance
-            .get_typed_func::<i32, i32>(&mut store, "lower_context")
+        && interpreter_instance
+            .get_typed_func::<i32, i32>(&mut store, "interpret")
+            .is_ok()
+        && interpreter_instance
+            .get_typed_func::<(), i32>(&mut store, "get_interp_error")
             .is_ok())
 }
 
@@ -326,6 +369,37 @@ fn wasm_engine() -> Result<&'static Engine, Diagnostic> {
 
     match result {
         Ok(engine) => Ok(engine),
+        Err(err) => Err(err.clone()),
+    }
+}
+
+fn parser_module() -> Result<&'static Module, Diagnostic> {
+    let result = PARSER_MODULE.get_or_init(|| {
+        let engine = wasm_engine()?;
+        let bytes = fs::read(PARSER_WASM_PATH)
+            .map_err(|err| Diagnostic::new(format!("Failed to read {PARSER_WASM_PATH}: {err}")))?;
+        Module::new(engine, bytes)
+            .map_err(|err| Diagnostic::new(format!("Failed to compile parser.wasm: {err}")))
+    });
+
+    match result {
+        Ok(module) => Ok(module),
+        Err(err) => Err(err.clone()),
+    }
+}
+
+fn interpreter_module() -> Result<&'static Module, Diagnostic> {
+    let result = INTERPRETER_MODULE.get_or_init(|| {
+        let engine = wasm_engine()?;
+        let bytes = fs::read(INTERPRETER_WASM_PATH).map_err(|err| {
+            Diagnostic::new(format!("Failed to read {INTERPRETER_WASM_PATH}: {err}"))
+        })?;
+        Module::new(engine, bytes)
+            .map_err(|err| Diagnostic::new(format!("Failed to compile interpreter.wasm: {err}")))
+    });
+
+    match result {
+        Ok(module) => Ok(module),
         Err(err) => Err(err.clone()),
     }
 }
@@ -490,10 +564,6 @@ fn ensure_no_trailing_input(
     Err(Diagnostic::new(message).with_span(span))
 }
 
-fn to_i32(value: usize, err: &str) -> Result<i32, Diagnostic> {
-    i32::try_from(value).map_err(|_| Diagnostic::new(err))
-}
-
 fn log_optional_debug_export(instance: &Instance, store: &mut Store<()>, export: &str) {
     if let Some(value) = call_optional_i32_export(instance, store, export) {
         eprintln!("SILK_DEBUG_WASM_INTERMEDIATE {export}={value}");
@@ -537,6 +607,32 @@ fn write_memory_payload(
     data.fill(0);
     data[..payload.len()].copy_from_slice(payload);
     data[payload.len()] = 0;
+    Ok(())
+}
+
+fn copy_named_memory(
+    store: &mut Store<()>,
+    src_instance: &Instance,
+    dst_instance: &Instance,
+    memory_name: &str,
+) -> Result<(), Diagnostic> {
+    let src = src_instance
+        .get_memory(&mut *store, memory_name)
+        .ok_or_else(|| Diagnostic::new(format!("Missing source memory `{memory_name}`")))?;
+    let dst = dst_instance
+        .get_memory(&mut *store, memory_name)
+        .ok_or_else(|| Diagnostic::new(format!("Missing destination memory `{memory_name}`")))?;
+
+    let src_data = src.data(&*store).to_vec();
+    let dst_data = dst.data_mut(&mut *store);
+    if dst_data.len() < src_data.len() {
+        return Err(Diagnostic::new(format!(
+            "Destination memory `{memory_name}` is smaller than source memory"
+        )));
+    }
+
+    dst_data.fill(0);
+    dst_data[..src_data.len()].copy_from_slice(&src_data);
     Ok(())
 }
 
@@ -768,222 +864,6 @@ fn decode_lowered_output(
     })
 }
 
-fn write_input_slots(
-    store: &mut Store<()>,
-    instance: &Instance,
-    encoded: &EncodedContextSlots,
-) -> Result<(), Diagnostic> {
-    let reset = instance
-        .get_typed_func::<(), i32>(&mut *store, "reset_input_slots")
-        .map_err(|err| {
-            Diagnostic::new(format!("Missing intermediate export `reset_input_slots`: {err}"))
-        })?;
-    let set_counts = instance
-        .get_typed_func::<(i32, i32), i32>(&mut *store, "set_input_counts")
-        .map_err(|err| {
-            Diagnostic::new(format!("Missing intermediate export `set_input_counts`: {err}"))
-        })?;
-    let set_value = instance
-        .get_typed_func::<(i32, i32, i32), i32>(&mut *store, "set_input_value")
-        .map_err(|err| {
-            Diagnostic::new(format!("Missing intermediate export `set_input_value`: {err}"))
-        })?;
-    let set_binding = instance
-        .get_typed_func::<(i32, i32, i32, i32, i32, i32, i32, i32), i32>(
-            &mut *store,
-            "set_input_binding",
-        )
-        .map_err(|err| {
-            Diagnostic::new(format!("Missing intermediate export `set_input_binding`: {err}"))
-        })?;
-
-    let reset_ok = reset.call(&mut *store, ()).map_err(|err| {
-        Diagnostic::new(format!("Intermediate call `reset_input_slots` failed: {err}"))
-    })?;
-    if reset_ok != 1 {
-        return Err(Diagnostic::new(
-            "Intermediate call `reset_input_slots` reported failure",
-        ));
-    }
-
-    let binding_count = to_i32(
-        encoded.bindings.len(),
-        "Encoded binding count exceeds i32 while writing intermediate input",
-    )?;
-    let value_count = to_i32(
-        encoded.values.len(),
-        "Encoded value count exceeds i32 while writing intermediate input",
-    )?;
-    let counts_ok = set_counts
-        .call(&mut *store, (binding_count, value_count))
-        .map_err(|err| {
-            Diagnostic::new(format!("Intermediate call `set_input_counts` failed: {err}"))
-        })?;
-    if counts_ok != 1 {
-        return Err(Diagnostic::new(
-            "Intermediate call `set_input_counts` reported failure",
-        ));
-    }
-
-    for (idx, value) in encoded.values.iter().enumerate() {
-        let idx = to_i32(
-            idx,
-            "Encoded value index exceeds i32 while writing intermediate input",
-        )?;
-        let ok = set_value
-            .call(&mut *store, (idx, value.tag, value.payload_i32))
-            .map_err(|err| {
-                Diagnostic::new(format!("Intermediate call `set_input_value` failed: {err}"))
-            })?;
-        if ok != 1 {
-            return Err(Diagnostic::new(format!(
-                "Intermediate call `set_input_value` reported failure at index {idx}"
-            )));
-        }
-    }
-
-    for (idx, binding) in encoded.bindings.iter().enumerate() {
-        let idx = to_i32(
-            idx,
-            "Encoded binding index exceeds i32 while writing intermediate input",
-        )?;
-        let ok = set_binding
-            .call(
-                &mut *store,
-                (
-                    idx,
-                    binding.name_start,
-                    binding.name_length,
-                    binding.value_idx,
-                    binding.is_mut,
-                    binding.target_mask,
-                    binding.export_mask,
-                    binding.wrap_mask,
-                ),
-            )
-            .map_err(|err| {
-                Diagnostic::new(format!(
-                    "Intermediate call `set_input_binding` failed: {err}"
-                ))
-            })?;
-        if ok != 1 {
-            return Err(Diagnostic::new(format!(
-                "Intermediate call `set_input_binding` reported failure at index {idx}"
-            )));
-        }
-    }
-
-    Ok(())
-}
-
-fn encode_context_slots(context: &Context) -> Result<EncodedContextSlots, Diagnostic> {
-    let mut input_bytes = Vec::new();
-    let mut values = Vec::new();
-    let mut bindings = Vec::new();
-
-    for scope in &context.bindings {
-        let mut entries: Vec<_> = scope.iter().collect();
-        entries.sort_by(|(left_id, _), (right_id, _)| {
-            left_id
-                .unique
-                .cmp(&right_id.unique)
-                .then(left_id.name.cmp(&right_id.name))
-        });
-
-        for (identifier, (binding_context, annotations)) in entries {
-            let name_start = to_i32(
-                input_bytes.len(),
-                "Input name buffer cursor exceeds i32 while encoding intermediate input",
-            )?;
-            input_bytes.extend_from_slice(identifier.name.as_bytes());
-            let name_length = to_i32(
-                identifier.name.len(),
-                "Binding name length exceeds i32 while encoding intermediate input",
-            )?;
-
-            let value_idx = to_i32(
-                values.len(),
-                "Encoded value index exceeds i32 while encoding intermediate input",
-            )?;
-            values.push(binding_value_slot(binding_context));
-
-            let (is_mut, target_mask, export_mask, wrap_mask) = annotation_masks(annotations);
-            bindings.push(EncodedBindingSlot {
-                name_start,
-                name_length,
-                value_idx,
-                is_mut,
-                target_mask,
-                export_mask,
-                wrap_mask,
-            });
-        }
-    }
-
-    Ok(EncodedContextSlots {
-        input_bytes,
-        values,
-        bindings,
-    })
-}
-
-fn annotation_masks(annotations: &[BindingAnnotation]) -> (i32, i32, i32, i32) {
-    let mut is_mut = 0;
-    let mut target_mask = 0;
-    let mut export_mask = 0;
-    let mut wrap_mask = 0;
-
-    for annotation in annotations {
-        match annotation {
-            BindingAnnotation::Mutable(_) => is_mut = 1,
-            BindingAnnotation::Export(expr, _) => {
-                if let ExpressionKind::Literal(ExpressionLiteral::Target(target)) = &expr.kind {
-                    export_mask |= target_mask_bit(target);
-                }
-            }
-            BindingAnnotation::Target(target, _) => target_mask |= target_mask_bit(target),
-            BindingAnnotation::Wrap(target, _) => wrap_mask |= target_mask_bit(target),
-        }
-    }
-
-    (is_mut, target_mask, export_mask, wrap_mask)
-}
-
-fn target_mask_bit(target: &TargetLiteral) -> i32 {
-    match target {
-        TargetLiteral::JSTarget => TARGET_MASK_JS,
-        TargetLiteral::WasmTarget => TARGET_MASK_WASM,
-        TargetLiteral::WgslTarget => TARGET_MASK_WGSL,
-    }
-}
-
-fn binding_value_slot(binding: &BindingContext) -> EncodedValueSlot {
-    match binding {
-        BindingContext::Bound(expr, _, _) => match &expr.kind {
-            ExpressionKind::Literal(ExpressionLiteral::Number(value)) => EncodedValueSlot {
-                tag: INPUT_VALUE_TAG_NUMBER,
-                payload_i32: *value,
-            },
-            ExpressionKind::Literal(ExpressionLiteral::Boolean(value)) => EncodedValueSlot {
-                tag: INPUT_VALUE_TAG_BOOLEAN,
-                payload_i32: if *value { 1 } else { 0 },
-            },
-            ExpressionKind::Literal(ExpressionLiteral::Char(value)) => EncodedValueSlot {
-                tag: INPUT_VALUE_TAG_CHAR,
-                payload_i32: *value as i32,
-            },
-            _ => EncodedValueSlot {
-                tag: -1,
-                payload_i32: 0,
-            },
-        },
-        _ => EncodedValueSlot {
-            tag: -1,
-            payload_i32: 0,
-        },
-    }
-}
-
 fn decode_name_from_input(input_bytes: &[u8], start: i32, len: i32) -> Result<String, Diagnostic> {
     if start < 0 || len < 0 {
         return Err(Diagnostic::new(format!(
@@ -1028,14 +908,30 @@ fn required_i32_to_i32_export(
 fn lower_error_code_message(code: i32) -> &'static str {
     match code {
         0 => "none",
-        1 => "input bytes are out of bounds",
-        2 => "input format magic mismatch",
-        3 => "input format version mismatch",
-        4 => "input binding counts do not match arguments",
-        5 => "input slot parse failed",
-        6 => "input slot counts do not match header",
-        7 => "output payload encoding failed",
+        1 => "input buffer bounds check failed",
+        2 => "reserved bad-magic error",
+        3 => "reserved bad-version error",
+        4 => "binding count mismatch",
+        5 => "ast body parse failed",
+        6 => "ast body count mismatch",
+        7 => "output encoding failed",
         _ => "unknown lower error",
+    }
+}
+
+fn interpreter_error_code_message(code: i32) -> &'static str {
+    match code {
+        0 => "none",
+        1 => "generic interpreter error",
+        2 => "array index out of range",
+        3 => "wrap requires exactly one export target",
+        4 => "wrap global only supports wasm-to-js",
+        5 => "unbound identifier",
+        6 => "if branch type mismatch",
+        7 => "match had no matching branch",
+        8 => "missing field",
+        9 => "trait missing field",
+        _ => "unknown interpreter error",
     }
 }
 
@@ -1093,92 +989,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn context_slots_follow_interpreter_binding_and_value_shape() {
-        let source = "(target wasm) base := 1; (export wasm) (wrap js) answer := 42; mut flag := true; ch := 'a'; answer";
-        let lowered_context = interpreted_context(source);
-        let encoded = encode_context_slots(&lowered_context).expect("slots should encode");
-
-        let base = find_binding(&encoded, "base");
-        assert_eq!(base.is_mut, 0);
-        assert_eq!(base.target_mask, TARGET_MASK_WASM);
-        assert_eq!(base.export_mask, 0);
-        assert_eq!(base.wrap_mask, 0);
-
-        let answer = find_binding(&encoded, "answer");
-        assert_eq!(answer.is_mut, 0);
-        assert_eq!(answer.target_mask, 0);
-        assert_eq!(answer.export_mask, TARGET_MASK_WASM);
-        assert_eq!(answer.wrap_mask, TARGET_MASK_JS);
-        let answer_value = &encoded.values[answer.value_idx as usize];
-        assert_eq!(answer_value.tag, INPUT_VALUE_TAG_NUMBER);
-        assert_eq!(answer_value.payload_i32, 42);
-
-        let flag = find_binding(&encoded, "flag");
-        assert_eq!(flag.is_mut, 1);
-        let flag_value = &encoded.values[flag.value_idx as usize];
-        assert_eq!(flag_value.tag, INPUT_VALUE_TAG_BOOLEAN);
-        assert_eq!(flag_value.payload_i32, 1);
-
-        let ch = find_binding(&encoded, "ch");
-        let ch_value = &encoded.values[ch.value_idx as usize];
-        assert_eq!(ch_value.tag, INPUT_VALUE_TAG_CHAR);
-        assert_eq!(ch_value.payload_i32, b'a' as i32);
-    }
-
-    #[test]
-    fn wasm_stage_accepts_slot_input_and_returns_known_status() {
+    fn wasm_stage_accepts_ast_input_and_returns_known_status() {
         if !wasm_stage_available() {
             return;
         }
         let source = "x := 1; y := x + 2; y";
-        let lowered_context = interpreted_context(source);
-        let encoded = encode_context_slots(&lowered_context).expect("slots should encode");
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
 
-        let engine = wasm_engine().expect("wasm engine should initialize");
-        let module = intermediate_module().expect("intermediate module should initialize");
-        let mut store = Store::new(engine, ());
-        let instance =
-            Instance::new(&mut store, module, &[]).expect("intermediate instance should create");
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.globals.len(), 0);
+        assert_eq!(lowered.exports.len(), 0);
+        assert_eq!(lowered.wrappers.len(), 0);
+    }
 
-        write_input_payload(&mut store, &instance, &encoded.input_bytes)
-            .expect("input bytes should be written");
-        write_input_slots(&mut store, &instance, &encoded).expect("input slots should be written");
-        let lower = instance
-            .get_typed_func::<(i32, i32, i32), i32>(&mut store, "lower_context_from_slots")
-            .expect("lower_context_from_slots export should exist");
+    #[test]
+    fn lower_context_uses_silk_backend_when_stage_is_available() {
+        if std::env::var_os("SILK_DISABLE_WASM_INTERMEDIATE").is_some() {
+            return;
+        }
+        if !wasm_stage_available() {
+            return;
+        }
 
-        let status = lower
-            .call(
-                &mut store,
-                (
-                    lowered_context.bindings.len() as i32,
-                    encoded.bindings.len() as i32,
-                    encoded.input_bytes.len() as i32,
-                ),
-            )
-            .expect("lower_context_from_slots call should succeed");
-
-        assert_eq!(status, LOWER_STATUS_OK);
-        assert_eq!(
-            call_optional_i32_export(&instance, &mut store, "get_lower_header_ok"),
-            Some(1)
-        );
-        assert_eq!(
-            call_optional_i32_export(&instance, &mut store, "get_lower_error_code"),
-            Some(0)
-        );
-        assert_eq!(
-            call_optional_i32_export(&instance, &mut store, "get_lower_output_global_count"),
-            Some(0)
-        );
-        assert_eq!(
-            call_optional_i32_export(&instance, &mut store, "get_lower_output_export_count"),
-            Some(0)
-        );
-        assert_eq!(
-            call_optional_i32_export(&instance, &mut store, "get_lower_output_wrapper_count"),
-            Some(0)
-        );
+        let source = "(export wasm) answer := 42; answer";
+        let context = interpreted_context(source);
+        let (_lowered, backend) =
+            lower_context(&context, source).expect("lower_context should succeed");
+        assert_eq!(backend, IntermediateLoweringBackend::SilkWasm);
     }
 
     #[test]
@@ -1187,9 +1027,7 @@ mod tests {
             return;
         }
         let source = "(export wasm) answer := 42; answer";
-        let lowered_context = interpreted_context(source);
-
-        let lowered = lower_with_wasm(&lowered_context)
+        let lowered = lower_with_wasm(source)
             .expect("wasm lowering should run")
             .expect("wasm lowering should produce a result");
 
@@ -1220,9 +1058,7 @@ mod tests {
             return;
         }
         let source = "(target wasm) base := 1; (export wasm) answer := 42; answer";
-        let lowered_context = interpreted_context(source);
-
-        let lowered = lower_with_wasm(&lowered_context)
+        let lowered = lower_with_wasm(source)
             .expect("wasm lowering should run")
             .expect("wasm lowering should produce a result");
 
@@ -1253,9 +1089,7 @@ mod tests {
             return;
         }
         let source = "(export wasm) (wrap js) answer: i32 := 42; answer";
-        let lowered_context = interpreted_context(source);
-
-        let lowered = lower_with_wasm(&lowered_context)
+        let lowered = lower_with_wasm(source)
             .expect("wasm lowering should run")
             .expect("wasm lowering should produce a result");
 
@@ -1291,14 +1125,78 @@ mod tests {
     }
 
     #[test]
+    fn wasm_stage_lowers_wrapped_literal_global_with_multiple_export_targets() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "(export wasm) (export wgsl) (wrap js) answer: i32 := 42; answer";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 2);
+        assert_eq!(lowered.wrappers.len(), 1);
+
+        assert_eq!(lowered.globals[0].name, "answer");
+        assert_eq!(lowered.globals[0].ty, IntermediateType::I32);
+        assert!(matches!(
+            lowered.globals[0].value,
+            IntermediateKind::Literal(ExpressionLiteral::Number(42))
+        ));
+
+        assert_eq!(lowered.exports[0].target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.exports[0].name, "answer");
+        assert_eq!(
+            lowered.exports[0].export_type,
+            IntermediateExportType::Global
+        );
+        assert_eq!(lowered.exports[0].index, 0);
+
+        assert_eq!(lowered.exports[1].target, TargetLiteral::WgslTarget);
+        assert_eq!(lowered.exports[1].name, "answer");
+        assert_eq!(
+            lowered.exports[1].export_type,
+            IntermediateExportType::Global
+        );
+        assert_eq!(lowered.exports[1].index, 0);
+
+        assert_eq!(lowered.wrappers[0].source_target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.wrappers[0].wrap_target, TargetLiteral::JSTarget);
+        assert_eq!(lowered.wrappers[0].name, "answer");
+        assert_eq!(
+            lowered.wrappers[0].export_type,
+            IntermediateExportType::Global
+        );
+        assert_eq!(lowered.wrappers[0].index, 0);
+    }
+
+    #[test]
+    fn wasm_stage_ignores_wrap_without_export_for_inline_literal_binding() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "(wrap js) answer := 42; answer";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.globals.len(), 0);
+        assert_eq!(lowered.exports.len(), 0);
+        assert_eq!(lowered.wrappers.len(), 0);
+    }
+
+    #[test]
     fn wasm_stage_lowers_non_exported_mut_literal_global() {
         if !wasm_stage_available() {
             return;
         }
         let source = "mut counter := 7; counter";
-        let lowered_context = interpreted_context(source);
-
-        let lowered = lower_with_wasm(&lowered_context)
+        let lowered = lower_with_wasm(source)
             .expect("wasm lowering should run")
             .expect("wasm lowering should produce a result");
 
@@ -1317,14 +1215,41 @@ mod tests {
     }
 
     #[test]
+    fn wasm_stage_lowers_exported_u8_typed_literal_global() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "(export wasm) byte: u8 := 7; byte";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+
+        assert_eq!(lowered.globals[0].name, "byte");
+        assert_eq!(lowered.globals[0].ty, IntermediateType::U8);
+        assert!(matches!(
+            lowered.globals[0].value,
+            IntermediateKind::Literal(ExpressionLiteral::Number(7))
+        ));
+        assert_eq!(lowered.exports[0].target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.exports[0].name, "byte");
+        assert_eq!(
+            lowered.exports[0].export_type,
+            IntermediateExportType::Global
+        );
+    }
+
+    #[test]
     fn wasm_stage_reports_unimplemented_for_non_literal_mut_global() {
         if !wasm_stage_available() {
             return;
         }
         let source = "mut point := { x = 1, y = 2 }; point";
-        let lowered_context = interpreted_context(source);
-
-        let lowered = lower_with_wasm(&lowered_context).expect("wasm lowering should run");
+        let lowered = lower_with_wasm(source).expect("wasm lowering should run");
         assert!(
             lowered.is_none(),
             "non-literal mutable globals should still report unimplemented"
@@ -1337,9 +1262,7 @@ mod tests {
             return;
         }
         let source = "(export wasm) id := (x: i32) => x; id";
-        let lowered_context = interpreted_context(source);
-
-        let lowered = lower_with_wasm(&lowered_context).expect("wasm lowering should run");
+        let lowered = lower_with_wasm(source).expect("wasm lowering should run");
         assert!(
             lowered.is_none(),
             "function exports should still report unimplemented for now"
@@ -1351,21 +1274,6 @@ mod tests {
         let mut context = crate::interpret::intrinsic_context();
         crate::interpret::interpret_program_for_context(ast, &mut context)
             .expect("source should interpret")
-    }
-
-    fn find_binding<'a>(encoded: &'a EncodedContextSlots, name: &str) -> &'a EncodedBindingSlot {
-        for binding in &encoded.bindings {
-            let binding_name = decode_name_from_input(
-                &encoded.input_bytes,
-                binding.name_start,
-                binding.name_length,
-            )
-            .expect("binding name should decode");
-            if binding_name == name {
-                return binding;
-            }
-        }
-        panic!("missing binding {name}");
     }
 
     fn wasm_stage_available() -> bool {
