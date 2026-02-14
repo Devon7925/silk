@@ -65,11 +65,13 @@ Error code export:
 
 - Literal globals are lowered for bindings that are syntactically materialized in AST (`mut` or `export` annotation).
 - Global type emission uses AST information (`: u8` hints and char literals map to `u8`; otherwise `i32`).
+- Scalar type aliases are recognized for annotation hints when they resolve to `u8` / `i32` / `bool`.
 - Wrap annotations no longer force an `unimplemented` result when no export source exists.
   - For inline literal bindings with only `(wrap ...)`, the stage emits no globals/exports/wrappers.
 - Wrappers are emitted for multi-target exports when a wrap target is present.
   - Source target selection is deterministic from the export mask priority (`js`, then `wasm`, then `wgsl`).
 - The stage still reports `unimplemented` for unsupported value shapes (for example non-literal mutable globals and function exports/wrappers).
+- Bindings with unsupported pattern extraction are now treated as `unimplemented` instead of hard parse failure, preserving fallback behavior.
 
 ## Debug Exports
 

@@ -1244,6 +1244,36 @@ mod tests {
     }
 
     #[test]
+    fn wasm_stage_lowers_exported_u8_typed_literal_global_with_type_alias() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "Byte := u8; (export wasm) byte: Byte := 255; byte";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+
+        assert_eq!(lowered.globals[0].name, "byte");
+        assert_eq!(lowered.globals[0].ty, IntermediateType::U8);
+        assert!(matches!(
+            lowered.globals[0].value,
+            IntermediateKind::Literal(ExpressionLiteral::Number(255))
+        ));
+        assert_eq!(lowered.exports[0].target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.exports[0].name, "byte");
+        assert_eq!(
+            lowered.exports[0].export_type,
+            IntermediateExportType::Global
+        );
+        assert_eq!(lowered.exports[0].index, 0);
+    }
+
+    #[test]
     fn wasm_stage_reports_unimplemented_for_non_literal_mut_global() {
         if !wasm_stage_available() {
             return;
