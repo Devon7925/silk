@@ -86,6 +86,11 @@ Error code export:
   - Struct literals can now be emitted for both inline bindings and materialized globals.
   - Example: `mut point := { x = 1, y = 2 }` now lowers as a concrete mutable global instead of returning `unimplemented`.
   - Example: `base := { x = 1, y = 2 }; (export wasm) point := base` now lowers `base` inline and materializes `point` via identifier aliasing.
+- Non-empty string literals are now lowered through value-slot tables and decoded as `IntermediateKind::ArrayLiteral` of `u8`.
+  - Example: `(export wasm) bytes := "abc"` lowers to an exported `u8` array global.
+- String value aliases now preserve lowered value refs through inline/materialized transitions.
+  - Example: `base := "abc"; (export wasm) out := base` now materializes `out` from the alias chain.
+  - Example: `base := "abc"; base` now emits an inline array-valued binding for `base`.
 - Non-materialized scalar bindings are emitted in `inline_bindings` as literal `IntermediateKind` values.
   - Example: `base := 42; (export wasm) answer := base` now lowers `base` into the inline-binding output table while still lowering `answer` as a global/export.
 - Wrap annotations no longer force an `unimplemented` result when no export source exists.
@@ -93,6 +98,9 @@ Error code export:
 - Wrappers are emitted for multi-target exports when a wrap target is present.
   - Source target selection is deterministic from the export mask priority (`js`, then `wasm`, then `wgsl`).
 - The stage still reports `unimplemented` for unsupported value shapes (for example function exports/wrappers and non-data/non-struct mutable globals).
+  - Struct/array projection lowering (`obj.field`, `obj[idx]`) remains unimplemented in the wasm parser path.
+  - Array-repeat lowering is still unimplemented.
+  - Empty-string lowering still falls back (`unimplemented`) because element-type metadata is not yet encoded for zero-length array payloads.
 - Bindings with unsupported pattern extraction are now treated as `unimplemented` instead of hard parse failure, preserving fallback behavior.
 
 ## State Getters

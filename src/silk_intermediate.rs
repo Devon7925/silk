@@ -1729,6 +1729,127 @@ mod tests {
     }
 
     #[test]
+    fn wasm_stage_lowers_exported_string_global_as_u8_array() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "(export wasm) bytes := \"abc\"; bytes";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+
+        assert_eq!(
+            lowered.globals[0].ty,
+            IntermediateType::Array {
+                element: Box::new(IntermediateType::U8),
+                length: 3,
+                field_names: vec!["0".to_string(), "1".to_string(), "2".to_string()],
+            }
+        );
+        match &lowered.globals[0].value {
+            IntermediateKind::ArrayLiteral {
+                items,
+                element_type,
+                field_names,
+            } => {
+                assert_eq!(*element_type, IntermediateType::U8);
+                assert_eq!(
+                    field_names,
+                    &vec!["0".to_string(), "1".to_string(), "2".to_string()]
+                );
+                assert_eq!(items.len(), 3);
+                assert!(matches!(
+                    items[0],
+                    IntermediateKind::Literal(ExpressionLiteral::Char(b'a'))
+                ));
+                assert!(matches!(
+                    items[1],
+                    IntermediateKind::Literal(ExpressionLiteral::Char(b'b'))
+                ));
+                assert!(matches!(
+                    items[2],
+                    IntermediateKind::Literal(ExpressionLiteral::Char(b'c'))
+                ));
+            }
+            other => panic!("expected array literal value, got {other:?}"),
+        }
+        assert_eq!(lowered.exports[0].target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.exports[0].name, "bytes");
+        assert_eq!(
+            lowered.exports[0].export_type,
+            IntermediateExportType::Global
+        );
+        assert_eq!(lowered.exports[0].index, 0);
+    }
+
+    #[test]
+    fn wasm_stage_lowers_exported_string_identifier_alias() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "base := \"abc\"; (export wasm) out := base; out";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 1);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+        assert!(matches!(
+            lowered.inline_bindings.get("base"),
+            Some(IntermediateKind::ArrayLiteral { .. })
+        ));
+
+        assert_eq!(lowered.globals[0].name, "out");
+        assert_eq!(
+            lowered.globals[0].ty,
+            IntermediateType::Array {
+                element: Box::new(IntermediateType::U8),
+                length: 3,
+                field_names: vec!["0".to_string(), "1".to_string(), "2".to_string()],
+            }
+        );
+        assert!(matches!(
+            lowered.globals[0].value,
+            IntermediateKind::ArrayLiteral { .. }
+        ));
+        assert_eq!(lowered.exports[0].target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.exports[0].name, "out");
+        assert_eq!(
+            lowered.exports[0].export_type,
+            IntermediateExportType::Global
+        );
+        assert_eq!(lowered.exports[0].index, 0);
+    }
+
+    #[test]
+    fn wasm_stage_lowers_inline_string_binding_without_materialized_outputs() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "base := \"abc\"; base";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.globals.len(), 0);
+        assert_eq!(lowered.exports.len(), 0);
+        assert_eq!(lowered.wrappers.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 1);
+        assert!(matches!(
+            lowered.inline_bindings.get("base"),
+            Some(IntermediateKind::ArrayLiteral { .. })
+        ));
+    }
+
+    #[test]
     fn wasm_stage_reports_unimplemented_for_function_exports() {
         if !wasm_stage_available() {
             return;
