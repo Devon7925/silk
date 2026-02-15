@@ -650,6 +650,21 @@ fn synthetic_string_bytes(start: i32, len: i32) -> Option<&'static [u8]> {
         (-19, 4) => Some(b"wasm"),
         (-20, 4) => Some(b"wgsl"),
         (-21, 5) => Some(b"Range"),
+        (-22, 1) => Some(b"+"),
+        (-23, 1) => Some(b"-"),
+        (-24, 1) => Some(b"*"),
+        (-25, 1) => Some(b"/"),
+        (-26, 2) => Some(b"=="),
+        (-27, 2) => Some(b"!="),
+        (-28, 1) => Some(b"<"),
+        (-29, 1) => Some(b">"),
+        (-30, 2) => Some(b"<="),
+        (-31, 2) => Some(b">="),
+        (-32, 2) => Some(b".."),
+        (-33, 2) => Some(b"&&"),
+        (-34, 2) => Some(b"||"),
+        (-35, 1) => Some(b"^"),
+        (-36, 13) => Some(b"__target_type"),
         _ => None,
     }
 }
@@ -955,5 +970,35 @@ mod tests {
         let value = evaluate_text("(x: i32) => x").expect("wasm evaluation should run");
         let value = value.expect("function result should decode");
         assert!(matches!(value.kind, ExpressionKind::Function { .. }));
+    }
+
+    #[test]
+    fn wasm_interpreter_evaluates_boolean_operations() {
+        let value = evaluate_text("true && false")
+            .expect("wasm evaluation should succeed")
+            .expect("boolean result should decode");
+        assert!(matches!(
+            value.kind,
+            ExpressionKind::Literal(ExpressionLiteral::Boolean(false))
+        ));
+
+        let value = evaluate_text("true == false")
+            .expect("wasm evaluation should succeed")
+            .expect("boolean equality result should decode");
+        assert!(matches!(
+            value.kind,
+            ExpressionKind::Literal(ExpressionLiteral::Boolean(false))
+        ));
+    }
+
+    #[test]
+    fn wasm_interpreter_keeps_range_operator_behavior() {
+        let value = evaluate_text("range: Range := 0..3; range.end")
+            .expect("wasm evaluation should succeed")
+            .expect("range result should decode");
+        assert!(matches!(
+            value.kind,
+            ExpressionKind::Literal(ExpressionLiteral::Number(3))
+        ));
     }
 }

@@ -79,6 +79,21 @@ SYNTHETIC_JS_STRING := { length = 2, start = -18 };
 SYNTHETIC_WASM_STRING := { length = 4, start = -19 };
 SYNTHETIC_WGSL_STRING := { length = 4, start = -20 };
 SYNTHETIC_RANGE_STRING := { length = 5, start = -21 };
+SYNTHETIC_OP_ADD_STRING := { length = 1, start = -22 };
+SYNTHETIC_OP_SUBTRACT_STRING := { length = 1, start = -23 };
+SYNTHETIC_OP_MULTIPLY_STRING := { length = 1, start = -24 };
+SYNTHETIC_OP_DIVIDE_STRING := { length = 1, start = -25 };
+SYNTHETIC_OP_EQUAL_STRING := { length = 2, start = -26 };
+SYNTHETIC_OP_NOT_EQUAL_STRING := { length = 2, start = -27 };
+SYNTHETIC_OP_LESS_THAN_STRING := { length = 1, start = -28 };
+SYNTHETIC_OP_GREATER_THAN_STRING := { length = 1, start = -29 };
+SYNTHETIC_OP_LESS_THAN_OR_EQUAL_STRING := { length = 2, start = -30 };
+SYNTHETIC_OP_GREATER_THAN_OR_EQUAL_STRING := { length = 2, start = -31 };
+SYNTHETIC_OP_RANGE_STRING := { length = 2, start = -32 };
+SYNTHETIC_OP_AND_STRING := { length = 2, start = -33 };
+SYNTHETIC_OP_OR_STRING := { length = 2, start = -34 };
+SYNTHETIC_OP_XOR_STRING := { length = 1, start = -35 };
+SYNTHETIC_TARGET_TYPE_BINDING_STRING := { length = 13, start = -36 };
 EMPTY_IDENTIFIER := types.EMPTY_IDENTIFIER;
 EMPTY_SPAN := types.EMPTY_SPAN;
 EMPTY_NODE := types.EMPTY_NODE;
@@ -118,6 +133,10 @@ Value := enum {
     BindingAnnotation = BindingAnnotationValue,
     AsmFunction = TargetTag,
     InlineAssembly = { target = TargetTag, code = StringRef },
+    IntrinsicBinaryMethod = BinaryIntrinsicOperator,
+    IntrinsicBinaryPartial = { operator = i32, left = i32 },
+    RangeMethod = {},
+    RangePartial = i32,
 };
 
 ValueState := { count = i32, error = i32, error_code = i32 };
@@ -1126,6 +1145,17 @@ add_intrinsic_binding_value := {name: StringRef, value: Value} => (
     )
 );
 
+add_intrinsic_target_binding_value := {name: StringRef, target_tag: TargetTag, target_type_idx: i32} => (
+    bind_idx := add_intrinsic_binding_value{name, Value::Target(target_tag)};
+    if bind_idx == -1 then (
+        -1
+    ) else (
+        value_idx := bindings(bind_idx).value;
+        values(value_idx).type_value = target_type_idx;
+        bind_idx
+    )
+);
+
 option_enum_from_type := {payload_type_idx: i32, span_start: i32} => (
     if value_is_type_like(payload_type_idx) == 0 then (
         set_error(span_start);
@@ -1261,20 +1291,207 @@ init_range_binding := {} => (
     )
 );
 
+add_intrinsic_impl_field := {name: StringRef, value: Value} => (
+    name_idx := store_value(Value::String(name));
+    if name_idx == -1 then (
+        -1
+    ) else (
+        store_value(value)
+    )
+);
+
+init_i32_intrinsic_impl := {type_idx: i32} => (
+    impl_start := value_state.count;
+    if add_intrinsic_impl_field{SYNTHETIC_OP_ADD_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32Add)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_SUBTRACT_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32Subtract)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_MULTIPLY_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32Multiply)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_DIVIDE_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32Divide)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_EQUAL_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32Equal)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_NOT_EQUAL_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32NotEqual)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_LESS_THAN_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32LessThan)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_GREATER_THAN_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32GreaterThan)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_LESS_THAN_OR_EQUAL_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32LessThanOrEqual)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_GREATER_THAN_OR_EQUAL_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32GreaterThanOrEqual)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_RANGE_STRING, Value::RangeMethod} == -1 then (
+        -1
+    ) else (
+        impl_value_idx := store_value(Value::Record({
+            head = impl_start,
+            count = 11,
+            has_named = 1
+        }));
+        if impl_value_idx == -1 then (
+            -1
+        ) else (
+            impl_add{type_idx, impl_value_idx}
+        )
+    )
+);
+
+init_u8_intrinsic_impl := {type_idx: i32} => (
+    impl_start := value_state.count;
+    if add_intrinsic_impl_field{SYNTHETIC_OP_ADD_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32Add)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_SUBTRACT_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32Subtract)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_MULTIPLY_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32Multiply)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_DIVIDE_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32Divide)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_EQUAL_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32Equal)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_NOT_EQUAL_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32NotEqual)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_LESS_THAN_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32LessThan)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_GREATER_THAN_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32GreaterThan)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_LESS_THAN_OR_EQUAL_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32LessThanOrEqual)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_GREATER_THAN_OR_EQUAL_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32GreaterThanOrEqual)} == -1 then (
+        -1
+    ) else (
+        impl_value_idx := store_value(Value::Record({
+            head = impl_start,
+            count = 10,
+            has_named = 1
+        }));
+        if impl_value_idx == -1 then (
+            -1
+        ) else (
+            impl_add{type_idx, impl_value_idx}
+        )
+    )
+);
+
+init_bool_intrinsic_impl := {type_idx: i32} => (
+    impl_start := value_state.count;
+    if add_intrinsic_impl_field{SYNTHETIC_OP_EQUAL_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32Equal)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_NOT_EQUAL_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32NotEqual)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_AND_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::BooleanAnd)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_OR_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::BooleanOr)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_XOR_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::BooleanXor)} == -1 then (
+        -1
+    ) else (
+        impl_value_idx := store_value(Value::Record({
+            head = impl_start,
+            count = 5,
+            has_named = 1
+        }));
+        if impl_value_idx == -1 then (
+            -1
+        ) else (
+            impl_add{type_idx, impl_value_idx}
+        )
+    )
+);
+
+init_eq_intrinsic_impl := {type_idx: i32} => (
+    impl_start := value_state.count;
+    if add_intrinsic_impl_field{SYNTHETIC_OP_EQUAL_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32Equal)} == -1 then (
+        -1
+    ) else if add_intrinsic_impl_field{SYNTHETIC_OP_NOT_EQUAL_STRING, Value::IntrinsicBinaryMethod(BinaryIntrinsicOperator::I32NotEqual)} == -1 then (
+        -1
+    ) else (
+        impl_value_idx := store_value(Value::Record({
+            head = impl_start,
+            count = 2,
+            has_named = 1
+        }));
+        if impl_value_idx == -1 then (
+            -1
+        ) else (
+            impl_add{type_idx, impl_value_idx}
+        )
+    )
+);
+
+init_intrinsic_operator_impls := {} => (
+    i32_bind_idx := find_binding_index(SYNTHETIC_I32_STRING);
+    if i32_bind_idx == -1 then (
+        -1
+    ) else (
+        u8_bind_idx := find_binding_index(SYNTHETIC_U8_STRING);
+        if u8_bind_idx == -1 then (
+            -1
+        ) else (
+            bool_bind_idx := find_binding_index(SYNTHETIC_BOOL_STRING);
+            if bool_bind_idx == -1 then (
+                -1
+            ) else (
+                target_type_bind_idx := find_binding_index(SYNTHETIC_TARGET_TYPE_BINDING_STRING);
+                if target_type_bind_idx == -1 then (
+                    -1
+                ) else (
+                    binding_annotation_bind_idx := find_binding_index(SYNTHETIC_BINDING_ANNOTATION_STRING);
+                    if binding_annotation_bind_idx == -1 then (
+                        -1
+                    ) else (
+                        i32_type_idx := bindings(i32_bind_idx).value;
+                        u8_type_idx := bindings(u8_bind_idx).value;
+                        bool_type_idx := bindings(bool_bind_idx).value;
+                        target_type_idx := bindings(target_type_bind_idx).value;
+                        binding_annotation_type_idx := bindings(binding_annotation_bind_idx).value;
+                        if init_i32_intrinsic_impl{i32_type_idx} == -1 then (
+                            -1
+                        ) else if init_u8_intrinsic_impl{u8_type_idx} == -1 then (
+                            -1
+                        ) else if init_bool_intrinsic_impl{bool_type_idx} == -1 then (
+                            -1
+                        ) else if init_eq_intrinsic_impl{target_type_idx} == -1 then (
+                            -1
+                        ) else (
+                            init_eq_intrinsic_impl{binding_annotation_type_idx}
+                        )
+                    )
+                )
+            )
+        )
+    )
+);
+
 init_intrinsic_context := {} => (
     if add_intrinsic_binding{SYNTHETIC_TYPE_STRING} == -1 then -1 else (
         if add_intrinsic_binding{SYNTHETIC_I32_STRING} == -1 then -1 else (
             if add_intrinsic_binding{SYNTHETIC_U8_STRING} == -1 then -1 else (
                 if add_intrinsic_binding{SYNTHETIC_BOOL_STRING} == -1 then -1 else (
                     if add_intrinsic_binding{SYNTHETIC_BINDING_ANNOTATION_STRING} == -1 then -1 else (
-                        if add_intrinsic_binding_value{SYNTHETIC_MUT_STRING, Value::BindingAnnotation(BindingAnnotationValue::Mut)} == -1 then -1 else (
-                            if add_intrinsic_binding_value{SYNTHETIC_JS_STRING, Value::Target(TargetTag::Js)} == -1 then -1 else (
-                                if add_intrinsic_binding_value{SYNTHETIC_WASM_STRING, Value::Target(TargetTag::Wasm)} == -1 then -1 else (
-                                    if add_intrinsic_binding_value{SYNTHETIC_WGSL_STRING, Value::Target(TargetTag::Wgsl)} == -1 then -1 else (
-                                        if init_option_enum{} == -1 then -1 else (
-                                            if init_range_binding{} == -1 then -1 else (
-                                                intrinsic_state.binding_count = binding_state.count;
-                                                0
+                        target_type_value_idx := store_value(Value::String(SYNTHETIC_TARGET_STRING));
+                        if target_type_value_idx == -1 then -1 else (
+                            if mark_value_as_type(target_type_value_idx) == -1 then -1 else (
+                                if add_binding{
+                                    SYNTHETIC_TARGET_TYPE_BINDING_STRING.start,
+                                    SYNTHETIC_TARGET_TYPE_BINDING_STRING.length,
+                                    target_type_value_idx,
+                                    0
+                                } == -1 then -1 else (
+                                    if add_intrinsic_binding_value{SYNTHETIC_MUT_STRING, Value::BindingAnnotation(BindingAnnotationValue::Mut)} == -1 then -1 else (
+                                        if add_intrinsic_target_binding_value{SYNTHETIC_JS_STRING, TargetTag::Js, target_type_value_idx} == -1 then -1 else (
+                                            if add_intrinsic_target_binding_value{SYNTHETIC_WASM_STRING, TargetTag::Wasm, target_type_value_idx} == -1 then -1 else (
+                                                if add_intrinsic_target_binding_value{SYNTHETIC_WGSL_STRING, TargetTag::Wgsl, target_type_value_idx} == -1 then -1 else (
+                                                    if init_option_enum{} == -1 then -1 else (
+                                                        if init_range_binding{} == -1 then -1 else (
+                                                            if init_intrinsic_operator_impls{} == -1 then -1 else (
+                                                                intrinsic_state.binding_count = binding_state.count;
+                                                                0
+                                                            )
+                                                        )
+                                                    )
+                                                )
                                             )
                                         )
                                     )
@@ -1294,6 +1511,8 @@ ensure_import_intrinsics := {} => (
             && find_binding_index(SYNTHETIC_I32_STRING) != -1
             && find_binding_index(SYNTHETIC_U8_STRING) != -1
             && find_binding_index(SYNTHETIC_BOOL_STRING) != -1
+            && find_binding_index(SYNTHETIC_BINDING_ANNOTATION_STRING) != -1
+            && find_binding_index(SYNTHETIC_TARGET_TYPE_BINDING_STRING) != -1
         then 0 else (
             binding_state.count = 0;
             binding_state.scope_count = 0;
@@ -2218,6 +2437,487 @@ op_is2 := {op_start: i32, op_len: i32, ch1: u8, ch2: u8} => (
     ) else 0
 );
 
+binary_intrinsic_operator_from_tag := (operator_tag: i32) => (
+    if operator_tag == 0 then BinaryIntrinsicOperator::I32Add
+    else if operator_tag == 1 then BinaryIntrinsicOperator::I32Subtract
+    else if operator_tag == 2 then BinaryIntrinsicOperator::I32Multiply
+    else if operator_tag == 3 then BinaryIntrinsicOperator::I32Divide
+    else if operator_tag == 4 then BinaryIntrinsicOperator::I32Equal
+    else if operator_tag == 5 then BinaryIntrinsicOperator::I32NotEqual
+    else if operator_tag == 6 then BinaryIntrinsicOperator::I32LessThan
+    else if operator_tag == 7 then BinaryIntrinsicOperator::I32GreaterThan
+    else if operator_tag == 8 then BinaryIntrinsicOperator::I32LessThanOrEqual
+    else if operator_tag == 9 then BinaryIntrinsicOperator::I32GreaterThanOrEqual
+    else if operator_tag == 10 then BinaryIntrinsicOperator::BooleanAnd
+    else if operator_tag == 11 then BinaryIntrinsicOperator::BooleanOr
+    else if operator_tag == 12 then BinaryIntrinsicOperator::BooleanXor
+    else BinaryIntrinsicOperator::I32Add
+);
+
+binary_intrinsic_operator_tag := (operator: BinaryIntrinsicOperator) => (
+    operator |> match {
+        BinaryIntrinsicOperator::I32Add => 0,
+        BinaryIntrinsicOperator::I32Subtract => 1,
+        BinaryIntrinsicOperator::I32Multiply => 2,
+        BinaryIntrinsicOperator::I32Divide => 3,
+        BinaryIntrinsicOperator::I32Equal => 4,
+        BinaryIntrinsicOperator::I32NotEqual => 5,
+        BinaryIntrinsicOperator::I32LessThan => 6,
+        BinaryIntrinsicOperator::I32GreaterThan => 7,
+        BinaryIntrinsicOperator::I32LessThanOrEqual => 8,
+        BinaryIntrinsicOperator::I32GreaterThanOrEqual => 9,
+        BinaryIntrinsicOperator::BooleanAnd => 10,
+        BinaryIntrinsicOperator::BooleanOr => 11,
+        BinaryIntrinsicOperator::BooleanXor => 12,
+        else => 0
+    }
+);
+
+eval_binary_intrinsic_values := {
+    left_idx: i32,
+    right_idx: i32,
+    operator: i32,
+    span_start: i32
+} => (
+    left := values(left_idx).value;
+    right := values(right_idx).value;
+    normalized_operator := binary_intrinsic_operator_from_tag(operator);
+    normalized_operator |> match {
+        BinaryIntrinsicOperator::I32Add => (
+            if Value::Number(lv) := left then (
+                if Value::Number(rv) := right then (
+                    store_value(Value::Number(lv + rv))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else (
+                set_error(span_start);
+                -1
+            )
+        ),
+        BinaryIntrinsicOperator::I32Subtract => (
+            if Value::Number(lv) := left then (
+                if Value::Number(rv) := right then (
+                    store_value(Value::Number(lv - rv))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else (
+                set_error(span_start);
+                -1
+            )
+        ),
+        BinaryIntrinsicOperator::I32Multiply => (
+            if Value::Number(lv) := left then (
+                if Value::Number(rv) := right then (
+                    store_value(Value::Number(lv * rv))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else (
+                set_error(span_start);
+                -1
+            )
+        ),
+        BinaryIntrinsicOperator::I32Divide => (
+            if Value::Number(lv) := left then (
+                if Value::Number(rv) := right then (
+                    if rv == 0 then (
+                        set_error(span_start);
+                        -1
+                    ) else (
+                        store_value(Value::Number(lv / rv))
+                    )
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else (
+                set_error(span_start);
+                -1
+            )
+        ),
+        BinaryIntrinsicOperator::I32Equal => (
+            if Value::Number(lv) := left then (
+                if Value::Number(rv) := right then (
+                    store_value(Value::Boolean(if lv == rv then 1 else 0))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else if Value::Boolean(lv) := left then (
+                if Value::Boolean(rv) := right then (
+                    store_value(Value::Boolean(if lv == rv then 1 else 0))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else if Value::Char(lv) := left then (
+                if Value::Char(rv) := right then (
+                    store_value(Value::Boolean(if lv == rv then 1 else 0))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else if Value::String(lv) := left then (
+                if Value::String(rv) := right then (
+                    store_value(Value::Boolean(if string_ref_equals{lv, rv} == 1 then 1 else 0))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else if Value::Target(lv) := left then (
+                if Value::Target(rv) := right then (
+                    store_value(Value::Boolean(target_tags_equal{lv, rv}))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else if Value::BindingAnnotation(lv) := left then (
+                if Value::BindingAnnotation(rv) := right then (
+                    store_value(Value::Boolean(binding_annotation_equals{lv, rv}))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else (
+                set_error(span_start);
+                -1
+            )
+        ),
+        BinaryIntrinsicOperator::I32NotEqual => (
+            if Value::Number(lv) := left then (
+                if Value::Number(rv) := right then (
+                    store_value(Value::Boolean(if lv != rv then 1 else 0))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else if Value::Boolean(lv) := left then (
+                if Value::Boolean(rv) := right then (
+                    store_value(Value::Boolean(if lv != rv then 1 else 0))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else if Value::Char(lv) := left then (
+                if Value::Char(rv) := right then (
+                    store_value(Value::Boolean(if lv != rv then 1 else 0))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else if Value::String(lv) := left then (
+                if Value::String(rv) := right then (
+                    store_value(Value::Boolean(if string_ref_equals{lv, rv} == 1 then 0 else 1))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else if Value::Target(lv) := left then (
+                if Value::Target(rv) := right then (
+                    store_value(Value::Boolean(if target_tags_equal{lv, rv} == 1 then 0 else 1))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else if Value::BindingAnnotation(lv) := left then (
+                if Value::BindingAnnotation(rv) := right then (
+                    store_value(Value::Boolean(if binding_annotation_equals{lv, rv} == 1 then 0 else 1))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else (
+                set_error(span_start);
+                -1
+            )
+        ),
+        BinaryIntrinsicOperator::I32LessThan => (
+            if Value::Number(lv) := left then (
+                if Value::Number(rv) := right then (
+                    store_value(Value::Boolean(if lv < rv then 1 else 0))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else if Value::Char(lv) := left then (
+                if Value::Char(rv) := right then (
+                    store_value(Value::Boolean(if lv < rv then 1 else 0))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else (
+                set_error(span_start);
+                -1
+            )
+        ),
+        BinaryIntrinsicOperator::I32GreaterThan => (
+            if Value::Number(lv) := left then (
+                if Value::Number(rv) := right then (
+                    store_value(Value::Boolean(if lv > rv then 1 else 0))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else if Value::Char(lv) := left then (
+                if Value::Char(rv) := right then (
+                    store_value(Value::Boolean(if lv > rv then 1 else 0))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else (
+                set_error(span_start);
+                -1
+            )
+        ),
+        BinaryIntrinsicOperator::I32LessThanOrEqual => (
+            if Value::Number(lv) := left then (
+                if Value::Number(rv) := right then (
+                    store_value(Value::Boolean(if lv <= rv then 1 else 0))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else if Value::Char(lv) := left then (
+                if Value::Char(rv) := right then (
+                    store_value(Value::Boolean(if lv <= rv then 1 else 0))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else (
+                set_error(span_start);
+                -1
+            )
+        ),
+        BinaryIntrinsicOperator::I32GreaterThanOrEqual => (
+            if Value::Number(lv) := left then (
+                if Value::Number(rv) := right then (
+                    store_value(Value::Boolean(if lv >= rv then 1 else 0))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else if Value::Char(lv) := left then (
+                if Value::Char(rv) := right then (
+                    store_value(Value::Boolean(if lv >= rv then 1 else 0))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else (
+                set_error(span_start);
+                -1
+            )
+        ),
+        BinaryIntrinsicOperator::BooleanAnd => (
+            if Value::Boolean(lv) := left then (
+                if Value::Boolean(rv) := right then (
+                    store_value(Value::Boolean(if lv == 1 && rv == 1 then 1 else 0))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else (
+                set_error(span_start);
+                -1
+            )
+        ),
+        BinaryIntrinsicOperator::BooleanOr => (
+            if Value::Boolean(lv) := left then (
+                if Value::Boolean(rv) := right then (
+                    store_value(Value::Boolean(if lv == 1 || rv == 1 then 1 else 0))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else (
+                set_error(span_start);
+                -1
+            )
+        ),
+        BinaryIntrinsicOperator::BooleanXor => (
+            if Value::Boolean(lv) := left then (
+                if Value::Boolean(rv) := right then (
+                    store_value(Value::Boolean(if lv != rv then 1 else 0))
+                ) else (
+                    set_error(span_start);
+                    -1
+                )
+            ) else (
+                set_error(span_start);
+                -1
+            )
+        ),
+        else => (
+            set_error(span_start);
+            -1
+        )
+    }
+);
+
+eval_range_from_values := {left_idx: i32, right_idx: i32, span_start: i32} => (
+    if Value::Number(lv) := values(left_idx).value then (
+        if Value::Number(rv) := values(right_idx).value then (
+            range_start := value_state.count;
+            name_idx := store_value(Value::String(SYNTHETIC_CURRENT_STRING));
+            current_idx := if name_idx == -1 then -1 else store_value(Value::Number(lv));
+            name_idx2 := if current_idx == -1 then -1 else store_value(Value::String(SYNTHETIC_END_STRING));
+            end_idx := if name_idx2 == -1 then -1 else store_value(Value::Number(rv));
+            name_idx3 := if end_idx == -1 then -1 else store_value(Value::String(SYNTHETIC_ITER_TY_STRING));
+            iter_ty_idx := if name_idx3 == -1 then -1 else store_value(Value::String(SYNTHETIC_I32_STRING));
+            marked_iter_ty_idx := if iter_ty_idx == -1 then -1 else mark_value_as_type(iter_ty_idx);
+            name_idx4 := if marked_iter_ty_idx == -1 then -1 else store_value(Value::String(SYNTHETIC_NEXT_STRING));
+            next_idx := if name_idx4 == -1 then -1 else store_value(Value::Builtin(builtin_range_next{}));
+            if name_idx == -1 then (
+                -1
+            ) else if current_idx == -1 then (
+                -1
+            ) else if name_idx2 == -1 then (
+                -1
+            ) else if end_idx == -1 then (
+                -1
+            ) else if name_idx3 == -1 then (
+                -1
+            ) else if iter_ty_idx == -1 then (
+                -1
+            ) else if marked_iter_ty_idx == -1 then (
+                -1
+            ) else if name_idx4 == -1 then (
+                -1
+            ) else if next_idx == -1 then (
+                -1
+            ) else (
+                range_idx := store_value(Value::Record({ head = range_start, count = 4, has_named = 1 }));
+                if range_idx == -1 then (
+                    -1
+                ) else (
+                    if runtime_state.range_type_idx != -1 then (
+                        values(range_idx).type_value = runtime_state.range_type_idx;
+                        0
+                    ) else (
+                        0
+                    );
+                    range_idx
+                )
+            )
+        ) else (
+            set_error(span_start);
+            -1
+        )
+    ) else (
+        set_error(span_start);
+        -1
+    )
+);
+
+infer_type_value_idx_from_value := (value_idx: i32) => (
+    if value_idx < 0 || value_idx >= value_state.count then (
+        -1
+    ) else if values(value_idx).type_value != -1 then (
+        values(value_idx).type_value
+    ) else (
+        values(value_idx).value |> match {
+            Value::Number(_) => (
+                bind_idx := find_binding_index(SYNTHETIC_I32_STRING);
+                if bind_idx == -1 then -1 else bindings(bind_idx).value
+            ),
+            Value::Char(_) => (
+                bind_idx := find_binding_index(SYNTHETIC_U8_STRING);
+                if bind_idx == -1 then -1 else bindings(bind_idx).value
+            ),
+            Value::Boolean(_) => (
+                bind_idx := find_binding_index(SYNTHETIC_BOOL_STRING);
+                if bind_idx == -1 then -1 else bindings(bind_idx).value
+            ),
+            Value::Target(_) => (
+                bind_idx := find_binding_index(SYNTHETIC_TARGET_TYPE_BINDING_STRING);
+                if bind_idx == -1 then -1 else bindings(bind_idx).value
+            ),
+            Value::BindingAnnotation(_) => (
+                bind_idx := find_binding_index(SYNTHETIC_BINDING_ANNOTATION_STRING);
+                if bind_idx == -1 then -1 else bindings(bind_idx).value
+            ),
+            else => -1
+        }
+    )
+);
+
+lookup_intrinsic_operation_method := {
+    value_idx: i32,
+    property_start: i32,
+    property_length: i32
+} => (
+    type_idx := infer_type_value_idx_from_value(value_idx);
+    if type_idx == -1 then (
+        -1
+    ) else (
+        impl_idx := impl_find(type_idx);
+        if impl_idx == -1 then (
+            -1
+        ) else if Value::Record(impl_info) := values(impl_idx).value then (
+            field_idx := record_find_field_index_no_error{
+                impl_info.head,
+                impl_info.count,
+                impl_info.has_named,
+                property_start,
+                property_length
+            };
+            if field_idx == -1 then (
+                -1
+            ) else (
+                copy_value(field_idx)
+            )
+        ) else (
+            -1
+        )
+    )
+);
+
+eval_operation_self_call := {
+    object_expr: i32,
+    object_idx: i32,
+    property_start: i32,
+    property_length: i32,
+    span_start: i32
+} => (
+    obj_val := values(object_idx).value;
+    if Value::Record(struct_info) := obj_val then (
+        field_idx := record_find_field_index_no_error{
+            struct_info.head,
+            struct_info.count,
+            struct_info.has_named,
+            property_start,
+            property_length
+        };
+        if field_idx != -1 then (
+            copy_value(field_idx)
+        ) else (
+            apply_impl_method{
+                object_idx,
+                object_expr,
+                property_start,
+                property_length,
+                span_start
+            }
+        )
+    ) else (
+        apply_impl_method{
+            object_idx,
+            object_expr,
+            property_start,
+            property_length,
+            span_start
+        }
+    )
+);
+
 store_value := (value: Value) => (
     if value_state.count >= MAX_VALUES then (
         set_error(0);
@@ -2769,6 +3469,34 @@ string_ref_equals_synthetic := {synthetic_start: i32, synthetic_len: i32, input_
             string_ref_is_wasm(input_ref)
         ) else if synthetic_start == SYNTHETIC_WGSL_STRING.start then (
             string_ref_is_wgsl(input_ref)
+        ) else if synthetic_start == SYNTHETIC_OP_ADD_STRING.start then (
+            string_ref_matches_1{input_ref, '+'}
+        ) else if synthetic_start == SYNTHETIC_OP_SUBTRACT_STRING.start then (
+            string_ref_matches_1{input_ref, '-'}
+        ) else if synthetic_start == SYNTHETIC_OP_MULTIPLY_STRING.start then (
+            string_ref_matches_1{input_ref, '*'}
+        ) else if synthetic_start == SYNTHETIC_OP_DIVIDE_STRING.start then (
+            string_ref_matches_1{input_ref, '/'}
+        ) else if synthetic_start == SYNTHETIC_OP_EQUAL_STRING.start then (
+            string_ref_matches_2{input_ref, '=', '='}
+        ) else if synthetic_start == SYNTHETIC_OP_NOT_EQUAL_STRING.start then (
+            string_ref_matches_2{input_ref, '!', '='}
+        ) else if synthetic_start == SYNTHETIC_OP_LESS_THAN_STRING.start then (
+            string_ref_matches_1{input_ref, '<'}
+        ) else if synthetic_start == SYNTHETIC_OP_GREATER_THAN_STRING.start then (
+            string_ref_matches_1{input_ref, '>'}
+        ) else if synthetic_start == SYNTHETIC_OP_LESS_THAN_OR_EQUAL_STRING.start then (
+            string_ref_matches_2{input_ref, '<', '='}
+        ) else if synthetic_start == SYNTHETIC_OP_GREATER_THAN_OR_EQUAL_STRING.start then (
+            string_ref_matches_2{input_ref, '>', '='}
+        ) else if synthetic_start == SYNTHETIC_OP_RANGE_STRING.start then (
+            string_ref_matches_2{input_ref, '.', '.'}
+        ) else if synthetic_start == SYNTHETIC_OP_AND_STRING.start then (
+            string_ref_matches_2{input_ref, '&', '&'}
+        ) else if synthetic_start == SYNTHETIC_OP_OR_STRING.start then (
+            string_ref_matches_2{input_ref, '|', '|'}
+        ) else if synthetic_start == SYNTHETIC_OP_XOR_STRING.start then (
+            string_ref_matches_1{input_ref, '^'}
         ) else (
             0
         )
@@ -3765,6 +4493,26 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
                 -1
             )
         ),
+        Value::IntrinsicBinaryMethod(operator) => (
+            store_value(Value::IntrinsicBinaryPartial({
+                operator = binary_intrinsic_operator_tag(operator),
+                left = arg_idx
+            }))
+        ),
+        Value::IntrinsicBinaryPartial(info) => (
+            eval_binary_intrinsic_values{
+                info.left,
+                arg_idx,
+                info.operator,
+                span_start
+            }
+        ),
+        Value::RangeMethod => (
+            store_value(Value::RangePartial(arg_idx))
+        ),
+        Value::RangePartial(left_idx) => (
+            eval_range_from_values{left_idx, arg_idx, span_start}
+        ),
         Value::AsmFunction(target_tag) => (
             if ensure_asm_target_allowed{target_tag_value(target_tag), span_start} == 0 then (
                 -1
@@ -3782,7 +4530,13 @@ apply_function_value := {func_idx: i32, arg_idx: i32, span_start: i32} => (
     }
 );
 
-apply_impl_method := {object_idx: i32, object_expr: i32, property: StringRef, span_start: i32} => (
+apply_impl_method := {
+    object_idx: i32,
+    object_expr: i32,
+    property_start: i32,
+    property_length: i32,
+    span_start: i32
+} => (
     mut type_idx := -1;
     if NodeKind::Identifier(id) := nodes(object_expr).kind then (
         bind_idx := find_binding_index(id.name);
@@ -3799,22 +4553,66 @@ apply_impl_method := {object_idx: i32, object_expr: i32, property: StringRef, sp
         ) else 0
     ) else 0;
     if type_idx == -1 then (
-        set_error(span_start);
-        -1
-    ) else (
-        impl_idx := impl_find(type_idx);
-        if impl_idx == -1 then (
+        mut intrinsic_method_idx := lookup_intrinsic_operation_method{
+            object_idx,
+            property_start,
+            property_length
+        };
+        if intrinsic_method_idx == -1 && op_is2{property_start, property_length, '.', '.'} == 1 then (
+            intrinsic_method_idx = lookup_intrinsic_operation_method{
+                object_idx,
+                SYNTHETIC_OP_RANGE_STRING.start,
+                SYNTHETIC_OP_RANGE_STRING.length
+            };
+            0
+        ) else 0;
+        if intrinsic_method_idx == -1 then (
             set_error(span_start);
             -1
         ) else (
+            apply_function_value{intrinsic_method_idx, object_idx, span_start}
+        )
+    ) else (
+        impl_idx := impl_find(type_idx);
+        if impl_idx == -1 then (
+            mut intrinsic_method_idx := lookup_intrinsic_operation_method{
+                object_idx,
+                property_start,
+                property_length
+            };
+            if intrinsic_method_idx == -1 && op_is2{property_start, property_length, '.', '.'} == 1 then (
+                intrinsic_method_idx = lookup_intrinsic_operation_method{
+                    object_idx,
+                    SYNTHETIC_OP_RANGE_STRING.start,
+                    SYNTHETIC_OP_RANGE_STRING.length
+                };
+                0
+            ) else 0;
+            if intrinsic_method_idx == -1 then (
+                set_error(span_start);
+                -1
+            ) else (
+                apply_function_value{intrinsic_method_idx, object_idx, span_start}
+            )
+        ) else (
             if Value::Record(impl_info) := values(impl_idx).value then (
-                method_idx := record_find_field_index_no_error{
+                mut method_idx := record_find_field_index_no_error{
                     impl_info.head,
                     impl_info.count,
                     impl_info.has_named,
-                    property.start,
-                    property.length
+                    property_start,
+                    property_length
                 };
+                if method_idx == -1 && op_is2{property_start, property_length, '.', '.'} == 1 then (
+                    method_idx = record_find_field_index_no_error{
+                        impl_info.head,
+                        impl_info.count,
+                        impl_info.has_named,
+                        SYNTHETIC_OP_RANGE_STRING.start,
+                        SYNTHETIC_OP_RANGE_STRING.length
+                    };
+                    0
+                ) else 0;
                 if method_idx == -1 then (
                     set_error(span_start);
                     -1
@@ -3846,13 +4644,31 @@ apply_impl_property := {object_expr: i32, object_value_idx: i32, property_start:
         ) else 0
     ) else 0;
     if type_idx == -1 then (
-        set_error(span_start);
-        -1
+        intrinsic_method_idx := lookup_intrinsic_operation_method{
+            object_value_idx,
+            property_start,
+            property_length
+        };
+        if intrinsic_method_idx == -1 then (
+            set_error(span_start);
+            -1
+        ) else (
+            intrinsic_method_idx
+        )
     ) else (
         impl_idx := impl_find(type_idx);
         if impl_idx == -1 then (
-            set_error(span_start);
-            -1
+            intrinsic_method_idx := lookup_intrinsic_operation_method{
+                object_value_idx,
+                property_start,
+                property_length
+            };
+            if intrinsic_method_idx == -1 then (
+                set_error(span_start);
+                -1
+            ) else (
+                intrinsic_method_idx
+            )
         ) else (
             if Value::Record(impl_info) := values(impl_idx).value then (
                 field_idx := record_find_field_index_no_error{
@@ -4324,10 +5140,22 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                                 if field_idx != -1 then (
                                     copy_value(field_idx)
                                 ) else (
-                                    apply_impl_method{obj_idx, access.object, access.property, span_start}
+                                    apply_impl_method{
+                                        obj_idx,
+                                        access.object,
+                                        access.property.start,
+                                        access.property.length,
+                                        span_start
+                                    }
                                 )
                             ) else (
-                                apply_impl_method{obj_idx, access.object, access.property, span_start}
+                                apply_impl_method{
+                                    obj_idx,
+                                    access.object,
+                                    access.property.start,
+                                    access.property.length,
+                                    span_start
+                                }
                             )
                         ) else (
                             obj_val := values(obj_idx).value;
@@ -4821,194 +5649,21 @@ eval_expression: (i32 -> i32) := (idx: i32) => (
                     ) else if flow_kind_is_none(flow_state.kind) == 0 then (
                         right_idx
                     ) else (
-                        op_start := info.operator.start;
-                        op_len := info.operator.length;
-                        left := values(left_idx).value;
-                        right := values(right_idx).value;
-                        if Value::Number(lv) := left then (
-                            if Value::Number(rv) := right then (
-                                if op_is1{op_start, op_len, '+'} == 1 then (
-                                    store_value(Value::Number(lv + rv))
-                                ) else if op_is1{op_start, op_len, '-'} == 1 then (
-                                    store_value(Value::Number(lv - rv))
-                                ) else if op_is1{op_start, op_len, '*'} == 1 then (
-                                    store_value(Value::Number(lv * rv))
-                                ) else if op_is1{op_start, op_len, '/'} == 1 then (
-                                    if rv == 0 then (
-                                        set_error(span_start);
-                                        -1
-                                    ) else (
-                                        store_value(Value::Number(lv / rv))
-                                    )
-                                ) else if op_is2{op_start, op_len, '=', '='} == 1 then (
-                                    store_value(Value::Boolean(if lv == rv then 1 else 0))
-                                ) else if op_is2{op_start, op_len, '!', '='} == 1 then (
-                                    store_value(Value::Boolean(if lv != rv then 1 else 0))
-                                ) else if op_is1{op_start, op_len, '<'} == 1 then (
-                                    store_value(Value::Boolean(if lv < rv then 1 else 0))
-                                ) else if op_is1{op_start, op_len, '>'} == 1 then (
-                                    store_value(Value::Boolean(if lv > rv then 1 else 0))
-                                ) else if op_is2{op_start, op_len, '<', '='} == 1 then (
-                                    store_value(Value::Boolean(if lv <= rv then 1 else 0))
-                                ) else if op_is2{op_start, op_len, '>', '='} == 1 then (
-                                    store_value(Value::Boolean(if lv >= rv then 1 else 0))
-                                ) else if op_is2{op_start, op_len, '.', '.'} == 1 then (
-                                    range_start := value_state.count;
-                                    name_idx := store_value(Value::String(SYNTHETIC_CURRENT_STRING));
-                                    if name_idx == -1 then (
-                                        -1
-                                    ) else (
-                                        current_idx := store_value(Value::Number(lv));
-                                        if current_idx == -1 then (
-                                            -1
-                                        ) else (
-                                            name_idx2 := store_value(Value::String(SYNTHETIC_END_STRING));
-                                            if name_idx2 == -1 then (
-                                                -1
-                                            ) else (
-                                                end_idx := store_value(Value::Number(rv));
-                                                if end_idx == -1 then (
-                                                    -1
-                                                ) else (
-                                                    name_idx3 := store_value(Value::String(SYNTHETIC_ITER_TY_STRING));
-                                                    if name_idx3 == -1 then (
-                                                        -1
-                                                    ) else (
-                                                        iter_ty_idx := store_value(Value::String(SYNTHETIC_I32_STRING));
-                                                        if iter_ty_idx == -1 then (
-                                                            -1
-                                                        ) else (
-                                                            if mark_value_as_type(iter_ty_idx) == -1 then (
-                                                                -1
-                                                            ) else (
-                                                                name_idx4 := store_value(Value::String(SYNTHETIC_NEXT_STRING));
-                                                                if name_idx4 == -1 then (
-                                                                    -1
-                                                                ) else (
-                                                                    next_idx := store_value(Value::Builtin(builtin_range_next{}));
-                                                                    if next_idx == -1 then (
-                                                                        -1
-                                                                    ) else (
-                                                                        range_idx := store_value(Value::Record({ head = range_start, count = 4, has_named = 1 }));
-                                                                        if range_idx == -1 then (
-                                                                            -1
-                                                                        ) else (
-                                                                            if runtime_state.range_type_idx != -1 then (
-                                                                                values(range_idx).type_value = runtime_state.range_type_idx;
-                                                                                0
-                                                                            ) else (
-                                                                                0
-                                                                            );
-                                                                            range_idx
-                                                                        )
-                                                                    )
-                                                                )
-                                                            )
-                                                        )
-                                                    )
-                                                )
-                                            )
-                                        )
-                                    )
-                                ) else (
-                                    set_error(span_start);
-                                    -1
-                                )
-                            ) else (
-                                set_error(span_start);
-                                -1
-                            )
-                        ) else if Value::Boolean(lv) := left then (
-                            if Value::Boolean(rv) := right then (
-                                if op_is2{op_start, op_len, '&', '&'} == 1 then (
-                                    store_value(Value::Boolean(if lv == 1 && rv == 1 then 1 else 0))
-                                ) else if op_is2{op_start, op_len, '|', '|'} == 1 then (
-                                    store_value(Value::Boolean(if lv == 1 || rv == 1 then 1 else 0))
-                                ) else if op_is1{op_start, op_len, '^'} == 1 then (
-                                    store_value(Value::Boolean(if lv != rv then 1 else 0))
-                                ) else if op_is2{op_start, op_len, '=', '='} == 1 then (
-                                    store_value(Value::Boolean(if lv == rv then 1 else 0))
-                                ) else if op_is2{op_start, op_len, '!', '='} == 1 then (
-                                    store_value(Value::Boolean(if lv != rv then 1 else 0))
-                                ) else (
-                                    set_error(span_start);
-                                    -1
-                                )
-                            ) else (
-                                set_error(span_start);
-                                -1
-                            )
-                        ) else if Value::Char(lv) := left then (
-                            if Value::Char(rv) := right then (
-                                if op_is2{op_start, op_len, '=', '='} == 1 then (
-                                    store_value(Value::Boolean(if lv == rv then 1 else 0))
-                                ) else if op_is2{op_start, op_len, '!', '='} == 1 then (
-                                    store_value(Value::Boolean(if lv != rv then 1 else 0))
-                                ) else if op_is1{op_start, op_len, '<'} == 1 then (
-                                    store_value(Value::Boolean(if lv < rv then 1 else 0))
-                                ) else if op_is1{op_start, op_len, '>'} == 1 then (
-                                    store_value(Value::Boolean(if lv > rv then 1 else 0))
-                                ) else if op_is2{op_start, op_len, '<', '='} == 1 then (
-                                    store_value(Value::Boolean(if lv <= rv then 1 else 0))
-                                ) else if op_is2{op_start, op_len, '>', '='} == 1 then (
-                                    store_value(Value::Boolean(if lv >= rv then 1 else 0))
-                                ) else (
-                                    set_error(span_start);
-                                    -1
-                                )
-                            ) else (
-                                set_error(span_start);
-                                -1
-                            )
-                        ) else if Value::String(lv) := left then (
-                            if Value::String(rv) := right then (
-                                if op_is2{op_start, op_len, '=', '='} == 1 then (
-                                    store_value(Value::Boolean(if string_ref_equals{lv, rv} == 1 then 1 else 0))
-                                ) else if op_is2{op_start, op_len, '!', '='} == 1 then (
-                                    store_value(Value::Boolean(if string_ref_equals{lv, rv} == 1 then 0 else 1))
-                                ) else (
-                                    set_error(span_start);
-                                    -1
-                                )
-                            ) else (
-                                set_error(span_start);
-                                -1
-                            )
-                        ) else if Value::Target(lv) := left then (
-                            if Value::Target(rv) := right then (
-                                if op_is2{op_start, op_len, '=', '='} == 1 then (
-                                    store_value(Value::Boolean(target_tags_equal{lv, rv}))
-                                ) else if op_is2{op_start, op_len, '!', '='} == 1 then (
-                                    store_value(Value::Boolean(if target_tags_equal{lv, rv} == 1 then 0 else 1))
-                                ) else (
-                                    set_error(span_start);
-                                    -1
-                                )
-                            ) else (
-                                set_error(span_start);
-                                -1
-                            )
-                        ) else if Value::BindingAnnotation(lv) := left then (
-                            if Value::BindingAnnotation(rv) := right then (
-                                if op_is2{op_start, op_len, '=', '='} == 1 then (
-                                    store_value(Value::Boolean(
-                                        binding_annotation_equals{lv, rv}
-                                    ))
-                                ) else if op_is2{op_start, op_len, '!', '='} == 1 then (
-                                    store_value(Value::Boolean(
-                                        if binding_annotation_equals{lv, rv} == 1 then 0 else 1
-                                    ))
-                                ) else (
-                                    set_error(span_start);
-                                    -1
-                                )
-                            ) else (
-                                set_error(span_start);
-                                -1
-                            )
+                        if op_is2{info.operator.start, info.operator.length, '.', '.'} == 1 then (
+                            eval_range_from_values{left_idx, right_idx, span_start}
                         ) else (
-                            set_error(span_start);
-                            -1
+                            self_call_idx := eval_operation_self_call{
+                                info.left,
+                                left_idx,
+                                info.operator.start,
+                                info.operator.length,
+                                span_start
+                            };
+                            if self_call_idx == -1 then (
+                                -1
+                            ) else (
+                                apply_function_value{self_call_idx, right_idx, span_start}
+                            )
                         )
                     )
                 )
@@ -5859,6 +6514,3 @@ value_tag := (value: Value) => (
 (export wasm) get_runtime_type_value_idx := {} => (
     runtime_state.type_value_idx
 );
-
-
-
