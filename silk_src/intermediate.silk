@@ -6,6 +6,7 @@ MAX_LIST_NODES := types.MAX_LIST_NODES;
 MAX_OUTPUT_GLOBALS := 4096;
 MAX_OUTPUT_EXPORTS := 12288;
 MAX_OUTPUT_WRAPPERS := 12288;
+MAX_OUTPUT_INLINE_BINDINGS := 8192;
 MAX_KNOWN_TYPE_ALIASES := 2048;
 MAX_KNOWN_SCALAR_ALIASES := 2048;
 
@@ -99,6 +100,13 @@ OutputWrapperSlot := {
     name_length = i32,
 };
 
+OutputInlineBindingSlot := {
+    name_start = i32,
+    name_length = i32,
+    value_tag = i32,
+    value_i32 = i32,
+};
+
 EMPTY_OUTPUT_GLOBAL_SLOT := {
     name_start = 0,
     name_length = 0,
@@ -122,6 +130,13 @@ EMPTY_OUTPUT_WRAPPER_SLOT := {
     index = 0,
     name_start = 0,
     name_length = 0,
+};
+
+EMPTY_OUTPUT_INLINE_BINDING_SLOT := {
+    name_start = 0,
+    name_length = 0,
+    value_tag = VALUE_TAG_UNKNOWN,
+    value_i32 = 0,
 };
 
 lower_status_ok := {} => (
@@ -173,7 +188,7 @@ lower_error_output_encode_failed := {} => (
 );
 
 (export wasm) intermediate_output_version := {} => (
-    2
+    3
 );
 
 (export wasm) input: Box({u8; MAX_INPUT}) := {0; MAX_INPUT};
@@ -184,6 +199,7 @@ lower_error_output_encode_failed := {} => (
 (export wasm) mut output_globals: Box({OutputGlobalSlot; MAX_OUTPUT_GLOBALS}) := {EMPTY_OUTPUT_GLOBAL_SLOT; MAX_OUTPUT_GLOBALS};
 (export wasm) mut output_exports: Box({OutputExportSlot; MAX_OUTPUT_EXPORTS}) := {EMPTY_OUTPUT_EXPORT_SLOT; MAX_OUTPUT_EXPORTS};
 (export wasm) mut output_wrappers: Box({OutputWrapperSlot; MAX_OUTPUT_WRAPPERS}) := {EMPTY_OUTPUT_WRAPPER_SLOT; MAX_OUTPUT_WRAPPERS};
+(export wasm) mut output_inline_bindings: Box({OutputInlineBindingSlot; MAX_OUTPUT_INLINE_BINDINGS}) := {EMPTY_OUTPUT_INLINE_BINDING_SLOT; MAX_OUTPUT_INLINE_BINDINGS};
 
 LowerState := {
     error_code = i32,
@@ -204,6 +220,7 @@ LowerState := {
     output_global_count = i32,
     output_export_count = i32,
     output_wrapper_count = i32,
+    output_inline_binding_count = i32,
     lowering_unimplemented = i32,
 };
 
@@ -226,6 +243,7 @@ LowerState := {
     output_global_count = 0,
     output_export_count = 0,
     output_wrapper_count = 0,
+    output_inline_binding_count = 0,
     lowering_unimplemented = 0,
 };
 
@@ -316,7 +334,7 @@ EMPTY_KNOWN_SCALAR_ALIAS_SLOT := {
 (export wasm) mut known_scalar_aliases: Box({KnownScalarAliasSlot; MAX_KNOWN_SCALAR_ALIASES}) := {EMPTY_KNOWN_SCALAR_ALIAS_SLOT; MAX_KNOWN_SCALAR_ALIASES};
 
 (export wasm) intermediate_stage_version := {} => (
-    6
+    7
 );
 
 target_mask_has := {mask: i32, bit: i32} => (
@@ -1031,6 +1049,7 @@ reset_output_slots := {} => (
     lower_state.output_global_count = 0;
     lower_state.output_export_count = 0;
     lower_state.output_wrapper_count = 0;
+    lower_state.output_inline_binding_count = 0;
     1
 );
 
@@ -1088,6 +1107,42 @@ emit_wrapper_entry := {
         output_wrappers(idx).name_length = name_length;
         lower_state.output_wrapper_count = idx + 1;
         1
+    )
+);
+
+emit_inline_binding_entry := {
+    name_start: i32,
+    name_length: i32,
+    value_tag: i32,
+    value_i32: i32
+} => (
+    idx := lower_state.output_inline_binding_count;
+    if idx < 0 || idx >= MAX_OUTPUT_INLINE_BINDINGS then 0 else (
+        output_inline_bindings(idx).name_start = name_start;
+        output_inline_bindings(idx).name_length = name_length;
+        output_inline_bindings(idx).value_tag = value_tag;
+        output_inline_bindings(idx).value_i32 = value_i32;
+        lower_state.output_inline_binding_count = idx + 1;
+        1
+    )
+);
+
+emit_inline_binding_for_binding := {expr_idx: i32, input_len: i32} => (
+    if binding_should_materialize{} == 1 then (
+        1
+    ) else (
+        value_lookup := resolve_scalar_value_expr{expr_idx, input_len};
+        value_lookup |> match {
+            ScalarValueLookup::InputError => 0,
+            ScalarValueLookup::Missing => 1,
+            ScalarValueLookup::Value(value) => emit_inline_binding_entry{
+                binding_extract_state.name_start,
+                binding_extract_state.name_length,
+                value.value_tag,
+                value.value_i32
+            },
+            else => 0
+        }
     )
 );
 
@@ -1209,13 +1264,15 @@ finalize_output_payload := {} => (
     if lower_state.output_global_count == 0
         && lower_state.output_export_count == 0
         && lower_state.output_wrapper_count == 0
+        && lower_state.output_inline_binding_count == 0
     then (
         lower_state.output_len = 0;
         1
     ) else (
         lower_state.output_len = lower_state.output_global_count
             + lower_state.output_export_count
-            + lower_state.output_wrapper_count;
+            + lower_state.output_wrapper_count
+            + lower_state.output_inline_binding_count;
         1
     )
 );
@@ -1303,6 +1360,12 @@ parse_body_records := {root: i32, binding_count: i32, input_len: i32} => (
                         {}
                     );
 
+                    if output_ok == 1 && emit_inline_binding_for_binding{binding.expr, input_len} == 0 then (
+                        output_ok = 0;
+                    ) else (
+                        {}
+                    );
+
                     if body_ok == 1 && update_known_type_alias_for_binding{binding.expr, input_len} == 0 then (
                         body_ok = 0;
                     ) else if body_ok == 1 && update_known_scalar_alias_for_binding{binding.expr, input_len} == 0 then (
@@ -1355,6 +1418,12 @@ parse_body_records := {root: i32, binding_count: i32, input_len: i32} => (
                     {}
                 );
 
+                if output_ok == 1 && emit_inline_binding_for_binding{binding.expr, input_len} == 0 then (
+                    output_ok = 0;
+                ) else (
+                    {}
+                );
+
                 if body_ok == 1 && update_known_type_alias_for_binding{binding.expr, input_len} == 0 then (
                     body_ok = 0;
                 ) else if body_ok == 1 && update_known_scalar_alias_for_binding{binding.expr, input_len} == 0 then (
@@ -1401,6 +1470,7 @@ run_lower_context := {root: i32, binding_count: i32, input_len: i32} => (
     lower_state.output_global_count = 0;
     lower_state.output_export_count = 0;
     lower_state.output_wrapper_count = 0;
+    lower_state.output_inline_binding_count = 0;
     lower_state.lowering_unimplemented = 0;
 
     lower_state.input_magic_ok = if input_len >= 0 && input_len <= MAX_INPUT then 1 else 0;
@@ -1465,6 +1535,7 @@ run_lower_context := {root: i32, binding_count: i32, input_len: i32} => (
         lower_state.output_global_count = 0;
         lower_state.output_export_count = 0;
         lower_state.output_wrapper_count = 0;
+        lower_state.output_inline_binding_count = 0;
         lower_state.lowering_unimplemented = 0;
         lower_status_error{}
     ) else (
@@ -1544,6 +1615,10 @@ run_lower_context := {root: i32, binding_count: i32, input_len: i32} => (
     lower_state.output_wrapper_count
 );
 
+(export wasm) get_lower_output_inline_binding_count := {} => (
+    lower_state.output_inline_binding_count
+);
+
 (export wasm) get_lower_lowering_unimplemented := {} => (
     lower_state.lowering_unimplemented
 );
@@ -1610,5 +1685,21 @@ run_lower_context := {root: i32, binding_count: i32, input_len: i32} => (
 
 (export wasm) get_lower_output_wrapper_name_length := (idx: i32) => (
     if idx < 0 || idx >= lower_state.output_wrapper_count then -1 else output_wrappers(idx).name_length
+);
+
+(export wasm) get_lower_output_inline_binding_name_start := (idx: i32) => (
+    if idx < 0 || idx >= lower_state.output_inline_binding_count then -1 else output_inline_bindings(idx).name_start
+);
+
+(export wasm) get_lower_output_inline_binding_name_length := (idx: i32) => (
+    if idx < 0 || idx >= lower_state.output_inline_binding_count then -1 else output_inline_bindings(idx).name_length
+);
+
+(export wasm) get_lower_output_inline_binding_value_tag := (idx: i32) => (
+    if idx < 0 || idx >= lower_state.output_inline_binding_count then -1 else output_inline_bindings(idx).value_tag
+);
+
+(export wasm) get_lower_output_inline_binding_value_i32 := (idx: i32) => (
+    if idx < 0 || idx >= lower_state.output_inline_binding_count then -1 else output_inline_bindings(idx).value_i32
 );
 

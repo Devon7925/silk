@@ -525,14 +525,16 @@ fn decode_lowered_output(
     let export_count = call_required_i32_export(instance, store, "get_lower_output_export_count")?;
     let wrapper_count =
         call_required_i32_export(instance, store, "get_lower_output_wrapper_count")?;
+    let inline_binding_count =
+        call_required_i32_export(instance, store, "get_lower_output_inline_binding_count")?;
 
-    if global_count < 0 || export_count < 0 || wrapper_count < 0 {
+    if global_count < 0 || export_count < 0 || wrapper_count < 0 || inline_binding_count < 0 {
         return Err(Diagnostic::new(format!(
-            "Silk intermediate returned negative output counts (globals={global_count}, exports={export_count}, wrappers={wrapper_count})"
+            "Silk intermediate returned negative output counts (globals={global_count}, exports={export_count}, wrappers={wrapper_count}, inline_bindings={inline_binding_count})"
         )));
     }
 
-    if global_count == 0 && export_count == 0 && wrapper_count == 0 {
+    if global_count == 0 && export_count == 0 && wrapper_count == 0 && inline_binding_count == 0 {
         return Ok(IntermediateResult {
             functions: Vec::new(),
             globals: Vec::new(),
@@ -743,12 +745,68 @@ fn decode_lowered_output(
         });
     }
 
+    let get_inline_binding_name_start = required_i32_to_i32_export(
+        instance,
+        store,
+        "get_lower_output_inline_binding_name_start",
+    )?;
+    let get_inline_binding_name_length = required_i32_to_i32_export(
+        instance,
+        store,
+        "get_lower_output_inline_binding_name_length",
+    )?;
+    let get_inline_binding_value_tag = required_i32_to_i32_export(
+        instance,
+        store,
+        "get_lower_output_inline_binding_value_tag",
+    )?;
+    let get_inline_binding_value_i32 = required_i32_to_i32_export(
+        instance,
+        store,
+        "get_lower_output_inline_binding_value_i32",
+    )?;
+
+    let mut inline_bindings = HashMap::with_capacity(inline_binding_count as usize);
+    for idx in 0..inline_binding_count {
+        let name_start = get_inline_binding_name_start
+            .call(&mut *store, idx)
+            .map_err(|err| {
+                Diagnostic::new(format!(
+                    "Intermediate call `get_lower_output_inline_binding_name_start` failed: {err}"
+                ))
+            })?;
+        let name_length = get_inline_binding_name_length
+            .call(&mut *store, idx)
+            .map_err(|err| {
+                Diagnostic::new(format!(
+                    "Intermediate call `get_lower_output_inline_binding_name_length` failed: {err}"
+                ))
+            })?;
+        let name = decode_name_from_input(input_bytes, name_start, name_length)?;
+        let value_tag = get_inline_binding_value_tag
+            .call(&mut *store, idx)
+            .map_err(|err| {
+                Diagnostic::new(format!(
+                    "Intermediate call `get_lower_output_inline_binding_value_tag` failed: {err}"
+                ))
+            })?;
+        let value_i32 = get_inline_binding_value_i32
+            .call(&mut *store, idx)
+            .map_err(|err| {
+                Diagnostic::new(format!(
+                    "Intermediate call `get_lower_output_inline_binding_value_i32` failed: {err}"
+                ))
+            })?;
+        let value = decode_output_literal(value_tag, value_i32).map(IntermediateKind::Literal)?;
+        inline_bindings.insert(name, value);
+    }
+
     Ok(IntermediateResult {
         functions: Vec::new(),
         globals,
         exports,
         wrappers,
-        inline_bindings: HashMap::new(),
+        inline_bindings,
     })
 }
 
@@ -871,10 +929,14 @@ mod tests {
             .expect("wasm lowering should produce a result");
 
         assert_eq!(lowered.functions.len(), 0);
-        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 1);
         assert_eq!(lowered.globals.len(), 0);
         assert_eq!(lowered.exports.len(), 0);
         assert_eq!(lowered.wrappers.len(), 0);
+        assert!(matches!(
+            lowered.inline_bindings.get("x"),
+            Some(IntermediateKind::Literal(ExpressionLiteral::Number(1)))
+        ));
     }
 
     #[test]
@@ -936,9 +998,13 @@ mod tests {
 
         assert_eq!(lowered.functions.len(), 0);
         assert_eq!(lowered.wrappers.len(), 0);
-        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 1);
         assert_eq!(lowered.globals.len(), 1);
         assert_eq!(lowered.exports.len(), 1);
+        assert!(matches!(
+            lowered.inline_bindings.get("base"),
+            Some(IntermediateKind::Literal(ExpressionLiteral::Number(1)))
+        ));
 
         assert_eq!(lowered.globals[0].name, "answer");
         assert_eq!(lowered.globals[0].ty, IntermediateType::I32);
@@ -1056,10 +1122,14 @@ mod tests {
             .expect("wasm lowering should produce a result");
 
         assert_eq!(lowered.functions.len(), 0);
-        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 1);
         assert_eq!(lowered.globals.len(), 0);
         assert_eq!(lowered.exports.len(), 0);
         assert_eq!(lowered.wrappers.len(), 0);
+        assert!(matches!(
+            lowered.inline_bindings.get("answer"),
+            Some(IntermediateKind::Literal(ExpressionLiteral::Number(42)))
+        ));
     }
 
     #[test]
@@ -1156,9 +1226,13 @@ mod tests {
             .expect("wasm lowering should produce a result");
 
         assert_eq!(lowered.functions.len(), 0);
-        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 1);
         assert_eq!(lowered.globals.len(), 1);
         assert_eq!(lowered.exports.len(), 1);
+        assert!(matches!(
+            lowered.inline_bindings.get("base"),
+            Some(IntermediateKind::Literal(ExpressionLiteral::Number(42)))
+        ));
 
         assert_eq!(lowered.globals[0].name, "answer");
         assert_eq!(lowered.globals[0].ty, IntermediateType::I32);
@@ -1186,9 +1260,13 @@ mod tests {
             .expect("wasm lowering should produce a result");
 
         assert_eq!(lowered.functions.len(), 0);
-        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 1);
         assert_eq!(lowered.globals.len(), 1);
         assert_eq!(lowered.exports.len(), 1);
+        assert!(matches!(
+            lowered.inline_bindings.get("seed"),
+            Some(IntermediateKind::Literal(ExpressionLiteral::Number(255)))
+        ));
 
         assert_eq!(lowered.globals[0].name, "out");
         assert_eq!(lowered.globals[0].ty, IntermediateType::U8);
@@ -1229,6 +1307,27 @@ mod tests {
             lowered.is_none(),
             "function exports should still report unimplemented for now"
         );
+    }
+
+    #[test]
+    fn wasm_stage_lowers_inline_scalar_binding_without_materialized_outputs() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "base := 7; base";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.globals.len(), 0);
+        assert_eq!(lowered.exports.len(), 0);
+        assert_eq!(lowered.wrappers.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 1);
+        assert!(matches!(
+            lowered.inline_bindings.get("base"),
+            Some(IntermediateKind::Literal(ExpressionLiteral::Number(7)))
+        ));
     }
 
     fn interpreted_context(source: &str) -> Context {

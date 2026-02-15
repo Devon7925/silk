@@ -17,9 +17,9 @@ stays aligned across parser/interpreter/intermediate stages.
 
 ## Versions
 
-- `intermediate_stage_version() -> 6`
+- `intermediate_stage_version() -> 7`
 - `intermediate_payload_version() -> 6`
-- `intermediate_output_version() -> 2`
+- `intermediate_output_version() -> 3`
 
 ## Input ABI (AST, chainable)
 
@@ -41,15 +41,18 @@ Lowered output is written into struct slot arrays:
 - `(export wasm) mut output_globals: Box({OutputGlobalSlot; ...})`
 - `(export wasm) mut output_exports: Box({OutputExportSlot; ...})`
 - `(export wasm) mut output_wrappers: Box({OutputWrapperSlot; ...})`
+- `(export wasm) mut output_inline_bindings: Box({OutputInlineBindingSlot; ...})`
 
 Host reads counts and fields through getters:
 
 - `get_lower_output_global_count()`
 - `get_lower_output_export_count()`
 - `get_lower_output_wrapper_count()`
+- `get_lower_output_inline_binding_count()`
 - `get_lower_output_global_*`
 - `get_lower_output_export_*`
 - `get_lower_output_wrapper_*`
+- `get_lower_output_inline_binding_*`
 
 No output byte payload memory is used.
 
@@ -72,6 +75,8 @@ Error code export:
   - Example: `base := 42; (export wasm) answer := base` lowers to a concrete global/export entry.
   - Typed alias chains preserve scalar type tags where available (for example `Byte := u8; seed: Byte := 255; (export wasm) out := seed` keeps `out` as `u8`).
 - Scalar aliases are tracked via explicit slot tables (`KnownScalarAliasSlot`) and lookup enums (`ScalarValueLookup`) in stage memory.
+- Non-materialized scalar bindings are emitted in `inline_bindings` as literal `IntermediateKind` values.
+  - Example: `base := 42; (export wasm) answer := base` now lowers `base` into the inline-binding output table while still lowering `answer` as a global/export.
 - Wrap annotations no longer force an `unimplemented` result when no export source exists.
   - For inline literal bindings with only `(wrap ...)`, the stage emits no globals/exports/wrappers.
 - Wrappers are emitted for multi-target exports when a wrap target is present.
