@@ -9,13 +9,15 @@ This document tracks the current host/wasm contract for the silk-based intermedi
 - Build output: `binaries/intermediate.wasm`
 
 The intermediate stage now uses a single AST-memory ABI only.
-The host parses source with `parser.wasm`, runs `interpreter.wasm` on that AST, then copies
-`input` / `nodes` / `list_nodes` / `state` from interpreter memory into the intermediate module
+The host parses source with `parser.wasm`, copies
+`input` / `nodes` / `list_nodes` / `state` from parser memory into the intermediate module,
 and calls `lower_context(root)`.
+`interpreter.wasm` is still validated by the stage-readiness probe so the wasm toolchain contract
+stays aligned across parser/interpreter/intermediate stages.
 
 ## Versions
 
-- `intermediate_stage_version() -> 5`
+- `intermediate_stage_version() -> 6`
 - `intermediate_payload_version() -> 6`
 - `intermediate_output_version() -> 2`
 
@@ -66,16 +68,20 @@ Error code export:
 - Literal globals are lowered for bindings that are syntactically materialized in AST (`mut` or `export` annotation).
 - Global type emission uses AST information (`: u8` hints and char literals map to `u8`; otherwise `i32`).
 - Scalar type aliases are recognized for annotation hints when they resolve to `u8` / `i32` / `bool`.
+- Scalar value alias chains are now lowered for materialized globals.
+  - Example: `base := 42; (export wasm) answer := base` lowers to a concrete global/export entry.
+  - Typed alias chains preserve scalar type tags where available (for example `Byte := u8; seed: Byte := 255; (export wasm) out := seed` keeps `out` as `u8`).
+- Scalar aliases are tracked via explicit slot tables (`KnownScalarAliasSlot`) and lookup enums (`ScalarValueLookup`) in stage memory.
 - Wrap annotations no longer force an `unimplemented` result when no export source exists.
   - For inline literal bindings with only `(wrap ...)`, the stage emits no globals/exports/wrappers.
 - Wrappers are emitted for multi-target exports when a wrap target is present.
   - Source target selection is deterministic from the export mask priority (`js`, then `wasm`, then `wgsl`).
-- The stage still reports `unimplemented` for unsupported value shapes (for example non-literal mutable globals and function exports/wrappers).
+- The stage still reports `unimplemented` for unsupported value shapes (for example mutable globals with non-scalar expressions and function exports/wrappers).
 - Bindings with unsupported pattern extraction are now treated as `unimplemented` instead of hard parse failure, preserving fallback behavior.
 
-## Debug Exports
+## State Getters
 
-The stage keeps debug/state getters for header/body/output counters, including:
+The stage exposes state getters for header/body/output counters, including:
 
 - `get_lower_last_scope_count`
 - `get_lower_last_binding_count`
@@ -86,8 +92,13 @@ The stage keeps debug/state getters for header/body/output counters, including:
 - `get_lower_output_*_count`
 - `get_lower_lowering_unimplemented`
 
+Output rows are read through:
+
+- `get_lower_output_global_*`
+- `get_lower_output_export_*`
+- `get_lower_output_wrapper_*`
+
 ## Host Flags
 
 - `SILK_DISABLE_WASM_INTERMEDIATE=1`
 - `SILK_WASM_INTERMEDIATE_STRICT=1`
-- `SILK_DEBUG_WASM_INTERMEDIATE=1`

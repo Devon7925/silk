@@ -93,12 +93,6 @@ pub(crate) fn lower_context(
             if wasm_intermediate_strict_mode() {
                 return Err(err);
             }
-            if std::env::var_os("SILK_DEBUG_WASM_INTERMEDIATE").is_some() {
-                eprintln!(
-                    "SILK_DEBUG_WASM_INTERMEDIATE fallback_to_rust reason={}",
-                    err.message
-                );
-            }
             Ok((
                 intermediate::context_to_intermediate(context),
                 IntermediateLoweringBackend::RustFallback,
@@ -122,16 +116,10 @@ fn lower_with_wasm(source: &str) -> Result<Option<IntermediateResult>, Diagnosti
 
     let engine = wasm_engine()?;
     let parser_module = parser_module()?;
-    let interpreter_module = interpreter_module()?;
     let module = intermediate_module()?;
     let mut store = Store::new(engine, ());
-    let parser_instance = Instance::new(&mut store, parser_module, &[]).map_err(|err| {
-        Diagnostic::new(format!("Failed to instantiate parser wasm: {err}"))
-    })?;
-    let interpreter_instance =
-        Instance::new(&mut store, interpreter_module, &[]).map_err(|err| {
-            Diagnostic::new(format!("Failed to instantiate interpreter wasm: {err}"))
-        })?;
+    let parser_instance = Instance::new(&mut store, parser_module, &[])
+        .map_err(|err| Diagnostic::new(format!("Failed to instantiate parser wasm: {err}")))?;
     let instance = Instance::new(&mut store, module, &[]).map_err(|err| {
         Diagnostic::new(format!("Failed to instantiate intermediate wasm: {err}"))
     })?;
@@ -151,92 +139,31 @@ fn lower_with_wasm(source: &str) -> Result<Option<IntermediateResult>, Diagnosti
         .map_err(|err| Diagnostic::new(format!("Parser call `get_state_error` failed: {err}")))?;
     if parse_error != -1 {
         let start = parse_error.max(0) as usize;
-        return Err(Diagnostic::new("Parse error while preparing intermediate lowering")
-            .with_span(SourceSpan::new(start.min(source.len()), 1)));
+        return Err(
+            Diagnostic::new("Parse error while preparing intermediate lowering")
+                .with_span(SourceSpan::new(start.min(source.len()), 1)),
+        );
     }
 
-    copy_named_memory(&mut store, &parser_instance, &interpreter_instance, "input")?;
-    copy_named_memory(&mut store, &parser_instance, &interpreter_instance, "nodes")?;
-    copy_named_memory(
-        &mut store,
-        &parser_instance,
-        &interpreter_instance,
-        "list_nodes",
-    )?;
-    copy_named_memory(&mut store, &parser_instance, &interpreter_instance, "state")?;
-
-    let interpret_func = interpreter_instance
-        .get_typed_func::<i32, i32>(&mut store, "interpret")
-        .map_err(|err| Diagnostic::new(format!("Missing interpreter export `interpret`: {err}")))?;
-    let _result = interpret_func
-        .call(&mut store, root)
-        .map_err(|err| Diagnostic::new(format!("Interpreter call `interpret` failed: {err}")))?;
-    let interp_error = interpreter_instance
-        .get_typed_func::<(), i32>(&mut store, "get_interp_error")
-        .map_err(|err| {
-            Diagnostic::new(format!(
-                "Missing interpreter export `get_interp_error`: {err}"
-            ))
-        })?
-        .call(&mut store, ())
-        .map_err(|err| Diagnostic::new(format!("Interpreter call `get_interp_error` failed: {err}")))?;
-    if interp_error != -1 {
-        let interp_error_code = interpreter_instance
-            .get_typed_func::<(), i32>(&mut store, "get_interp_error_code")
-            .ok()
-            .and_then(|func| func.call(&mut store, ()).ok())
-            .unwrap_or(0);
-        let start = interp_error.max(0) as usize;
-        return Err(Diagnostic::new(format!(
-            "Interpreter error while preparing intermediate lowering: {} (code {interp_error_code})",
-            interpreter_error_code_message(interp_error_code)
-        ))
-        .with_span(SourceSpan::new(start.min(source.len()), 1)));
-    }
-
-    copy_named_memory(&mut store, &interpreter_instance, &instance, "input")?;
-    copy_named_memory(&mut store, &interpreter_instance, &instance, "nodes")?;
-    copy_named_memory(
-        &mut store,
-        &interpreter_instance,
-        &instance,
-        "list_nodes",
-    )?;
-    copy_named_memory(&mut store, &interpreter_instance, &instance, "state")?;
+    copy_named_memory(&mut store, &parser_instance, &instance, "input")?;
+    copy_named_memory(&mut store, &parser_instance, &instance, "nodes")?;
+    copy_named_memory(&mut store, &parser_instance, &instance, "list_nodes")?;
+    copy_named_memory(&mut store, &parser_instance, &instance, "state")?;
 
     let lower_func = instance
         .get_typed_func::<i32, i32>(&mut store, "lower_context")
         .map_err(|err| {
-            Diagnostic::new(format!("Missing intermediate export `lower_context`: {err}"))
+            Diagnostic::new(format!(
+                "Missing intermediate export `lower_context`: {err}"
+            ))
         })?;
-    let status = lower_func
-        .call(&mut store, root)
-        .map_err(|err| {
-            Diagnostic::new(format!("Intermediate call `lower_context` failed: {err}"))
-        })?;
+    let status = lower_func.call(&mut store, root).map_err(|err| {
+        Diagnostic::new(format!("Intermediate call `lower_context` failed: {err}"))
+    })?;
 
     match status {
         LOWER_STATUS_OK => {
             let lowered = decode_lowered_output(&mut store, &instance, source.as_bytes())?;
-            if std::env::var_os("SILK_DEBUG_WASM_INTERMEDIATE").is_some() {
-                eprintln!(
-                    "SILK_DEBUG_WASM_INTERMEDIATE status=ok root={root} input_len={}",
-                    source.len()
-                );
-                log_optional_debug_export(&instance, &mut store, "get_lower_header_ok");
-                log_optional_debug_export(
-                    &instance,
-                    &mut store,
-                    "get_lower_header_annotated_binding_count",
-                );
-                log_optional_debug_export(&instance, &mut store, "get_lower_output_len");
-                log_optional_debug_export(&instance, &mut store, "get_lower_parsed_binding_count");
-                log_optional_debug_export(
-                    &instance,
-                    &mut store,
-                    "get_lower_parsed_annotated_binding_count",
-                );
-            }
             Ok(Some(lowered))
         }
         LOWER_STATUS_UNIMPLEMENTED => Ok(None),
@@ -246,34 +173,6 @@ fn lower_with_wasm(source: &str) -> Result<Option<IntermediateResult>, Diagnosti
                 .ok()
                 .and_then(|func| func.call(&mut store, ()).ok())
                 .unwrap_or(0);
-            if std::env::var_os("SILK_DEBUG_WASM_INTERMEDIATE").is_some() {
-                eprintln!(
-                    "SILK_DEBUG_WASM_INTERMEDIATE status=error code={error_code} root={root} input_len={}",
-                    source.len()
-                );
-                log_optional_debug_export(&instance, &mut store, "get_lower_input_magic_ok");
-                log_optional_debug_export(&instance, &mut store, "get_lower_header_version");
-                log_optional_debug_export(&instance, &mut store, "get_lower_header_scope_count");
-                log_optional_debug_export(&instance, &mut store, "get_lower_header_binding_count");
-                log_optional_debug_export(
-                    &instance,
-                    &mut store,
-                    "get_lower_header_annotated_binding_count",
-                );
-                log_optional_debug_export(&instance, &mut store, "get_lower_header_ok");
-                log_optional_debug_export(&instance, &mut store, "get_lower_parsed_binding_count");
-                log_optional_debug_export(
-                    &instance,
-                    &mut store,
-                    "get_lower_parsed_annotated_binding_count",
-                );
-                log_optional_debug_export(&instance, &mut store, "get_lower_parse_cursor");
-                log_optional_debug_export(&instance, &mut store, "get_lower_body_ok");
-                log_optional_debug_export(&instance, &mut store, "get_lower_last_scope_count");
-                log_optional_debug_export(&instance, &mut store, "get_lower_last_binding_count");
-                log_optional_debug_export(&instance, &mut store, "get_lower_last_input_len");
-                log_optional_debug_export(&instance, &mut store, "get_lower_output_wrapper_count");
-            }
             Err(Diagnostic::new(format!(
                 "Silk intermediate wasm reported an error: {} (code {error_code})",
                 lower_error_code_message(error_code)
@@ -299,12 +198,10 @@ fn probe_stage_ready() -> Result<bool, Diagnostic> {
     let interpreter = interpreter_module()?;
     let module = intermediate_module()?;
     let mut store = Store::new(engine, ());
-    let _parser_instance = Instance::new(&mut store, parser, &[]).map_err(|err| {
-        Diagnostic::new(format!("Failed to instantiate parser wasm: {err}"))
-    })?;
-    let interpreter_instance = Instance::new(&mut store, interpreter, &[]).map_err(|err| {
-        Diagnostic::new(format!("Failed to instantiate interpreter wasm: {err}"))
-    })?;
+    let _parser_instance = Instance::new(&mut store, parser, &[])
+        .map_err(|err| Diagnostic::new(format!("Failed to instantiate parser wasm: {err}")))?;
+    let interpreter_instance = Instance::new(&mut store, interpreter, &[])
+        .map_err(|err| Diagnostic::new(format!("Failed to instantiate interpreter wasm: {err}")))?;
     let instance = Instance::new(&mut store, module, &[]).map_err(|err| {
         Diagnostic::new(format!("Failed to instantiate intermediate wasm: {err}"))
     })?;
@@ -564,23 +461,6 @@ fn ensure_no_trailing_input(
     Err(Diagnostic::new(message).with_span(span))
 }
 
-fn log_optional_debug_export(instance: &Instance, store: &mut Store<()>, export: &str) {
-    if let Some(value) = call_optional_i32_export(instance, store, export) {
-        eprintln!("SILK_DEBUG_WASM_INTERMEDIATE {export}={value}");
-    }
-}
-
-fn call_optional_i32_export(
-    instance: &Instance,
-    store: &mut Store<()>,
-    export: &str,
-) -> Option<i32> {
-    let func = instance
-        .get_typed_func::<(), i32>(&mut *store, export)
-        .ok()?;
-    func.call(&mut *store, ()).ok()
-}
-
 fn write_input_payload(
     store: &mut Store<()>,
     instance: &Instance,
@@ -662,16 +542,10 @@ fn decode_lowered_output(
         });
     }
 
-    let get_global_name_start = required_i32_to_i32_export(
-        instance,
-        store,
-        "get_lower_output_global_name_start",
-    )?;
-    let get_global_name_length = required_i32_to_i32_export(
-        instance,
-        store,
-        "get_lower_output_global_name_length",
-    )?;
+    let get_global_name_start =
+        required_i32_to_i32_export(instance, store, "get_lower_output_global_name_start")?;
+    let get_global_name_length =
+        required_i32_to_i32_export(instance, store, "get_lower_output_global_name_length")?;
     let get_global_type_tag =
         required_i32_to_i32_export(instance, store, "get_lower_output_global_type_tag")?;
     let get_global_value_tag =
@@ -681,16 +555,20 @@ fn decode_lowered_output(
 
     let mut globals = Vec::with_capacity(global_count as usize);
     for idx in 0..global_count {
-        let name_start = get_global_name_start.call(&mut *store, idx).map_err(|err| {
-            Diagnostic::new(format!(
-                "Intermediate call `get_lower_output_global_name_start` failed: {err}"
-            ))
-        })?;
-        let name_length = get_global_name_length.call(&mut *store, idx).map_err(|err| {
-            Diagnostic::new(format!(
-                "Intermediate call `get_lower_output_global_name_length` failed: {err}"
-            ))
-        })?;
+        let name_start = get_global_name_start
+            .call(&mut *store, idx)
+            .map_err(|err| {
+                Diagnostic::new(format!(
+                    "Intermediate call `get_lower_output_global_name_start` failed: {err}"
+                ))
+            })?;
+        let name_length = get_global_name_length
+            .call(&mut *store, idx)
+            .map_err(|err| {
+                Diagnostic::new(format!(
+                    "Intermediate call `get_lower_output_global_name_length` failed: {err}"
+                ))
+            })?;
         let name = decode_name_from_input(input_bytes, name_start, name_length)?;
         let ty_tag = get_global_type_tag.call(&mut *store, idx).map_err(|err| {
             Diagnostic::new(format!(
@@ -726,11 +604,13 @@ fn decode_lowered_output(
 
     let mut exports = Vec::with_capacity(export_count as usize);
     for idx in 0..export_count {
-        let target_tag = get_export_target_tag.call(&mut *store, idx).map_err(|err| {
-            Diagnostic::new(format!(
-                "Intermediate call `get_lower_output_export_target_tag` failed: {err}"
-            ))
-        })?;
+        let target_tag = get_export_target_tag
+            .call(&mut *store, idx)
+            .map_err(|err| {
+                Diagnostic::new(format!(
+                    "Intermediate call `get_lower_output_export_target_tag` failed: {err}"
+                ))
+            })?;
         let export_type_tag = get_export_type_tag.call(&mut *store, idx).map_err(|err| {
             Diagnostic::new(format!(
                 "Intermediate call `get_lower_output_export_type_tag` failed: {err}"
@@ -741,16 +621,20 @@ fn decode_lowered_output(
                 "Intermediate call `get_lower_output_export_index` failed: {err}"
             ))
         })? as usize;
-        let name_start = get_export_name_start.call(&mut *store, idx).map_err(|err| {
-            Diagnostic::new(format!(
-                "Intermediate call `get_lower_output_export_name_start` failed: {err}"
-            ))
-        })?;
-        let name_length = get_export_name_length.call(&mut *store, idx).map_err(|err| {
-            Diagnostic::new(format!(
-                "Intermediate call `get_lower_output_export_name_length` failed: {err}"
-            ))
-        })?;
+        let name_start = get_export_name_start
+            .call(&mut *store, idx)
+            .map_err(|err| {
+                Diagnostic::new(format!(
+                    "Intermediate call `get_lower_output_export_name_start` failed: {err}"
+                ))
+            })?;
+        let name_length = get_export_name_length
+            .call(&mut *store, idx)
+            .map_err(|err| {
+                Diagnostic::new(format!(
+                    "Intermediate call `get_lower_output_export_name_length` failed: {err}"
+                ))
+            })?;
         let name = decode_name_from_input(input_bytes, name_start, name_length)?;
 
         let target = decode_output_target(target_tag)?;
@@ -779,16 +663,10 @@ fn decode_lowered_output(
         store,
         "get_lower_output_wrapper_source_target_tag",
     )?;
-    let get_wrapper_wrap_target_tag = required_i32_to_i32_export(
-        instance,
-        store,
-        "get_lower_output_wrapper_wrap_target_tag",
-    )?;
-    let get_wrapper_export_type_tag = required_i32_to_i32_export(
-        instance,
-        store,
-        "get_lower_output_wrapper_export_type_tag",
-    )?;
+    let get_wrapper_wrap_target_tag =
+        required_i32_to_i32_export(instance, store, "get_lower_output_wrapper_wrap_target_tag")?;
+    let get_wrapper_export_type_tag =
+        required_i32_to_i32_export(instance, store, "get_lower_output_wrapper_export_type_tag")?;
     let get_wrapper_index =
         required_i32_to_i32_export(instance, store, "get_lower_output_wrapper_index")?;
     let get_wrapper_name_start =
@@ -805,31 +683,41 @@ fn decode_lowered_output(
                     "Intermediate call `get_lower_output_wrapper_source_target_tag` failed: {err}"
                 ))
             })?;
-        let wrap_target_tag = get_wrapper_wrap_target_tag.call(&mut *store, idx).map_err(|err| {
-            Diagnostic::new(format!(
-                "Intermediate call `get_lower_output_wrapper_wrap_target_tag` failed: {err}"
-            ))
-        })?;
-        let export_type_tag = get_wrapper_export_type_tag.call(&mut *store, idx).map_err(|err| {
-            Diagnostic::new(format!(
-                "Intermediate call `get_lower_output_wrapper_export_type_tag` failed: {err}"
-            ))
-        })?;
+        let wrap_target_tag =
+            get_wrapper_wrap_target_tag
+                .call(&mut *store, idx)
+                .map_err(|err| {
+                    Diagnostic::new(format!(
+                        "Intermediate call `get_lower_output_wrapper_wrap_target_tag` failed: {err}"
+                    ))
+                })?;
+        let export_type_tag =
+            get_wrapper_export_type_tag
+                .call(&mut *store, idx)
+                .map_err(|err| {
+                    Diagnostic::new(format!(
+                        "Intermediate call `get_lower_output_wrapper_export_type_tag` failed: {err}"
+                    ))
+                })?;
         let item_index = get_wrapper_index.call(&mut *store, idx).map_err(|err| {
             Diagnostic::new(format!(
                 "Intermediate call `get_lower_output_wrapper_index` failed: {err}"
             ))
         })? as usize;
-        let name_start = get_wrapper_name_start.call(&mut *store, idx).map_err(|err| {
-            Diagnostic::new(format!(
-                "Intermediate call `get_lower_output_wrapper_name_start` failed: {err}"
-            ))
-        })?;
-        let name_length = get_wrapper_name_length.call(&mut *store, idx).map_err(|err| {
-            Diagnostic::new(format!(
-                "Intermediate call `get_lower_output_wrapper_name_length` failed: {err}"
-            ))
-        })?;
+        let name_start = get_wrapper_name_start
+            .call(&mut *store, idx)
+            .map_err(|err| {
+                Diagnostic::new(format!(
+                    "Intermediate call `get_lower_output_wrapper_name_start` failed: {err}"
+                ))
+            })?;
+        let name_length = get_wrapper_name_length
+            .call(&mut *store, idx)
+            .map_err(|err| {
+                Diagnostic::new(format!(
+                    "Intermediate call `get_lower_output_wrapper_name_length` failed: {err}"
+                ))
+            })?;
         let name = decode_name_from_input(input_bytes, name_start, name_length)?;
 
         let source_target = decode_output_target(source_target_tag)?;
@@ -916,22 +804,6 @@ fn lower_error_code_message(code: i32) -> &'static str {
         6 => "ast body count mismatch",
         7 => "output encoding failed",
         _ => "unknown lower error",
-    }
-}
-
-fn interpreter_error_code_message(code: i32) -> &'static str {
-    match code {
-        0 => "none",
-        1 => "generic interpreter error",
-        2 => "array index out of range",
-        3 => "wrap requires exactly one export target",
-        4 => "wrap global only supports wasm-to-js",
-        5 => "unbound identifier",
-        6 => "if branch type mismatch",
-        7 => "match had no matching branch",
-        8 => "missing field",
-        9 => "trait missing field",
-        _ => "unknown interpreter error",
     }
 }
 
@@ -1274,6 +1146,66 @@ mod tests {
     }
 
     #[test]
+    fn wasm_stage_lowers_exported_literal_identifier_alias() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "base := 42; (export wasm) answer := base; answer";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+
+        assert_eq!(lowered.globals[0].name, "answer");
+        assert_eq!(lowered.globals[0].ty, IntermediateType::I32);
+        assert!(matches!(
+            lowered.globals[0].value,
+            IntermediateKind::Literal(ExpressionLiteral::Number(42))
+        ));
+        assert_eq!(lowered.exports[0].target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.exports[0].name, "answer");
+        assert_eq!(
+            lowered.exports[0].export_type,
+            IntermediateExportType::Global
+        );
+        assert_eq!(lowered.exports[0].index, 0);
+    }
+
+    #[test]
+    fn wasm_stage_preserves_u8_type_through_scalar_alias_chain() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "Byte := u8; seed: Byte := 255; (export wasm) out := seed; out";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+
+        assert_eq!(lowered.globals[0].name, "out");
+        assert_eq!(lowered.globals[0].ty, IntermediateType::U8);
+        assert!(matches!(
+            lowered.globals[0].value,
+            IntermediateKind::Literal(ExpressionLiteral::Number(255))
+        ));
+        assert_eq!(lowered.exports[0].target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.exports[0].name, "out");
+        assert_eq!(
+            lowered.exports[0].export_type,
+            IntermediateExportType::Global
+        );
+        assert_eq!(lowered.exports[0].index, 0);
+    }
+
+    #[test]
     fn wasm_stage_reports_unimplemented_for_non_literal_mut_global() {
         if !wasm_stage_available() {
             return;
@@ -1309,15 +1241,11 @@ mod tests {
     fn wasm_stage_available() -> bool {
         match stage_ready() {
             Ok(true) => true,
-            Ok(false) => {
-                eprintln!("skipping wasm-stage test: stage is not ready");
-                false
-            }
-            Err(err) => {
-                eprintln!("skipping wasm-stage test: {}", err.message);
-                false
-            }
+            Ok(false) => panic!("wasm-stage test requires the stage to be ready"),
+            Err(err) => panic!(
+                "wasm-stage test requires the stage to be ready: {}",
+                err.message
+            ),
         }
     }
-
 }
