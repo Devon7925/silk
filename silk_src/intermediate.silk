@@ -7,8 +7,11 @@ MAX_OUTPUT_GLOBALS := 4096;
 MAX_OUTPUT_EXPORTS := 12288;
 MAX_OUTPUT_WRAPPERS := 12288;
 MAX_OUTPUT_INLINE_BINDINGS := 8192;
+MAX_OUTPUT_VALUES := 65536;
+MAX_OUTPUT_VALUE_FIELDS := 131072;
 MAX_KNOWN_TYPE_ALIASES := 2048;
 MAX_KNOWN_SCALAR_ALIASES := 2048;
+MAX_KNOWN_VALUE_ALIASES := 8192;
 
 StringRef := types.StringRef;
 TargetLiteral := types.TargetLiteral;
@@ -43,8 +46,15 @@ OUTPUT_TARGET_WGSL := types.TARGET_WGSL;
 OUTPUT_EXPORT_TYPE_FUNCTION := 0;
 OUTPUT_EXPORT_TYPE_GLOBAL := 1;
 
+OUTPUT_GLOBAL_TYPE_INFER := -1;
 OUTPUT_GLOBAL_TYPE_I32 := 0;
 OUTPUT_GLOBAL_TYPE_U8 := 1;
+
+OUTPUT_VALUE_KIND_UNKNOWN := 0;
+OUTPUT_VALUE_KIND_NUMBER := 1;
+OUTPUT_VALUE_KIND_BOOLEAN := 2;
+OUTPUT_VALUE_KIND_CHAR := 3;
+OUTPUT_VALUE_KIND_STRUCT := 4;
 
 LowerStatus := enum {
     Ok = {},
@@ -81,6 +91,7 @@ OutputGlobalSlot := {
     ty_tag = i32,
     value_tag = i32,
     value_i32 = i32,
+    value_ref = i32,
 };
 
 OutputExportSlot := {
@@ -105,6 +116,22 @@ OutputInlineBindingSlot := {
     name_length = i32,
     value_tag = i32,
     value_i32 = i32,
+    value_ref = i32,
+};
+
+OutputValueSlot := {
+    kind_tag = i32,
+    value_i32 = i32,
+    name_start = i32,
+    name_length = i32,
+    item_start = i32,
+    item_count = i32,
+};
+
+OutputValueFieldSlot := {
+    name_start = i32,
+    name_length = i32,
+    value_ref = i32,
 };
 
 EMPTY_OUTPUT_GLOBAL_SLOT := {
@@ -113,6 +140,7 @@ EMPTY_OUTPUT_GLOBAL_SLOT := {
     ty_tag = 0,
     value_tag = 0,
     value_i32 = 0,
+    value_ref = -1,
 };
 
 EMPTY_OUTPUT_EXPORT_SLOT := {
@@ -137,6 +165,22 @@ EMPTY_OUTPUT_INLINE_BINDING_SLOT := {
     name_length = 0,
     value_tag = VALUE_TAG_UNKNOWN,
     value_i32 = 0,
+    value_ref = -1,
+};
+
+EMPTY_OUTPUT_VALUE_SLOT := {
+    kind_tag = OUTPUT_VALUE_KIND_UNKNOWN,
+    value_i32 = 0,
+    name_start = 0,
+    name_length = 0,
+    item_start = 0,
+    item_count = 0,
+};
+
+EMPTY_OUTPUT_VALUE_FIELD_SLOT := {
+    name_start = 0,
+    name_length = 0,
+    value_ref = -1,
 };
 
 lower_status_ok := {} => (
@@ -188,7 +232,7 @@ lower_error_output_encode_failed := {} => (
 );
 
 (export wasm) intermediate_output_version := {} => (
-    3
+    4
 );
 
 (export wasm) input: Box({u8; MAX_INPUT}) := {0; MAX_INPUT};
@@ -200,6 +244,8 @@ lower_error_output_encode_failed := {} => (
 (export wasm) mut output_exports: Box({OutputExportSlot; MAX_OUTPUT_EXPORTS}) := {EMPTY_OUTPUT_EXPORT_SLOT; MAX_OUTPUT_EXPORTS};
 (export wasm) mut output_wrappers: Box({OutputWrapperSlot; MAX_OUTPUT_WRAPPERS}) := {EMPTY_OUTPUT_WRAPPER_SLOT; MAX_OUTPUT_WRAPPERS};
 (export wasm) mut output_inline_bindings: Box({OutputInlineBindingSlot; MAX_OUTPUT_INLINE_BINDINGS}) := {EMPTY_OUTPUT_INLINE_BINDING_SLOT; MAX_OUTPUT_INLINE_BINDINGS};
+(export wasm) mut output_values: Box({OutputValueSlot; MAX_OUTPUT_VALUES}) := {EMPTY_OUTPUT_VALUE_SLOT; MAX_OUTPUT_VALUES};
+(export wasm) mut output_value_fields: Box({OutputValueFieldSlot; MAX_OUTPUT_VALUE_FIELDS}) := {EMPTY_OUTPUT_VALUE_FIELD_SLOT; MAX_OUTPUT_VALUE_FIELDS};
 
 LowerState := {
     error_code = i32,
@@ -221,6 +267,8 @@ LowerState := {
     output_export_count = i32,
     output_wrapper_count = i32,
     output_inline_binding_count = i32,
+    output_value_count = i32,
+    output_value_field_count = i32,
     lowering_unimplemented = i32,
 };
 
@@ -244,6 +292,8 @@ LowerState := {
     output_export_count = 0,
     output_wrapper_count = 0,
     output_inline_binding_count = 0,
+    output_value_count = 0,
+    output_value_field_count = 0,
     lowering_unimplemented = 0,
 };
 
@@ -274,6 +324,7 @@ KnownTypeAliasSlot := {
 BindingLookupState := {
     type_alias_count = i32,
     scalar_alias_count = i32,
+    value_alias_count = i32,
 };
 
 ScalarValue := {
@@ -286,6 +337,14 @@ ScalarValueLookup := enum {
     Missing = {},
     Value = ScalarValue,
     InputError = {},
+};
+
+LoweredValueLookup := enum {
+    Missing = {},
+    Scalar = ScalarValue,
+    ValueRef = i32,
+    InputError = {},
+    OutputError = {},
 };
 
 EMPTY_KNOWN_TYPE_ALIAS_SLOT := {
@@ -310,6 +369,24 @@ EMPTY_KNOWN_SCALAR_ALIAS_SLOT := {
     value_type_tag = INPUT_VALUE_TYPE_UNKNOWN,
 };
 
+KnownValueAliasSlot := {
+    name_start = i32,
+    name_length = i32,
+    value_tag = i32,
+    value_i32 = i32,
+    value_type_tag = i32,
+    value_ref = i32,
+};
+
+EMPTY_KNOWN_VALUE_ALIAS_SLOT := {
+    name_start = 0,
+    name_length = 0,
+    value_tag = VALUE_TAG_UNKNOWN,
+    value_i32 = 0,
+    value_type_tag = INPUT_VALUE_TYPE_UNKNOWN,
+    value_ref = -1,
+};
+
 (export wasm) mut annotation_state: Box(AnnotationState) := {
     is_mut = 0,
     target_mask = 0,
@@ -329,12 +406,14 @@ EMPTY_KNOWN_SCALAR_ALIAS_SLOT := {
 (export wasm) mut binding_lookup_state: Box(BindingLookupState) := {
     type_alias_count = 0,
     scalar_alias_count = 0,
+    value_alias_count = 0,
 };
 (export wasm) mut known_type_aliases: Box({KnownTypeAliasSlot; MAX_KNOWN_TYPE_ALIASES}) := {EMPTY_KNOWN_TYPE_ALIAS_SLOT; MAX_KNOWN_TYPE_ALIASES};
 (export wasm) mut known_scalar_aliases: Box({KnownScalarAliasSlot; MAX_KNOWN_SCALAR_ALIASES}) := {EMPTY_KNOWN_SCALAR_ALIAS_SLOT; MAX_KNOWN_SCALAR_ALIASES};
+(export wasm) mut known_value_aliases: Box({KnownValueAliasSlot; MAX_KNOWN_VALUE_ALIASES}) := {EMPTY_KNOWN_VALUE_ALIAS_SLOT; MAX_KNOWN_VALUE_ALIASES};
 
 (export wasm) intermediate_stage_version := {} => (
-    7
+    8
 );
 
 target_mask_has := {mask: i32, bit: i32} => (
@@ -724,6 +803,7 @@ safe_name_bounds := {start: i32, length: i32, input_len: i32} => (
 reset_binding_lookup_state := {} => (
     binding_lookup_state.type_alias_count = 0;
     binding_lookup_state.scalar_alias_count = 0;
+    binding_lookup_state.value_alias_count = 0;
     1
 );
 
@@ -921,6 +1001,106 @@ lookup_known_scalar_alias := {name_start: i32, name_length: i32, input_len: i32}
     )
 );
 
+find_known_value_alias_index := {name_start: i32, name_length: i32, input_len: i32} => (
+    mut idx := 0;
+    mut found := -1;
+    while idx < binding_lookup_state.value_alias_count && found == -1 do (
+        if input_spans_equal{
+            name_start,
+            name_length,
+            known_value_aliases(idx).name_start,
+            known_value_aliases(idx).name_length,
+            input_len
+        } == 1 then (
+            found = idx;
+        ) else (
+            {}
+        );
+        idx = idx + 1;
+        {}
+    );
+    found
+);
+
+set_known_value_alias := {
+    name_start: i32,
+    name_length: i32,
+    value_tag: i32,
+    value_i32: i32,
+    value_type_tag: i32,
+    value_ref: i32,
+    input_len: i32
+} => (
+    existing := find_known_value_alias_index{name_start, name_length, input_len};
+    if existing >= 0 then (
+        known_value_aliases(existing).name_start = name_start;
+        known_value_aliases(existing).name_length = name_length;
+        known_value_aliases(existing).value_tag = value_tag;
+        known_value_aliases(existing).value_i32 = value_i32;
+        known_value_aliases(existing).value_type_tag = value_type_tag;
+        known_value_aliases(existing).value_ref = value_ref;
+        1
+    ) else (
+        idx := binding_lookup_state.value_alias_count;
+        if idx < 0 || idx >= MAX_KNOWN_VALUE_ALIASES then 0 else (
+            known_value_aliases(idx).name_start = name_start;
+            known_value_aliases(idx).name_length = name_length;
+            known_value_aliases(idx).value_tag = value_tag;
+            known_value_aliases(idx).value_i32 = value_i32;
+            known_value_aliases(idx).value_type_tag = value_type_tag;
+            known_value_aliases(idx).value_ref = value_ref;
+            binding_lookup_state.value_alias_count = idx + 1;
+            1
+        )
+    )
+);
+
+clear_known_value_alias := {name_start: i32, name_length: i32, input_len: i32} => (
+    idx := find_known_value_alias_index{name_start, name_length, input_len};
+    if idx < 0 then (
+        1
+    ) else (
+        last := binding_lookup_state.value_alias_count - 1;
+        if last < 0 then (
+            binding_lookup_state.value_alias_count = 0;
+            1
+        ) else (
+            if idx != last then (
+                known_value_aliases(idx).name_start = known_value_aliases(last).name_start;
+                known_value_aliases(idx).name_length = known_value_aliases(last).name_length;
+                known_value_aliases(idx).value_tag = known_value_aliases(last).value_tag;
+                known_value_aliases(idx).value_i32 = known_value_aliases(last).value_i32;
+                known_value_aliases(idx).value_type_tag = known_value_aliases(last).value_type_tag;
+                known_value_aliases(idx).value_ref = known_value_aliases(last).value_ref;
+            ) else (
+                {}
+            );
+            binding_lookup_state.value_alias_count = last;
+            1
+        )
+    )
+);
+
+lookup_known_value_alias := {name_start: i32, name_length: i32, input_len: i32} => (
+    if safe_name_bounds{name_start, name_length, input_len} == 0 then LoweredValueLookup::InputError
+    else (
+        idx := find_known_value_alias_index{name_start, name_length, input_len};
+        if idx < 0 then (
+            LoweredValueLookup::Missing
+        ) else if known_value_aliases(idx).value_ref >= 0 then (
+            LoweredValueLookup::ValueRef(known_value_aliases(idx).value_ref)
+        ) else if known_value_aliases(idx).value_tag != VALUE_TAG_UNKNOWN then (
+            LoweredValueLookup::Scalar({
+                value_tag = known_value_aliases(idx).value_tag,
+                value_i32 = known_value_aliases(idx).value_i32,
+                value_type_tag = known_value_aliases(idx).value_type_tag
+            })
+        ) else (
+            LoweredValueLookup::Missing
+        )
+    )
+);
+
 resolve_scalar_type_expr := {expr_idx: i32, input_len: i32} => (
     if expr_idx == -1 then INPUT_VALUE_TYPE_UNKNOWN
     else if expr_idx < 0 || expr_idx >= MAX_NODES then INPUT_VALUE_TYPE_UNKNOWN
@@ -988,6 +1168,270 @@ resolve_scalar_value_expr := {expr_idx: i32, input_len: i32} => (
     )
 );
 
+output_value_kind_from_scalar_tag := (value_tag: i32) => (
+    if value_tag == VALUE_TAG_NUMBER then OUTPUT_VALUE_KIND_NUMBER
+    else if value_tag == VALUE_TAG_BOOLEAN then OUTPUT_VALUE_KIND_BOOLEAN
+    else if value_tag == VALUE_TAG_CHAR then OUTPUT_VALUE_KIND_CHAR
+    else OUTPUT_VALUE_KIND_UNKNOWN
+);
+
+emit_output_value_entry := {
+    kind_tag: i32,
+    value_i32: i32,
+    name_start: i32,
+    name_length: i32,
+    item_start: i32,
+    item_count: i32
+} => (
+    idx := lower_state.output_value_count;
+    if idx < 0 || idx >= MAX_OUTPUT_VALUES then -1 else (
+        output_values(idx).kind_tag = kind_tag;
+        output_values(idx).value_i32 = value_i32;
+        output_values(idx).name_start = name_start;
+        output_values(idx).name_length = name_length;
+        output_values(idx).item_start = item_start;
+        output_values(idx).item_count = item_count;
+        lower_state.output_value_count = idx + 1;
+        idx
+    )
+);
+
+emit_output_value_for_scalar := {value_tag: i32, value_i32: i32} => (
+    kind_tag := output_value_kind_from_scalar_tag(value_tag);
+    if kind_tag == OUTPUT_VALUE_KIND_UNKNOWN then -1 else (
+        emit_output_value_entry{
+            kind_tag,
+            value_i32,
+            0,
+            0,
+            0,
+            0
+        }
+    )
+);
+
+resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
+    if expr_idx == -1 then LoweredValueLookup::Missing
+    else if expr_idx < 0 || expr_idx >= MAX_NODES then LoweredValueLookup::InputError
+    else (
+        nodes(expr_idx).kind |> match {
+            NodeKind::Literal(value) => (
+                value |> match {
+                    ExpressionLiteral::Number(number) => (
+                        LoweredValueLookup::Scalar({
+                            value_tag = VALUE_TAG_NUMBER,
+                            value_i32 = number,
+                            value_type_tag = INPUT_VALUE_TYPE_I32
+                        })
+                    ),
+                    ExpressionLiteral::Boolean(boolean) => (
+                        LoweredValueLookup::Scalar({
+                            value_tag = VALUE_TAG_BOOLEAN,
+                            value_i32 = boolean,
+                            value_type_tag = INPUT_VALUE_TYPE_I32
+                        })
+                    ),
+                    ExpressionLiteral::Char(ch) => (
+                        LoweredValueLookup::Scalar({
+                            value_tag = VALUE_TAG_CHAR,
+                            value_i32 = ch,
+                            value_type_tag = INPUT_VALUE_TYPE_U8
+                        })
+                    ),
+                    else => LoweredValueLookup::Missing
+                }
+            ),
+            NodeKind::Identifier(id) => (
+                value_lookup := lookup_known_value_alias{id.name.start, id.name.length, input_len};
+                value_lookup |> match {
+                    LoweredValueLookup::Missing => (
+                        scalar_lookup := lookup_known_scalar_alias{id.name.start, id.name.length, input_len};
+                        scalar_lookup |> match {
+                            ScalarValueLookup::Missing => LoweredValueLookup::Missing,
+                            ScalarValueLookup::Value(value) => LoweredValueLookup::Scalar(value),
+                            ScalarValueLookup::InputError => LoweredValueLookup::InputError,
+                            else => LoweredValueLookup::InputError
+                        }
+                    ),
+                    LoweredValueLookup::Scalar(value) => LoweredValueLookup::Scalar(value),
+                    LoweredValueLookup::ValueRef(value_ref) => LoweredValueLookup::ValueRef(value_ref),
+                    LoweredValueLookup::InputError => LoweredValueLookup::InputError,
+                    LoweredValueLookup::OutputError => LoweredValueLookup::OutputError,
+                    else => LoweredValueLookup::InputError
+                }
+            ),
+            NodeKind::Struct(info) => (
+                checkpoint_value_count := lower_state.output_value_count;
+                checkpoint_field_count := lower_state.output_value_field_count;
+                item_start := checkpoint_field_count;
+                mut item_count := 0;
+                mut current := info.fields;
+                mut ok := 1;
+                mut result_code := 0;
+
+                while current != -1 && ok == 1 do (
+                    if current < 0 || current >= MAX_LIST_NODES then (
+                        ok = 0;
+                        result_code = 1;
+                    ) else (
+                        field_node := list_nodes(current).value;
+                        if field_node < 0 || field_node >= MAX_NODES then (
+                            ok = 0;
+                            result_code = 1;
+                        ) else if NodeKind::Binding(field_binding) := nodes(field_node).kind then (
+                            child_lookup := resolve_scalar_value_expr{field_binding.expr, input_len};
+                            mut child_ref := -1;
+                            child_lookup |> match {
+                                ScalarValueLookup::Missing => (
+                                    if NodeKind::Identifier(field_identifier) := nodes(field_binding.expr).kind then (
+                                        alias_lookup := lookup_known_value_alias{
+                                            field_identifier.name.start,
+                                            field_identifier.name.length,
+                                            input_len
+                                        };
+                                        alias_lookup |> match {
+                                            LoweredValueLookup::ValueRef(value_ref) => (
+                                                child_ref = value_ref;
+                                                0
+                                            ),
+                                            LoweredValueLookup::InputError => (
+                                                ok = 0;
+                                                result_code = 1;
+                                                0
+                                            ),
+                                            LoweredValueLookup::OutputError => (
+                                                ok = 0;
+                                                result_code = 2;
+                                                0
+                                            ),
+                                            LoweredValueLookup::Scalar(value) => (
+                                                child_ref = emit_output_value_for_scalar{
+                                                    value.value_tag,
+                                                    value.value_i32
+                                                };
+                                                if child_ref < 0 then (
+                                                    ok = 0;
+                                                    result_code = 2;
+                                                ) else (
+                                                    {}
+                                                );
+                                                0
+                                            ),
+                                            LoweredValueLookup::Missing => (
+                                                ok = 0;
+                                                result_code = 0;
+                                                0
+                                            ),
+                                            else => (
+                                                ok = 0;
+                                                result_code = 1;
+                                                0
+                                            )
+                                        }
+                                    ) else (
+                                        ok = 0;
+                                        result_code = 0;
+                                        0
+                                    )
+                                ),
+                                ScalarValueLookup::Value(value) => (
+                                    child_ref = emit_output_value_for_scalar{
+                                        value.value_tag,
+                                        value.value_i32
+                                    };
+                                    if child_ref < 0 then (
+                                        ok = 0;
+                                        result_code = 2;
+                                    ) else (
+                                        {}
+                                    );
+                                    0
+                                ),
+                                ScalarValueLookup::InputError => (
+                                    ok = 0;
+                                    result_code = 1;
+                                    0
+                                ),
+                                else => (
+                                    ok = 0;
+                                    result_code = 1;
+                                    0
+                                )
+                            };
+
+                            mut field_name_start := -1;
+                            mut field_name_length := item_count;
+                            if ok == 1 then (
+                                if BindingPattern::Identifier(field_pattern_info) := field_binding.pattern then (
+                                    if field_pattern_info.name.name.start >= 0 && field_pattern_info.name.name.length > 0 then (
+                                        field_name_start = field_pattern_info.name.name.start;
+                                        field_name_length = field_pattern_info.name.name.length;
+                                    ) else (
+                                        {}
+                                    );
+                                ) else (
+                                    ok = 0;
+                                    result_code = 0;
+                                );
+                                {}
+                            ) else (
+                                {}
+                            );
+
+                            if ok == 1 then (
+                                field_slot_idx := lower_state.output_value_field_count;
+                                if field_slot_idx < 0 || field_slot_idx >= MAX_OUTPUT_VALUE_FIELDS then (
+                                    ok = 0;
+                                    result_code = 2;
+                                ) else (
+                                    output_value_fields(field_slot_idx).name_start = field_name_start;
+                                    output_value_fields(field_slot_idx).name_length = field_name_length;
+                                    output_value_fields(field_slot_idx).value_ref = child_ref;
+                                    lower_state.output_value_field_count = field_slot_idx + 1;
+                                    item_count = item_count + 1;
+                                    current = list_nodes(current).next;
+                                );
+                                {}
+                            ) else (
+                                {}
+                            )
+                        ) else (
+                            ok = 0;
+                            result_code = 0;
+                        )
+                    );
+                    {}
+                );
+
+                if ok == 0 then (
+                    lower_state.output_value_count = checkpoint_value_count;
+                    lower_state.output_value_field_count = checkpoint_field_count;
+                    if result_code == 1 then LoweredValueLookup::InputError
+                    else if result_code == 2 then LoweredValueLookup::OutputError
+                    else LoweredValueLookup::Missing
+                ) else (
+                    value_ref := emit_output_value_entry{
+                        OUTPUT_VALUE_KIND_STRUCT,
+                        0,
+                        0,
+                        0,
+                        item_start,
+                        item_count
+                    };
+                    if value_ref < 0 then (
+                        lower_state.output_value_count = checkpoint_value_count;
+                        lower_state.output_value_field_count = checkpoint_field_count;
+                        LoweredValueLookup::OutputError
+                    ) else (
+                        LoweredValueLookup::ValueRef(value_ref)
+                    )
+                )
+            ),
+            else => LoweredValueLookup::Missing
+        }
+    )
+);
+
 update_known_type_alias_for_binding := {expr_idx: i32, input_len: i32} => (
     if safe_name_bounds{binding_extract_state.name_start, binding_extract_state.name_length, input_len} == 0 then 0
     else (
@@ -1037,6 +1481,51 @@ update_known_scalar_alias_for_binding := {expr_idx: i32, input_len: i32} => (
     )
 );
 
+update_known_value_alias_for_binding := {expr_idx: i32, input_len: i32} => (
+    if safe_name_bounds{binding_extract_state.name_start, binding_extract_state.name_length, input_len} == 0 then 0
+    else (
+        value_lookup := resolve_lowered_value_expr{expr_idx, input_len};
+        value_lookup |> match {
+            LoweredValueLookup::InputError => 0,
+            LoweredValueLookup::OutputError => 0,
+            LoweredValueLookup::Missing => (
+                clear_known_value_alias{
+                    binding_extract_state.name_start,
+                    binding_extract_state.name_length,
+                    input_len
+                }
+            ),
+            LoweredValueLookup::Scalar(value) => (
+                explicit_type_tag := binding_extract_state.value_type_tag;
+                resolved_type_tag := if explicit_type_tag != INPUT_VALUE_TYPE_UNKNOWN then explicit_type_tag
+                    else if value.value_type_tag != INPUT_VALUE_TYPE_UNKNOWN then value.value_type_tag
+                    else default_scalar_type_tag(value.value_tag);
+                set_known_value_alias{
+                    binding_extract_state.name_start,
+                    binding_extract_state.name_length,
+                    value.value_tag,
+                    value.value_i32,
+                    resolved_type_tag,
+                    -1,
+                    input_len
+                }
+            ),
+            LoweredValueLookup::ValueRef(value_ref) => (
+                set_known_value_alias{
+                    binding_extract_state.name_start,
+                    binding_extract_state.name_length,
+                    VALUE_TAG_UNKNOWN,
+                    0,
+                    INPUT_VALUE_TYPE_UNKNOWN,
+                    value_ref,
+                    input_len
+                }
+            ),
+            else => 0
+        }
+    )
+);
+
 resolve_wrapper_source_target := {} => (
     if target_count(binding_extract_state.wrap_mask) == 0 then WrapperSourceTarget::Missing else (
         source_target_tag := first_target_tag(binding_extract_state.export_mask);
@@ -1050,6 +1539,8 @@ reset_output_slots := {} => (
     lower_state.output_export_count = 0;
     lower_state.output_wrapper_count = 0;
     lower_state.output_inline_binding_count = 0;
+    lower_state.output_value_count = 0;
+    lower_state.output_value_field_count = 0;
     1
 );
 
@@ -1058,7 +1549,8 @@ emit_global_entry := {
     name_length: i32,
     ty_tag: i32,
     value_tag: i32,
-    value_i32: i32
+    value_i32: i32,
+    value_ref: i32
 } => (
     idx := lower_state.output_global_count;
     if idx < 0 || idx >= MAX_OUTPUT_GLOBALS then -1 else (
@@ -1067,6 +1559,7 @@ emit_global_entry := {
         output_globals(idx).ty_tag = ty_tag;
         output_globals(idx).value_tag = value_tag;
         output_globals(idx).value_i32 = value_i32;
+        output_globals(idx).value_ref = value_ref;
         lower_state.output_global_count = idx + 1;
         idx
     )
@@ -1114,7 +1607,8 @@ emit_inline_binding_entry := {
     name_start: i32,
     name_length: i32,
     value_tag: i32,
-    value_i32: i32
+    value_i32: i32,
+    value_ref: i32
 } => (
     idx := lower_state.output_inline_binding_count;
     if idx < 0 || idx >= MAX_OUTPUT_INLINE_BINDINGS then 0 else (
@@ -1122,6 +1616,7 @@ emit_inline_binding_entry := {
         output_inline_bindings(idx).name_length = name_length;
         output_inline_bindings(idx).value_tag = value_tag;
         output_inline_bindings(idx).value_i32 = value_i32;
+        output_inline_bindings(idx).value_ref = value_ref;
         lower_state.output_inline_binding_count = idx + 1;
         1
     )
@@ -1131,15 +1626,24 @@ emit_inline_binding_for_binding := {expr_idx: i32, input_len: i32} => (
     if binding_should_materialize{} == 1 then (
         1
     ) else (
-        value_lookup := resolve_scalar_value_expr{expr_idx, input_len};
+        value_lookup := resolve_lowered_value_expr{expr_idx, input_len};
         value_lookup |> match {
-            ScalarValueLookup::InputError => 0,
-            ScalarValueLookup::Missing => 1,
-            ScalarValueLookup::Value(value) => emit_inline_binding_entry{
+            LoweredValueLookup::InputError => 0,
+            LoweredValueLookup::OutputError => 0,
+            LoweredValueLookup::Missing => 1,
+            LoweredValueLookup::Scalar(value) => emit_inline_binding_entry{
                 binding_extract_state.name_start,
                 binding_extract_state.name_length,
                 value.value_tag,
-                value.value_i32
+                value.value_i32,
+                -1
+            },
+            LoweredValueLookup::ValueRef(value_ref) => emit_inline_binding_entry{
+                binding_extract_state.name_start,
+                binding_extract_state.name_length,
+                VALUE_TAG_UNKNOWN,
+                0,
+                value_ref
             },
             else => 0
         }
@@ -1158,11 +1662,12 @@ lower_binding_expr := {expr_idx: i32, input_len: i32} => (
     else if binding_extract_state.export_mask < 0 || binding_extract_state.wrap_mask < 0 || binding_extract_state.target_mask < 0 then LowerBindingResult::InputError
     else if binding_should_materialize{} == 0 then LowerBindingResult::Ok
     else (
-        value_lookup := resolve_scalar_value_expr{expr_idx, input_len};
+        value_lookup := resolve_lowered_value_expr{expr_idx, input_len};
         value_lookup |> match {
-            ScalarValueLookup::InputError => LowerBindingResult::InputError,
-            ScalarValueLookup::Missing => LowerBindingResult::Unimplemented,
-            ScalarValueLookup::Value(value) => (
+            LoweredValueLookup::InputError => LowerBindingResult::InputError,
+            LoweredValueLookup::OutputError => LowerBindingResult::OutputError,
+            LoweredValueLookup::Missing => LowerBindingResult::Unimplemented,
+            LoweredValueLookup::Scalar(value) => (
                 explicit_type_tag := binding_extract_state.value_type_tag;
                 value_type_tag := if explicit_type_tag != INPUT_VALUE_TYPE_UNKNOWN then explicit_type_tag
                     else if value.value_type_tag != INPUT_VALUE_TYPE_UNKNOWN then value.value_type_tag
@@ -1173,7 +1678,97 @@ lower_binding_expr := {expr_idx: i32, input_len: i32} => (
                     binding_extract_state.name_length,
                     global_type_tag,
                     value.value_tag,
-                    value.value_i32
+                    value.value_i32,
+                    -1
+                };
+                if global_index < 0 then LowerBindingResult::OutputError else (
+                    mut emit_ok := 1;
+                    if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_JS} == 1 then (
+                        emit_ok = emit_export_entry{
+                            OUTPUT_TARGET_JS,
+                            global_index,
+                            binding_extract_state.name_start,
+                            binding_extract_state.name_length
+                        };
+                    ) else (
+                        {}
+                    );
+                    if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_WASM} == 1 then (
+                        emit_ok = emit_export_entry{
+                            OUTPUT_TARGET_WASM,
+                            global_index,
+                            binding_extract_state.name_start,
+                            binding_extract_state.name_length
+                        };
+                    ) else (
+                        {}
+                    );
+                    if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_WGSL} == 1 then (
+                        emit_ok = emit_export_entry{
+                            OUTPUT_TARGET_WGSL,
+                            global_index,
+                            binding_extract_state.name_start,
+                            binding_extract_state.name_length
+                        };
+                    ) else (
+                        {}
+                    );
+                    if emit_ok == 0 then LowerBindingResult::OutputError
+                    else (
+                        wrapper_source_target := resolve_wrapper_source_target{};
+                        wrapper_source_target |> match {
+                            WrapperSourceTarget::Missing => (
+                                LowerBindingResult::Ok
+                            ),
+                            WrapperSourceTarget::Target(source_target_tag) => (
+                                if emit_ok == 1 && target_mask_has{binding_extract_state.wrap_mask, TARGET_MASK_JS} == 1 && source_target_tag != OUTPUT_TARGET_JS then (
+                                    emit_ok = emit_wrapper_entry{
+                                        source_target_tag,
+                                        OUTPUT_TARGET_JS,
+                                        global_index,
+                                        binding_extract_state.name_start,
+                                        binding_extract_state.name_length
+                                    };
+                                ) else (
+                                    {}
+                                );
+                                if emit_ok == 1 && target_mask_has{binding_extract_state.wrap_mask, TARGET_MASK_WASM} == 1 && source_target_tag != OUTPUT_TARGET_WASM then (
+                                    emit_ok = emit_wrapper_entry{
+                                        source_target_tag,
+                                        OUTPUT_TARGET_WASM,
+                                        global_index,
+                                        binding_extract_state.name_start,
+                                        binding_extract_state.name_length
+                                    };
+                                ) else (
+                                    {}
+                                );
+                                if emit_ok == 1 && target_mask_has{binding_extract_state.wrap_mask, TARGET_MASK_WGSL} == 1 && source_target_tag != OUTPUT_TARGET_WGSL then (
+                                    emit_ok = emit_wrapper_entry{
+                                        source_target_tag,
+                                        OUTPUT_TARGET_WGSL,
+                                        global_index,
+                                        binding_extract_state.name_start,
+                                        binding_extract_state.name_length
+                                    };
+                                ) else (
+                                    {}
+                                );
+                                if emit_ok == 1 then LowerBindingResult::Ok else LowerBindingResult::OutputError
+                            ),
+                            else => LowerBindingResult::OutputError
+                        }
+                    )
+                )
+            ),
+            LoweredValueLookup::ValueRef(value_ref) => (
+                global_index := emit_global_entry{
+                    binding_extract_state.name_start,
+                    binding_extract_state.name_length,
+                    OUTPUT_GLOBAL_TYPE_INFER,
+                    VALUE_TAG_UNKNOWN,
+                    0,
+                    value_ref
                 };
                 if global_index < 0 then LowerBindingResult::OutputError else (
                     mut emit_ok := 1;
@@ -1265,6 +1860,8 @@ finalize_output_payload := {} => (
         && lower_state.output_export_count == 0
         && lower_state.output_wrapper_count == 0
         && lower_state.output_inline_binding_count == 0
+        && lower_state.output_value_count == 0
+        && lower_state.output_value_field_count == 0
     then (
         lower_state.output_len = 0;
         1
@@ -1272,7 +1869,9 @@ finalize_output_payload := {} => (
         lower_state.output_len = lower_state.output_global_count
             + lower_state.output_export_count
             + lower_state.output_wrapper_count
-            + lower_state.output_inline_binding_count;
+            + lower_state.output_inline_binding_count
+            + lower_state.output_value_count
+            + lower_state.output_value_field_count;
         1
     )
 );
@@ -1370,6 +1969,8 @@ parse_body_records := {root: i32, binding_count: i32, input_len: i32} => (
                         body_ok = 0;
                     ) else if body_ok == 1 && update_known_scalar_alias_for_binding{binding.expr, input_len} == 0 then (
                         body_ok = 0;
+                    ) else if body_ok == 1 && update_known_value_alias_for_binding{binding.expr, input_len} == 0 then (
+                        body_ok = 0;
                     ) else (
                         {}
                     )
@@ -1428,6 +2029,8 @@ parse_body_records := {root: i32, binding_count: i32, input_len: i32} => (
                     body_ok = 0;
                 ) else if body_ok == 1 && update_known_scalar_alias_for_binding{binding.expr, input_len} == 0 then (
                     body_ok = 0;
+                ) else if body_ok == 1 && update_known_value_alias_for_binding{binding.expr, input_len} == 0 then (
+                    body_ok = 0;
                 ) else (
                     {}
                 )
@@ -1471,6 +2074,8 @@ run_lower_context := {root: i32, binding_count: i32, input_len: i32} => (
     lower_state.output_export_count = 0;
     lower_state.output_wrapper_count = 0;
     lower_state.output_inline_binding_count = 0;
+    lower_state.output_value_count = 0;
+    lower_state.output_value_field_count = 0;
     lower_state.lowering_unimplemented = 0;
 
     lower_state.input_magic_ok = if input_len >= 0 && input_len <= MAX_INPUT then 1 else 0;
@@ -1536,6 +2141,8 @@ run_lower_context := {root: i32, binding_count: i32, input_len: i32} => (
         lower_state.output_export_count = 0;
         lower_state.output_wrapper_count = 0;
         lower_state.output_inline_binding_count = 0;
+        lower_state.output_value_count = 0;
+        lower_state.output_value_field_count = 0;
         lower_state.lowering_unimplemented = 0;
         lower_status_error{}
     ) else (
@@ -1619,6 +2226,14 @@ run_lower_context := {root: i32, binding_count: i32, input_len: i32} => (
     lower_state.output_inline_binding_count
 );
 
+(export wasm) get_lower_output_value_count := {} => (
+    lower_state.output_value_count
+);
+
+(export wasm) get_lower_output_value_field_count := {} => (
+    lower_state.output_value_field_count
+);
+
 (export wasm) get_lower_lowering_unimplemented := {} => (
     lower_state.lowering_unimplemented
 );
@@ -1641,6 +2256,10 @@ run_lower_context := {root: i32, binding_count: i32, input_len: i32} => (
 
 (export wasm) get_lower_output_global_value_i32 := (idx: i32) => (
     if idx < 0 || idx >= lower_state.output_global_count then -1 else output_globals(idx).value_i32
+);
+
+(export wasm) get_lower_output_global_value_ref := (idx: i32) => (
+    if idx < 0 || idx >= lower_state.output_global_count then -1 else output_globals(idx).value_ref
 );
 
 (export wasm) get_lower_output_export_target_tag := (idx: i32) => (
@@ -1701,5 +2320,45 @@ run_lower_context := {root: i32, binding_count: i32, input_len: i32} => (
 
 (export wasm) get_lower_output_inline_binding_value_i32 := (idx: i32) => (
     if idx < 0 || idx >= lower_state.output_inline_binding_count then -1 else output_inline_bindings(idx).value_i32
+);
+
+(export wasm) get_lower_output_inline_binding_value_ref := (idx: i32) => (
+    if idx < 0 || idx >= lower_state.output_inline_binding_count then -1 else output_inline_bindings(idx).value_ref
+);
+
+(export wasm) get_lower_output_value_kind := (idx: i32) => (
+    if idx < 0 || idx >= lower_state.output_value_count then -1 else output_values(idx).kind_tag
+);
+
+(export wasm) get_lower_output_value_i32 := (idx: i32) => (
+    if idx < 0 || idx >= lower_state.output_value_count then -1 else output_values(idx).value_i32
+);
+
+(export wasm) get_lower_output_value_name_start := (idx: i32) => (
+    if idx < 0 || idx >= lower_state.output_value_count then -1 else output_values(idx).name_start
+);
+
+(export wasm) get_lower_output_value_name_length := (idx: i32) => (
+    if idx < 0 || idx >= lower_state.output_value_count then -1 else output_values(idx).name_length
+);
+
+(export wasm) get_lower_output_value_item_start := (idx: i32) => (
+    if idx < 0 || idx >= lower_state.output_value_count then -1 else output_values(idx).item_start
+);
+
+(export wasm) get_lower_output_value_item_count := (idx: i32) => (
+    if idx < 0 || idx >= lower_state.output_value_count then -1 else output_values(idx).item_count
+);
+
+(export wasm) get_lower_output_value_field_name_start := (idx: i32) => (
+    if idx < 0 || idx >= lower_state.output_value_field_count then -1 else output_value_fields(idx).name_start
+);
+
+(export wasm) get_lower_output_value_field_name_length := (idx: i32) => (
+    if idx < 0 || idx >= lower_state.output_value_field_count then -1 else output_value_fields(idx).name_length
+);
+
+(export wasm) get_lower_output_value_field_value_ref := (idx: i32) => (
+    if idx < 0 || idx >= lower_state.output_value_field_count then -1 else output_value_fields(idx).value_ref
 );
 

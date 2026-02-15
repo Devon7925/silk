@@ -12,7 +12,7 @@ use crate::intermediate::{
 };
 use crate::interpret::{self, Context};
 use crate::loader;
-use crate::parsing::{ExpressionLiteral, TargetLiteral};
+use crate::parsing::{ExpressionLiteral, Identifier, TargetLiteral};
 use crate::wasm;
 
 const INTERMEDIATE_SOURCE_PATH: &str = "silk_src/intermediate.silk";
@@ -36,6 +36,7 @@ const OUTPUT_TARGET_WGSL: i32 = 2;
 const OUTPUT_EXPORT_TYPE_FUNCTION: i32 = 0;
 const OUTPUT_EXPORT_TYPE_GLOBAL: i32 = 1;
 
+const OUTPUT_GLOBAL_TYPE_INFER: i32 = -1;
 const OUTPUT_GLOBAL_TYPE_I32: i32 = 0;
 const OUTPUT_GLOBAL_TYPE_U8: i32 = 1;
 
@@ -43,12 +44,34 @@ const OUTPUT_VALUE_TAG_NUMBER: i32 = 1;
 const OUTPUT_VALUE_TAG_BOOLEAN: i32 = 2;
 const OUTPUT_VALUE_TAG_CHAR: i32 = 3;
 
+const OUTPUT_VALUE_KIND_NUMBER: i32 = 1;
+const OUTPUT_VALUE_KIND_BOOLEAN: i32 = 2;
+const OUTPUT_VALUE_KIND_CHAR: i32 = 3;
+const OUTPUT_VALUE_KIND_STRUCT: i32 = 4;
+
 static INTERMEDIATE_WASM_BYTES: OnceLock<Result<Vec<u8>, Diagnostic>> = OnceLock::new();
 static WASM_ENGINE: OnceLock<Result<Engine, Diagnostic>> = OnceLock::new();
 static PARSER_MODULE: OnceLock<Result<Module, Diagnostic>> = OnceLock::new();
 static INTERPRETER_MODULE: OnceLock<Result<Module, Diagnostic>> = OnceLock::new();
 static INTERMEDIATE_MODULE: OnceLock<Result<Module, Diagnostic>> = OnceLock::new();
 static STAGE_READY: OnceLock<Result<bool, Diagnostic>> = OnceLock::new();
+
+#[derive(Debug, Clone)]
+struct DecodedOutputValueSlot {
+    kind_tag: i32,
+    value_i32: i32,
+    name_start: i32,
+    name_length: i32,
+    item_start: i32,
+    item_count: i32,
+}
+
+#[derive(Debug, Clone)]
+struct DecodedOutputValueFieldSlot {
+    name_start: i32,
+    name_length: i32,
+    value_ref: i32,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IntermediateLoweringBackend {
@@ -527,10 +550,19 @@ fn decode_lowered_output(
         call_required_i32_export(instance, store, "get_lower_output_wrapper_count")?;
     let inline_binding_count =
         call_required_i32_export(instance, store, "get_lower_output_inline_binding_count")?;
+    let value_count = call_required_i32_export(instance, store, "get_lower_output_value_count")?;
+    let value_field_count =
+        call_required_i32_export(instance, store, "get_lower_output_value_field_count")?;
 
-    if global_count < 0 || export_count < 0 || wrapper_count < 0 || inline_binding_count < 0 {
+    if global_count < 0
+        || export_count < 0
+        || wrapper_count < 0
+        || inline_binding_count < 0
+        || value_count < 0
+        || value_field_count < 0
+    {
         return Err(Diagnostic::new(format!(
-            "Silk intermediate returned negative output counts (globals={global_count}, exports={export_count}, wrappers={wrapper_count}, inline_bindings={inline_binding_count})"
+            "Silk intermediate returned negative output counts (globals={global_count}, exports={export_count}, wrappers={wrapper_count}, inline_bindings={inline_binding_count}, values={value_count}, value_fields={value_field_count})"
         )));
     }
 
@@ -554,7 +586,108 @@ fn decode_lowered_output(
         required_i32_to_i32_export(instance, store, "get_lower_output_global_value_tag")?;
     let get_global_value_i32 =
         required_i32_to_i32_export(instance, store, "get_lower_output_global_value_i32")?;
+    let get_global_value_ref =
+        required_i32_to_i32_export(instance, store, "get_lower_output_global_value_ref")?;
 
+    let get_value_kind = required_i32_to_i32_export(instance, store, "get_lower_output_value_kind")?;
+    let get_value_i32 = required_i32_to_i32_export(instance, store, "get_lower_output_value_i32")?;
+    let get_value_name_start =
+        required_i32_to_i32_export(instance, store, "get_lower_output_value_name_start")?;
+    let get_value_name_length =
+        required_i32_to_i32_export(instance, store, "get_lower_output_value_name_length")?;
+    let get_value_item_start =
+        required_i32_to_i32_export(instance, store, "get_lower_output_value_item_start")?;
+    let get_value_item_count =
+        required_i32_to_i32_export(instance, store, "get_lower_output_value_item_count")?;
+    let get_value_field_name_start = required_i32_to_i32_export(
+        instance,
+        store,
+        "get_lower_output_value_field_name_start",
+    )?;
+    let get_value_field_name_length = required_i32_to_i32_export(
+        instance,
+        store,
+        "get_lower_output_value_field_name_length",
+    )?;
+    let get_value_field_value_ref = required_i32_to_i32_export(
+        instance,
+        store,
+        "get_lower_output_value_field_value_ref",
+    )?;
+
+    let mut decoded_value_slots = Vec::with_capacity(value_count as usize);
+    for idx in 0..value_count {
+        let kind_tag = get_value_kind.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_value_kind` failed: {err}"
+            ))
+        })?;
+        let value_i32 = get_value_i32.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_value_i32` failed: {err}"
+            ))
+        })?;
+        let name_start = get_value_name_start.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_value_name_start` failed: {err}"
+            ))
+        })?;
+        let name_length = get_value_name_length.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_value_name_length` failed: {err}"
+            ))
+        })?;
+        let item_start = get_value_item_start.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_value_item_start` failed: {err}"
+            ))
+        })?;
+        let item_count = get_value_item_count.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_value_item_count` failed: {err}"
+            ))
+        })?;
+        decoded_value_slots.push(DecodedOutputValueSlot {
+            kind_tag,
+            value_i32,
+            name_start,
+            name_length,
+            item_start,
+            item_count,
+        });
+    }
+
+    let mut decoded_value_field_slots = Vec::with_capacity(value_field_count as usize);
+    for idx in 0..value_field_count {
+        let name_start = get_value_field_name_start
+            .call(&mut *store, idx)
+            .map_err(|err| {
+                Diagnostic::new(format!(
+                    "Intermediate call `get_lower_output_value_field_name_start` failed: {err}"
+                ))
+            })?;
+        let name_length = get_value_field_name_length
+            .call(&mut *store, idx)
+            .map_err(|err| {
+                Diagnostic::new(format!(
+                    "Intermediate call `get_lower_output_value_field_name_length` failed: {err}"
+                ))
+            })?;
+        let value_ref = get_value_field_value_ref
+            .call(&mut *store, idx)
+            .map_err(|err| {
+                Diagnostic::new(format!(
+                    "Intermediate call `get_lower_output_value_field_value_ref` failed: {err}"
+                ))
+            })?;
+        decoded_value_field_slots.push(DecodedOutputValueFieldSlot {
+            name_start,
+            name_length,
+            value_ref,
+        });
+    }
+
+    let mut decoded_value_cache = HashMap::new();
     let mut globals = Vec::with_capacity(global_count as usize);
     for idx in 0..global_count {
         let name_start = get_global_name_start
@@ -587,9 +720,27 @@ fn decode_lowered_output(
                 "Intermediate call `get_lower_output_global_value_i32` failed: {err}"
             ))
         })?;
+        let value_ref = get_global_value_ref.call(&mut *store, idx).map_err(|err| {
+            Diagnostic::new(format!(
+                "Intermediate call `get_lower_output_global_value_ref` failed: {err}"
+            ))
+        })?;
 
-        let ty = decode_output_global_type(ty_tag)?;
-        let value = decode_output_literal(value_tag, value_i32).map(IntermediateKind::Literal)?;
+        let value = if value_ref >= 0 {
+            decode_output_value(
+                value_ref,
+                &decoded_value_slots,
+                &decoded_value_field_slots,
+                input_bytes,
+                &mut decoded_value_cache,
+            )?
+        } else {
+            decode_output_literal(value_tag, value_i32).map(IntermediateKind::Literal)?
+        };
+        let ty = match decode_output_global_type(ty_tag)? {
+            Some(decoded) => decoded,
+            None => infer_intermediate_type_from_value(&value)?,
+        };
         globals.push(IntermediateGlobal { name, ty, value });
     }
 
@@ -765,6 +916,11 @@ fn decode_lowered_output(
         store,
         "get_lower_output_inline_binding_value_i32",
     )?;
+    let get_inline_binding_value_ref = required_i32_to_i32_export(
+        instance,
+        store,
+        "get_lower_output_inline_binding_value_ref",
+    )?;
 
     let mut inline_bindings = HashMap::with_capacity(inline_binding_count as usize);
     for idx in 0..inline_binding_count {
@@ -797,7 +953,24 @@ fn decode_lowered_output(
                     "Intermediate call `get_lower_output_inline_binding_value_i32` failed: {err}"
                 ))
             })?;
-        let value = decode_output_literal(value_tag, value_i32).map(IntermediateKind::Literal)?;
+        let value_ref = get_inline_binding_value_ref
+            .call(&mut *store, idx)
+            .map_err(|err| {
+                Diagnostic::new(format!(
+                    "Intermediate call `get_lower_output_inline_binding_value_ref` failed: {err}"
+                ))
+            })?;
+        let value = if value_ref >= 0 {
+            decode_output_value(
+                value_ref,
+                &decoded_value_slots,
+                &decoded_value_field_slots,
+                input_bytes,
+                &mut decoded_value_cache,
+            )?
+        } else {
+            decode_output_literal(value_tag, value_i32).map(IntermediateKind::Literal)?
+        };
         inline_bindings.insert(name, value);
     }
 
@@ -808,6 +981,198 @@ fn decode_lowered_output(
         wrappers,
         inline_bindings,
     })
+}
+
+fn decode_output_value(
+    root: i32,
+    value_slots: &[DecodedOutputValueSlot],
+    value_fields: &[DecodedOutputValueFieldSlot],
+    input_bytes: &[u8],
+    memo: &mut HashMap<i32, IntermediateKind>,
+) -> Result<IntermediateKind, Diagnostic> {
+    let mut visiting = HashMap::new();
+    decode_output_value_inner(
+        root,
+        value_slots,
+        value_fields,
+        input_bytes,
+        memo,
+        &mut visiting,
+    )
+}
+
+fn decode_output_value_inner(
+    root: i32,
+    value_slots: &[DecodedOutputValueSlot],
+    value_fields: &[DecodedOutputValueFieldSlot],
+    input_bytes: &[u8],
+    memo: &mut HashMap<i32, IntermediateKind>,
+    visiting: &mut HashMap<i32, ()>,
+) -> Result<IntermediateKind, Diagnostic> {
+    if let Some(existing) = memo.get(&root) {
+        return Ok(existing.clone());
+    }
+    if root < 0 || root as usize >= value_slots.len() {
+        return Err(Diagnostic::new(format!(
+            "Output value reference {root} is out of bounds (value count {})",
+            value_slots.len()
+        )));
+    }
+    if visiting.contains_key(&root) {
+        return Err(Diagnostic::new(format!(
+            "Cyclic output value graph detected at value {root}"
+        )));
+    }
+    visiting.insert(root, ());
+
+    let slot = &value_slots[root as usize];
+    let decoded = match slot.kind_tag {
+        OUTPUT_VALUE_KIND_NUMBER => IntermediateKind::Literal(ExpressionLiteral::Number(slot.value_i32)),
+        OUTPUT_VALUE_KIND_BOOLEAN => {
+            IntermediateKind::Literal(ExpressionLiteral::Boolean(slot.value_i32 != 0))
+        }
+        OUTPUT_VALUE_KIND_CHAR => {
+            if !(0..=u8::MAX as i32).contains(&slot.value_i32) {
+                return Err(Diagnostic::new(format!(
+                    "Output char value out of range for u8: {}",
+                    slot.value_i32
+                )));
+            }
+            IntermediateKind::Literal(ExpressionLiteral::Char(slot.value_i32 as u8))
+        }
+        OUTPUT_VALUE_KIND_STRUCT => {
+            if slot.item_start < 0 || slot.item_count < 0 {
+                return Err(Diagnostic::new(format!(
+                    "Output struct value has invalid item span start={} count={}",
+                    slot.item_start, slot.item_count
+                )));
+            }
+            let item_start = slot.item_start as usize;
+            let item_count = slot.item_count as usize;
+            let item_end = item_start.saturating_add(item_count);
+            if item_end > value_fields.len() {
+                return Err(Diagnostic::new(format!(
+                    "Output struct value item span out of bounds: start={} count={} fields={}",
+                    item_start,
+                    item_count,
+                    value_fields.len()
+                )));
+            }
+
+            let mut struct_fields = Vec::with_capacity(item_count);
+            let mut array_items = Vec::with_capacity(item_count);
+            let mut field_names = Vec::with_capacity(item_count);
+            let mut item_types = Vec::with_capacity(item_count);
+
+            for field in &value_fields[item_start..item_end] {
+                let name = decode_output_value_field_name(input_bytes, field.name_start, field.name_length)?;
+                let value = decode_output_value_inner(
+                    field.value_ref,
+                    value_slots,
+                    value_fields,
+                    input_bytes,
+                    memo,
+                    visiting,
+                )?;
+                let value_ty = infer_intermediate_type_from_value(&value)?;
+                struct_fields.push((Identifier::new(name.clone()), value.clone()));
+                array_items.push(value);
+                field_names.push(name);
+                item_types.push(value_ty);
+            }
+
+            let homogeneous = if let Some(first) = item_types.first() {
+                item_types.iter().skip(1).all(|ty| ty == first)
+            } else {
+                false
+            };
+
+            if !item_types.is_empty() && homogeneous && is_tuple_field_names(&field_names) {
+                IntermediateKind::ArrayLiteral {
+                    items: array_items,
+                    element_type: item_types[0].clone(),
+                    field_names: normalize_field_names(field_names),
+                }
+            } else {
+                IntermediateKind::Struct(struct_fields)
+            }
+        }
+        other => {
+            return Err(Diagnostic::new(format!(
+                "Unsupported output value kind tag {other}"
+            )));
+        }
+    };
+
+    visiting.remove(&root);
+    memo.insert(root, decoded.clone());
+    Ok(decoded)
+}
+
+fn decode_output_value_field_name(
+    input_bytes: &[u8],
+    start: i32,
+    len: i32,
+) -> Result<String, Diagnostic> {
+    if start == -1 {
+        if len < 0 {
+            return Err(Diagnostic::new(format!(
+                "Invalid synthetic field name index {len}"
+            )));
+        }
+        return Ok(len.to_string());
+    }
+    if start < -1 {
+        return Err(Diagnostic::new(format!(
+            "Unsupported field name encoding: start={start} len={len}"
+        )));
+    }
+    decode_name_from_input(input_bytes, start, len)
+}
+
+fn infer_intermediate_type_from_value(value: &IntermediateKind) -> Result<IntermediateType, Diagnostic> {
+    match value {
+        IntermediateKind::Literal(ExpressionLiteral::Number(_))
+        | IntermediateKind::Literal(ExpressionLiteral::Boolean(_)) => Ok(IntermediateType::I32),
+        IntermediateKind::Literal(ExpressionLiteral::Char(_)) => Ok(IntermediateType::U8),
+        IntermediateKind::Struct(fields) => {
+            let mut field_types = Vec::with_capacity(fields.len());
+            for (field_name, field_value) in fields {
+                field_types.push((
+                    field_name.name.clone(),
+                    infer_intermediate_type_from_value(field_value)?,
+                ));
+            }
+            Ok(IntermediateType::Struct(field_types))
+        }
+        IntermediateKind::ArrayLiteral {
+            items,
+            element_type,
+            field_names,
+        } => Ok(IntermediateType::Array {
+            element: Box::new(element_type.clone()),
+            length: items.len(),
+            field_names: field_names.clone(),
+        }),
+        other => Err(Diagnostic::new(format!(
+            "Unable to infer intermediate type from lowered output value: {:?}",
+            other
+        ))),
+    }
+}
+
+fn is_tuple_field_names(field_names: &[String]) -> bool {
+    field_names
+        .iter()
+        .enumerate()
+        .all(|(index, name)| *name == index.to_string())
+}
+
+fn normalize_field_names(mut field_names: Vec<String>) -> Vec<String> {
+    if !is_tuple_field_names(&field_names) {
+        field_names.sort();
+    }
+    field_names
 }
 
 fn decode_name_from_input(input_bytes: &[u8], start: i32, len: i32) -> Result<String, Diagnostic> {
@@ -886,10 +1251,11 @@ fn decode_output_export_type(tag: i32) -> Result<IntermediateExportType, Diagnos
     }
 }
 
-fn decode_output_global_type(tag: i32) -> Result<IntermediateType, Diagnostic> {
+fn decode_output_global_type(tag: i32) -> Result<Option<IntermediateType>, Diagnostic> {
     match tag {
-        OUTPUT_GLOBAL_TYPE_I32 => Ok(IntermediateType::I32),
-        OUTPUT_GLOBAL_TYPE_U8 => Ok(IntermediateType::U8),
+        OUTPUT_GLOBAL_TYPE_INFER => Ok(None),
+        OUTPUT_GLOBAL_TYPE_I32 => Ok(Some(IntermediateType::I32)),
+        OUTPUT_GLOBAL_TYPE_U8 => Ok(Some(IntermediateType::U8)),
         _ => Err(Diagnostic::new(format!(
             "Unsupported output global type tag {tag}"
         ))),
@@ -1284,16 +1650,82 @@ mod tests {
     }
 
     #[test]
-    fn wasm_stage_reports_unimplemented_for_non_literal_mut_global() {
+    fn wasm_stage_lowers_non_literal_mut_struct_global() {
         if !wasm_stage_available() {
             return;
         }
         let source = "mut point := { x = 1, y = 2 }; point";
-        let lowered = lower_with_wasm(source).expect("wasm lowering should run");
-        assert!(
-            lowered.is_none(),
-            "non-literal mutable globals should still report unimplemented"
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 0);
+        assert_eq!(lowered.wrappers.len(), 0);
+
+        assert_eq!(lowered.globals[0].name, "point");
+        assert_eq!(
+            lowered.globals[0].ty,
+            IntermediateType::Struct(vec![
+                ("x".to_string(), IntermediateType::I32),
+                ("y".to_string(), IntermediateType::I32),
+            ])
         );
+        match &lowered.globals[0].value {
+            IntermediateKind::Struct(fields) => {
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].0.name, "x");
+                assert!(matches!(
+                    fields[0].1,
+                    IntermediateKind::Literal(ExpressionLiteral::Number(1))
+                ));
+                assert_eq!(fields[1].0.name, "y");
+                assert!(matches!(
+                    fields[1].1,
+                    IntermediateKind::Literal(ExpressionLiteral::Number(2))
+                ));
+            }
+            other => panic!("expected struct literal global value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wasm_stage_lowers_exported_struct_identifier_alias() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "base := { x = 1, y = 2 }; (export wasm) point := base; point";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 1);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+        assert_eq!(lowered.wrappers.len(), 0);
+
+        assert!(matches!(
+            lowered.inline_bindings.get("base"),
+            Some(IntermediateKind::Struct(_))
+        ));
+        assert_eq!(
+            lowered.globals[0].ty,
+            IntermediateType::Struct(vec![
+                ("x".to_string(), IntermediateType::I32),
+                ("y".to_string(), IntermediateType::I32),
+            ])
+        );
+        assert!(matches!(lowered.globals[0].value, IntermediateKind::Struct(_)));
+        assert_eq!(lowered.exports[0].target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.exports[0].name, "point");
+        assert_eq!(
+            lowered.exports[0].export_type,
+            IntermediateExportType::Global
+        );
+        assert_eq!(lowered.exports[0].index, 0);
     }
 
     #[test]
@@ -1327,6 +1759,27 @@ mod tests {
         assert!(matches!(
             lowered.inline_bindings.get("base"),
             Some(IntermediateKind::Literal(ExpressionLiteral::Number(7)))
+        ));
+    }
+
+    #[test]
+    fn wasm_stage_lowers_inline_struct_binding_without_materialized_outputs() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "base := { x = 7, y = 8 }; base";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.globals.len(), 0);
+        assert_eq!(lowered.exports.len(), 0);
+        assert_eq!(lowered.wrappers.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 1);
+        assert!(matches!(
+            lowered.inline_bindings.get("base"),
+            Some(IntermediateKind::Struct(_))
         ));
     }
 
