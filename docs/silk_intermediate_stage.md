@@ -17,9 +17,9 @@ stays aligned across parser/interpreter/intermediate stages.
 
 ## Versions
 
-- `intermediate_stage_version() -> 14`
+- `intermediate_stage_version() -> 15`
 - `intermediate_payload_version() -> 6`
-- `intermediate_output_version() -> 8`
+- `intermediate_output_version() -> 9`
 
 ## Input ABI (AST, chainable)
 
@@ -122,6 +122,11 @@ Error code export:
 - Function identifier alias chains are now recognized as function exports instead of falling back to `unimplemented`.
   - Example: `id := (x: i32) => x; (export wasm) alias := id` now lowers `alias` as a function export.
   - Wrapped aliases are also emitted (for example `(export wasm) (wrap js) alias := id`).
+- Function-call expressions are now preserved as structured intermediate call nodes when the callee resolves to an emitted function slot.
+  - Example: `(export wasm) id := (x: i32) => x; value := id 7` now lowers `value` to `IntermediateKind::FunctionCall`.
+  - The stage still does not evaluate calls; it only preserves the call structure and argument expression.
+- Materialized globals backed by function-call value refs currently require an explicit type hint.
+  - Example: `(export wasm) out: i32 := id 7` lowers, while omitting `: i32` still falls back.
 - Binary operation expressions now lower to intrinsic-operation intermediate nodes instead of forcing fallback.
   - Supported operators currently include arithmetic/comparison/boolean operators from parser operation nodes (`+`, `-`, `*`, `/`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `&&`, `||`, `^`).
   - The stage preserves operation structure; it does not evaluate operations.

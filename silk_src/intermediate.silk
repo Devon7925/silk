@@ -72,6 +72,7 @@ OUTPUT_VALUE_KIND_ARRAY_INDEX := 11;
 OUTPUT_VALUE_KIND_BLOCK := 12;
 OUTPUT_VALUE_KIND_DIVERGE := 13;
 OUTPUT_VALUE_KIND_LOOP := 14;
+OUTPUT_VALUE_KIND_FUNCTION_CALL := 15;
 
 VALUE_REF_LOOKUP_MISSING := -1;
 VALUE_REF_LOOKUP_INPUT_ERROR := -2;
@@ -263,7 +264,7 @@ lower_error_output_encode_failed := {} => (
 );
 
 (export wasm) intermediate_output_version := {} => (
-    8
+    9
 );
 
 (export wasm) input: Box({u8; MAX_INPUT}) := {0; MAX_INPUT};
@@ -470,7 +471,7 @@ EMPTY_KNOWN_FUNCTION_ALIAS_SLOT := {
 (export wasm) mut known_function_aliases: Box({KnownFunctionAliasSlot; MAX_KNOWN_FUNCTION_ALIASES}) := {EMPTY_KNOWN_FUNCTION_ALIAS_SLOT; MAX_KNOWN_FUNCTION_ALIASES};
 
 (export wasm) intermediate_stage_version := {} => (
-    14
+    15
 );
 
 target_mask_has := {mask: i32, bit: i32} => (
@@ -2020,6 +2021,79 @@ emit_loop_value := {body_expr_idx: i32, input_len: i32} => (
     )
 );
 
+find_output_function_index_by_name := {name_start: i32, name_length: i32, input_len: i32} => (
+    if safe_name_bounds{name_start, name_length, input_len} == 0 then VALUE_REF_LOOKUP_INPUT_ERROR
+    else (
+        mut idx := 0;
+        mut found := -1;
+        while idx < lower_state.output_function_count && found == -1 do (
+            if input_spans_equal{
+                name_start,
+                name_length,
+                output_functions(idx).name_start,
+                output_functions(idx).name_length,
+                input_len
+            } == 1 then (
+                found = idx;
+            ) else (
+                {}
+            );
+            idx = idx + 1;
+            {}
+        );
+        found
+    )
+);
+
+resolve_output_function_index_expr := {expr_idx: i32, input_len: i32} => (
+    if expr_idx < 0 || expr_idx >= MAX_NODES then VALUE_REF_LOOKUP_INPUT_ERROR
+    else (
+        nodes(expr_idx).kind |> match {
+            NodeKind::Identifier(id) => find_output_function_index_by_name{
+                id.name.start,
+                id.name.length,
+                input_len
+            },
+            else => VALUE_REF_LOOKUP_MISSING
+        }
+    )
+);
+
+emit_function_call_value := {function_index: i32, argument_expr_idx: i32, input_len: i32} => (
+    if function_index < 0 then LoweredValueLookup::Missing
+    else (
+        checkpoint_value_count := lower_state.output_value_count;
+        checkpoint_field_count := lower_state.output_value_field_count;
+        item_start := checkpoint_field_count;
+        argument_ref := resolve_lowered_value_expr_as_ref{argument_expr_idx, input_len};
+        if argument_ref < 0 then (
+            lower_state.output_value_count = checkpoint_value_count;
+            lower_state.output_value_field_count = checkpoint_field_count;
+            value_ref_lookup_to_lowered_value(argument_ref)
+        ) else if emit_output_value_child_field{0, argument_ref} == 0 then (
+            lower_state.output_value_count = checkpoint_value_count;
+            lower_state.output_value_field_count = checkpoint_field_count;
+            LoweredValueLookup::OutputError
+        ) else (
+            value_ref := emit_output_value_entry{
+                OUTPUT_VALUE_KIND_FUNCTION_CALL,
+                function_index,
+                0,
+                0,
+                item_start,
+                1
+            };
+            if value_ref < 0 then (
+                lower_state.output_value_count = checkpoint_value_count;
+                lower_state.output_value_field_count = checkpoint_field_count;
+                LoweredValueLookup::OutputError
+            ) else (
+                LoweredValueLookup::ValueRef(value_ref)
+            )
+        )
+    )
+);
+
 resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
     if expr_idx == -1 then LoweredValueLookup::Missing
     else if expr_idx < 0 || expr_idx >= MAX_NODES then LoweredValueLookup::InputError
@@ -2221,8 +2295,57 @@ resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
             NodeKind::FunctionCall(info) => (
                 if info.function < 0 || info.function >= MAX_NODES then (
                     LoweredValueLookup::InputError
-                ) else if NodeKind::TypePropertyAccess(access_info) := nodes(info.function).kind then (
-                    if info.argument != access_info.object then (
+                ) else (
+                    function_index := resolve_output_function_index_expr{info.function, input_len};
+                    if function_index == VALUE_REF_LOOKUP_INPUT_ERROR then (
+                        LoweredValueLookup::InputError
+                    ) else if function_index >= 0 then (
+                        emit_function_call_value{function_index, info.argument, input_len}
+                    ) else if NodeKind::TypePropertyAccess(access_info) := nodes(info.function).kind then (
+                        if info.argument != access_info.object then (
+                            index_lookup := resolve_lowered_value_index_access{
+                                info.function,
+                                info.argument,
+                                input_len
+                            };
+                            index_lookup |> match {
+                                LoweredValueLookup::Missing => emit_array_index_value{
+                                    info.function,
+                                    info.argument,
+                                    input_len
+                                },
+                                else => index_lookup
+                            }
+                        ) else if safe_name_bounds{access_info.property.start, access_info.property.length, input_len} == 0 then (
+                            LoweredValueLookup::InputError
+                        ) else (
+                            resolve_lowered_value_expr{access_info.object, input_len} |> match {
+                                LoweredValueLookup::InputError => LoweredValueLookup::InputError,
+                                LoweredValueLookup::OutputError => LoweredValueLookup::OutputError,
+                                LoweredValueLookup::Missing => LoweredValueLookup::Missing,
+                                LoweredValueLookup::Scalar(value) => LoweredValueLookup::Missing,
+                                LoweredValueLookup::ValueRef(object_ref) => (
+                                    property_lookup := lookup_value_ref_by_property{
+                                        object_ref,
+                                        access_info.property.start,
+                                        access_info.property.length,
+                                        input_len
+                                    };
+                                    if property_lookup == VALUE_REF_LOOKUP_MISSING then (
+                                        emit_type_property_access_value{
+                                            access_info.object,
+                                            access_info.property.start,
+                                            access_info.property.length,
+                                            input_len
+                                        }
+                                    ) else (
+                                        value_ref_lookup_to_lowered_value(property_lookup)
+                                    )
+                                ),
+                                else => LoweredValueLookup::InputError
+                            }
+                        )
+                    ) else (
                         index_lookup := resolve_lowered_value_index_access{
                             info.function,
                             info.argument,
@@ -2236,49 +2359,7 @@ resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
                             },
                             else => index_lookup
                         }
-                    ) else if safe_name_bounds{access_info.property.start, access_info.property.length, input_len} == 0 then (
-                        LoweredValueLookup::InputError
-                    ) else (
-                        resolve_lowered_value_expr{access_info.object, input_len} |> match {
-                            LoweredValueLookup::InputError => LoweredValueLookup::InputError,
-                            LoweredValueLookup::OutputError => LoweredValueLookup::OutputError,
-                            LoweredValueLookup::Missing => LoweredValueLookup::Missing,
-                            LoweredValueLookup::Scalar(value) => LoweredValueLookup::Missing,
-                            LoweredValueLookup::ValueRef(object_ref) => (
-                                property_lookup := lookup_value_ref_by_property{
-                                    object_ref,
-                                    access_info.property.start,
-                                    access_info.property.length,
-                                    input_len
-                                };
-                                if property_lookup == VALUE_REF_LOOKUP_MISSING then (
-                                    emit_type_property_access_value{
-                                        access_info.object,
-                                        access_info.property.start,
-                                        access_info.property.length,
-                                        input_len
-                                    }
-                                ) else (
-                                    value_ref_lookup_to_lowered_value(property_lookup)
-                                )
-                            ),
-                            else => LoweredValueLookup::InputError
-                        }
                     )
-                ) else (
-                    index_lookup := resolve_lowered_value_index_access{
-                        info.function,
-                        info.argument,
-                        input_len
-                    };
-                    index_lookup |> match {
-                        LoweredValueLookup::Missing => emit_array_index_value{
-                            info.function,
-                            info.argument,
-                            input_len
-                        },
-                        else => index_lookup
-                    }
                 )
             ),
             NodeKind::Struct(info) => (
@@ -2892,6 +2973,7 @@ value_ref_requires_explicit_global_type := (value_ref: i32) => (
         if kind_tag == OUTPUT_VALUE_KIND_IDENTIFIER
             || kind_tag == OUTPUT_VALUE_KIND_TYPE_PROPERTY_ACCESS
             || kind_tag == OUTPUT_VALUE_KIND_ARRAY_INDEX
+            || kind_tag == OUTPUT_VALUE_KIND_FUNCTION_CALL
         then 1 else 0
     )
 );

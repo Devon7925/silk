@@ -62,6 +62,7 @@ const OUTPUT_VALUE_KIND_ARRAY_INDEX: i32 = 11;
 const OUTPUT_VALUE_KIND_BLOCK: i32 = 12;
 const OUTPUT_VALUE_KIND_DIVERGE: i32 = 13;
 const OUTPUT_VALUE_KIND_LOOP: i32 = 14;
+const OUTPUT_VALUE_KIND_FUNCTION_CALL: i32 = 15;
 
 const OUTPUT_VALUE_TYPE_UNKNOWN: i32 = 0;
 const OUTPUT_VALUE_TYPE_I32: i32 = 1;
@@ -788,6 +789,7 @@ fn decode_lowered_output(
                 value_ref,
                 &decoded_value_slots,
                 &decoded_value_field_slots,
+                function_count as usize,
                 input_bytes,
                 &mut decoded_value_cache,
             )?
@@ -1056,6 +1058,7 @@ fn decode_lowered_output(
                 value_ref,
                 &decoded_value_slots,
                 &decoded_value_field_slots,
+                function_count as usize,
                 input_bytes,
                 &mut decoded_value_cache,
             )?
@@ -1078,6 +1081,7 @@ fn decode_output_value(
     root: i32,
     value_slots: &[DecodedOutputValueSlot],
     value_fields: &[DecodedOutputValueFieldSlot],
+    function_count: usize,
     input_bytes: &[u8],
     memo: &mut HashMap<i32, IntermediateKind>,
 ) -> Result<IntermediateKind, Diagnostic> {
@@ -1086,6 +1090,7 @@ fn decode_output_value(
         root,
         value_slots,
         value_fields,
+        function_count,
         input_bytes,
         memo,
         &mut visiting,
@@ -1096,6 +1101,7 @@ fn decode_output_value_inner(
     root: i32,
     value_slots: &[DecodedOutputValueSlot],
     value_fields: &[DecodedOutputValueFieldSlot],
+    function_count: usize,
     input_bytes: &[u8],
     memo: &mut HashMap<i32, IntermediateKind>,
     visiting: &mut HashMap<i32, ()>,
@@ -1144,6 +1150,7 @@ fn decode_output_value_inner(
                 1,
                 value_slots,
                 value_fields,
+                function_count,
                 input_bytes,
                 memo,
                 visiting,
@@ -1164,6 +1171,7 @@ fn decode_output_value_inner(
                 2,
                 value_slots,
                 value_fields,
+                function_count,
                 input_bytes,
                 memo,
                 visiting,
@@ -1184,6 +1192,7 @@ fn decode_output_value_inner(
                 2,
                 value_slots,
                 value_fields,
+                function_count,
                 input_bytes,
                 memo,
                 visiting,
@@ -1206,6 +1215,7 @@ fn decode_output_value_inner(
                 1,
                 value_slots,
                 value_fields,
+                function_count,
                 input_bytes,
                 memo,
                 visiting,
@@ -1226,6 +1236,7 @@ fn decode_output_value_inner(
                 3,
                 value_slots,
                 value_fields,
+                function_count,
                 input_bytes,
                 memo,
                 visiting,
@@ -1266,6 +1277,7 @@ fn decode_output_value_inner(
                     field.value_ref,
                     value_slots,
                     value_fields,
+                    function_count,
                     input_bytes,
                     memo,
                     visiting,
@@ -1280,6 +1292,7 @@ fn decode_output_value_inner(
                 1,
                 value_slots,
                 value_fields,
+                function_count,
                 input_bytes,
                 memo,
                 visiting,
@@ -1300,6 +1313,7 @@ fn decode_output_value_inner(
                 1,
                 value_slots,
                 value_fields,
+                function_count,
                 input_bytes,
                 memo,
                 visiting,
@@ -1309,6 +1323,38 @@ fn decode_output_value_inner(
             let body = children.next().expect("loop body child");
             IntermediateKind::Loop {
                 body: Box::new(body),
+            }
+        }
+        OUTPUT_VALUE_KIND_FUNCTION_CALL => {
+            if slot.value_i32 < 0 {
+                return Err(Diagnostic::new(format!(
+                    "Output function call value {root} has negative function index {}",
+                    slot.value_i32
+                )));
+            }
+            let function_index = slot.value_i32 as usize;
+            if function_index >= function_count {
+                return Err(Diagnostic::new(format!(
+                    "Output function call value {root} references missing function index {function_index} (function count {function_count})"
+                )));
+            }
+            let mut children = decode_output_value_children(
+                slot,
+                root,
+                1,
+                value_slots,
+                value_fields,
+                function_count,
+                input_bytes,
+                memo,
+                visiting,
+                "function call",
+            )?
+            .into_iter();
+            let argument = children.next().expect("function call argument child");
+            IntermediateKind::FunctionCall {
+                function: function_index,
+                argument: Box::new(argument),
             }
         }
         OUTPUT_VALUE_KIND_ARRAY => {
@@ -1344,6 +1390,7 @@ fn decode_output_value_inner(
                     field.value_ref,
                     value_slots,
                     value_fields,
+                    function_count,
                     input_bytes,
                     memo,
                     visiting,
@@ -1404,6 +1451,7 @@ fn decode_output_value_inner(
                     field.value_ref,
                     value_slots,
                     value_fields,
+                    function_count,
                     input_bytes,
                     memo,
                     visiting,
@@ -1449,6 +1497,7 @@ fn decode_output_value_children(
     expected_count: usize,
     value_slots: &[DecodedOutputValueSlot],
     value_fields: &[DecodedOutputValueFieldSlot],
+    function_count: usize,
     input_bytes: &[u8],
     memo: &mut HashMap<i32, IntermediateKind>,
     visiting: &mut HashMap<i32, ()>,
@@ -1485,6 +1534,7 @@ fn decode_output_value_children(
             field.value_ref,
             value_slots,
             value_fields,
+            function_count,
             input_bytes,
             memo,
             visiting,
@@ -1575,6 +1625,7 @@ fn infer_intermediate_type_from_value(
         }
         IntermediateKind::Diverge { value, .. } => infer_intermediate_type_from_value(value),
         IntermediateKind::Loop { .. } => Ok(IntermediateType::I32),
+        IntermediateKind::FunctionCall { .. } => Ok(IntermediateType::I32),
         other => Err(Diagnostic::new(format!(
             "Unable to infer intermediate type from lowered output value: {:?}",
             other
@@ -2824,6 +2875,83 @@ mod tests {
                 ));
             }
             other => panic!("expected loop expression output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wasm_stage_lowers_exported_function_call_expression_without_evaluation() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "(export wasm) id := (x: i32) => x; (export wasm) out: i32 := id 7; out";
+        let context = interpreted_context(source);
+        let (lowered, backend) =
+            lower_context(&context, source).expect("lower_context should succeed");
+        assert_eq!(backend, IntermediateLoweringBackend::SilkWasm);
+
+        assert_eq!(lowered.functions.len(), 1);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.wrappers.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.exports.len(), 2);
+
+        assert!(lowered.exports.iter().any(|export| {
+            export.name == "id"
+                && export.target == TargetLiteral::WasmTarget
+                && export.export_type == IntermediateExportType::Function
+                && export.index == 0
+        }));
+        assert!(lowered.exports.iter().any(|export| {
+            export.name == "out"
+                && export.target == TargetLiteral::WasmTarget
+                && export.export_type == IntermediateExportType::Global
+                && export.index == 0
+        }));
+
+        let out_global = lowered
+            .globals
+            .iter()
+            .find(|global| global.name == "out")
+            .expect("missing `out` global");
+        assert_eq!(out_global.ty, IntermediateType::I32);
+        match &out_global.value {
+            IntermediateKind::FunctionCall { function, argument } => {
+                assert_eq!(*function, 0);
+                assert!(matches!(
+                    argument.as_ref(),
+                    IntermediateKind::Literal(ExpressionLiteral::Number(7))
+                ));
+            }
+            other => panic!("expected function call output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wasm_stage_lowers_inline_function_call_expression_without_materialization() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "(export wasm) id := (x: i32) => x; value := id 7; value";
+        let context = interpreted_context(source);
+        let (lowered, backend) =
+            lower_context(&context, source).expect("lower_context should succeed");
+        assert_eq!(backend, IntermediateLoweringBackend::SilkWasm);
+
+        assert_eq!(lowered.functions.len(), 1);
+        assert_eq!(lowered.globals.len(), 0);
+        assert_eq!(lowered.wrappers.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+
+        match lowered.inline_bindings.get("value") {
+            Some(IntermediateKind::FunctionCall { function, argument }) => {
+                assert_eq!(*function, 0);
+                assert!(matches!(
+                    argument.as_ref(),
+                    IntermediateKind::Literal(ExpressionLiteral::Number(7))
+                ));
+            }
+            other => panic!("expected inline function call output, got {other:?}"),
         }
     }
 
