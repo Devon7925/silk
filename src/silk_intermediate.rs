@@ -8,11 +8,14 @@ use wasmtime::{Config, Engine, Instance, Memory, Module, Store};
 use crate::diagnostics::{Diagnostic, SourceSpan};
 use crate::intermediate::{
     self, IntermediateExport, IntermediateExportType, IntermediateFunction, IntermediateGlobal,
-    IntermediateKind, IntermediateResult, IntermediateType, IntermediateWrap,
+    IntermediateIntrinsicOperation, IntermediateKind, IntermediateResult, IntermediateType,
+    IntermediateWrap,
 };
 use crate::interpret::{self, Context};
 use crate::loader;
-use crate::parsing::{ExpressionLiteral, Identifier, TargetLiteral};
+use crate::parsing::{
+    BinaryIntrinsicOperator, ExpressionLiteral, Identifier, TargetLiteral, UnaryIntrinsicOperator,
+};
 use crate::wasm;
 
 const INTERMEDIATE_SOURCE_PATH: &str = "silk_src/intermediate.silk";
@@ -49,6 +52,9 @@ const OUTPUT_VALUE_KIND_BOOLEAN: i32 = 2;
 const OUTPUT_VALUE_KIND_CHAR: i32 = 3;
 const OUTPUT_VALUE_KIND_STRUCT: i32 = 4;
 const OUTPUT_VALUE_KIND_ARRAY: i32 = 5;
+const OUTPUT_VALUE_KIND_INTRINSIC_BINARY: i32 = 6;
+const OUTPUT_VALUE_KIND_INTRINSIC_UNARY: i32 = 7;
+const OUTPUT_VALUE_KIND_IF: i32 = 8;
 
 const OUTPUT_VALUE_TYPE_UNKNOWN: i32 = 0;
 const OUTPUT_VALUE_TYPE_I32: i32 = 1;
@@ -1124,6 +1130,70 @@ fn decode_output_value_inner(
             }
             IntermediateKind::Literal(ExpressionLiteral::Char(slot.value_i32 as u8))
         }
+        OUTPUT_VALUE_KIND_INTRINSIC_BINARY => {
+            let mut children = decode_output_value_children(
+                slot,
+                root,
+                2,
+                value_slots,
+                value_fields,
+                input_bytes,
+                memo,
+                visiting,
+                "intrinsic binary",
+            )?
+            .into_iter();
+            let left = children.next().expect("binary intrinsic left child");
+            let right = children.next().expect("binary intrinsic right child");
+            let operator = decode_output_binary_intrinsic_operator(slot.value_i32)?;
+            IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
+                Box::new(left),
+                Box::new(right),
+                operator,
+            ))
+        }
+        OUTPUT_VALUE_KIND_INTRINSIC_UNARY => {
+            let mut children = decode_output_value_children(
+                slot,
+                root,
+                1,
+                value_slots,
+                value_fields,
+                input_bytes,
+                memo,
+                visiting,
+                "intrinsic unary",
+            )?
+            .into_iter();
+            let operand = children.next().expect("unary intrinsic operand");
+            let operator = decode_output_unary_intrinsic_operator(slot.value_i32)?;
+            IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Unary(
+                Box::new(operand),
+                operator,
+            ))
+        }
+        OUTPUT_VALUE_KIND_IF => {
+            let mut children = decode_output_value_children(
+                slot,
+                root,
+                3,
+                value_slots,
+                value_fields,
+                input_bytes,
+                memo,
+                visiting,
+                "if expression",
+            )?
+            .into_iter();
+            let condition = children.next().expect("if condition child");
+            let then_branch = children.next().expect("if then child");
+            let else_branch = children.next().expect("if else child");
+            IntermediateKind::If {
+                condition: Box::new(condition),
+                then_branch: Box::new(then_branch),
+                else_branch: Box::new(else_branch),
+            }
+        }
         OUTPUT_VALUE_KIND_ARRAY => {
             if slot.item_start < 0 || slot.item_count < 0 {
                 return Err(Diagnostic::new(format!(
@@ -1256,6 +1326,56 @@ fn decode_output_value_inner(
     Ok(decoded)
 }
 
+fn decode_output_value_children(
+    slot: &DecodedOutputValueSlot,
+    root: i32,
+    expected_count: usize,
+    value_slots: &[DecodedOutputValueSlot],
+    value_fields: &[DecodedOutputValueFieldSlot],
+    input_bytes: &[u8],
+    memo: &mut HashMap<i32, IntermediateKind>,
+    visiting: &mut HashMap<i32, ()>,
+    kind_label: &str,
+) -> Result<Vec<IntermediateKind>, Diagnostic> {
+    if slot.item_start < 0 || slot.item_count < 0 {
+        return Err(Diagnostic::new(format!(
+            "Output {kind_label} value {root} has invalid item span start={} count={}",
+            slot.item_start, slot.item_count
+        )));
+    }
+
+    let item_start = slot.item_start as usize;
+    let item_count = slot.item_count as usize;
+    if item_count != expected_count {
+        return Err(Diagnostic::new(format!(
+            "Output {kind_label} value {root} expected {expected_count} children, got {item_count}"
+        )));
+    }
+
+    let item_end = item_start.saturating_add(item_count);
+    if item_end > value_fields.len() {
+        return Err(Diagnostic::new(format!(
+            "Output {kind_label} value {root} item span out of bounds: start={} count={} fields={}",
+            item_start,
+            item_count,
+            value_fields.len()
+        )));
+    }
+
+    let mut children = Vec::with_capacity(item_count);
+    for field in &value_fields[item_start..item_end] {
+        children.push(decode_output_value_inner(
+            field.value_ref,
+            value_slots,
+            value_fields,
+            input_bytes,
+            memo,
+            visiting,
+        )?);
+    }
+    Ok(children)
+}
+
 fn decode_output_value_field_name(
     input_bytes: &[u8],
     start: i32,
@@ -1303,6 +1423,32 @@ fn infer_intermediate_type_from_value(
             length: items.len(),
             field_names: field_names.clone(),
         }),
+        IntermediateKind::IntrinsicOperation(op) => match op {
+            IntermediateIntrinsicOperation::Binary(..) => Ok(IntermediateType::I32),
+            IntermediateIntrinsicOperation::Unary(_, UnaryIntrinsicOperator::BooleanNot) => {
+                Ok(IntermediateType::I32)
+            }
+            IntermediateIntrinsicOperation::Unary(_, other) => Err(Diagnostic::new(format!(
+                "Unable to infer intermediate type from unary intrinsic operator {:?}",
+                other
+            ))),
+        },
+        IntermediateKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let then_ty = infer_intermediate_type_from_value(then_branch.as_ref())?;
+            let else_ty = infer_intermediate_type_from_value(else_branch.as_ref())?;
+            if then_ty == else_ty {
+                Ok(then_ty)
+            } else {
+                Err(Diagnostic::new(format!(
+                    "If expression branch type mismatch during output decode: then={:?} else={:?}",
+                    then_ty, else_ty
+                )))
+            }
+        }
         other => Err(Diagnostic::new(format!(
             "Unable to infer intermediate type from lowered output value: {:?}",
             other
@@ -1400,6 +1546,44 @@ fn decode_output_export_type(tag: i32) -> Result<IntermediateExportType, Diagnos
     }
 }
 
+fn decode_output_binary_intrinsic_operator(tag: i32) -> Result<BinaryIntrinsicOperator, Diagnostic> {
+    match tag {
+        0 => Ok(BinaryIntrinsicOperator::I32Add),
+        1 => Ok(BinaryIntrinsicOperator::I32Subtract),
+        2 => Ok(BinaryIntrinsicOperator::I32Multiply),
+        3 => Ok(BinaryIntrinsicOperator::I32Divide),
+        4 => Ok(BinaryIntrinsicOperator::I32Equal),
+        5 => Ok(BinaryIntrinsicOperator::I32NotEqual),
+        6 => Ok(BinaryIntrinsicOperator::I32LessThan),
+        7 => Ok(BinaryIntrinsicOperator::I32GreaterThan),
+        8 => Ok(BinaryIntrinsicOperator::I32LessThanOrEqual),
+        9 => Ok(BinaryIntrinsicOperator::I32GreaterThanOrEqual),
+        10 => Ok(BinaryIntrinsicOperator::BooleanAnd),
+        11 => Ok(BinaryIntrinsicOperator::BooleanOr),
+        12 => Ok(BinaryIntrinsicOperator::BooleanXor),
+        _ => Err(Diagnostic::new(format!(
+            "Unsupported binary intrinsic operator tag {tag}"
+        ))),
+    }
+}
+
+fn decode_output_unary_intrinsic_operator(tag: i32) -> Result<UnaryIntrinsicOperator, Diagnostic> {
+    match tag {
+        0 => Ok(UnaryIntrinsicOperator::BooleanNot),
+        1 => Ok(UnaryIntrinsicOperator::EnumFromStruct),
+        2 => Ok(UnaryIntrinsicOperator::MatchFromStruct),
+        3 => Ok(UnaryIntrinsicOperator::UseFromString),
+        4 => Ok(UnaryIntrinsicOperator::BoxFromType),
+        5 => Ok(UnaryIntrinsicOperator::BindingAnnotationExportFromTarget),
+        6 => Ok(UnaryIntrinsicOperator::BindingAnnotationTargetFromTarget),
+        7 => Ok(UnaryIntrinsicOperator::BindingAnnotationWrapFromTarget),
+        8 => Ok(UnaryIntrinsicOperator::AssemblyFromTarget),
+        _ => Err(Diagnostic::new(format!(
+            "Unsupported unary intrinsic operator tag {tag}"
+        ))),
+    }
+}
+
 fn decode_output_global_type(tag: i32) -> Result<Option<IntermediateType>, Diagnostic> {
     match tag {
         OUTPUT_GLOBAL_TYPE_INFER => Ok(None),
@@ -1457,13 +1641,19 @@ mod tests {
             .expect("wasm lowering should produce a result");
 
         assert_eq!(lowered.functions.len(), 0);
-        assert_eq!(lowered.inline_bindings.len(), 1);
+        assert_eq!(lowered.inline_bindings.len(), 2);
         assert_eq!(lowered.globals.len(), 0);
         assert_eq!(lowered.exports.len(), 0);
         assert_eq!(lowered.wrappers.len(), 0);
         assert!(matches!(
             lowered.inline_bindings.get("x"),
             Some(IntermediateKind::Literal(ExpressionLiteral::Number(1)))
+        ));
+        assert!(matches!(
+            lowered.inline_bindings.get("y"),
+            Some(IntermediateKind::IntrinsicOperation(
+                IntermediateIntrinsicOperation::Binary(_, _, BinaryIntrinsicOperator::I32Add)
+            ))
         ));
     }
 
@@ -1637,6 +1827,24 @@ mod tests {
             IntermediateExportType::Global
         );
         assert_eq!(lowered.wrappers[0].index, 0);
+    }
+
+    #[test]
+    fn wasm_stage_uses_first_export_target_order_for_wrapped_literal_global() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "(export wasm) (export js) (wrap wgsl) answer: i32 := 42; answer";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 2);
+        assert_eq!(lowered.wrappers.len(), 1);
+        assert_eq!(lowered.wrappers[0].source_target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.wrappers[0].wrap_target, TargetLiteral::WgslTarget);
     }
 
     #[test]
@@ -2234,6 +2442,117 @@ mod tests {
                 assert!(field_names.is_empty());
             }
             other => panic!("expected array literal value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wasm_stage_lowers_exported_binary_intrinsic_expression_without_evaluation() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "(export wasm) out := 1 + 2; out";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+
+        assert_eq!(lowered.globals[0].name, "out");
+        assert_eq!(lowered.globals[0].ty, IntermediateType::I32);
+        match &lowered.globals[0].value {
+            IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
+                left,
+                right,
+                operator,
+            )) => {
+                assert_eq!(*operator, BinaryIntrinsicOperator::I32Add);
+                assert!(matches!(
+                    left.as_ref(),
+                    IntermediateKind::Literal(ExpressionLiteral::Number(1))
+                ));
+                assert!(matches!(
+                    right.as_ref(),
+                    IntermediateKind::Literal(ExpressionLiteral::Number(2))
+                ));
+            }
+            other => panic!("expected binary intrinsic output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wasm_stage_lowers_inline_binary_intrinsic_expression_without_materialization() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "sum := 1 + 2; sum";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.globals.len(), 0);
+        assert_eq!(lowered.exports.len(), 0);
+        assert_eq!(lowered.wrappers.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 1);
+
+        match lowered.inline_bindings.get("sum") {
+            Some(IntermediateKind::IntrinsicOperation(
+                IntermediateIntrinsicOperation::Binary(left, right, operator),
+            )) => {
+                assert_eq!(*operator, BinaryIntrinsicOperator::I32Add);
+                assert!(matches!(
+                    left.as_ref(),
+                    IntermediateKind::Literal(ExpressionLiteral::Number(1))
+                ));
+                assert!(matches!(
+                    right.as_ref(),
+                    IntermediateKind::Literal(ExpressionLiteral::Number(2))
+                ));
+            }
+            other => panic!("expected inline binary intrinsic output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wasm_stage_lowers_exported_if_expression_without_evaluation() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "(export wasm) out := if true then 1 else 2; out";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+
+        assert_eq!(lowered.globals[0].name, "out");
+        assert_eq!(lowered.globals[0].ty, IntermediateType::I32);
+        match &lowered.globals[0].value {
+            IntermediateKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                assert!(matches!(
+                    condition.as_ref(),
+                    IntermediateKind::Literal(ExpressionLiteral::Boolean(true))
+                ));
+                assert!(matches!(
+                    then_branch.as_ref(),
+                    IntermediateKind::Literal(ExpressionLiteral::Number(1))
+                ));
+                assert!(matches!(
+                    else_branch.as_ref(),
+                    IntermediateKind::Literal(ExpressionLiteral::Number(2))
+                ));
+            }
+            other => panic!("expected if expression output, got {other:?}"),
         }
     }
 

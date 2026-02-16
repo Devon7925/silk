@@ -17,7 +17,7 @@ stays aligned across parser/interpreter/intermediate stages.
 
 ## Versions
 
-- `intermediate_stage_version() -> 11`
+- `intermediate_stage_version() -> 12`
 - `intermediate_payload_version() -> 6`
 - `intermediate_output_version() -> 6`
 
@@ -109,12 +109,17 @@ Error code export:
 - Wrap annotations no longer force an `unimplemented` result when no export source exists.
   - For inline literal bindings with only `(wrap ...)`, the stage emits no globals/exports/wrappers.
 - Wrappers are emitted for multi-target exports when a wrap target is present.
-  - Source target selection is deterministic from the export mask priority (`js`, then `wasm`, then `wgsl`).
+  - Source target selection now follows first-export annotation order (matching the first emitted export row), with mask-priority fallback only when the first target cannot be recovered.
 - Function exports/wrappers are now emitted through dedicated function slots.
   - Current host bridge resolves function bodies from the interpreted Rust context by exported/wrapped function name while retaining wasm-stage ownership of export/wrapper routing.
 - Function identifier alias chains are now recognized as function exports instead of falling back to `unimplemented`.
   - Example: `id := (x: i32) => x; (export wasm) alias := id` now lowers `alias` as a function export.
   - Wrapped aliases are also emitted (for example `(export wasm) (wrap js) alias := id`).
+- Binary operation expressions now lower to intrinsic-operation intermediate nodes instead of forcing fallback.
+  - Supported operators currently include arithmetic/comparison/boolean operators from parser operation nodes (`+`, `-`, `*`, `/`, `==`, `!=`, `<`, `>`, `<=`, `>=`, `&&`, `||`, `^`).
+  - The stage preserves operation structure; it does not evaluate operations.
+- `if` expressions now lower as structured intermediate `If` nodes when condition/branches can be lowered.
+  - Branch values are preserved as expression trees; the stage does not evaluate branch selection.
 - The stage still reports `unimplemented` for unsupported value shapes (for example non-data/non-struct mutable globals).
   - Array-repeat lowering for non-scalar empty repeats still falls back when element type cannot be inferred.
 - Bindings with unsupported pattern extraction are now treated as `unimplemented` instead of hard parse failure, preserving fallback behavior.

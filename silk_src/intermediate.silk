@@ -20,6 +20,9 @@ TargetLiteral := types.TargetLiteral;
 BindingAnnotationLiteral := types.BindingAnnotationLiteral;
 ExpressionLiteral := types.ExpressionLiteral;
 IntrinsicType := types.IntrinsicType;
+UnaryIntrinsicOperator := types.UnaryIntrinsicOperator;
+BinaryIntrinsicOperator := types.BinaryIntrinsicOperator;
+IntrinsicOperation := types.IntrinsicOperation;
 BindingPattern := types.BindingPattern;
 NodeKind := types.NodeKind;
 Node := types.Node;
@@ -58,6 +61,9 @@ OUTPUT_VALUE_KIND_BOOLEAN := 2;
 OUTPUT_VALUE_KIND_CHAR := 3;
 OUTPUT_VALUE_KIND_STRUCT := 4;
 OUTPUT_VALUE_KIND_ARRAY := 5;
+OUTPUT_VALUE_KIND_INTRINSIC_BINARY := 6;
+OUTPUT_VALUE_KIND_INTRINSIC_UNARY := 7;
+OUTPUT_VALUE_KIND_IF := 8;
 
 VALUE_REF_LOOKUP_MISSING := -1;
 VALUE_REF_LOOKUP_INPUT_ERROR := -2;
@@ -322,6 +328,7 @@ AnnotationState := {
     target_mask = i32,
     export_mask = i32,
     wrap_mask = i32,
+    first_export_target_tag = i32,
 };
 
 BindingExtractState := {
@@ -332,6 +339,7 @@ BindingExtractState := {
     target_mask = i32,
     export_mask = i32,
     wrap_mask = i32,
+    first_export_target_tag = i32,
     value_type_tag = i32,
 };
 
@@ -429,6 +437,7 @@ EMPTY_KNOWN_FUNCTION_ALIAS_SLOT := {
     target_mask = 0,
     export_mask = 0,
     wrap_mask = 0,
+    first_export_target_tag = -1,
 };
 (export wasm) mut binding_extract_state: Box(BindingExtractState) := {
     ok = 0,
@@ -438,6 +447,7 @@ EMPTY_KNOWN_FUNCTION_ALIAS_SLOT := {
     target_mask = 0,
     export_mask = 0,
     wrap_mask = 0,
+    first_export_target_tag = -1,
     value_type_tag = INPUT_VALUE_TYPE_UNKNOWN,
 };
 (export wasm) mut binding_lookup_state: Box(BindingLookupState) := {
@@ -452,7 +462,7 @@ EMPTY_KNOWN_FUNCTION_ALIAS_SLOT := {
 (export wasm) mut known_function_aliases: Box({KnownFunctionAliasSlot; MAX_KNOWN_FUNCTION_ALIASES}) := {EMPTY_KNOWN_FUNCTION_ALIAS_SLOT; MAX_KNOWN_FUNCTION_ALIASES};
 
 (export wasm) intermediate_stage_version := {} => (
-    11
+    12
 );
 
 target_mask_has := {mask: i32, bit: i32} => (
@@ -480,6 +490,13 @@ first_target_tag := (mask: i32) => (
     else if target_mask_has{mask, TARGET_MASK_WASM} == 1 then OUTPUT_TARGET_WASM
     else if target_mask_has{mask, TARGET_MASK_WGSL} == 1 then OUTPUT_TARGET_WGSL
     else -1
+);
+
+target_mask_from_output_target_tag := (target_tag: i32) => (
+    if target_tag == OUTPUT_TARGET_JS then TARGET_MASK_JS
+    else if target_tag == OUTPUT_TARGET_WASM then TARGET_MASK_WASM
+    else if target_tag == OUTPUT_TARGET_WGSL then TARGET_MASK_WGSL
+    else 0
 );
 
 string_ref_matches_2 := {value: StringRef, c0: u8, c1: u8} => (
@@ -608,6 +625,7 @@ reset_annotation_state := {} => (
     annotation_state.target_mask = 0;
     annotation_state.export_mask = 0;
     annotation_state.wrap_mask = 0;
+    annotation_state.first_export_target_tag = -1;
     1
 );
 
@@ -629,6 +647,11 @@ apply_annotation_expr := (expr_idx: i32) => (
                 ) else if NodeKind::Identifier(id) := nodes(info.function).kind then (
                     if string_ref_is_export(id.name) == 1 then (
                         annotation_state.export_mask = target_mask_or{annotation_state.export_mask, target_mask};
+                        if annotation_state.first_export_target_tag < 0 then (
+                            annotation_state.first_export_target_tag = first_target_tag(target_mask);
+                        ) else (
+                            {}
+                        );
                         1
                     ) else if string_ref_is_target(id.name) == 1 then (
                         annotation_state.target_mask = target_mask_or{annotation_state.target_mask, target_mask};
@@ -652,6 +675,11 @@ apply_annotation_expr := (expr_idx: i32) => (
                     BindingAnnotationLiteral::Export(target) => (
                         ann_mask := target_mask_from_target_literal(target);
                         annotation_state.export_mask = target_mask_or{annotation_state.export_mask, ann_mask};
+                        if annotation_state.first_export_target_tag < 0 then (
+                            annotation_state.first_export_target_tag = first_target_tag(ann_mask);
+                        ) else (
+                            {}
+                        );
                         1
                     ),
                     BindingAnnotationLiteral::Target(target) => (
@@ -696,6 +724,7 @@ reset_binding_extract_state := {} => (
     binding_extract_state.target_mask = 0;
     binding_extract_state.export_mask = 0;
     binding_extract_state.wrap_mask = 0;
+    binding_extract_state.first_export_target_tag = -1;
     binding_extract_state.value_type_tag = INPUT_VALUE_TYPE_UNKNOWN;
     1
 );
@@ -793,6 +822,8 @@ resolve_binding_pattern := {pattern: BindingPattern, input_len: i32} => (
                 binding_extract_state.target_mask = annotation_state.target_mask;
                 binding_extract_state.export_mask = annotation_state.export_mask;
                 binding_extract_state.wrap_mask = annotation_state.wrap_mask;
+                binding_extract_state.first_export_target_tag =
+                    annotation_state.first_export_target_tag;
                 binding_extract_state.value_type_tag = value_type_tag_from_type_expr{info.type_expr, input_len};
                 binding_extract_state.ok
             )
@@ -809,6 +840,8 @@ resolve_binding_pattern := {pattern: BindingPattern, input_len: i32} => (
                 binding_extract_state.target_mask = annotation_state.target_mask;
                 binding_extract_state.export_mask = annotation_state.export_mask;
                 binding_extract_state.wrap_mask = annotation_state.wrap_mask;
+                binding_extract_state.first_export_target_tag =
+                    annotation_state.first_export_target_tag;
                 binding_extract_state.value_type_tag = value_type_tag_from_pattern_expr{info.pattern, input_len};
                 binding_extract_state.ok
             )
@@ -1317,6 +1350,67 @@ parse_non_negative_i32_span := {start: i32, length: i32, input_len: i32} => (
     )
 );
 
+binary_intrinsic_operator_tag := (operator: BinaryIntrinsicOperator) => (
+    operator |> match {
+        BinaryIntrinsicOperator::I32Add => 0,
+        BinaryIntrinsicOperator::I32Subtract => 1,
+        BinaryIntrinsicOperator::I32Multiply => 2,
+        BinaryIntrinsicOperator::I32Divide => 3,
+        BinaryIntrinsicOperator::I32Equal => 4,
+        BinaryIntrinsicOperator::I32NotEqual => 5,
+        BinaryIntrinsicOperator::I32LessThan => 6,
+        BinaryIntrinsicOperator::I32GreaterThan => 7,
+        BinaryIntrinsicOperator::I32LessThanOrEqual => 8,
+        BinaryIntrinsicOperator::I32GreaterThanOrEqual => 9,
+        BinaryIntrinsicOperator::BooleanAnd => 10,
+        BinaryIntrinsicOperator::BooleanOr => 11,
+        BinaryIntrinsicOperator::BooleanXor => 12,
+        else => -1
+    }
+);
+
+unary_intrinsic_operator_tag := (operator: UnaryIntrinsicOperator) => (
+    operator |> match {
+        UnaryIntrinsicOperator::BooleanNot => 0,
+        UnaryIntrinsicOperator::EnumFromStruct => 1,
+        UnaryIntrinsicOperator::MatchFromStruct => 2,
+        UnaryIntrinsicOperator::UseFromString => 3,
+        UnaryIntrinsicOperator::BoxFromType => 4,
+        UnaryIntrinsicOperator::BindingAnnotationExportFromTarget => 5,
+        UnaryIntrinsicOperator::BindingAnnotationTargetFromTarget => 6,
+        UnaryIntrinsicOperator::BindingAnnotationWrapFromTarget => 7,
+        UnaryIntrinsicOperator::AssemblyFromTarget => 8,
+        else => -1
+    }
+);
+
+binary_intrinsic_operator_tag_from_span := {start: i32, length: i32, input_len: i32} => (
+    if safe_name_bounds{start, length, input_len} == 0 then VALUE_REF_LOOKUP_INPUT_ERROR
+    else if length == 1 then (
+        op := input(start);
+        if op == '+' then 0
+        else if op == '-' then 1
+        else if op == '*' then 2
+        else if op == '/' then 3
+        else if op == '<' then 6
+        else if op == '>' then 7
+        else if op == '^' then 12
+        else VALUE_REF_LOOKUP_MISSING
+    ) else if length == 2 then (
+        op0 := input(start);
+        op1 := input(start + 1);
+        if op0 == '=' && op1 == '=' then 4
+        else if op0 == '!' && op1 == '=' then 5
+        else if op0 == '<' && op1 == '=' then 8
+        else if op0 == '>' && op1 == '=' then 9
+        else if op0 == '&' && op1 == '&' then 10
+        else if op0 == '|' && op1 == '|' then 11
+        else VALUE_REF_LOOKUP_MISSING
+    ) else (
+        VALUE_REF_LOOKUP_MISSING
+    )
+);
+
 value_ref_lookup_to_lowered_value := (value_ref_lookup: i32) => (
     if value_ref_lookup == VALUE_REF_LOOKUP_INPUT_ERROR then LoweredValueLookup::InputError
     else if value_ref_lookup == VALUE_REF_LOOKUP_OUTPUT_ERROR then LoweredValueLookup::OutputError
@@ -1487,6 +1581,159 @@ emit_output_value_for_scalar := {value_tag: i32, value_i32: i32} => (
     )
 );
 
+resolve_lowered_value_expr_as_ref := {expr_idx: i32, input_len: i32} => (
+    resolve_lowered_value_expr{expr_idx, input_len} |> match {
+        LoweredValueLookup::Missing => VALUE_REF_LOOKUP_MISSING,
+        LoweredValueLookup::InputError => VALUE_REF_LOOKUP_INPUT_ERROR,
+        LoweredValueLookup::OutputError => VALUE_REF_LOOKUP_OUTPUT_ERROR,
+        LoweredValueLookup::Scalar(value) => (
+            value_ref := emit_output_value_for_scalar{value.value_tag, value.value_i32};
+            if value_ref < 0 then VALUE_REF_LOOKUP_OUTPUT_ERROR else value_ref
+        ),
+        LoweredValueLookup::ValueRef(value_ref) => value_ref,
+        else => VALUE_REF_LOOKUP_INPUT_ERROR
+    }
+);
+
+emit_output_value_child_field := {index: i32, value_ref: i32} => (
+    field_slot_idx := lower_state.output_value_field_count;
+    if field_slot_idx < 0 || field_slot_idx >= MAX_OUTPUT_VALUE_FIELDS then 0
+    else if value_ref < 0 || value_ref >= lower_state.output_value_count then 0
+    else (
+        output_value_fields(field_slot_idx).name_start = -1;
+        output_value_fields(field_slot_idx).name_length = index;
+        output_value_fields(field_slot_idx).value_ref = value_ref;
+        lower_state.output_value_field_count = field_slot_idx + 1;
+        1
+    )
+);
+
+emit_binary_intrinsic_value := {operator_tag: i32, left_expr_idx: i32, right_expr_idx: i32, input_len: i32} => (
+    if operator_tag < 0 then LoweredValueLookup::Missing
+    else (
+        checkpoint_value_count := lower_state.output_value_count;
+        checkpoint_field_count := lower_state.output_value_field_count;
+        item_start := checkpoint_field_count;
+        left_ref := resolve_lowered_value_expr_as_ref{left_expr_idx, input_len};
+        if left_ref < 0 then (
+            lower_state.output_value_count = checkpoint_value_count;
+            lower_state.output_value_field_count = checkpoint_field_count;
+            value_ref_lookup_to_lowered_value(left_ref)
+        ) else (
+            right_ref := resolve_lowered_value_expr_as_ref{right_expr_idx, input_len};
+            if right_ref < 0 then (
+                lower_state.output_value_count = checkpoint_value_count;
+                lower_state.output_value_field_count = checkpoint_field_count;
+                value_ref_lookup_to_lowered_value(right_ref)
+            ) else if emit_output_value_child_field{0, left_ref} == 0 || emit_output_value_child_field{1, right_ref} == 0 then (
+                lower_state.output_value_count = checkpoint_value_count;
+                lower_state.output_value_field_count = checkpoint_field_count;
+                LoweredValueLookup::OutputError
+            ) else (
+                value_ref := emit_output_value_entry{
+                    OUTPUT_VALUE_KIND_INTRINSIC_BINARY,
+                    operator_tag,
+                    0,
+                    0,
+                    item_start,
+                    2
+                };
+                if value_ref < 0 then (
+                    lower_state.output_value_count = checkpoint_value_count;
+                    lower_state.output_value_field_count = checkpoint_field_count;
+                    LoweredValueLookup::OutputError
+                ) else (
+                    LoweredValueLookup::ValueRef(value_ref)
+                )
+            )
+        )
+    )
+);
+
+emit_unary_intrinsic_value := {operator_tag: i32, operand_expr_idx: i32, input_len: i32} => (
+    if operator_tag < 0 then LoweredValueLookup::Missing
+    else (
+        checkpoint_value_count := lower_state.output_value_count;
+        checkpoint_field_count := lower_state.output_value_field_count;
+        item_start := checkpoint_field_count;
+        operand_ref := resolve_lowered_value_expr_as_ref{operand_expr_idx, input_len};
+        if operand_ref < 0 then (
+            lower_state.output_value_count = checkpoint_value_count;
+            lower_state.output_value_field_count = checkpoint_field_count;
+            value_ref_lookup_to_lowered_value(operand_ref)
+        ) else if emit_output_value_child_field{0, operand_ref} == 0 then (
+            lower_state.output_value_count = checkpoint_value_count;
+            lower_state.output_value_field_count = checkpoint_field_count;
+            LoweredValueLookup::OutputError
+        ) else (
+            value_ref := emit_output_value_entry{
+                OUTPUT_VALUE_KIND_INTRINSIC_UNARY,
+                operator_tag,
+                0,
+                0,
+                item_start,
+                1
+            };
+            if value_ref < 0 then (
+                lower_state.output_value_count = checkpoint_value_count;
+                lower_state.output_value_field_count = checkpoint_field_count;
+                LoweredValueLookup::OutputError
+            ) else (
+                LoweredValueLookup::ValueRef(value_ref)
+            )
+        )
+    )
+);
+
+emit_if_value := {condition_expr_idx: i32, then_expr_idx: i32, else_expr_idx: i32, input_len: i32} => (
+    checkpoint_value_count := lower_state.output_value_count;
+    checkpoint_field_count := lower_state.output_value_field_count;
+    item_start := checkpoint_field_count;
+    condition_ref := resolve_lowered_value_expr_as_ref{condition_expr_idx, input_len};
+    if condition_ref < 0 then (
+        lower_state.output_value_count = checkpoint_value_count;
+        lower_state.output_value_field_count = checkpoint_field_count;
+        value_ref_lookup_to_lowered_value(condition_ref)
+    ) else (
+        then_ref := resolve_lowered_value_expr_as_ref{then_expr_idx, input_len};
+        if then_ref < 0 then (
+            lower_state.output_value_count = checkpoint_value_count;
+            lower_state.output_value_field_count = checkpoint_field_count;
+            value_ref_lookup_to_lowered_value(then_ref)
+        ) else (
+            else_ref := resolve_lowered_value_expr_as_ref{else_expr_idx, input_len};
+            if else_ref < 0 then (
+                lower_state.output_value_count = checkpoint_value_count;
+                lower_state.output_value_field_count = checkpoint_field_count;
+                value_ref_lookup_to_lowered_value(else_ref)
+            ) else if emit_output_value_child_field{0, condition_ref} == 0
+                || emit_output_value_child_field{1, then_ref} == 0
+                || emit_output_value_child_field{2, else_ref} == 0
+            then (
+                lower_state.output_value_count = checkpoint_value_count;
+                lower_state.output_value_field_count = checkpoint_field_count;
+                LoweredValueLookup::OutputError
+            ) else (
+                value_ref := emit_output_value_entry{
+                    OUTPUT_VALUE_KIND_IF,
+                    0,
+                    0,
+                    0,
+                    item_start,
+                    3
+                };
+                if value_ref < 0 then (
+                    lower_state.output_value_count = checkpoint_value_count;
+                    lower_state.output_value_field_count = checkpoint_field_count;
+                    LoweredValueLookup::OutputError
+                ) else (
+                    LoweredValueLookup::ValueRef(value_ref)
+                )
+            )
+        )
+    )
+);
+
 resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
     if expr_idx == -1 then LoweredValueLookup::Missing
     else if expr_idx < 0 || expr_idx >= MAX_NODES then LoweredValueLookup::InputError
@@ -1597,6 +1844,39 @@ resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
                     else => LoweredValueLookup::InputError
                 }
             ),
+            NodeKind::IntrinsicOperation(intrinsic) => (
+                intrinsic |> match {
+                    IntrinsicOperation::Binary(info) => (
+                        operator_tag := binary_intrinsic_operator_tag(info.operator);
+                        emit_binary_intrinsic_value{
+                            operator_tag,
+                            info.left,
+                            info.right,
+                            input_len
+                        }
+                    ),
+                    IntrinsicOperation::Unary(info) => (
+                        operator_tag := unary_intrinsic_operator_tag(info.operator);
+                        emit_unary_intrinsic_value{
+                            operator_tag,
+                            info.operand,
+                            input_len
+                        }
+                    ),
+                    IntrinsicOperation::InlineAssembly(info) => (
+                        LoweredValueLookup::Missing
+                    ),
+                    else => LoweredValueLookup::Missing
+                }
+            ),
+            NodeKind::If(info) => (
+                emit_if_value{
+                    info.condition,
+                    info.then_branch,
+                    info.else_branch,
+                    input_len
+                }
+            ),
             NodeKind::Operation(info) => (
                 if info.operator.length == 1 && info.operator.start >= 0 && input(info.operator.start) == '.' then (
                     if info.left < 0 || info.left >= MAX_NODES || info.right < 0 || info.right >= MAX_NODES then (
@@ -1623,7 +1903,21 @@ resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
                         LoweredValueLookup::Missing
                     )
                 ) else (
-                    LoweredValueLookup::Missing
+                    operator_tag_lookup := binary_intrinsic_operator_tag_from_span{
+                        info.operator.start,
+                        info.operator.length,
+                        input_len
+                    };
+                    if operator_tag_lookup == VALUE_REF_LOOKUP_INPUT_ERROR then LoweredValueLookup::InputError
+                    else if operator_tag_lookup < 0 then LoweredValueLookup::Missing
+                    else (
+                        emit_binary_intrinsic_value{
+                            operator_tag_lookup,
+                            info.left,
+                            info.right,
+                            input_len
+                        }
+                    )
                 )
             ),
             NodeKind::FunctionCall(info) => (
@@ -2065,7 +2359,13 @@ update_known_function_alias_for_binding := {expr_idx: i32, input_len: i32} => (
 
 resolve_wrapper_source_target := {} => (
     if target_count(binding_extract_state.wrap_mask) == 0 then WrapperSourceTarget::Missing else (
-        source_target_tag := first_target_tag(binding_extract_state.export_mask);
+        mut source_target_tag := binding_extract_state.first_export_target_tag;
+        source_target_mask := target_mask_from_output_target_tag(source_target_tag);
+        if source_target_mask == 0 || target_mask_has{binding_extract_state.export_mask, source_target_mask} == 0 then (
+            source_target_tag = first_target_tag(binding_extract_state.export_mask);
+        ) else (
+            {}
+        );
         if source_target_tag < 0 then WrapperSourceTarget::Missing else WrapperSourceTarget::Target(source_target_tag)
     )
 );
