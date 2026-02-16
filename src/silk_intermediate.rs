@@ -1894,6 +1894,41 @@ mod tests {
     }
 
     #[test]
+    fn wasm_stage_lowers_exported_struct_property_access_from_function_call_shape() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "base := { x = 7, y = 8 }; (export wasm) out := base.x; out";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 1);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+        assert_eq!(lowered.wrappers.len(), 0);
+
+        assert!(matches!(
+            lowered.inline_bindings.get("base"),
+            Some(IntermediateKind::Struct(_))
+        ));
+        assert_eq!(lowered.globals[0].name, "out");
+        assert_eq!(lowered.globals[0].ty, IntermediateType::I32);
+        assert!(matches!(
+            lowered.globals[0].value,
+            IntermediateKind::Literal(ExpressionLiteral::Number(7))
+        ));
+        assert_eq!(lowered.exports[0].target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.exports[0].name, "out");
+        assert_eq!(
+            lowered.exports[0].export_type,
+            IntermediateExportType::Global
+        );
+        assert_eq!(lowered.exports[0].index, 0);
+    }
+
+    #[test]
     fn wasm_stage_lowers_exported_string_global_as_u8_array() {
         if !wasm_stage_available() {
             return;

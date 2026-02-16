@@ -1494,6 +1494,37 @@ resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
                     LoweredValueLookup::Missing
                 )
             ),
+            NodeKind::FunctionCall(info) => (
+                if info.function < 0 || info.function >= MAX_NODES then (
+                    LoweredValueLookup::InputError
+                ) else if NodeKind::TypePropertyAccess(access_info) := nodes(info.function).kind then (
+                    if info.argument != access_info.object then (
+                        LoweredValueLookup::Missing
+                    ) else if safe_name_bounds{access_info.property.start, access_info.property.length, input_len} == 0 then (
+                        LoweredValueLookup::InputError
+                    ) else (
+                        resolve_lowered_value_expr{access_info.object, input_len} |> match {
+                            LoweredValueLookup::InputError => LoweredValueLookup::InputError,
+                            LoweredValueLookup::OutputError => LoweredValueLookup::OutputError,
+                            LoweredValueLookup::Missing => LoweredValueLookup::Missing,
+                            LoweredValueLookup::Scalar(value) => LoweredValueLookup::Missing,
+                            LoweredValueLookup::ValueRef(object_ref) => (
+                                value_ref_lookup_to_lowered_value(
+                                    lookup_value_ref_by_property{
+                                        object_ref,
+                                        access_info.property.start,
+                                        access_info.property.length,
+                                        input_len
+                                    }
+                                )
+                            ),
+                            else => LoweredValueLookup::InputError
+                        }
+                    )
+                ) else (
+                    LoweredValueLookup::Missing
+                )
+            ),
             NodeKind::Struct(info) => (
                 checkpoint_value_count := lower_state.output_value_count;
                 checkpoint_field_count := lower_state.output_value_field_count;

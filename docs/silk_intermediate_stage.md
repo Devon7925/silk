@@ -99,6 +99,8 @@ Error code export:
   - Example: `base := "abc"; (export wasm) out := base` now materializes `out` from the alias chain.
   - Example: `base := "abc"; base` now emits an inline array-valued binding for `base`.
 - Struct/array projection lookup now resolves through the lowered-value alias graph recursively instead of only direct identifier slots.
+- Property access in parser function-call form now lowers through the same projection path.
+  - Example: `base := { x = 7, y = 8 }; (export wasm) out := base.x` now lowers `out` as scalar global `7` instead of returning `unimplemented`.
 - Non-materialized scalar bindings are emitted in `inline_bindings` as literal `IntermediateKind` values.
   - Example: `base := 42; (export wasm) answer := base` now lowers `base` into the inline-binding output table while still lowering `answer` as a global/export.
 - Wrap annotations no longer force an `unimplemented` result when no export source exists.
