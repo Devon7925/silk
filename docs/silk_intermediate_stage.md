@@ -17,9 +17,9 @@ stays aligned across parser/interpreter/intermediate stages.
 
 ## Versions
 
-- `intermediate_stage_version() -> 13`
+- `intermediate_stage_version() -> 14`
 - `intermediate_payload_version() -> 6`
-- `intermediate_output_version() -> 7`
+- `intermediate_output_version() -> 8`
 
 ## Input ABI (AST, chainable)
 
@@ -127,6 +127,10 @@ Error code export:
   - The stage preserves operation structure; it does not evaluate operations.
 - `if` expressions now lower as structured intermediate `If` nodes when condition/branches can be lowered.
   - Branch values are preserved as expression trees; the stage does not evaluate branch selection.
+- Block/loop/diverge expressions now lower as structured intermediate expression trees.
+  - Block expressions are preserved as `IntermediateKind::Block` child lists.
+  - Loop expressions are preserved as `IntermediateKind::Loop` with lowered loop bodies.
+  - Diverge expressions (`return`/`break`) are preserved as `IntermediateKind::Diverge` with explicit diverge-type tags.
 - The stage still reports `unimplemented` for unsupported value shapes (for example non-data/non-struct mutable globals).
   - Array-repeat lowering for non-scalar empty repeats still falls back when element type cannot be inferred.
 - Bindings with unsupported pattern extraction are now treated as `unimplemented` instead of hard parse failure, preserving fallback behavior.

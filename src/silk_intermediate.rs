@@ -14,7 +14,8 @@ use crate::intermediate::{
 use crate::interpret::{self, Context};
 use crate::loader;
 use crate::parsing::{
-    BinaryIntrinsicOperator, ExpressionLiteral, Identifier, TargetLiteral, UnaryIntrinsicOperator,
+    BinaryIntrinsicOperator, DivergeExpressionType, ExpressionLiteral, Identifier, TargetLiteral,
+    UnaryIntrinsicOperator,
 };
 use crate::wasm;
 
@@ -58,6 +59,9 @@ const OUTPUT_VALUE_KIND_IF: i32 = 8;
 const OUTPUT_VALUE_KIND_IDENTIFIER: i32 = 9;
 const OUTPUT_VALUE_KIND_TYPE_PROPERTY_ACCESS: i32 = 10;
 const OUTPUT_VALUE_KIND_ARRAY_INDEX: i32 = 11;
+const OUTPUT_VALUE_KIND_BLOCK: i32 = 12;
+const OUTPUT_VALUE_KIND_DIVERGE: i32 = 13;
+const OUTPUT_VALUE_KIND_LOOP: i32 = 14;
 
 const OUTPUT_VALUE_TYPE_UNKNOWN: i32 = 0;
 const OUTPUT_VALUE_TYPE_I32: i32 = 1;
@@ -207,8 +211,7 @@ fn lower_with_wasm_with_context(
 
     match status {
         LOWER_STATUS_OK => {
-            let lowered =
-                decode_lowered_output(&mut store, &instance, source.as_bytes(), context)?;
+            let lowered = decode_lowered_output(&mut store, &instance, source.as_bytes(), context)?;
             Ok(Some(lowered))
         }
         LOWER_STATUS_UNIMPLEMENTED => Ok(None),
@@ -802,11 +805,8 @@ fn decode_lowered_output(
     if function_count > 0 {
         let get_function_name_start =
             required_i32_to_i32_export(instance, store, "get_lower_output_function_name_start")?;
-        let get_function_name_length = required_i32_to_i32_export(
-            instance,
-            store,
-            "get_lower_output_function_name_length",
-        )?;
+        let get_function_name_length =
+            required_i32_to_i32_export(instance, store, "get_lower_output_function_name_length")?;
         let function_lookup = context
             .map(function_lookup_from_context)
             .ok_or_else(|| {
@@ -1241,6 +1241,76 @@ fn decode_output_value_inner(
                 else_branch: Box::new(else_branch),
             }
         }
+        OUTPUT_VALUE_KIND_BLOCK => {
+            if slot.item_start < 0 || slot.item_count < 0 {
+                return Err(Diagnostic::new(format!(
+                    "Output block value has invalid item span start={} count={}",
+                    slot.item_start, slot.item_count
+                )));
+            }
+            let item_start = slot.item_start as usize;
+            let item_count = slot.item_count as usize;
+            let item_end = item_start.saturating_add(item_count);
+            if item_end > value_fields.len() {
+                return Err(Diagnostic::new(format!(
+                    "Output block value item span out of bounds: start={} count={} fields={}",
+                    item_start,
+                    item_count,
+                    value_fields.len()
+                )));
+            }
+
+            let mut expressions = Vec::with_capacity(item_count);
+            for field in &value_fields[item_start..item_end] {
+                expressions.push(decode_output_value_inner(
+                    field.value_ref,
+                    value_slots,
+                    value_fields,
+                    input_bytes,
+                    memo,
+                    visiting,
+                )?);
+            }
+            IntermediateKind::Block(expressions)
+        }
+        OUTPUT_VALUE_KIND_DIVERGE => {
+            let mut children = decode_output_value_children(
+                slot,
+                root,
+                1,
+                value_slots,
+                value_fields,
+                input_bytes,
+                memo,
+                visiting,
+                "diverge expression",
+            )?
+            .into_iter();
+            let value = children.next().expect("diverge value child");
+            let divergance_type = decode_output_diverge_expression_type(slot.value_i32)?;
+            IntermediateKind::Diverge {
+                value: Box::new(value),
+                divergance_type,
+            }
+        }
+        OUTPUT_VALUE_KIND_LOOP => {
+            let mut children = decode_output_value_children(
+                slot,
+                root,
+                1,
+                value_slots,
+                value_fields,
+                input_bytes,
+                memo,
+                visiting,
+                "loop expression",
+            )?
+            .into_iter();
+            let body = children.next().expect("loop body child");
+            IntermediateKind::Loop {
+                body: Box::new(body),
+            }
+        }
         OUTPUT_VALUE_KIND_ARRAY => {
             if slot.item_start < 0 || slot.item_count < 0 {
                 return Err(Diagnostic::new(format!(
@@ -1496,6 +1566,15 @@ fn infer_intermediate_type_from_value(
                 )))
             }
         }
+        IntermediateKind::Block(expressions) => {
+            if let Some(last) = expressions.last() {
+                infer_intermediate_type_from_value(last)
+            } else {
+                Ok(IntermediateType::I32)
+            }
+        }
+        IntermediateKind::Diverge { value, .. } => infer_intermediate_type_from_value(value),
+        IntermediateKind::Loop { .. } => Ok(IntermediateType::I32),
         other => Err(Diagnostic::new(format!(
             "Unable to infer intermediate type from lowered output value: {:?}",
             other
@@ -1593,7 +1672,9 @@ fn decode_output_export_type(tag: i32) -> Result<IntermediateExportType, Diagnos
     }
 }
 
-fn decode_output_binary_intrinsic_operator(tag: i32) -> Result<BinaryIntrinsicOperator, Diagnostic> {
+fn decode_output_binary_intrinsic_operator(
+    tag: i32,
+) -> Result<BinaryIntrinsicOperator, Diagnostic> {
     match tag {
         0 => Ok(BinaryIntrinsicOperator::I32Add),
         1 => Ok(BinaryIntrinsicOperator::I32Subtract),
@@ -1627,6 +1708,16 @@ fn decode_output_unary_intrinsic_operator(tag: i32) -> Result<UnaryIntrinsicOper
         8 => Ok(UnaryIntrinsicOperator::AssemblyFromTarget),
         _ => Err(Diagnostic::new(format!(
             "Unsupported unary intrinsic operator tag {tag}"
+        ))),
+    }
+}
+
+fn decode_output_diverge_expression_type(tag: i32) -> Result<DivergeExpressionType, Diagnostic> {
+    match tag {
+        0 => Ok(DivergeExpressionType::Return),
+        1 => Ok(DivergeExpressionType::Break),
+        _ => Err(Diagnostic::new(format!(
+            "Unsupported diverge expression type tag {tag}"
         ))),
     }
 }
@@ -2282,8 +2373,7 @@ mod tests {
         if !wasm_stage_available() {
             return;
         }
-        let source =
-            "base := {10, 20, 30}; idx := if true then 1 else 2; (export wasm) out: i32 := base(idx); out";
+        let source = "base := {10, 20, 30}; idx := if true then 1 else 2; (export wasm) out: i32 := base(idx); out";
         let lowered = lower_with_wasm(source)
             .expect("wasm lowering should run")
             .expect("wasm lowering should produce a result");
@@ -2296,7 +2386,10 @@ mod tests {
         assert_eq!(lowered.globals[0].ty, IntermediateType::I32);
         match &lowered.globals[0].value {
             IntermediateKind::ArrayIndex { array, index } => {
-                assert!(matches!(array.as_ref(), IntermediateKind::ArrayLiteral { .. }));
+                assert!(matches!(
+                    array.as_ref(),
+                    IntermediateKind::ArrayLiteral { .. }
+                ));
                 assert!(matches!(index.as_ref(), IntermediateKind::If { .. }));
             }
             other => panic!("expected array-index value, got {other:?}"),
@@ -2611,9 +2704,11 @@ mod tests {
         assert_eq!(lowered.inline_bindings.len(), 1);
 
         match lowered.inline_bindings.get("sum") {
-            Some(IntermediateKind::IntrinsicOperation(
-                IntermediateIntrinsicOperation::Binary(left, right, operator),
-            )) => {
+            Some(IntermediateKind::IntrinsicOperation(IntermediateIntrinsicOperation::Binary(
+                left,
+                right,
+                operator,
+            ))) => {
                 assert_eq!(*operator, BinaryIntrinsicOperator::I32Add);
                 assert!(matches!(
                     left.as_ref(),
@@ -2665,6 +2760,70 @@ mod tests {
                 ));
             }
             other => panic!("expected if expression output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wasm_stage_lowers_inline_block_expression_without_materialization() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "value := (1; 2; 3); value";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.globals.len(), 0);
+        assert_eq!(lowered.exports.len(), 0);
+        assert_eq!(lowered.wrappers.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 1);
+
+        match lowered.inline_bindings.get("value") {
+            Some(IntermediateKind::Block(expressions)) => {
+                assert_eq!(expressions.len(), 3);
+                assert!(matches!(
+                    expressions[0],
+                    IntermediateKind::Literal(ExpressionLiteral::Number(1))
+                ));
+                assert!(matches!(
+                    expressions[1],
+                    IntermediateKind::Literal(ExpressionLiteral::Number(2))
+                ));
+                assert!(matches!(
+                    expressions[2],
+                    IntermediateKind::Literal(ExpressionLiteral::Number(3))
+                ));
+            }
+            other => panic!("expected inline block output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wasm_stage_lowers_exported_loop_expression_without_evaluation() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "(export wasm) out: i32 := loop (break 7); out";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+
+        assert_eq!(lowered.globals[0].name, "out");
+        assert_eq!(lowered.globals[0].ty, IntermediateType::I32);
+        match &lowered.globals[0].value {
+            IntermediateKind::Loop { body } => {
+                assert!(matches!(
+                    body.as_ref(),
+                    IntermediateKind::Literal(ExpressionLiteral::Number(7))
+                ));
+            }
+            other => panic!("expected loop expression output, got {other:?}"),
         }
     }
 
