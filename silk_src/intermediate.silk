@@ -55,6 +55,11 @@ OUTPUT_VALUE_KIND_NUMBER := 1;
 OUTPUT_VALUE_KIND_BOOLEAN := 2;
 OUTPUT_VALUE_KIND_CHAR := 3;
 OUTPUT_VALUE_KIND_STRUCT := 4;
+OUTPUT_VALUE_KIND_ARRAY := 5;
+
+VALUE_REF_LOOKUP_MISSING := -1;
+VALUE_REF_LOOKUP_INPUT_ERROR := -2;
+VALUE_REF_LOOKUP_OUTPUT_ERROR := -3;
 
 LowerStatus := enum {
     Ok = {},
@@ -232,7 +237,7 @@ lower_error_output_encode_failed := {} => (
 );
 
 (export wasm) intermediate_output_version := {} => (
-    4
+    5
 );
 
 (export wasm) input: Box({u8; MAX_INPUT}) := {0; MAX_INPUT};
@@ -413,7 +418,7 @@ EMPTY_KNOWN_VALUE_ALIAS_SLOT := {
 (export wasm) mut known_value_aliases: Box({KnownValueAliasSlot; MAX_KNOWN_VALUE_ALIASES}) := {EMPTY_KNOWN_VALUE_ALIAS_SLOT; MAX_KNOWN_VALUE_ALIASES};
 
 (export wasm) intermediate_stage_version := {} => (
-    8
+    9
 );
 
 target_mask_has := {mask: i32, bit: i32} => (
@@ -1197,6 +1202,110 @@ parse_non_negative_i32_span := {start: i32, length: i32, input_len: i32} => (
     )
 );
 
+value_ref_lookup_to_lowered_value := (value_ref_lookup: i32) => (
+    if value_ref_lookup == VALUE_REF_LOOKUP_INPUT_ERROR then LoweredValueLookup::InputError
+    else if value_ref_lookup == VALUE_REF_LOOKUP_OUTPUT_ERROR then LoweredValueLookup::OutputError
+    else if value_ref_lookup == VALUE_REF_LOOKUP_MISSING then LoweredValueLookup::Missing
+    else LoweredValueLookup::ValueRef(value_ref_lookup)
+);
+
+value_ref_element_type_tag := (value_ref: i32) => (
+    if value_ref < 0 || value_ref >= lower_state.output_value_count then INPUT_VALUE_TYPE_UNKNOWN
+    else (
+        kind_tag := output_values(value_ref).kind_tag;
+        if kind_tag == OUTPUT_VALUE_KIND_NUMBER || kind_tag == OUTPUT_VALUE_KIND_BOOLEAN then INPUT_VALUE_TYPE_I32
+        else if kind_tag == OUTPUT_VALUE_KIND_CHAR then INPUT_VALUE_TYPE_U8
+        else INPUT_VALUE_TYPE_UNKNOWN
+    )
+);
+
+lookup_value_ref_by_property := {object_ref: i32, property_start: i32, property_length: i32, input_len: i32} => (
+    if safe_name_bounds{property_start, property_length, input_len} == 0 then VALUE_REF_LOOKUP_INPUT_ERROR
+    else if object_ref < 0 || object_ref >= lower_state.output_value_count then VALUE_REF_LOOKUP_INPUT_ERROR
+    else (
+        kind_tag := output_values(object_ref).kind_tag;
+        if kind_tag != OUTPUT_VALUE_KIND_STRUCT && kind_tag != OUTPUT_VALUE_KIND_ARRAY then VALUE_REF_LOOKUP_MISSING
+        else (
+            item_start := output_values(object_ref).item_start;
+            item_count := output_values(object_ref).item_count;
+            if item_start < 0 || item_count < 0 || item_start + item_count > lower_state.output_value_field_count then VALUE_REF_LOOKUP_INPUT_ERROR
+            else (
+                target_index := parse_non_negative_i32_span{property_start, property_length, input_len};
+                mut cursor := item_start;
+                mut found_ref := VALUE_REF_LOOKUP_MISSING;
+                while cursor < item_start + item_count && found_ref == VALUE_REF_LOOKUP_MISSING do (
+                    field_name_start := output_value_fields(cursor).name_start;
+                    field_name_length := output_value_fields(cursor).name_length;
+                    if field_name_start >= 0 && input_spans_equal{
+                        field_name_start,
+                        field_name_length,
+                        property_start,
+                        property_length,
+                        input_len
+                    } == 1 then (
+                        found_ref = output_value_fields(cursor).value_ref;
+                    ) else if field_name_start == -1 && target_index >= 0 && field_name_length == target_index then (
+                        found_ref = output_value_fields(cursor).value_ref;
+                    ) else (
+                        {}
+                    );
+                    cursor = cursor + 1;
+                    {}
+                );
+                if found_ref == VALUE_REF_LOOKUP_MISSING then VALUE_REF_LOOKUP_MISSING
+                else if found_ref < 0 || found_ref >= lower_state.output_value_count then VALUE_REF_LOOKUP_INPUT_ERROR
+                else found_ref
+            )
+        )
+    )
+);
+
+lookup_value_ref_by_index := {array_ref: i32, index: i32, input_len: i32} => (
+    if index < 0 then VALUE_REF_LOOKUP_MISSING
+    else if array_ref < 0 || array_ref >= lower_state.output_value_count then VALUE_REF_LOOKUP_INPUT_ERROR
+    else (
+        kind_tag := output_values(array_ref).kind_tag;
+        if kind_tag != OUTPUT_VALUE_KIND_STRUCT && kind_tag != OUTPUT_VALUE_KIND_ARRAY then VALUE_REF_LOOKUP_MISSING
+        else (
+            item_start := output_values(array_ref).item_start;
+            item_count := output_values(array_ref).item_count;
+            if item_start < 0 || item_count < 0 || item_start + item_count > lower_state.output_value_field_count then VALUE_REF_LOOKUP_INPUT_ERROR
+            else if index >= item_count then VALUE_REF_LOOKUP_MISSING
+            else (
+                field_idx := item_start + index;
+                if field_idx < item_start || field_idx >= item_start + item_count then VALUE_REF_LOOKUP_INPUT_ERROR
+                else (
+                    field_name_start := output_value_fields(field_idx).name_start;
+                    field_name_length := output_value_fields(field_idx).name_length;
+                    mut name_match := 0;
+                    if field_name_start == -1 && field_name_length == index then (
+                        name_match = 1;
+                    ) else if field_name_start >= 0 then (
+                        parsed_idx := parse_non_negative_i32_span{
+                            field_name_start,
+                            field_name_length,
+                            input_len
+                        };
+                        if parsed_idx == index then (
+                            name_match = 1;
+                        ) else (
+                            {}
+                        );
+                    ) else (
+                        {}
+                    );
+                    if name_match == 0 then VALUE_REF_LOOKUP_MISSING
+                    else (
+                        child_ref := output_value_fields(field_idx).value_ref;
+                        if child_ref < 0 || child_ref >= lower_state.output_value_count then VALUE_REF_LOOKUP_INPUT_ERROR
+                        else child_ref
+                    )
+                )
+            )
+        )
+    )
+);
+
 emit_output_value_entry := {
     kind_tag: i32,
     value_i32: i32,
@@ -1263,8 +1372,6 @@ resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
                     ExpressionLiteral::String(value) => (
                         if safe_name_bounds{value.start, value.length, input_len} == 0 then (
                             LoweredValueLookup::InputError
-                        ) else if value.length <= 0 then (
-                            LoweredValueLookup::Missing
                         ) else (
                             checkpoint_value_count := lower_state.output_value_count;
                             checkpoint_field_count := lower_state.output_value_field_count;
@@ -1305,8 +1412,8 @@ resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
                                 LoweredValueLookup::OutputError
                             ) else (
                                 value_ref := emit_output_value_entry{
-                                    OUTPUT_VALUE_KIND_STRUCT,
-                                    0,
+                                    OUTPUT_VALUE_KIND_ARRAY,
+                                    INPUT_VALUE_TYPE_U8,
                                     0,
                                     0,
                                     item_start,
@@ -1348,56 +1455,24 @@ resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
                 if info.operator.length == 1 && info.operator.start >= 0 && input(info.operator.start) == '.' then (
                     if info.left < 0 || info.left >= MAX_NODES || info.right < 0 || info.right >= MAX_NODES then (
                         LoweredValueLookup::InputError
-                    ) else if NodeKind::Identifier(object_id) := nodes(info.left).kind then (
-                        if NodeKind::Identifier(property_id) := nodes(info.right).kind then (
-                            object_lookup := lookup_known_value_alias{
-                                object_id.name.start,
-                                object_id.name.length,
-                                input_len
-                            };
-                            object_lookup |> match {
-                                LoweredValueLookup::InputError => LoweredValueLookup::InputError,
-                                LoweredValueLookup::OutputError => LoweredValueLookup::OutputError,
-                                LoweredValueLookup::Missing => LoweredValueLookup::Missing,
-                                LoweredValueLookup::Scalar(value) => LoweredValueLookup::Missing,
-                                LoweredValueLookup::ValueRef(object_ref) => (
-                                    if object_ref < 0 || object_ref >= lower_state.output_value_count then LoweredValueLookup::InputError
-                                    else if output_values(object_ref).kind_tag != OUTPUT_VALUE_KIND_STRUCT then LoweredValueLookup::Missing
-                                    else (
-                                        item_start := output_values(object_ref).item_start;
-                                        item_count := output_values(object_ref).item_count;
-                                        if item_start < 0 || item_count < 0 || item_start + item_count > lower_state.output_value_field_count then LoweredValueLookup::InputError
-                                        else (
-                                            mut cursor := item_start;
-                                            mut found_ref := -1;
-                                            while cursor < item_start + item_count && found_ref == -1 do (
-                                                field_name_start := output_value_fields(cursor).name_start;
-                                                field_name_length := output_value_fields(cursor).name_length;
-                                                if field_name_start >= 0 && input_spans_equal{
-                                                    field_name_start,
-                                                    field_name_length,
-                                                    property_id.name.start,
-                                                    property_id.name.length,
-                                                    input_len
-                                                } == 1 then (
-                                                    found_ref = output_value_fields(cursor).value_ref;
-                                                ) else (
-                                                    {}
-                                                );
-                                                cursor = cursor + 1;
-                                                {}
-                                            );
-                                            if found_ref == -1 then LoweredValueLookup::Missing
-                                            else if found_ref < 0 || found_ref >= lower_state.output_value_count then LoweredValueLookup::InputError
-                                            else LoweredValueLookup::ValueRef(found_ref)
-                                        )
-                                    )
-                                ),
-                                else => LoweredValueLookup::InputError
-                            }
-                        ) else (
-                            LoweredValueLookup::Missing
-                        )
+                    ) else if NodeKind::Identifier(property_id) := nodes(info.right).kind then (
+                        resolve_lowered_value_expr{info.left, input_len} |> match {
+                            LoweredValueLookup::InputError => LoweredValueLookup::InputError,
+                            LoweredValueLookup::OutputError => LoweredValueLookup::OutputError,
+                            LoweredValueLookup::Missing => LoweredValueLookup::Missing,
+                            LoweredValueLookup::Scalar(value) => LoweredValueLookup::Missing,
+                            LoweredValueLookup::ValueRef(object_ref) => (
+                                value_ref_lookup_to_lowered_value(
+                                    lookup_value_ref_by_property{
+                                        object_ref,
+                                        property_id.name.start,
+                                        property_id.name.length,
+                                        input_len
+                                    }
+                                )
+                            ),
+                            else => LoweredValueLookup::InputError
+                        }
                     ) else (
                         LoweredValueLookup::Missing
                     )
@@ -1424,62 +1499,14 @@ resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
                             ok = 0;
                             result_code = 1;
                         ) else if NodeKind::Binding(field_binding) := nodes(field_node).kind then (
-                            child_lookup := resolve_scalar_value_expr{field_binding.expr, input_len};
                             mut child_ref := -1;
-                            child_lookup |> match {
-                                ScalarValueLookup::Missing => (
-                                    if NodeKind::Identifier(field_identifier) := nodes(field_binding.expr).kind then (
-                                        alias_lookup := lookup_known_value_alias{
-                                            field_identifier.name.start,
-                                            field_identifier.name.length,
-                                            input_len
-                                        };
-                                        alias_lookup |> match {
-                                            LoweredValueLookup::ValueRef(value_ref) => (
-                                                child_ref = value_ref;
-                                                0
-                                            ),
-                                            LoweredValueLookup::InputError => (
-                                                ok = 0;
-                                                result_code = 1;
-                                                0
-                                            ),
-                                            LoweredValueLookup::OutputError => (
-                                                ok = 0;
-                                                result_code = 2;
-                                                0
-                                            ),
-                                            LoweredValueLookup::Scalar(value) => (
-                                                child_ref = emit_output_value_for_scalar{
-                                                    value.value_tag,
-                                                    value.value_i32
-                                                };
-                                                if child_ref < 0 then (
-                                                    ok = 0;
-                                                    result_code = 2;
-                                                ) else (
-                                                    {}
-                                                );
-                                                0
-                                            ),
-                                            LoweredValueLookup::Missing => (
-                                                ok = 0;
-                                                result_code = 0;
-                                                0
-                                            ),
-                                            else => (
-                                                ok = 0;
-                                                result_code = 1;
-                                                0
-                                            )
-                                        }
-                                    ) else (
-                                        ok = 0;
-                                        result_code = 0;
-                                        0
-                                    )
+                            resolve_lowered_value_expr{field_binding.expr, input_len} |> match {
+                                LoweredValueLookup::Missing => (
+                                    ok = 0;
+                                    result_code = 0;
+                                    0
                                 ),
-                                ScalarValueLookup::Value(value) => (
+                                LoweredValueLookup::Scalar(value) => (
                                     child_ref = emit_output_value_for_scalar{
                                         value.value_tag,
                                         value.value_i32
@@ -1492,9 +1519,18 @@ resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
                                     );
                                     0
                                 ),
-                                ScalarValueLookup::InputError => (
+                                LoweredValueLookup::ValueRef(value_ref) => (
+                                    child_ref = value_ref;
+                                    0
+                                ),
+                                LoweredValueLookup::InputError => (
                                     ok = 0;
                                     result_code = 1;
+                                    0
+                                ),
+                                LoweredValueLookup::OutputError => (
+                                    ok = 0;
+                                    result_code = 2;
                                     0
                                 ),
                                 else => (
@@ -1572,58 +1608,155 @@ resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
                     )
                 )
             ),
+            NodeKind::ArrayRepeat(info) => (
+                count_lookup := resolve_scalar_value_expr{info.count, input_len};
+                count_lookup |> match {
+                    ScalarValueLookup::InputError => LoweredValueLookup::InputError,
+                    ScalarValueLookup::Missing => LoweredValueLookup::Missing,
+                    ScalarValueLookup::Value(count_value) => (
+                        if count_value.value_tag != VALUE_TAG_NUMBER || count_value.value_i32 < 0 then (
+                            LoweredValueLookup::Missing
+                        ) else (
+                            repeat_count := count_value.value_i32;
+                            resolve_lowered_value_expr{info.value, input_len} |> match {
+                                LoweredValueLookup::Missing => LoweredValueLookup::Missing,
+                                LoweredValueLookup::InputError => LoweredValueLookup::InputError,
+                                LoweredValueLookup::OutputError => LoweredValueLookup::OutputError,
+                                LoweredValueLookup::Scalar(value) => (
+                                    element_type_tag := if value.value_type_tag != INPUT_VALUE_TYPE_UNKNOWN then value.value_type_tag
+                                        else default_scalar_type_tag(value.value_tag);
+                                    checkpoint_value_count := lower_state.output_value_count;
+                                    checkpoint_field_count := lower_state.output_value_field_count;
+                                    item_start := checkpoint_field_count;
+                                    mut idx := 0;
+                                    mut ok := 1;
+                                    mut child_ref := -1;
+
+                                    if repeat_count > 0 then (
+                                        child_ref = emit_output_value_for_scalar{
+                                            value.value_tag,
+                                            value.value_i32
+                                        };
+                                        if child_ref < 0 then (
+                                            ok = 0;
+                                        ) else (
+                                            {}
+                                        );
+                                    ) else (
+                                        {}
+                                    );
+
+                                    while idx < repeat_count && ok == 1 do (
+                                        field_slot_idx := lower_state.output_value_field_count;
+                                        if field_slot_idx < 0 || field_slot_idx >= MAX_OUTPUT_VALUE_FIELDS then (
+                                            ok = 0;
+                                        ) else (
+                                            output_value_fields(field_slot_idx).name_start = -1;
+                                            output_value_fields(field_slot_idx).name_length = idx;
+                                            output_value_fields(field_slot_idx).value_ref = child_ref;
+                                            lower_state.output_value_field_count = field_slot_idx + 1;
+                                        );
+                                        idx = idx + 1;
+                                        {}
+                                    );
+
+                                    if ok == 0 then (
+                                        lower_state.output_value_count = checkpoint_value_count;
+                                        lower_state.output_value_field_count = checkpoint_field_count;
+                                        LoweredValueLookup::OutputError
+                                    ) else (
+                                        value_ref := emit_output_value_entry{
+                                            OUTPUT_VALUE_KIND_ARRAY,
+                                            element_type_tag,
+                                            0,
+                                            0,
+                                            item_start,
+                                            repeat_count
+                                        };
+                                        if value_ref < 0 then (
+                                            lower_state.output_value_count = checkpoint_value_count;
+                                            lower_state.output_value_field_count = checkpoint_field_count;
+                                            LoweredValueLookup::OutputError
+                                        ) else (
+                                            LoweredValueLookup::ValueRef(value_ref)
+                                        )
+                                    )
+                                ),
+                                LoweredValueLookup::ValueRef(item_value_ref) => (
+                                    element_type_tag := value_ref_element_type_tag(item_value_ref);
+                                    if repeat_count == 0 && element_type_tag == INPUT_VALUE_TYPE_UNKNOWN then (
+                                        LoweredValueLookup::Missing
+                                    ) else (
+                                        checkpoint_value_count := lower_state.output_value_count;
+                                        checkpoint_field_count := lower_state.output_value_field_count;
+                                        item_start := checkpoint_field_count;
+                                        mut idx := 0;
+                                        mut ok := 1;
+
+                                        while idx < repeat_count && ok == 1 do (
+                                            field_slot_idx := lower_state.output_value_field_count;
+                                            if field_slot_idx < 0 || field_slot_idx >= MAX_OUTPUT_VALUE_FIELDS then (
+                                                ok = 0;
+                                            ) else (
+                                                output_value_fields(field_slot_idx).name_start = -1;
+                                                output_value_fields(field_slot_idx).name_length = idx;
+                                                output_value_fields(field_slot_idx).value_ref = item_value_ref;
+                                                lower_state.output_value_field_count = field_slot_idx + 1;
+                                            );
+                                            idx = idx + 1;
+                                            {}
+                                        );
+
+                                        if ok == 0 then (
+                                            lower_state.output_value_count = checkpoint_value_count;
+                                            lower_state.output_value_field_count = checkpoint_field_count;
+                                            LoweredValueLookup::OutputError
+                                        ) else (
+                                            value_ref := emit_output_value_entry{
+                                                OUTPUT_VALUE_KIND_ARRAY,
+                                                element_type_tag,
+                                                0,
+                                                0,
+                                                item_start,
+                                                repeat_count
+                                            };
+                                            if value_ref < 0 then (
+                                                lower_state.output_value_count = checkpoint_value_count;
+                                                lower_state.output_value_field_count = checkpoint_field_count;
+                                                LoweredValueLookup::OutputError
+                                            ) else (
+                                                LoweredValueLookup::ValueRef(value_ref)
+                                            )
+                                        )
+                                    )
+                                ),
+                                else => LoweredValueLookup::InputError
+                            }
+                        )
+                    ),
+                    else => LoweredValueLookup::InputError
+                }
+            ),
             NodeKind::TypePropertyAccess(info) => (
                 if safe_name_bounds{info.property.start, info.property.length, input_len} == 0 then LoweredValueLookup::InputError
-                else if info.object < 0 || info.object >= MAX_NODES then (
-                    LoweredValueLookup::InputError
-                ) else if NodeKind::Identifier(object_id) := nodes(info.object).kind then (
-                    object_lookup := lookup_known_value_alias{
-                        object_id.name.start,
-                        object_id.name.length,
-                        input_len
-                    };
-                    object_lookup |> match {
+                else (
+                    resolve_lowered_value_expr{info.object, input_len} |> match {
                         LoweredValueLookup::InputError => LoweredValueLookup::InputError,
                         LoweredValueLookup::OutputError => LoweredValueLookup::OutputError,
                         LoweredValueLookup::Missing => LoweredValueLookup::Missing,
                         LoweredValueLookup::Scalar(value) => LoweredValueLookup::Missing,
                         LoweredValueLookup::ValueRef(object_ref) => (
-                            if object_ref < 0 || object_ref >= lower_state.output_value_count then LoweredValueLookup::InputError
-                            else if output_values(object_ref).kind_tag != OUTPUT_VALUE_KIND_STRUCT then LoweredValueLookup::Missing
-                            else (
-                                item_start := output_values(object_ref).item_start;
-                                item_count := output_values(object_ref).item_count;
-                                if item_start < 0 || item_count < 0 || item_start + item_count > lower_state.output_value_field_count then LoweredValueLookup::InputError
-                                else (
-                                    mut cursor := item_start;
-                                    mut found_ref := -1;
-                                    while cursor < item_start + item_count && found_ref == -1 do (
-                                        field_name_start := output_value_fields(cursor).name_start;
-                                        field_name_length := output_value_fields(cursor).name_length;
-                                        if field_name_start >= 0 && input_spans_equal{
-                                            field_name_start,
-                                            field_name_length,
-                                            info.property.start,
-                                            info.property.length,
-                                            input_len
-                                        } == 1 then (
-                                            found_ref = output_value_fields(cursor).value_ref;
-                                        ) else (
-                                            {}
-                                        );
-                                        cursor = cursor + 1;
-                                        {}
-                                    );
-                                    if found_ref == -1 then LoweredValueLookup::Missing
-                                    else if found_ref < 0 || found_ref >= lower_state.output_value_count then LoweredValueLookup::InputError
-                                    else LoweredValueLookup::ValueRef(found_ref)
-                                )
+                            value_ref_lookup_to_lowered_value(
+                                lookup_value_ref_by_property{
+                                    object_ref,
+                                    info.property.start,
+                                    info.property.length,
+                                    input_len
+                                }
                             )
                         ),
                         else => LoweredValueLookup::InputError
                     }
-                ) else (
-                    LoweredValueLookup::Missing
                 )
             ),
             NodeKind::ArrayIndex(info) => (
@@ -1634,70 +1767,23 @@ resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
                     ScalarValueLookup::Value(index_value) => (
                         if index_value.value_tag != VALUE_TAG_NUMBER || index_value.value_i32 < 0 then (
                             LoweredValueLookup::Missing
-                        ) else if info.array < 0 || info.array >= MAX_NODES then (
-                            LoweredValueLookup::InputError
-                        ) else if NodeKind::Identifier(array_id) := nodes(info.array).kind then (
-                            array_lookup := lookup_known_value_alias{
-                                array_id.name.start,
-                                array_id.name.length,
-                                input_len
-                            };
-                            array_lookup |> match {
+                        ) else (
+                            resolve_lowered_value_expr{info.array, input_len} |> match {
                                 LoweredValueLookup::InputError => LoweredValueLookup::InputError,
                                 LoweredValueLookup::OutputError => LoweredValueLookup::OutputError,
                                 LoweredValueLookup::Missing => LoweredValueLookup::Missing,
                                 LoweredValueLookup::Scalar(value) => LoweredValueLookup::Missing,
                                 LoweredValueLookup::ValueRef(array_ref) => (
-                                    if array_ref < 0 || array_ref >= lower_state.output_value_count then LoweredValueLookup::InputError
-                                    else if output_values(array_ref).kind_tag != OUTPUT_VALUE_KIND_STRUCT then LoweredValueLookup::Missing
-                                    else (
-                                        item_start := output_values(array_ref).item_start;
-                                        item_count := output_values(array_ref).item_count;
-                                        if item_start < 0 || item_count < 0 || item_start + item_count > lower_state.output_value_field_count then LoweredValueLookup::InputError
-                                        else if index_value.value_i32 >= item_count then (
-                                            LoweredValueLookup::Missing
-                                        ) else (
-                                            field_idx := item_start + index_value.value_i32;
-                                            if field_idx < item_start || field_idx >= item_start + item_count then (
-                                                LoweredValueLookup::InputError
-                                            ) else (
-                                                field_name_start := output_value_fields(field_idx).name_start;
-                                                field_name_length := output_value_fields(field_idx).name_length;
-                                                mut name_match := 0;
-                                                if field_name_start == -1 && field_name_length == index_value.value_i32 then (
-                                                    name_match = 1;
-                                                ) else if field_name_start >= 0 then (
-                                                    parsed_idx := parse_non_negative_i32_span{
-                                                        field_name_start,
-                                                        field_name_length,
-                                                        input_len
-                                                    };
-                                                    if parsed_idx == index_value.value_i32 then (
-                                                        name_match = 1;
-                                                    ) else (
-                                                        {}
-                                                    );
-                                                ) else (
-                                                    {}
-                                                );
-                                                if name_match == 0 then (
-                                                    LoweredValueLookup::Missing
-                                                ) else (
-                                                    child_ref := output_value_fields(field_idx).value_ref;
-                                                    if child_ref < 0 || child_ref >= lower_state.output_value_count then (
-                                                        LoweredValueLookup::InputError
-                                                    ) else (
-                                                        LoweredValueLookup::ValueRef(child_ref)
-                                                    )
-                                                )
-                                            )
-                                        )
+                                    value_ref_lookup_to_lowered_value(
+                                        lookup_value_ref_by_index{
+                                            array_ref,
+                                            index_value.value_i32,
+                                            input_len
+                                        }
                                     )
                                 ),
                                 else => LoweredValueLookup::InputError
                             }
-                        ) else (
-                            LoweredValueLookup::Missing
                         )
                     ),
                     else => LoweredValueLookup::InputError

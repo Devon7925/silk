@@ -48,6 +48,11 @@ const OUTPUT_VALUE_KIND_NUMBER: i32 = 1;
 const OUTPUT_VALUE_KIND_BOOLEAN: i32 = 2;
 const OUTPUT_VALUE_KIND_CHAR: i32 = 3;
 const OUTPUT_VALUE_KIND_STRUCT: i32 = 4;
+const OUTPUT_VALUE_KIND_ARRAY: i32 = 5;
+
+const OUTPUT_VALUE_TYPE_UNKNOWN: i32 = 0;
+const OUTPUT_VALUE_TYPE_I32: i32 = 1;
+const OUTPUT_VALUE_TYPE_U8: i32 = 2;
 
 static INTERMEDIATE_WASM_BYTES: OnceLock<Result<Vec<u8>, Diagnostic>> = OnceLock::new();
 static WASM_ENGINE: OnceLock<Result<Engine, Diagnostic>> = OnceLock::new();
@@ -589,7 +594,8 @@ fn decode_lowered_output(
     let get_global_value_ref =
         required_i32_to_i32_export(instance, store, "get_lower_output_global_value_ref")?;
 
-    let get_value_kind = required_i32_to_i32_export(instance, store, "get_lower_output_value_kind")?;
+    let get_value_kind =
+        required_i32_to_i32_export(instance, store, "get_lower_output_value_kind")?;
     let get_value_i32 = required_i32_to_i32_export(instance, store, "get_lower_output_value_i32")?;
     let get_value_name_start =
         required_i32_to_i32_export(instance, store, "get_lower_output_value_name_start")?;
@@ -599,21 +605,12 @@ fn decode_lowered_output(
         required_i32_to_i32_export(instance, store, "get_lower_output_value_item_start")?;
     let get_value_item_count =
         required_i32_to_i32_export(instance, store, "get_lower_output_value_item_count")?;
-    let get_value_field_name_start = required_i32_to_i32_export(
-        instance,
-        store,
-        "get_lower_output_value_field_name_start",
-    )?;
-    let get_value_field_name_length = required_i32_to_i32_export(
-        instance,
-        store,
-        "get_lower_output_value_field_name_length",
-    )?;
-    let get_value_field_value_ref = required_i32_to_i32_export(
-        instance,
-        store,
-        "get_lower_output_value_field_value_ref",
-    )?;
+    let get_value_field_name_start =
+        required_i32_to_i32_export(instance, store, "get_lower_output_value_field_name_start")?;
+    let get_value_field_name_length =
+        required_i32_to_i32_export(instance, store, "get_lower_output_value_field_name_length")?;
+    let get_value_field_value_ref =
+        required_i32_to_i32_export(instance, store, "get_lower_output_value_field_value_ref")?;
 
     let mut decoded_value_slots = Vec::with_capacity(value_count as usize);
     for idx in 0..value_count {
@@ -632,11 +629,13 @@ fn decode_lowered_output(
                 "Intermediate call `get_lower_output_value_name_start` failed: {err}"
             ))
         })?;
-        let name_length = get_value_name_length.call(&mut *store, idx).map_err(|err| {
-            Diagnostic::new(format!(
-                "Intermediate call `get_lower_output_value_name_length` failed: {err}"
-            ))
-        })?;
+        let name_length = get_value_name_length
+            .call(&mut *store, idx)
+            .map_err(|err| {
+                Diagnostic::new(format!(
+                    "Intermediate call `get_lower_output_value_name_length` failed: {err}"
+                ))
+            })?;
         let item_start = get_value_item_start.call(&mut *store, idx).map_err(|err| {
             Diagnostic::new(format!(
                 "Intermediate call `get_lower_output_value_item_start` failed: {err}"
@@ -906,21 +905,12 @@ fn decode_lowered_output(
         store,
         "get_lower_output_inline_binding_name_length",
     )?;
-    let get_inline_binding_value_tag = required_i32_to_i32_export(
-        instance,
-        store,
-        "get_lower_output_inline_binding_value_tag",
-    )?;
-    let get_inline_binding_value_i32 = required_i32_to_i32_export(
-        instance,
-        store,
-        "get_lower_output_inline_binding_value_i32",
-    )?;
-    let get_inline_binding_value_ref = required_i32_to_i32_export(
-        instance,
-        store,
-        "get_lower_output_inline_binding_value_ref",
-    )?;
+    let get_inline_binding_value_tag =
+        required_i32_to_i32_export(instance, store, "get_lower_output_inline_binding_value_tag")?;
+    let get_inline_binding_value_i32 =
+        required_i32_to_i32_export(instance, store, "get_lower_output_inline_binding_value_i32")?;
+    let get_inline_binding_value_ref =
+        required_i32_to_i32_export(instance, store, "get_lower_output_inline_binding_value_ref")?;
 
     let mut inline_bindings = HashMap::with_capacity(inline_binding_count as usize);
     for idx in 0..inline_binding_count {
@@ -1027,7 +1017,9 @@ fn decode_output_value_inner(
 
     let slot = &value_slots[root as usize];
     let decoded = match slot.kind_tag {
-        OUTPUT_VALUE_KIND_NUMBER => IntermediateKind::Literal(ExpressionLiteral::Number(slot.value_i32)),
+        OUTPUT_VALUE_KIND_NUMBER => {
+            IntermediateKind::Literal(ExpressionLiteral::Number(slot.value_i32))
+        }
         OUTPUT_VALUE_KIND_BOOLEAN => {
             IntermediateKind::Literal(ExpressionLiteral::Boolean(slot.value_i32 != 0))
         }
@@ -1039,6 +1031,65 @@ fn decode_output_value_inner(
                 )));
             }
             IntermediateKind::Literal(ExpressionLiteral::Char(slot.value_i32 as u8))
+        }
+        OUTPUT_VALUE_KIND_ARRAY => {
+            if slot.item_start < 0 || slot.item_count < 0 {
+                return Err(Diagnostic::new(format!(
+                    "Output array value has invalid item span start={} count={}",
+                    slot.item_start, slot.item_count
+                )));
+            }
+            let item_start = slot.item_start as usize;
+            let item_count = slot.item_count as usize;
+            let item_end = item_start.saturating_add(item_count);
+            if item_end > value_fields.len() {
+                return Err(Diagnostic::new(format!(
+                    "Output array value item span out of bounds: start={} count={} fields={}",
+                    item_start,
+                    item_count,
+                    value_fields.len()
+                )));
+            }
+
+            let mut items = Vec::with_capacity(item_count);
+            let mut field_names = Vec::with_capacity(item_count);
+            let mut item_types = Vec::with_capacity(item_count);
+
+            for field in &value_fields[item_start..item_end] {
+                let name = decode_output_value_field_name(
+                    input_bytes,
+                    field.name_start,
+                    field.name_length,
+                )?;
+                let value = decode_output_value_inner(
+                    field.value_ref,
+                    value_slots,
+                    value_fields,
+                    input_bytes,
+                    memo,
+                    visiting,
+                )?;
+                item_types.push(infer_intermediate_type_from_value(&value)?);
+                items.push(value);
+                field_names.push(name);
+            }
+
+            let element_type = if let Some(first) = item_types.first() {
+                if !item_types.iter().skip(1).all(|ty| ty == first) {
+                    return Err(Diagnostic::new(
+                        "Output array value has non-homogeneous element types",
+                    ));
+                }
+                first.clone()
+            } else {
+                decode_output_value_type(slot.value_i32)?
+            };
+
+            IntermediateKind::ArrayLiteral {
+                items,
+                element_type,
+                field_names: normalize_field_names(field_names),
+            }
         }
         OUTPUT_VALUE_KIND_STRUCT => {
             if slot.item_start < 0 || slot.item_count < 0 {
@@ -1065,7 +1116,11 @@ fn decode_output_value_inner(
             let mut item_types = Vec::with_capacity(item_count);
 
             for field in &value_fields[item_start..item_end] {
-                let name = decode_output_value_field_name(input_bytes, field.name_start, field.name_length)?;
+                let name = decode_output_value_field_name(
+                    input_bytes,
+                    field.name_start,
+                    field.name_length,
+                )?;
                 let value = decode_output_value_inner(
                     field.value_ref,
                     value_slots,
@@ -1130,7 +1185,9 @@ fn decode_output_value_field_name(
     decode_name_from_input(input_bytes, start, len)
 }
 
-fn infer_intermediate_type_from_value(value: &IntermediateKind) -> Result<IntermediateType, Diagnostic> {
+fn infer_intermediate_type_from_value(
+    value: &IntermediateKind,
+) -> Result<IntermediateType, Diagnostic> {
     match value {
         IntermediateKind::Literal(ExpressionLiteral::Number(_))
         | IntermediateKind::Literal(ExpressionLiteral::Boolean(_)) => Ok(IntermediateType::I32),
@@ -1258,6 +1315,19 @@ fn decode_output_global_type(tag: i32) -> Result<Option<IntermediateType>, Diagn
         OUTPUT_GLOBAL_TYPE_U8 => Ok(Some(IntermediateType::U8)),
         _ => Err(Diagnostic::new(format!(
             "Unsupported output global type tag {tag}"
+        ))),
+    }
+}
+
+fn decode_output_value_type(tag: i32) -> Result<IntermediateType, Diagnostic> {
+    match tag {
+        OUTPUT_VALUE_TYPE_I32 => Ok(IntermediateType::I32),
+        OUTPUT_VALUE_TYPE_U8 => Ok(IntermediateType::U8),
+        OUTPUT_VALUE_TYPE_UNKNOWN => Err(Diagnostic::new(
+            "Unable to infer array element type from empty output array value",
+        )),
+        _ => Err(Diagnostic::new(format!(
+            "Unsupported output value type tag {tag}"
         ))),
     }
 }
@@ -1718,7 +1788,10 @@ mod tests {
                 ("y".to_string(), IntermediateType::I32),
             ])
         );
-        assert!(matches!(lowered.globals[0].value, IntermediateKind::Struct(_)));
+        assert!(matches!(
+            lowered.globals[0].value,
+            IntermediateKind::Struct(_)
+        ));
         assert_eq!(lowered.exports[0].target, TargetLiteral::WasmTarget);
         assert_eq!(lowered.exports[0].name, "point");
         assert_eq!(
@@ -1847,6 +1920,132 @@ mod tests {
             lowered.inline_bindings.get("base"),
             Some(IntermediateKind::ArrayLiteral { .. })
         ));
+    }
+
+    #[test]
+    fn wasm_stage_lowers_exported_empty_string_global_as_empty_u8_array() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "(export wasm) empty := \"\"; empty";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+
+        assert_eq!(
+            lowered.globals[0].ty,
+            IntermediateType::Array {
+                element: Box::new(IntermediateType::U8),
+                length: 0,
+                field_names: vec![],
+            }
+        );
+        match &lowered.globals[0].value {
+            IntermediateKind::ArrayLiteral {
+                items,
+                element_type,
+                field_names,
+            } => {
+                assert_eq!(*element_type, IntermediateType::U8);
+                assert!(items.is_empty());
+                assert!(field_names.is_empty());
+            }
+            other => panic!("expected array literal value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wasm_stage_lowers_exported_array_repeat_scalar_global() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "(export wasm) triple := {7; 3}; triple";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+
+        assert_eq!(
+            lowered.globals[0].ty,
+            IntermediateType::Array {
+                element: Box::new(IntermediateType::I32),
+                length: 3,
+                field_names: vec!["0".to_string(), "1".to_string(), "2".to_string()],
+            }
+        );
+        match &lowered.globals[0].value {
+            IntermediateKind::ArrayLiteral {
+                items,
+                element_type,
+                field_names,
+            } => {
+                assert_eq!(*element_type, IntermediateType::I32);
+                assert_eq!(
+                    field_names,
+                    &vec!["0".to_string(), "1".to_string(), "2".to_string()]
+                );
+                assert_eq!(items.len(), 3);
+                assert!(matches!(
+                    items[0],
+                    IntermediateKind::Literal(ExpressionLiteral::Number(7))
+                ));
+                assert!(matches!(
+                    items[1],
+                    IntermediateKind::Literal(ExpressionLiteral::Number(7))
+                ));
+                assert!(matches!(
+                    items[2],
+                    IntermediateKind::Literal(ExpressionLiteral::Number(7))
+                ));
+            }
+            other => panic!("expected array literal value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wasm_stage_lowers_exported_zero_length_array_repeat_scalar_global() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "(export wasm) empty := {7; 0}; empty";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+
+        assert_eq!(
+            lowered.globals[0].ty,
+            IntermediateType::Array {
+                element: Box::new(IntermediateType::I32),
+                length: 0,
+                field_names: vec![],
+            }
+        );
+        match &lowered.globals[0].value {
+            IntermediateKind::ArrayLiteral {
+                items,
+                element_type,
+                field_names,
+            } => {
+                assert_eq!(*element_type, IntermediateType::I32);
+                assert!(items.is_empty());
+                assert!(field_names.is_empty());
+            }
+            other => panic!("expected array literal value, got {other:?}"),
+        }
     }
 
     #[test]

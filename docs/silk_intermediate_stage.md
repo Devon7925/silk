@@ -17,9 +17,9 @@ stays aligned across parser/interpreter/intermediate stages.
 
 ## Versions
 
-- `intermediate_stage_version() -> 8`
+- `intermediate_stage_version() -> 9`
 - `intermediate_payload_version() -> 6`
-- `intermediate_output_version() -> 4`
+- `intermediate_output_version() -> 5`
 
 ## Input ABI (AST, chainable)
 
@@ -86,11 +86,16 @@ Error code export:
   - Struct literals can now be emitted for both inline bindings and materialized globals.
   - Example: `mut point := { x = 1, y = 2 }` now lowers as a concrete mutable global instead of returning `unimplemented`.
   - Example: `base := { x = 1, y = 2 }; (export wasm) point := base` now lowers `base` inline and materializes `point` via identifier aliasing.
-- Non-empty string literals are now lowered through value-slot tables and decoded as `IntermediateKind::ArrayLiteral` of `u8`.
+- String literals are now lowered through value-slot tables and decoded as `IntermediateKind::ArrayLiteral` of `u8`.
   - Example: `(export wasm) bytes := "abc"` lowers to an exported `u8` array global.
+  - Example: `(export wasm) empty := ""` now lowers to an exported empty `u8` array global.
+- Array-repeat data expressions are now lowered through value-slot tables when the repeat count is a non-negative scalar.
+  - Example: `(export wasm) triple := {7; 3}` lowers to an exported `i32` array global.
+  - Zero-length scalar repeats are now preserved with element-type metadata (for example `(export wasm) empty := {7; 0}`).
 - String value aliases now preserve lowered value refs through inline/materialized transitions.
   - Example: `base := "abc"; (export wasm) out := base` now materializes `out` from the alias chain.
   - Example: `base := "abc"; base` now emits an inline array-valued binding for `base`.
+- Struct/array projection lookup now resolves through the lowered-value alias graph recursively instead of only direct identifier slots.
 - Non-materialized scalar bindings are emitted in `inline_bindings` as literal `IntermediateKind` values.
   - Example: `base := 42; (export wasm) answer := base` now lowers `base` into the inline-binding output table while still lowering `answer` as a global/export.
 - Wrap annotations no longer force an `unimplemented` result when no export source exists.
@@ -98,9 +103,7 @@ Error code export:
 - Wrappers are emitted for multi-target exports when a wrap target is present.
   - Source target selection is deterministic from the export mask priority (`js`, then `wasm`, then `wgsl`).
 - The stage still reports `unimplemented` for unsupported value shapes (for example function exports/wrappers and non-data/non-struct mutable globals).
-  - Struct/array projection lowering (`obj.field`, `obj[idx]`) remains unimplemented in the wasm parser path.
-  - Array-repeat lowering is still unimplemented.
-  - Empty-string lowering still falls back (`unimplemented`) because element-type metadata is not yet encoded for zero-length array payloads.
+  - Array-repeat lowering for non-scalar empty repeats still falls back when element type cannot be inferred.
 - Bindings with unsupported pattern extraction are now treated as `unimplemented` instead of hard parse failure, preserving fallback behavior.
 
 ## State Getters
