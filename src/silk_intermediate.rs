@@ -7,9 +7,9 @@ use wasmtime::{Config, Engine, Instance, Memory, Module, Store};
 
 use crate::diagnostics::{Diagnostic, SourceSpan};
 use crate::intermediate::{
-    self, IntermediateExport, IntermediateExportType, IntermediateFunction, IntermediateGlobal,
-    IntermediateIntrinsicOperation, IntermediateKind, IntermediateResult, IntermediateType,
-    IntermediateWrap,
+    self, IntermediateBinding, IntermediateExport, IntermediateExportType, IntermediateFunction,
+    IntermediateGlobal, IntermediateIntrinsicOperation, IntermediateKind, IntermediateLValue,
+    IntermediateResult, IntermediateType, IntermediateWrap,
 };
 use crate::interpret::{self, Context};
 use crate::loader;
@@ -63,6 +63,9 @@ const OUTPUT_VALUE_KIND_BLOCK: i32 = 12;
 const OUTPUT_VALUE_KIND_DIVERGE: i32 = 13;
 const OUTPUT_VALUE_KIND_LOOP: i32 = 14;
 const OUTPUT_VALUE_KIND_FUNCTION_CALL: i32 = 15;
+const OUTPUT_VALUE_KIND_INLINE_ASSEMBLY: i32 = 16;
+const OUTPUT_VALUE_KIND_ASSIGNMENT: i32 = 17;
+const OUTPUT_VALUE_KIND_BINDING: i32 = 18;
 
 const OUTPUT_VALUE_TYPE_UNKNOWN: i32 = 0;
 const OUTPUT_VALUE_TYPE_I32: i32 = 1;
@@ -1357,6 +1360,65 @@ fn decode_output_value_inner(
                 argument: Box::new(argument),
             }
         }
+        OUTPUT_VALUE_KIND_INLINE_ASSEMBLY => {
+            if slot.item_start != 0 || slot.item_count != 0 {
+                return Err(Diagnostic::new(format!(
+                    "Output inline assembly value {root} should not have children (start={} count={})",
+                    slot.item_start, slot.item_count
+                )));
+            }
+            let target = decode_output_target(slot.value_i32)?;
+            let code = decode_bytes_from_input(input_bytes, slot.name_start, slot.name_length)?;
+            IntermediateKind::InlineAssembly { target, code }
+        }
+        OUTPUT_VALUE_KIND_ASSIGNMENT => {
+            let mut children = decode_output_value_children(
+                slot,
+                root,
+                2,
+                value_slots,
+                value_fields,
+                function_count,
+                input_bytes,
+                memo,
+                visiting,
+                "assignment",
+            )?
+            .into_iter();
+            let target_value = children.next().expect("assignment target child");
+            let expr = children.next().expect("assignment expression child");
+            let target = decode_output_lvalue_from_value(target_value)?;
+            IntermediateKind::Assignment {
+                target,
+                expr: Box::new(expr),
+            }
+        }
+        OUTPUT_VALUE_KIND_BINDING => {
+            let mut children = decode_output_value_children(
+                slot,
+                root,
+                1,
+                value_slots,
+                value_fields,
+                function_count,
+                input_bytes,
+                memo,
+                visiting,
+                "binding",
+            )?
+            .into_iter();
+            let expr = children.next().expect("binding expression child");
+            let name = decode_name_from_input(input_bytes, slot.name_start, slot.name_length)?;
+            let binding_type = match decode_output_optional_value_type(slot.value_i32)? {
+                Some(ty) => ty,
+                None => infer_intermediate_type_from_value(&expr).unwrap_or(IntermediateType::I32),
+            };
+            IntermediateKind::Binding(Box::new(IntermediateBinding {
+                identifier: Identifier::new(name),
+                binding_type,
+                expr,
+            }))
+        }
         OUTPUT_VALUE_KIND_ARRAY => {
             if slot.item_start < 0 || slot.item_count < 0 {
                 return Err(Diagnostic::new(format!(
@@ -1543,6 +1605,36 @@ fn decode_output_value_children(
     Ok(children)
 }
 
+fn decode_output_lvalue_from_value(
+    value: IntermediateKind,
+) -> Result<IntermediateLValue, Diagnostic> {
+    match value {
+        IntermediateKind::Identifier(identifier) => Ok(IntermediateLValue::Identifier(
+            identifier,
+            SourceSpan::default(),
+        )),
+        IntermediateKind::TypePropertyAccess { object, property } => {
+            let object = decode_output_lvalue_from_value(*object)?;
+            Ok(IntermediateLValue::TypePropertyAccess {
+                object: Box::new(object),
+                property,
+                span: SourceSpan::default(),
+            })
+        }
+        IntermediateKind::ArrayIndex { array, index } => {
+            let array = decode_output_lvalue_from_value(*array)?;
+            Ok(IntermediateLValue::ArrayIndex {
+                array: Box::new(array),
+                index,
+                span: SourceSpan::default(),
+            })
+        }
+        other => Err(Diagnostic::new(format!(
+            "Output assignment target is not a valid lvalue: {other:?}"
+        ))),
+    }
+}
+
 fn decode_output_value_field_name(
     input_bytes: &[u8],
     start: i32,
@@ -1564,6 +1656,28 @@ fn decode_output_value_field_name(
     decode_name_from_input(input_bytes, start, len)
 }
 
+fn decode_bytes_from_input(
+    input_bytes: &[u8],
+    start: i32,
+    len: i32,
+) -> Result<Vec<u8>, Diagnostic> {
+    if start < 0 || len < 0 {
+        return Err(Diagnostic::new(format!(
+            "Invalid byte span from intermediate output: start={start} len={len}"
+        )));
+    }
+    let start = start as usize;
+    let len = len as usize;
+    let end = start.saturating_add(len);
+    if end > input_bytes.len() {
+        return Err(Diagnostic::new(format!(
+            "Intermediate output byte span exceeds input buffer bounds: start={start} len={len} input_len={}",
+            input_bytes.len()
+        )));
+    }
+    Ok(input_bytes[start..end].to_vec())
+}
+
 fn infer_intermediate_type_from_value(
     value: &IntermediateKind,
 ) -> Result<IntermediateType, Diagnostic> {
@@ -1571,6 +1685,7 @@ fn infer_intermediate_type_from_value(
         IntermediateKind::Literal(ExpressionLiteral::Number(_))
         | IntermediateKind::Literal(ExpressionLiteral::Boolean(_)) => Ok(IntermediateType::I32),
         IntermediateKind::Literal(ExpressionLiteral::Char(_)) => Ok(IntermediateType::U8),
+        IntermediateKind::InlineAssembly { .. } => Ok(IntermediateType::I32),
         IntermediateKind::Struct(fields) => {
             let mut field_types = Vec::with_capacity(fields.len());
             for (field_name, field_value) in fields {
@@ -1626,6 +1741,12 @@ fn infer_intermediate_type_from_value(
         IntermediateKind::Diverge { value, .. } => infer_intermediate_type_from_value(value),
         IntermediateKind::Loop { .. } => Ok(IntermediateType::I32),
         IntermediateKind::FunctionCall { .. } => Ok(IntermediateType::I32),
+        IntermediateKind::Assignment { .. } => Ok(IntermediateType::I32),
+        IntermediateKind::Binding(..) => Ok(IntermediateType::I32),
+        IntermediateKind::BoxAlloc { element_type, .. } => Ok(IntermediateType::Box {
+            element: Box::new(element_type.clone()),
+        }),
+        IntermediateKind::Unreachable => Ok(IntermediateType::I32),
         other => Err(Diagnostic::new(format!(
             "Unable to infer intermediate type from lowered output value: {:?}",
             other
@@ -1784,17 +1905,21 @@ fn decode_output_global_type(tag: i32) -> Result<Option<IntermediateType>, Diagn
     }
 }
 
-fn decode_output_value_type(tag: i32) -> Result<IntermediateType, Diagnostic> {
+fn decode_output_optional_value_type(tag: i32) -> Result<Option<IntermediateType>, Diagnostic> {
     match tag {
-        OUTPUT_VALUE_TYPE_I32 => Ok(IntermediateType::I32),
-        OUTPUT_VALUE_TYPE_U8 => Ok(IntermediateType::U8),
-        OUTPUT_VALUE_TYPE_UNKNOWN => Err(Diagnostic::new(
-            "Unable to infer array element type from empty output array value",
-        )),
+        OUTPUT_VALUE_TYPE_I32 => Ok(Some(IntermediateType::I32)),
+        OUTPUT_VALUE_TYPE_U8 => Ok(Some(IntermediateType::U8)),
+        OUTPUT_VALUE_TYPE_UNKNOWN => Ok(None),
         _ => Err(Diagnostic::new(format!(
             "Unsupported output value type tag {tag}"
         ))),
     }
+}
+
+fn decode_output_value_type(tag: i32) -> Result<IntermediateType, Diagnostic> {
+    decode_output_optional_value_type(tag)?.ok_or_else(|| {
+        Diagnostic::new("Unable to infer array element type from empty output array value")
+    })
 }
 
 fn decode_output_literal(tag: i32, value_i32: i32) -> Result<ExpressionLiteral, Diagnostic> {
@@ -3135,6 +3260,75 @@ mod tests {
             lowered.inline_bindings.get("base"),
             Some(IntermediateKind::Struct(_))
         ));
+    }
+
+    #[test]
+    fn wasm_stage_lowers_inline_asm_expression_values() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "asm_value := asm(wasm)(\"i32.const 42\"); asm_value";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        match lowered.inline_bindings.get("asm_value") {
+            Some(IntermediateKind::InlineAssembly { target, code }) => {
+                assert_eq!(*target, TargetLiteral::WasmTarget);
+                assert_eq!(code.as_slice(), b"i32.const 42");
+            }
+            other => panic!("expected inline assembly value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wasm_stage_lowers_assignment_expression_values() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "mut counter := 1; update := (counter = 2); update";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        match lowered.inline_bindings.get("update") {
+            Some(IntermediateKind::Assignment { target, expr }) => {
+                match target {
+                    IntermediateLValue::Identifier(identifier, _) => {
+                        assert_eq!(identifier.name, "counter");
+                    }
+                    other => panic!("expected identifier lvalue target, got {other:?}"),
+                }
+                assert!(matches!(
+                    expr.as_ref(),
+                    IntermediateKind::Literal(ExpressionLiteral::Number(2))
+                ));
+            }
+            other => panic!("expected assignment value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wasm_stage_lowers_binding_expression_values() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "(export wasm) result: i32 := (tmp := 7); result";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        match lowered.globals.first().map(|global| &global.value) {
+            Some(IntermediateKind::Binding(binding)) => {
+                assert_eq!(binding.identifier.name, "tmp");
+                assert_eq!(binding.binding_type, IntermediateType::I32);
+                assert!(matches!(
+                    binding.expr,
+                    IntermediateKind::Literal(ExpressionLiteral::Number(7))
+                ));
+            }
+            other => panic!("expected binding global value, got {other:?}"),
+        }
     }
 
     fn interpreted_context(source: &str) -> Context {

@@ -3450,8 +3450,7 @@ fn emit_expression(
                         field_types.push((name.name.clone(), ty));
                     }
 
-                    let type_index =
-                        stable_type_index(type_ctx, &WasmType::Struct(field_types))
+                    let type_index = stable_type_index(type_ctx, &WasmType::Struct(field_types))
                         .ok_or_else(|| {
                             Diagnostic::new("Struct type not found in context")
                                 .with_span(SourceSpan::default())

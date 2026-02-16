@@ -25,6 +25,8 @@ BinaryIntrinsicOperator := types.BinaryIntrinsicOperator;
 IntrinsicOperation := types.IntrinsicOperation;
 DivergeExpressionType := types.DivergeExpressionType;
 BindingPattern := types.BindingPattern;
+LValue := types.LValue;
+Binding := types.Binding;
 NodeKind := types.NodeKind;
 Node := types.Node;
 ListNode := types.ListNode;
@@ -73,6 +75,9 @@ OUTPUT_VALUE_KIND_BLOCK := 12;
 OUTPUT_VALUE_KIND_DIVERGE := 13;
 OUTPUT_VALUE_KIND_LOOP := 14;
 OUTPUT_VALUE_KIND_FUNCTION_CALL := 15;
+OUTPUT_VALUE_KIND_INLINE_ASSEMBLY := 16;
+OUTPUT_VALUE_KIND_ASSIGNMENT := 17;
+OUTPUT_VALUE_KIND_BINDING := 18;
 
 VALUE_REF_LOOKUP_MISSING := -1;
 VALUE_REF_LOOKUP_INPUT_ERROR := -2;
@@ -562,6 +567,12 @@ string_ref_is_wrap := (value: StringRef) => (
     then 1 else 0
 );
 
+string_ref_is_asm := (value: StringRef) => (
+    if value.start < 0 then 0
+    else if value.length != 3 then 0
+    else if input(value.start) == 'a' && input(value.start + 1) == 's' && input(value.start + 2) == 'm' then 1 else 0
+);
+
 string_ref_is_js := (value: StringRef) => (
     string_ref_matches_2{value, 'j', 's'}
 );
@@ -603,6 +614,15 @@ target_mask_from_target_literal := (target: TargetLiteral) => (
         TargetLiteral::WasmTarget => TARGET_MASK_WASM,
         TargetLiteral::WgslTarget => TARGET_MASK_WGSL,
         else => 0
+    }
+);
+
+output_target_tag_from_target_literal := (target: TargetLiteral) => (
+    target |> match {
+        TargetLiteral::JSTarget => OUTPUT_TARGET_JS,
+        TargetLiteral::WasmTarget => OUTPUT_TARGET_WASM,
+        TargetLiteral::WgslTarget => OUTPUT_TARGET_WGSL,
+        else => -1
     }
 );
 
@@ -1359,6 +1379,11 @@ parse_non_negative_i32_span := {start: i32, length: i32, input_len: i32} => (
     )
 );
 
+output_target_tag_from_expr := (expr_idx: i32) => (
+    mask := target_mask_from_expr(expr_idx);
+    if target_count(mask) == 1 then first_target_tag(mask) else -1
+);
+
 binary_intrinsic_operator_tag := (operator: BinaryIntrinsicOperator) => (
     operator |> match {
         BinaryIntrinsicOperator::I32Add => 0,
@@ -2021,6 +2046,295 @@ emit_loop_value := {body_expr_idx: i32, input_len: i32} => (
     )
 );
 
+emit_inline_assembly_value := {
+    target_tag: i32,
+    code_start: i32,
+    code_length: i32,
+    input_len: i32
+} => (
+    if target_tag < 0 then LoweredValueLookup::Missing
+    else if safe_name_bounds{code_start, code_length, input_len} == 0 then LoweredValueLookup::InputError
+    else (
+        value_ref := emit_output_value_entry{
+            OUTPUT_VALUE_KIND_INLINE_ASSEMBLY,
+            target_tag,
+            code_start,
+            code_length,
+            0,
+            0
+        };
+        if value_ref < 0 then LoweredValueLookup::OutputError
+        else LoweredValueLookup::ValueRef(value_ref)
+    )
+);
+
+resolve_inline_assembly_call := {
+    function_expr_idx: i32,
+    code_expr_idx: i32,
+    input_len: i32
+} => (
+    if function_expr_idx < 0 || function_expr_idx >= MAX_NODES then LoweredValueLookup::InputError
+    else if NodeKind::FunctionCall(inner) := nodes(function_expr_idx).kind then (
+        if inner.function < 0 || inner.function >= MAX_NODES then LoweredValueLookup::InputError
+        else if NodeKind::Identifier(id) := nodes(inner.function).kind then (
+            if string_ref_is_asm(id.name) == 0 then LoweredValueLookup::Missing
+            else (
+                target_tag := output_target_tag_from_expr(inner.argument);
+                if target_tag < 0 then LoweredValueLookup::Missing
+                else if code_expr_idx < 0 || code_expr_idx >= MAX_NODES then LoweredValueLookup::InputError
+                else (
+                    nodes(code_expr_idx).kind |> match {
+                        NodeKind::Literal(ExpressionLiteral::String(code_ref)) => (
+                            emit_inline_assembly_value{
+                                target_tag,
+                                code_ref.start,
+                                code_ref.length,
+                                input_len
+                            }
+                        ),
+                        else => LoweredValueLookup::Missing
+                    }
+                )
+            )
+        ) else (
+            LoweredValueLookup::Missing
+        )
+    ) else (
+        LoweredValueLookup::Missing
+    )
+);
+
+emit_lvalue_target_object_expr_ref := {expr_idx: i32, input_len: i32} => (
+    if expr_idx < 0 || expr_idx >= MAX_NODES then VALUE_REF_LOOKUP_INPUT_ERROR
+    else (
+        nodes(expr_idx).kind |> match {
+            NodeKind::Identifier(id) => (
+                if safe_name_bounds{id.name.start, id.name.length, input_len} == 0 then VALUE_REF_LOOKUP_INPUT_ERROR
+                else (
+                    value_ref := emit_output_value_entry{
+                        OUTPUT_VALUE_KIND_IDENTIFIER,
+                        0,
+                        id.name.start,
+                        id.name.length,
+                        0,
+                        0
+                    };
+                    if value_ref < 0 then VALUE_REF_LOOKUP_OUTPUT_ERROR else value_ref
+                )
+            ),
+            NodeKind::TypePropertyAccess(info) => (
+                if safe_name_bounds{info.property.start, info.property.length, input_len} == 0 then VALUE_REF_LOOKUP_INPUT_ERROR
+                else (
+                    item_start := lower_state.output_value_field_count;
+                    object_ref := emit_lvalue_target_object_expr_ref{info.object, input_len};
+                    if object_ref < 0 then (
+                        object_ref
+                    ) else if emit_output_value_child_field{0, object_ref} == 0 then (
+                        VALUE_REF_LOOKUP_OUTPUT_ERROR
+                    ) else (
+                        value_ref := emit_output_value_entry{
+                            OUTPUT_VALUE_KIND_TYPE_PROPERTY_ACCESS,
+                            0,
+                            info.property.start,
+                            info.property.length,
+                            item_start,
+                            1
+                        };
+                        if value_ref < 0 then VALUE_REF_LOOKUP_OUTPUT_ERROR else value_ref
+                    )
+                )
+            ),
+            NodeKind::ArrayIndex(info) => (
+                item_start := lower_state.output_value_field_count;
+                array_ref := emit_lvalue_target_object_expr_ref{info.array, input_len};
+                if array_ref < 0 then (
+                    array_ref
+                ) else (
+                    index_ref := resolve_lowered_value_expr_as_ref{info.index, input_len};
+                    if index_ref < 0 then (
+                        index_ref
+                    ) else if emit_output_value_child_field{0, array_ref} == 0
+                        || emit_output_value_child_field{1, index_ref} == 0
+                    then (
+                        VALUE_REF_LOOKUP_OUTPUT_ERROR
+                    ) else (
+                        value_ref := emit_output_value_entry{
+                            OUTPUT_VALUE_KIND_ARRAY_INDEX,
+                            0,
+                            0,
+                            0,
+                            item_start,
+                            2
+                        };
+                        if value_ref < 0 then VALUE_REF_LOOKUP_OUTPUT_ERROR else value_ref
+                    )
+                )
+            ),
+            else => VALUE_REF_LOOKUP_MISSING
+        }
+    )
+);
+
+emit_assignment_value := {assignment_expr_idx: i32, input_len: i32} => (
+    if assignment_expr_idx < 0 || assignment_expr_idx >= MAX_NODES then LoweredValueLookup::InputError
+    else if NodeKind::Assignment(info) := nodes(assignment_expr_idx).kind then (
+        checkpoint_value_count := lower_state.output_value_count;
+        checkpoint_field_count := lower_state.output_value_field_count;
+        item_start := checkpoint_field_count;
+        target_ref := info.target |> match {
+            LValue::Identifier(target_info) => (
+                if safe_name_bounds{target_info.name.name.start, target_info.name.name.length, input_len} == 0 then VALUE_REF_LOOKUP_INPUT_ERROR
+                else (
+                    value_ref := emit_output_value_entry{
+                        OUTPUT_VALUE_KIND_IDENTIFIER,
+                        0,
+                        target_info.name.name.start,
+                        target_info.name.name.length,
+                        0,
+                        0
+                    };
+                    if value_ref < 0 then VALUE_REF_LOOKUP_OUTPUT_ERROR else value_ref
+                )
+            ),
+            LValue::TypePropertyAccess(target_info) => (
+                if safe_name_bounds{target_info.property.start, target_info.property.length, input_len} == 0 then VALUE_REF_LOOKUP_INPUT_ERROR
+                else (
+                    target_item_start := lower_state.output_value_field_count;
+                    object_ref := emit_lvalue_target_object_expr_ref{target_info.object, input_len};
+                    if object_ref < 0 then (
+                        object_ref
+                    ) else if emit_output_value_child_field{0, object_ref} == 0 then (
+                        VALUE_REF_LOOKUP_OUTPUT_ERROR
+                    ) else (
+                        value_ref := emit_output_value_entry{
+                            OUTPUT_VALUE_KIND_TYPE_PROPERTY_ACCESS,
+                            0,
+                            target_info.property.start,
+                            target_info.property.length,
+                            target_item_start,
+                            1
+                        };
+                        if value_ref < 0 then VALUE_REF_LOOKUP_OUTPUT_ERROR else value_ref
+                    )
+                )
+            ),
+            LValue::ArrayIndex(target_info) => (
+                target_item_start := lower_state.output_value_field_count;
+                array_ref := emit_lvalue_target_object_expr_ref{target_info.array, input_len};
+                if array_ref < 0 then (
+                    array_ref
+                ) else (
+                    index_ref := resolve_lowered_value_expr_as_ref{target_info.index, input_len};
+                    if index_ref < 0 then (
+                        index_ref
+                    ) else if emit_output_value_child_field{0, array_ref} == 0
+                        || emit_output_value_child_field{1, index_ref} == 0
+                    then (
+                        VALUE_REF_LOOKUP_OUTPUT_ERROR
+                    ) else (
+                        value_ref := emit_output_value_entry{
+                            OUTPUT_VALUE_KIND_ARRAY_INDEX,
+                            0,
+                            0,
+                            0,
+                            target_item_start,
+                            2
+                        };
+                        if value_ref < 0 then VALUE_REF_LOOKUP_OUTPUT_ERROR else value_ref
+                    )
+                )
+            ),
+            else => VALUE_REF_LOOKUP_MISSING
+        };
+        if target_ref < 0 then (
+            lower_state.output_value_count = checkpoint_value_count;
+            lower_state.output_value_field_count = checkpoint_field_count;
+            value_ref_lookup_to_lowered_value(target_ref)
+        ) else (
+            value_ref := resolve_lowered_value_expr_as_ref{info.expr, input_len};
+            if value_ref < 0 then (
+                lower_state.output_value_count = checkpoint_value_count;
+                lower_state.output_value_field_count = checkpoint_field_count;
+                value_ref_lookup_to_lowered_value(value_ref)
+            ) else if emit_output_value_child_field{0, target_ref} == 0
+                || emit_output_value_child_field{1, value_ref} == 0
+            then (
+                lower_state.output_value_count = checkpoint_value_count;
+                lower_state.output_value_field_count = checkpoint_field_count;
+                LoweredValueLookup::OutputError
+            ) else (
+                assignment_ref := emit_output_value_entry{
+                    OUTPUT_VALUE_KIND_ASSIGNMENT,
+                    0,
+                    0,
+                    0,
+                    item_start,
+                    2
+                };
+                if assignment_ref < 0 then (
+                    lower_state.output_value_count = checkpoint_value_count;
+                    lower_state.output_value_field_count = checkpoint_field_count;
+                    LoweredValueLookup::OutputError
+                ) else (
+                    LoweredValueLookup::ValueRef(assignment_ref)
+                )
+            )
+        )
+    ) else (
+        LoweredValueLookup::InputError
+    )
+);
+
+emit_binding_value := {binding_expr_idx: i32, input_len: i32} => (
+    if binding_expr_idx < 0 || binding_expr_idx >= MAX_NODES then LoweredValueLookup::InputError
+    else if NodeKind::Binding(binding) := nodes(binding_expr_idx).kind then (
+        if resolve_binding_pattern{binding.pattern, input_len} == 0 then (
+            LoweredValueLookup::Missing
+        ) else if safe_name_bounds{binding_extract_state.name_start, binding_extract_state.name_length, input_len} == 0 then (
+            LoweredValueLookup::InputError
+        ) else (
+            checkpoint_value_count := lower_state.output_value_count;
+            checkpoint_field_count := lower_state.output_value_field_count;
+            item_start := checkpoint_field_count;
+            value_ref := resolve_lowered_value_expr_as_ref{binding.expr, input_len};
+            if value_ref < 0 then (
+                lower_state.output_value_count = checkpoint_value_count;
+                lower_state.output_value_field_count = checkpoint_field_count;
+                value_ref_lookup_to_lowered_value(value_ref)
+            ) else if emit_output_value_child_field{0, value_ref} == 0 then (
+                lower_state.output_value_count = checkpoint_value_count;
+                lower_state.output_value_field_count = checkpoint_field_count;
+                LoweredValueLookup::OutputError
+            ) else (
+                mut binding_type_tag := if binding_extract_state.value_type_tag != INPUT_VALUE_TYPE_UNKNOWN then binding_extract_state.value_type_tag
+                    else value_ref_element_type_tag(value_ref);
+                if binding_type_tag != INPUT_VALUE_TYPE_I32 && binding_type_tag != INPUT_VALUE_TYPE_U8 then (
+                    binding_type_tag = INPUT_VALUE_TYPE_UNKNOWN;
+                ) else (
+                    {}
+                );
+                binding_ref := emit_output_value_entry{
+                    OUTPUT_VALUE_KIND_BINDING,
+                    binding_type_tag,
+                    binding_extract_state.name_start,
+                    binding_extract_state.name_length,
+                    item_start,
+                    1
+                };
+                if binding_ref < 0 then (
+                    lower_state.output_value_count = checkpoint_value_count;
+                    lower_state.output_value_field_count = checkpoint_field_count;
+                    LoweredValueLookup::OutputError
+                ) else (
+                    LoweredValueLookup::ValueRef(binding_ref)
+                )
+            )
+        )
+    ) else (
+        LoweredValueLookup::InputError
+    )
+);
+
 find_output_function_index_by_name := {name_start: i32, name_length: i32, input_len: i32} => (
     if safe_name_bounds{name_start, name_length, input_len} == 0 then VALUE_REF_LOOKUP_INPUT_ERROR
     else (
@@ -2228,7 +2542,22 @@ resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
                         }
                     ),
                     IntrinsicOperation::InlineAssembly(info) => (
-                        LoweredValueLookup::Missing
+                        if info.code < 0 || info.code >= MAX_NODES then (
+                            LoweredValueLookup::InputError
+                        ) else (
+                            nodes(info.code).kind |> match {
+                                NodeKind::Literal(ExpressionLiteral::String(code_ref)) => (
+                                    target_tag := output_target_tag_from_target_literal(info.target);
+                                    emit_inline_assembly_value{
+                                        target_tag,
+                                        code_ref.start,
+                                        code_ref.length,
+                                        input_len
+                                    }
+                                ),
+                                else => LoweredValueLookup::Missing
+                            }
+                        )
                     ),
                     else => LoweredValueLookup::Missing
                 }
@@ -2296,70 +2625,80 @@ resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
                 if info.function < 0 || info.function >= MAX_NODES then (
                     LoweredValueLookup::InputError
                 ) else (
-                    function_index := resolve_output_function_index_expr{info.function, input_len};
-                    if function_index == VALUE_REF_LOOKUP_INPUT_ERROR then (
-                        LoweredValueLookup::InputError
-                    ) else if function_index >= 0 then (
-                        emit_function_call_value{function_index, info.argument, input_len}
-                    ) else if NodeKind::TypePropertyAccess(access_info) := nodes(info.function).kind then (
-                        if info.argument != access_info.object then (
-                            index_lookup := resolve_lowered_value_index_access{
-                                info.function,
-                                info.argument,
-                                input_len
-                            };
-                            index_lookup |> match {
-                                LoweredValueLookup::Missing => emit_array_index_value{
+                    inline_asm_lookup := resolve_inline_assembly_call{
+                        info.function,
+                        info.argument,
+                        input_len
+                    };
+                    inline_asm_lookup |> match {
+                        LoweredValueLookup::Missing => (
+                            function_index := resolve_output_function_index_expr{info.function, input_len};
+                            if function_index == VALUE_REF_LOOKUP_INPUT_ERROR then (
+                                LoweredValueLookup::InputError
+                            ) else if function_index >= 0 then (
+                                emit_function_call_value{function_index, info.argument, input_len}
+                            ) else if NodeKind::TypePropertyAccess(access_info) := nodes(info.function).kind then (
+                                if info.argument != access_info.object then (
+                                    index_lookup := resolve_lowered_value_index_access{
+                                        info.function,
+                                        info.argument,
+                                        input_len
+                                    };
+                                    index_lookup |> match {
+                                        LoweredValueLookup::Missing => emit_array_index_value{
+                                            info.function,
+                                            info.argument,
+                                            input_len
+                                        },
+                                        else => index_lookup
+                                    }
+                                ) else if safe_name_bounds{access_info.property.start, access_info.property.length, input_len} == 0 then (
+                                    LoweredValueLookup::InputError
+                                ) else (
+                                    resolve_lowered_value_expr{access_info.object, input_len} |> match {
+                                        LoweredValueLookup::InputError => LoweredValueLookup::InputError,
+                                        LoweredValueLookup::OutputError => LoweredValueLookup::OutputError,
+                                        LoweredValueLookup::Missing => LoweredValueLookup::Missing,
+                                        LoweredValueLookup::Scalar(value) => LoweredValueLookup::Missing,
+                                        LoweredValueLookup::ValueRef(object_ref) => (
+                                            property_lookup := lookup_value_ref_by_property{
+                                                object_ref,
+                                                access_info.property.start,
+                                                access_info.property.length,
+                                                input_len
+                                            };
+                                            if property_lookup == VALUE_REF_LOOKUP_MISSING then (
+                                                emit_type_property_access_value{
+                                                    access_info.object,
+                                                    access_info.property.start,
+                                                    access_info.property.length,
+                                                    input_len
+                                                }
+                                            ) else (
+                                                value_ref_lookup_to_lowered_value(property_lookup)
+                                            )
+                                        ),
+                                        else => LoweredValueLookup::InputError
+                                    }
+                                )
+                            ) else (
+                                index_lookup := resolve_lowered_value_index_access{
                                     info.function,
                                     info.argument,
                                     input_len
-                                },
-                                else => index_lookup
-                            }
-                        ) else if safe_name_bounds{access_info.property.start, access_info.property.length, input_len} == 0 then (
-                            LoweredValueLookup::InputError
-                        ) else (
-                            resolve_lowered_value_expr{access_info.object, input_len} |> match {
-                                LoweredValueLookup::InputError => LoweredValueLookup::InputError,
-                                LoweredValueLookup::OutputError => LoweredValueLookup::OutputError,
-                                LoweredValueLookup::Missing => LoweredValueLookup::Missing,
-                                LoweredValueLookup::Scalar(value) => LoweredValueLookup::Missing,
-                                LoweredValueLookup::ValueRef(object_ref) => (
-                                    property_lookup := lookup_value_ref_by_property{
-                                        object_ref,
-                                        access_info.property.start,
-                                        access_info.property.length,
+                                };
+                                index_lookup |> match {
+                                    LoweredValueLookup::Missing => emit_array_index_value{
+                                        info.function,
+                                        info.argument,
                                         input_len
-                                    };
-                                    if property_lookup == VALUE_REF_LOOKUP_MISSING then (
-                                        emit_type_property_access_value{
-                                            access_info.object,
-                                            access_info.property.start,
-                                            access_info.property.length,
-                                            input_len
-                                        }
-                                    ) else (
-                                        value_ref_lookup_to_lowered_value(property_lookup)
-                                    )
-                                ),
-                                else => LoweredValueLookup::InputError
-                            }
-                        )
-                    ) else (
-                        index_lookup := resolve_lowered_value_index_access{
-                            info.function,
-                            info.argument,
-                            input_len
-                        };
-                        index_lookup |> match {
-                            LoweredValueLookup::Missing => emit_array_index_value{
-                                info.function,
-                                info.argument,
-                                input_len
-                            },
-                            else => index_lookup
-                        }
-                    )
+                                    },
+                                    else => index_lookup
+                                }
+                            )
+                        ),
+                        else => inline_asm_lookup
+                    }
                 )
             ),
             NodeKind::Struct(info) => (
@@ -2663,6 +3002,12 @@ resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
                     },
                     else => index_lookup
                 }
+            ),
+            NodeKind::Assignment(info) => (
+                emit_assignment_value{expr_idx, input_len}
+            ),
+            NodeKind::Binding(binding) => (
+                emit_binding_value{expr_idx, input_len}
             ),
             NodeKind::Block(list) => (
                 emit_block_value{list.head, list.count, input_len}

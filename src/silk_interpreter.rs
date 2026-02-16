@@ -687,9 +687,15 @@ impl WasmRuntime {
             let name = String::from_utf8(name_bytes).map_err(|err| {
                 Diagnostic::new(format!("Binding name is not valid UTF-8: {err}"))
             })?;
-            let is_mut = self.interpreter_call1("get_binding_is_mut", idx).unwrap_or(0);
-            let export_mask = self.interpreter_call1("get_binding_export_mask", idx).unwrap_or(0);
-            let wrap_mask = self.interpreter_call1("get_binding_wrap_mask", idx).unwrap_or(0);
+            let is_mut = self
+                .interpreter_call1("get_binding_is_mut", idx)
+                .unwrap_or(0);
+            let export_mask = self
+                .interpreter_call1("get_binding_export_mask", idx)
+                .unwrap_or(0);
+            let wrap_mask = self
+                .interpreter_call1("get_binding_wrap_mask", idx)
+                .unwrap_or(0);
             let value_idx = self.interpreter_call1("get_binding_value", idx)?;
             let value = if value_idx >= 0 {
                 match self.decode_value_expression(value_idx)? {
@@ -707,8 +713,7 @@ impl WasmRuntime {
                 preserve_behavior = PRESERVE_BEHAVIOR_PRESERVE_USAGE_IN_LOOPS;
             }
             if export_mask != 0 || wrap_mask != 0 {
-                preserve_behavior =
-                    preserve_behavior.max(PRESERVE_BEHAVIOR_PRESERVE_BINDING);
+                preserve_behavior = preserve_behavior.max(PRESERVE_BEHAVIOR_PRESERVE_BINDING);
             }
 
             bindings.insert(

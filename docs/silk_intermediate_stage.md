@@ -136,6 +136,13 @@ Error code export:
   - Block expressions are preserved as `IntermediateKind::Block` child lists.
   - Loop expressions are preserved as `IntermediateKind::Loop` with lowered loop bodies.
   - Diverge expressions (`return`/`break`) are preserved as `IntermediateKind::Diverge` with explicit diverge-type tags.
+- Inline `asm(target)("...")` expressions are now preserved as `IntermediateKind::InlineAssembly` nodes.
+  - The stage records target tag and raw code bytes; it does not execute assembly.
+- Assignment expressions now lower as `IntermediateKind::Assignment` nodes with reconstructed lvalue trees.
+  - Identifier/property/index assignment targets are preserved structurally.
+- Binding expressions with identifier-like patterns now lower as `IntermediateKind::Binding` nodes.
+  - Binding type tags use explicit pattern hints when available; otherwise type is inferred from lowered value shape when possible.
+  - Complex binding patterns that cannot be represented by this path still return `unimplemented` to preserve fallback behavior.
 - The stage still reports `unimplemented` for unsupported value shapes (for example non-data/non-struct mutable globals).
   - Array-repeat lowering for non-scalar empty repeats still falls back when element type cannot be inferred.
 - Bindings with unsupported pattern extraction are now treated as `unimplemented` instead of hard parse failure, preserving fallback behavior.

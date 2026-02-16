@@ -9165,16 +9165,9 @@ fn overlay_context_with_wasm_bindings(
         let BindingContext::Bound(current_value, _, bound_type) = binding_ctx.clone() else {
             continue;
         };
-        let value = wasm_binding
-            .value
-            .clone()
-            .unwrap_or(current_value);
+        let value = wasm_binding.value.clone().unwrap_or(current_value);
         let preserve_behavior = preserve_behavior_from_wasm_tag(wasm_binding.preserve_behavior);
-        *binding_ctx = BindingContext::Bound(
-            value,
-            preserve_behavior,
-            bound_type,
-        );
+        *binding_ctx = BindingContext::Bound(value, preserve_behavior, bound_type);
     }
 }
 
@@ -9235,7 +9228,9 @@ pub fn evaluate_files_to_expression(
 
     if wasm_interpreter_only_mode() {
         let wasm_eval = crate::silk_interpreter::evaluate_files_with_bindings(wasm_files, &root)?
-            .ok_or_else(|| Diagnostic::new("Silk interpreter result could not be represented"))?;
+            .ok_or_else(|| {
+            Diagnostic::new("Silk interpreter result could not be represented")
+        })?;
         overlay_context_with_wasm_bindings(&mut context, &wasm_eval.bindings);
         return Ok((collapse_final_value(wasm_eval.value), context));
     }
@@ -9458,10 +9453,7 @@ counter
     let BindingContext::Bound(_, preserve_behavior, _) = binding else {
         panic!("counter should be a bound binding");
     };
-    assert_eq!(
-        *preserve_behavior,
-        PreserveBehavior::PreserveUsageInLoops
-    );
+    assert_eq!(*preserve_behavior, PreserveBehavior::PreserveUsageInLoops);
 }
 
 #[test]
