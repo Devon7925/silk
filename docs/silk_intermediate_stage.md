@@ -17,7 +17,7 @@ stays aligned across parser/interpreter/intermediate stages.
 
 ## Versions
 
-- `intermediate_stage_version() -> 10`
+- `intermediate_stage_version() -> 11`
 - `intermediate_payload_version() -> 6`
 - `intermediate_output_version() -> 6`
 
@@ -112,6 +112,9 @@ Error code export:
   - Source target selection is deterministic from the export mask priority (`js`, then `wasm`, then `wgsl`).
 - Function exports/wrappers are now emitted through dedicated function slots.
   - Current host bridge resolves function bodies from the interpreted Rust context by exported/wrapped function name while retaining wasm-stage ownership of export/wrapper routing.
+- Function identifier alias chains are now recognized as function exports instead of falling back to `unimplemented`.
+  - Example: `id := (x: i32) => x; (export wasm) alias := id` now lowers `alias` as a function export.
+  - Wrapped aliases are also emitted (for example `(export wasm) (wrap js) alias := id`).
 - The stage still reports `unimplemented` for unsupported value shapes (for example non-data/non-struct mutable globals).
   - Array-repeat lowering for non-scalar empty repeats still falls back when element type cannot be inferred.
 - Bindings with unsupported pattern extraction are now treated as `unimplemented` instead of hard parse failure, preserving fallback behavior.

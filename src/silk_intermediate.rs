@@ -2264,6 +2264,58 @@ mod tests {
     }
 
     #[test]
+    fn wasm_stage_lowers_function_exports_via_identifier_alias() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "id := (x: i32) => x; (export wasm) alias := id; alias";
+        let context = interpreted_context(source);
+        let (lowered, backend) =
+            lower_context(&context, source).expect("lower_context should succeed");
+        assert_eq!(backend, IntermediateLoweringBackend::SilkWasm);
+
+        assert_eq!(lowered.functions.len(), 1);
+        assert_eq!(lowered.globals.len(), 0);
+        assert_eq!(lowered.exports.len(), 1);
+        assert_eq!(lowered.wrappers.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+
+        assert_eq!(lowered.exports[0].target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.exports[0].name, "alias");
+        assert_eq!(
+            lowered.exports[0].export_type,
+            IntermediateExportType::Function
+        );
+        assert_eq!(lowered.exports[0].index, 0);
+    }
+
+    #[test]
+    fn wasm_stage_lowers_function_exports_via_identifier_alias_chain() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "id := (x: i32) => x; first := id; (export wasm) alias := first; alias";
+        let context = interpreted_context(source);
+        let (lowered, backend) =
+            lower_context(&context, source).expect("lower_context should succeed");
+        assert_eq!(backend, IntermediateLoweringBackend::SilkWasm);
+
+        assert_eq!(lowered.functions.len(), 1);
+        assert_eq!(lowered.globals.len(), 0);
+        assert_eq!(lowered.exports.len(), 1);
+        assert_eq!(lowered.wrappers.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+
+        assert_eq!(lowered.exports[0].target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.exports[0].name, "alias");
+        assert_eq!(
+            lowered.exports[0].export_type,
+            IntermediateExportType::Function
+        );
+        assert_eq!(lowered.exports[0].index, 0);
+    }
+
+    #[test]
     fn wasm_stage_lowers_wrapped_function_exports() {
         if !wasm_stage_available() {
             return;
@@ -2283,6 +2335,41 @@ mod tests {
         assert_eq!(lowered.wrappers[0].source_target, TargetLiteral::WasmTarget);
         assert_eq!(lowered.wrappers[0].wrap_target, TargetLiteral::JSTarget);
         assert_eq!(lowered.wrappers[0].name, "id");
+        assert_eq!(
+            lowered.wrappers[0].export_type,
+            IntermediateExportType::Function
+        );
+        assert_eq!(lowered.wrappers[0].index, 0);
+    }
+
+    #[test]
+    fn wasm_stage_lowers_wrapped_function_exports_via_identifier_alias() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "id := (x: i32) => x; (export wasm) (wrap js) alias := id; alias";
+        let context = interpreted_context(source);
+        let (lowered, backend) =
+            lower_context(&context, source).expect("lower_context should succeed");
+        assert_eq!(backend, IntermediateLoweringBackend::SilkWasm);
+
+        assert_eq!(lowered.functions.len(), 1);
+        assert_eq!(lowered.globals.len(), 0);
+        assert_eq!(lowered.exports.len(), 1);
+        assert_eq!(lowered.wrappers.len(), 1);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+
+        assert_eq!(lowered.exports[0].target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.exports[0].name, "alias");
+        assert_eq!(
+            lowered.exports[0].export_type,
+            IntermediateExportType::Function
+        );
+        assert_eq!(lowered.exports[0].index, 0);
+
+        assert_eq!(lowered.wrappers[0].source_target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.wrappers[0].wrap_target, TargetLiteral::JSTarget);
+        assert_eq!(lowered.wrappers[0].name, "alias");
         assert_eq!(
             lowered.wrappers[0].export_type,
             IntermediateExportType::Function
