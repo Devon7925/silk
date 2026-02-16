@@ -62,20 +62,20 @@ pub fn compile(
         .get(&root)
         .ok_or_else(|| Diagnostic::new(format!("Missing root source for {root}")))?
         .clone();
-    let ast = loader::parse_source_block(&root_source)?;
     if timings_enabled {
         eprintln!(
             "SILK_TIMINGS parse_files_ms={:.2}",
             parse_start.elapsed().as_secs_f64() * 1_000.0
         );
     }
-    let mut parsed_files = HashMap::with_capacity(1);
-    parsed_files.insert(root.clone(), ast.clone());
 
     let interpret_start = Instant::now();
-    let mut context =
-        interpret::intrinsic_context_with_files_and_sources(parsed_files, file_sources);
-    let program_context = interpret::interpret_program_for_context(ast, &mut context)?;
+    let eval_inputs: Vec<(&str, &str)> = file_sources
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect();
+    let (_evaluated_value, program_context) =
+        interpret::evaluate_files_to_expression(eval_inputs, &root)?;
     if timings_enabled {
         eprintln!(
             "SILK_TIMINGS interpret_ms={:.2}",

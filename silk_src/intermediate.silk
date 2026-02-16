@@ -1320,6 +1320,37 @@ lookup_value_ref_by_index := {array_ref: i32, index: i32, input_len: i32} => (
     )
 );
 
+resolve_lowered_value_index_access := {array_expr_idx: i32, index_expr_idx: i32, input_len: i32} => (
+    index_lookup := resolve_scalar_value_expr{index_expr_idx, input_len};
+    index_lookup |> match {
+        ScalarValueLookup::InputError => LoweredValueLookup::InputError,
+        ScalarValueLookup::Missing => LoweredValueLookup::Missing,
+        ScalarValueLookup::Value(index_value) => (
+            if index_value.value_tag != VALUE_TAG_NUMBER || index_value.value_i32 < 0 then (
+                LoweredValueLookup::Missing
+            ) else (
+                resolve_lowered_value_expr{array_expr_idx, input_len} |> match {
+                    LoweredValueLookup::InputError => LoweredValueLookup::InputError,
+                    LoweredValueLookup::OutputError => LoweredValueLookup::OutputError,
+                    LoweredValueLookup::Missing => LoweredValueLookup::Missing,
+                    LoweredValueLookup::Scalar(value) => LoweredValueLookup::Missing,
+                    LoweredValueLookup::ValueRef(array_ref) => (
+                        value_ref_lookup_to_lowered_value(
+                            lookup_value_ref_by_index{
+                                array_ref,
+                                index_value.value_i32,
+                                input_len
+                            }
+                        )
+                    ),
+                    else => LoweredValueLookup::InputError
+                }
+            )
+        ),
+        else => LoweredValueLookup::InputError
+    }
+);
+
 emit_output_value_entry := {
     kind_tag: i32,
     value_i32: i32,
@@ -1499,7 +1530,7 @@ resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
                     LoweredValueLookup::InputError
                 ) else if NodeKind::TypePropertyAccess(access_info) := nodes(info.function).kind then (
                     if info.argument != access_info.object then (
-                        LoweredValueLookup::Missing
+                        resolve_lowered_value_index_access{info.function, info.argument, input_len}
                     ) else if safe_name_bounds{access_info.property.start, access_info.property.length, input_len} == 0 then (
                         LoweredValueLookup::InputError
                     ) else (
@@ -1522,7 +1553,7 @@ resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
                         }
                     )
                 ) else (
-                    LoweredValueLookup::Missing
+                    resolve_lowered_value_index_access{info.function, info.argument, input_len}
                 )
             ),
             NodeKind::Struct(info) => (
@@ -1805,34 +1836,7 @@ resolve_lowered_value_expr := {expr_idx: i32, input_len: i32} => (
                 )
             ),
             NodeKind::ArrayIndex(info) => (
-                index_lookup := resolve_scalar_value_expr{info.index, input_len};
-                index_lookup |> match {
-                    ScalarValueLookup::InputError => LoweredValueLookup::InputError,
-                    ScalarValueLookup::Missing => LoweredValueLookup::Missing,
-                    ScalarValueLookup::Value(index_value) => (
-                        if index_value.value_tag != VALUE_TAG_NUMBER || index_value.value_i32 < 0 then (
-                            LoweredValueLookup::Missing
-                        ) else (
-                            resolve_lowered_value_expr{info.array, input_len} |> match {
-                                LoweredValueLookup::InputError => LoweredValueLookup::InputError,
-                                LoweredValueLookup::OutputError => LoweredValueLookup::OutputError,
-                                LoweredValueLookup::Missing => LoweredValueLookup::Missing,
-                                LoweredValueLookup::Scalar(value) => LoweredValueLookup::Missing,
-                                LoweredValueLookup::ValueRef(array_ref) => (
-                                    value_ref_lookup_to_lowered_value(
-                                        lookup_value_ref_by_index{
-                                            array_ref,
-                                            index_value.value_i32,
-                                            input_len
-                                        }
-                                    )
-                                ),
-                                else => LoweredValueLookup::InputError
-                            }
-                        )
-                    ),
-                    else => LoweredValueLookup::InputError
-                }
+                resolve_lowered_value_index_access{info.array, info.index, input_len}
             ),
             else => LoweredValueLookup::Missing
         }

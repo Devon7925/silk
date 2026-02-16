@@ -6475,6 +6475,10 @@ value_tag := (value: Value) => (
     bindings(idx).name_length
 );
 
+(export wasm) get_binding_is_mut := (idx: i32) => (
+    bindings(idx).is_mut
+);
+
 (export wasm) get_binding_target_mask := (idx: i32) => (
     bindings(idx).target_mask
 );

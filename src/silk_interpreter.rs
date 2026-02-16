@@ -38,7 +38,30 @@ static WASM_ENGINE: OnceLock<Result<Engine, Diagnostic>> = OnceLock::new();
 static PARSER_MODULE: OnceLock<Result<Module, Diagnostic>> = OnceLock::new();
 static INTERPRETER_MODULE: OnceLock<Result<Module, Diagnostic>> = OnceLock::new();
 
+const PRESERVE_BEHAVIOR_INLINE: i32 = 0;
+const PRESERVE_BEHAVIOR_PRESERVE_BINDING: i32 = 1;
+const PRESERVE_BEHAVIOR_PRESERVE_USAGE_IN_LOOPS: i32 = 2;
+
+#[derive(Debug, Clone)]
+pub struct WasmBindingMetadata {
+    pub value: Option<Expression>,
+    pub preserve_behavior: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct WasmEvaluation {
+    pub value: Expression,
+    pub bindings: HashMap<String, WasmBindingMetadata>,
+}
+
 pub fn evaluate_text(program: &str) -> Result<Option<Expression>, Diagnostic> {
+    let Some(result) = evaluate_text_with_bindings(program)? else {
+        return Ok(None);
+    };
+    Ok(Some(result.value))
+}
+
+pub fn evaluate_text_with_bindings(program: &str) -> Result<Option<WasmEvaluation>, Diagnostic> {
     if std::env::var_os("SILK_DISABLE_WASM_INTERPRETER").is_some() {
         return Ok(None);
     }
@@ -65,13 +88,27 @@ pub fn evaluate_text(program: &str) -> Result<Option<Expression>, Diagnostic> {
         ));
     }
 
-    runtime.decode_value_expression(result_idx)
+    let Some(value) = runtime.decode_value_expression(result_idx)? else {
+        return Ok(None);
+    };
+    let bindings = runtime.decode_binding_values()?;
+    Ok(Some(WasmEvaluation { value, bindings }))
 }
 
 pub fn evaluate_files(
     files: Vec<(&str, &str)>,
     root: &str,
 ) -> Result<Option<Expression>, Diagnostic> {
+    let Some(result) = evaluate_files_with_bindings(files, root)? else {
+        return Ok(None);
+    };
+    Ok(Some(result.value))
+}
+
+pub fn evaluate_files_with_bindings(
+    files: Vec<(&str, &str)>,
+    root: &str,
+) -> Result<Option<WasmEvaluation>, Diagnostic> {
     if std::env::var_os("SILK_DISABLE_WASM_INTERPRETER").is_some() {
         return Ok(None);
     }
@@ -235,7 +272,11 @@ pub fn evaluate_files(
         return Err(Diagnostic::new(message));
     }
 
-    runtime.decode_value_expression(result_idx)
+    let Some(value) = runtime.decode_value_expression(result_idx)? else {
+        return Ok(None);
+    };
+    let bindings = runtime.decode_binding_values()?;
+    Ok(Some(WasmEvaluation { value, bindings }))
 }
 
 fn map_error_position<'a>(
@@ -626,6 +667,61 @@ impl WasmRuntime {
 
         Ok(lines.join("\n"))
     }
+
+    fn decode_binding_values(
+        &mut self,
+    ) -> Result<HashMap<String, WasmBindingMetadata>, Diagnostic> {
+        let binding_count = self.interpreter_call0("get_binding_count")?;
+        let intrinsic_binding_count = self
+            .interpreter_call0("get_intrinsic_binding_count")
+            .unwrap_or(0)
+            .max(0);
+        let mut bindings = HashMap::new();
+
+        for idx in intrinsic_binding_count..binding_count {
+            let name_start = self.interpreter_call1("get_binding_name_start", idx)?;
+            let name_len = self.interpreter_call1("get_binding_name_length", idx)?;
+            let Some(name_bytes) = self.decode_string_bytes(name_start, name_len)? else {
+                continue;
+            };
+            let name = String::from_utf8(name_bytes).map_err(|err| {
+                Diagnostic::new(format!("Binding name is not valid UTF-8: {err}"))
+            })?;
+            let is_mut = self.interpreter_call1("get_binding_is_mut", idx).unwrap_or(0);
+            let export_mask = self.interpreter_call1("get_binding_export_mask", idx).unwrap_or(0);
+            let wrap_mask = self.interpreter_call1("get_binding_wrap_mask", idx).unwrap_or(0);
+            let value_idx = self.interpreter_call1("get_binding_value", idx)?;
+            let value = if value_idx >= 0 {
+                match self.decode_value_expression(value_idx)? {
+                    Some(decoded) if !matches!(decoded.kind, ExpressionKind::Function { .. }) => {
+                        Some(decoded)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            let mut preserve_behavior = PRESERVE_BEHAVIOR_INLINE;
+            if is_mut != 0 {
+                preserve_behavior = PRESERVE_BEHAVIOR_PRESERVE_USAGE_IN_LOOPS;
+            }
+            if export_mask != 0 || wrap_mask != 0 {
+                preserve_behavior =
+                    preserve_behavior.max(PRESERVE_BEHAVIOR_PRESERVE_BINDING);
+            }
+
+            bindings.insert(
+                name,
+                WasmBindingMetadata {
+                    value,
+                    preserve_behavior,
+                },
+            );
+        }
+
+        Ok(bindings)
+    }
 }
 
 fn synthetic_string_bytes(start: i32, len: i32) -> Option<&'static [u8]> {
@@ -999,6 +1095,31 @@ mod tests {
         assert!(matches!(
             value.kind,
             ExpressionKind::Literal(ExpressionLiteral::Number(3))
+        ));
+    }
+
+    #[test]
+    fn wasm_interpreter_exposes_folded_binding_values() {
+        let eval = evaluate_text_with_bindings("answer := 40 + 2; answer")
+            .expect("wasm evaluation should succeed")
+            .expect("binding snapshot should decode");
+
+        assert!(matches!(
+            eval.value.kind,
+            ExpressionKind::Literal(ExpressionLiteral::Number(42))
+        ));
+        let answer = eval
+            .bindings
+            .get("answer")
+            .expect("answer binding should be present");
+        assert_eq!(answer.preserve_behavior, PRESERVE_BEHAVIOR_INLINE);
+        let answer_value = answer
+            .value
+            .as_ref()
+            .expect("answer binding value should decode");
+        assert!(matches!(
+            answer_value.kind,
+            ExpressionKind::Literal(ExpressionLiteral::Number(42))
         ));
     }
 }

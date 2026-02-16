@@ -9141,19 +9141,59 @@ fn wasm_interpreter_only_mode() -> bool {
     true
 }
 
+fn preserve_behavior_from_wasm_tag(tag: i32) -> PreserveBehavior {
+    match tag {
+        1 => PreserveBehavior::PreserveBinding,
+        2 => PreserveBehavior::PreserveUsageInLoops,
+        3 => PreserveBehavior::PreserveUsage,
+        _ => PreserveBehavior::Inline,
+    }
+}
+
+fn overlay_context_with_wasm_bindings(
+    context: &mut Context,
+    bindings: &HashMap<String, crate::silk_interpreter::WasmBindingMetadata>,
+) {
+    let Some(scope) = context.bindings.last_mut() else {
+        return;
+    };
+
+    for (identifier, (binding_ctx, _)) in scope.iter_mut() {
+        let Some(wasm_binding) = bindings.get(&identifier.name) else {
+            continue;
+        };
+        let BindingContext::Bound(current_value, _, bound_type) = binding_ctx.clone() else {
+            continue;
+        };
+        let value = wasm_binding
+            .value
+            .clone()
+            .unwrap_or(current_value);
+        let preserve_behavior = preserve_behavior_from_wasm_tag(wasm_binding.preserve_behavior);
+        *binding_ctx = BindingContext::Bound(
+            value,
+            preserve_behavior,
+            bound_type,
+        );
+    }
+}
+
 pub fn evaluate_text_to_expression(program: &str) -> Result<(Expression, Context), Diagnostic> {
     if wasm_interpreter_only_mode() {
-        let value = crate::silk_interpreter::evaluate_text(program)?
+        let wasm_eval = crate::silk_interpreter::evaluate_text_with_bindings(program)?
             .ok_or_else(|| Diagnostic::new("Silk interpreter result could not be represented"))?;
-        let context = intrinsic_context();
-        return Ok((collapse_final_value(value), context));
+        let expression = loader::parse_source_block(program)?;
+        let mut metadata_context = intrinsic_context();
+        let mut context = interpret_program_for_context(expression, &mut metadata_context)?;
+        overlay_context_with_wasm_bindings(&mut context, &wasm_eval.bindings);
+        return Ok((collapse_final_value(wasm_eval.value), context));
     }
 
     let expression = loader::parse_source_block(program)?;
     let mut metadata_context = intrinsic_context();
-    let context = interpret_program_for_context(expression.clone(), &mut metadata_context)?;
+    let mut context = interpret_program_for_context(expression.clone(), &mut metadata_context)?;
 
-    let wasm_value = match crate::silk_interpreter::evaluate_text(program) {
+    let wasm_eval = match crate::silk_interpreter::evaluate_text_with_bindings(program) {
         Ok(value) => value,
         Err(err) => {
             if wasm_interpreter_strict_mode() {
@@ -9163,8 +9203,9 @@ pub fn evaluate_text_to_expression(program: &str) -> Result<(Expression, Context
         }
     };
 
-    let value = if let Some(value) = wasm_value {
-        value
+    let value = if let Some(wasm_eval) = wasm_eval {
+        overlay_context_with_wasm_bindings(&mut context, &wasm_eval.bindings);
+        wasm_eval.value
     } else {
         let mut fallback_context = intrinsic_context();
         let (fallback_value, _) = interpret_program(expression, &mut fallback_context)?;
@@ -9182,13 +9223,6 @@ pub fn evaluate_files_to_expression(
     files: Vec<(&str, &str)>,
     root: &str,
 ) -> Result<(Expression, Context), Diagnostic> {
-    if wasm_interpreter_only_mode() {
-        let value = crate::silk_interpreter::evaluate_files(files, root)?
-            .ok_or_else(|| Diagnostic::new("Silk interpreter result could not be represented"))?;
-        let context = intrinsic_context();
-        return Ok((collapse_final_value(value), context));
-    }
-
     let wasm_files = files.clone();
     let file_map = loader::build_parsed_files(files)?;
     let root = loader::normalize_path(root);
@@ -9197,9 +9231,16 @@ pub fn evaluate_files_to_expression(
         .ok_or_else(|| Diagnostic::new(format!("Missing root source for {root}")))?
         .clone();
     let mut metadata_context = intrinsic_context_with_files(file_map.clone());
-    let context = interpret_program_for_context(expression.clone(), &mut metadata_context)?;
+    let mut context = interpret_program_for_context(expression.clone(), &mut metadata_context)?;
 
-    let wasm_value = match crate::silk_interpreter::evaluate_files(wasm_files, &root) {
+    if wasm_interpreter_only_mode() {
+        let wasm_eval = crate::silk_interpreter::evaluate_files_with_bindings(wasm_files, &root)?
+            .ok_or_else(|| Diagnostic::new("Silk interpreter result could not be represented"))?;
+        overlay_context_with_wasm_bindings(&mut context, &wasm_eval.bindings);
+        return Ok((collapse_final_value(wasm_eval.value), context));
+    }
+
+    let wasm_eval = match crate::silk_interpreter::evaluate_files_with_bindings(wasm_files, &root) {
         Ok(value) => value,
         Err(err) => {
             if wasm_interpreter_strict_mode() {
@@ -9209,8 +9250,9 @@ pub fn evaluate_files_to_expression(
         }
     };
 
-    if let Some(value) = wasm_value {
-        Ok((value, context))
+    if let Some(wasm_eval) = wasm_eval {
+        overlay_context_with_wasm_bindings(&mut context, &wasm_eval.bindings);
+        Ok((collapse_final_value(wasm_eval.value), context))
     } else {
         let mut fallback_context = intrinsic_context_with_files(file_map);
         let (value, _) = interpret_program(expression, &mut fallback_context)?;
@@ -9395,6 +9437,53 @@ fn interpret_binding_with_export_annotation() {
 answer
     ";
     assert_eq!(evaluate_text_to_number(program), 42);
+}
+
+#[test]
+fn interpret_uses_wasm_binding_metadata_for_mut_preserve_behavior() {
+    let program = "
+mut counter := 0;
+counter
+    ";
+    let (_, context) = evaluate_text_to_expression(program).expect("program should interpret");
+    let scope = context
+        .bindings
+        .last()
+        .expect("context should contain at least one scope");
+    let (binding, _) = scope
+        .iter()
+        .find(|(identifier, _)| identifier.name == "counter")
+        .map(|(_, binding)| binding)
+        .expect("counter binding should exist");
+    let BindingContext::Bound(_, preserve_behavior, _) = binding else {
+        panic!("counter should be a bound binding");
+    };
+    assert_eq!(
+        *preserve_behavior,
+        PreserveBehavior::PreserveUsageInLoops
+    );
+}
+
+#[test]
+fn interpret_uses_wasm_binding_metadata_for_export_preserve_behavior() {
+    let program = "
+(export wasm) answer := 42;
+answer
+    ";
+    let (_, context) = evaluate_text_to_expression(program).expect("program should interpret");
+    let scope = context
+        .bindings
+        .last()
+        .expect("context should contain at least one scope");
+    let (binding, _) = scope
+        .iter()
+        .find(|(identifier, _)| identifier.name == "answer")
+        .map(|(_, binding)| binding)
+        .expect("answer binding should exist");
+    let BindingContext::Bound(_, preserve_behavior, _) = binding else {
+        panic!("answer should be a bound binding");
+    };
+    assert_eq!(*preserve_behavior, PreserveBehavior::PreserveBinding);
 }
 
 #[test]

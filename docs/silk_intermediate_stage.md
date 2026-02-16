@@ -101,6 +101,9 @@ Error code export:
 - Struct/array projection lookup now resolves through the lowered-value alias graph recursively instead of only direct identifier slots.
 - Property access in parser function-call form now lowers through the same projection path.
   - Example: `base := { x = 7, y = 8 }; (export wasm) out := base.x` now lowers `out` as scalar global `7` instead of returning `unimplemented`.
+- Array indexing in parser function-call form now lowers through the value projection path.
+  - Example: `base := {10, 20, 30}; (export wasm) out := base(1)` now lowers `out` as scalar global `20`.
+  - Scalar index aliases now flow through the same path (for example `idx := 2; ... out := base(idx)`).
 - Non-materialized scalar bindings are emitted in `inline_bindings` as literal `IntermediateKind` values.
   - Example: `base := 42; (export wasm) answer := base` now lowers `base` into the inline-binding output table while still lowering `answer` as a global/export.
 - Wrap annotations no longer force an `unimplemented` result when no export source exists.

@@ -4,10 +4,10 @@ This document tracks known feature gaps between the Rust interpreter (`src/inter
 
 **Missing Or Incomplete**
 - Builtin library prelude fidelity. The Silk interpreter now supports typed `Option(T)` construction and a builtin `Range` type binding, but still does not fully mirror Rust's library-evaluated generic behavior (for example, `Iterator(...)` currently follows Rust's permissive non-type-argument behavior rather than strict generic parameter validation).
-- Preserve/inlining metadata. The Rust interpreter computes `PreserveBehavior` and returns a rich `Context` used by `src/intermediate.rs`; the Silk interpreter only returns value indices, so preserve metadata is unavailable.
 - Diagnostics. The Rust interpreter reports structured `Diagnostic` messages with spans; the Silk interpreter only tracks a numeric error position in `value_state.error`.
 
 **Recently Closed**
+- Compilation now runs through the Silk interpreter evaluation path (`evaluate_files_to_expression`) and overlays wasm binding metadata (including preserve/inlining behavior) onto the context used by intermediate lowering.
 - `if` branch compatibility checks now reject obvious mismatches in the Silk interpreter (for example, `if true then 1 else true` and `if true then (1;) else (2)`), matching Rust interpreter behavior for these branch-type errors.
 - `use "path"` imports are now supported via a file registry (`register_file`) and cached per interpreter run; path normalization and file resolution are still handled by the host.
 - `for` loops now execute iterator implementations correctly, including preserving concrete iterator types across calls.
