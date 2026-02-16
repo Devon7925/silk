@@ -17,9 +17,9 @@ stays aligned across parser/interpreter/intermediate stages.
 
 ## Versions
 
-- `intermediate_stage_version() -> 12`
+- `intermediate_stage_version() -> 13`
 - `intermediate_payload_version() -> 6`
-- `intermediate_output_version() -> 6`
+- `intermediate_output_version() -> 7`
 
 ## Input ABI (AST, chainable)
 
@@ -104,6 +104,13 @@ Error code export:
 - Array indexing in parser function-call form now lowers through the value projection path.
   - Example: `base := {10, 20, 30}; (export wasm) out := base(1)` now lowers `out` as scalar global `20`.
   - Scalar index aliases now flow through the same path (for example `idx := 2; ... out := base(idx)`).
+- Unresolved identifier/property/index expressions are now preserved as intermediate expression nodes instead of being dropped as missing.
+  - Identifiers can now be emitted as `IntermediateKind::Identifier` value nodes when no scalar/value alias is available.
+  - Property access and array index expressions now fall back to `IntermediateKind::TypePropertyAccess` / `IntermediateKind::ArrayIndex` trees when compile-time projection is unavailable.
+  - This preserves intermediate structure without evaluating operations.
+- Materialized globals backed by unresolved identifier/property/index value refs now require an explicit type hint.
+  - Without a type hint, those bindings still return `unimplemented` so the host can safely fall back.
+  - With a type hint (for example `: i32`), the stage now materializes the global while preserving the expression tree value.
 - Non-materialized scalar bindings are emitted in `inline_bindings` as literal `IntermediateKind` values.
   - Example: `base := 42; (export wasm) answer := base` now lowers `base` into the inline-binding output table while still lowering `answer` as a global/export.
 - Wrap annotations no longer force an `unimplemented` result when no export source exists.

@@ -55,6 +55,9 @@ const OUTPUT_VALUE_KIND_ARRAY: i32 = 5;
 const OUTPUT_VALUE_KIND_INTRINSIC_BINARY: i32 = 6;
 const OUTPUT_VALUE_KIND_INTRINSIC_UNARY: i32 = 7;
 const OUTPUT_VALUE_KIND_IF: i32 = 8;
+const OUTPUT_VALUE_KIND_IDENTIFIER: i32 = 9;
+const OUTPUT_VALUE_KIND_TYPE_PROPERTY_ACCESS: i32 = 10;
+const OUTPUT_VALUE_KIND_ARRAY_INDEX: i32 = 11;
 
 const OUTPUT_VALUE_TYPE_UNKNOWN: i32 = 0;
 const OUTPUT_VALUE_TYPE_I32: i32 = 1;
@@ -1130,6 +1133,50 @@ fn decode_output_value_inner(
             }
             IntermediateKind::Literal(ExpressionLiteral::Char(slot.value_i32 as u8))
         }
+        OUTPUT_VALUE_KIND_IDENTIFIER => {
+            let name = decode_name_from_input(input_bytes, slot.name_start, slot.name_length)?;
+            IntermediateKind::Identifier(Identifier::new(name))
+        }
+        OUTPUT_VALUE_KIND_TYPE_PROPERTY_ACCESS => {
+            let mut children = decode_output_value_children(
+                slot,
+                root,
+                1,
+                value_slots,
+                value_fields,
+                input_bytes,
+                memo,
+                visiting,
+                "type property access",
+            )?
+            .into_iter();
+            let object = children.next().expect("type property access object child");
+            let property = decode_name_from_input(input_bytes, slot.name_start, slot.name_length)?;
+            IntermediateKind::TypePropertyAccess {
+                object: Box::new(object),
+                property,
+            }
+        }
+        OUTPUT_VALUE_KIND_ARRAY_INDEX => {
+            let mut children = decode_output_value_children(
+                slot,
+                root,
+                2,
+                value_slots,
+                value_fields,
+                input_bytes,
+                memo,
+                visiting,
+                "array index",
+            )?
+            .into_iter();
+            let array = children.next().expect("array index array child");
+            let index = children.next().expect("array index index child");
+            IntermediateKind::ArrayIndex {
+                array: Box::new(array),
+                index: Box::new(index),
+            }
+        }
         OUTPUT_VALUE_KIND_INTRINSIC_BINARY => {
             let mut children = decode_output_value_children(
                 slot,
@@ -2189,6 +2236,71 @@ mod tests {
             lowered.globals[0].value,
             IntermediateKind::Literal(ExpressionLiteral::Number(30))
         ));
+        assert_eq!(lowered.exports[0].target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.exports[0].name, "out");
+        assert_eq!(
+            lowered.exports[0].export_type,
+            IntermediateExportType::Global
+        );
+        assert_eq!(lowered.exports[0].index, 0);
+    }
+
+    #[test]
+    fn wasm_stage_lowers_exported_dynamic_struct_property_access_with_explicit_type() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "left := { x = 7 }; right := { x = 8 }; pick_obj := if true then left else right; (export wasm) out: i32 := pick_obj.x; out";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+        assert_eq!(lowered.wrappers.len(), 0);
+        assert_eq!(lowered.globals[0].name, "out");
+        assert_eq!(lowered.globals[0].ty, IntermediateType::I32);
+        match &lowered.globals[0].value {
+            IntermediateKind::TypePropertyAccess { object, property } => {
+                assert_eq!(property, "x");
+                assert!(matches!(object.as_ref(), IntermediateKind::If { .. }));
+            }
+            other => panic!("expected type-property access value, got {other:?}"),
+        }
+        assert_eq!(lowered.exports[0].target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.exports[0].name, "out");
+        assert_eq!(
+            lowered.exports[0].export_type,
+            IntermediateExportType::Global
+        );
+        assert_eq!(lowered.exports[0].index, 0);
+    }
+
+    #[test]
+    fn wasm_stage_lowers_exported_dynamic_array_index_with_explicit_type() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source =
+            "base := {10, 20, 30}; idx := if true then 1 else 2; (export wasm) out: i32 := base(idx); out";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+        assert_eq!(lowered.wrappers.len(), 0);
+        assert_eq!(lowered.globals[0].name, "out");
+        assert_eq!(lowered.globals[0].ty, IntermediateType::I32);
+        match &lowered.globals[0].value {
+            IntermediateKind::ArrayIndex { array, index } => {
+                assert!(matches!(array.as_ref(), IntermediateKind::ArrayLiteral { .. }));
+                assert!(matches!(index.as_ref(), IntermediateKind::If { .. }));
+            }
+            other => panic!("expected array-index value, got {other:?}"),
+        }
         assert_eq!(lowered.exports[0].target, TargetLiteral::WasmTarget);
         assert_eq!(lowered.exports[0].name, "out");
         assert_eq!(
