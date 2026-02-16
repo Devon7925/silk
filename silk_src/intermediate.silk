@@ -3,6 +3,7 @@ types := use "types.silk";
 MAX_INPUT := types.MAX_INPUT;
 MAX_NODES := types.MAX_NODES;
 MAX_LIST_NODES := types.MAX_LIST_NODES;
+MAX_OUTPUT_FUNCTIONS := 4096;
 MAX_OUTPUT_GLOBALS := 4096;
 MAX_OUTPUT_EXPORTS := 12288;
 MAX_OUTPUT_WRAPPERS := 12288;
@@ -99,6 +100,11 @@ OutputGlobalSlot := {
     value_ref = i32,
 };
 
+OutputFunctionSlot := {
+    name_start = i32,
+    name_length = i32,
+};
+
 OutputExportSlot := {
     target_tag = i32,
     export_type = i32,
@@ -146,6 +152,11 @@ EMPTY_OUTPUT_GLOBAL_SLOT := {
     value_tag = 0,
     value_i32 = 0,
     value_ref = -1,
+};
+
+EMPTY_OUTPUT_FUNCTION_SLOT := {
+    name_start = 0,
+    name_length = 0,
 };
 
 EMPTY_OUTPUT_EXPORT_SLOT := {
@@ -237,7 +248,7 @@ lower_error_output_encode_failed := {} => (
 );
 
 (export wasm) intermediate_output_version := {} => (
-    5
+    6
 );
 
 (export wasm) input: Box({u8; MAX_INPUT}) := {0; MAX_INPUT};
@@ -246,6 +257,7 @@ lower_error_output_encode_failed := {} => (
 (export wasm) mut state: Box(State) := { count = 0, cursor = 0, error = 0, list_count = 0 };
 
 (export wasm) mut output_globals: Box({OutputGlobalSlot; MAX_OUTPUT_GLOBALS}) := {EMPTY_OUTPUT_GLOBAL_SLOT; MAX_OUTPUT_GLOBALS};
+(export wasm) mut output_functions: Box({OutputFunctionSlot; MAX_OUTPUT_FUNCTIONS}) := {EMPTY_OUTPUT_FUNCTION_SLOT; MAX_OUTPUT_FUNCTIONS};
 (export wasm) mut output_exports: Box({OutputExportSlot; MAX_OUTPUT_EXPORTS}) := {EMPTY_OUTPUT_EXPORT_SLOT; MAX_OUTPUT_EXPORTS};
 (export wasm) mut output_wrappers: Box({OutputWrapperSlot; MAX_OUTPUT_WRAPPERS}) := {EMPTY_OUTPUT_WRAPPER_SLOT; MAX_OUTPUT_WRAPPERS};
 (export wasm) mut output_inline_bindings: Box({OutputInlineBindingSlot; MAX_OUTPUT_INLINE_BINDINGS}) := {EMPTY_OUTPUT_INLINE_BINDING_SLOT; MAX_OUTPUT_INLINE_BINDINGS};
@@ -269,6 +281,7 @@ LowerState := {
     header_ok = i32,
     output_len = i32,
     output_global_count = i32,
+    output_function_count = i32,
     output_export_count = i32,
     output_wrapper_count = i32,
     output_inline_binding_count = i32,
@@ -294,6 +307,7 @@ LowerState := {
     header_ok = 0,
     output_len = 0,
     output_global_count = 0,
+    output_function_count = 0,
     output_export_count = 0,
     output_wrapper_count = 0,
     output_inline_binding_count = 0,
@@ -418,7 +432,7 @@ EMPTY_KNOWN_VALUE_ALIAS_SLOT := {
 (export wasm) mut known_value_aliases: Box({KnownValueAliasSlot; MAX_KNOWN_VALUE_ALIASES}) := {EMPTY_KNOWN_VALUE_ALIAS_SLOT; MAX_KNOWN_VALUE_ALIASES};
 
 (export wasm) intermediate_stage_version := {} => (
-    9
+    10
 );
 
 target_mask_has := {mask: i32, bit: i32} => (
@@ -1898,6 +1912,7 @@ resolve_wrapper_source_target := {} => (
 reset_output_slots := {} => (
     lower_state.output_len = 0;
     lower_state.output_global_count = 0;
+    lower_state.output_function_count = 0;
     lower_state.output_export_count = 0;
     lower_state.output_wrapper_count = 0;
     lower_state.output_inline_binding_count = 0;
@@ -1927,17 +1942,31 @@ emit_global_entry := {
     )
 );
 
+emit_function_entry := {
+    name_start: i32,
+    name_length: i32
+} => (
+    idx := lower_state.output_function_count;
+    if idx < 0 || idx >= MAX_OUTPUT_FUNCTIONS then -1 else (
+        output_functions(idx).name_start = name_start;
+        output_functions(idx).name_length = name_length;
+        lower_state.output_function_count = idx + 1;
+        idx
+    )
+);
+
 emit_export_entry := {
     target_tag: i32,
-    global_index: i32,
+    export_type: i32,
+    item_index: i32,
     name_start: i32,
     name_length: i32
 } => (
     idx := lower_state.output_export_count;
     if idx < 0 || idx >= MAX_OUTPUT_EXPORTS then 0 else (
         output_exports(idx).target_tag = target_tag;
-        output_exports(idx).export_type = OUTPUT_EXPORT_TYPE_GLOBAL;
-        output_exports(idx).index = global_index;
+        output_exports(idx).export_type = export_type;
+        output_exports(idx).index = item_index;
         output_exports(idx).name_start = name_start;
         output_exports(idx).name_length = name_length;
         lower_state.output_export_count = idx + 1;
@@ -1948,7 +1977,8 @@ emit_export_entry := {
 emit_wrapper_entry := {
     source_target_tag: i32,
     wrap_target_tag: i32,
-    global_index: i32,
+    export_type: i32,
+    item_index: i32,
     name_start: i32,
     name_length: i32
 } => (
@@ -1956,8 +1986,8 @@ emit_wrapper_entry := {
     if idx < 0 || idx >= MAX_OUTPUT_WRAPPERS then 0 else (
         output_wrappers(idx).source_target_tag = source_target_tag;
         output_wrappers(idx).wrap_target_tag = wrap_target_tag;
-        output_wrappers(idx).export_type = OUTPUT_EXPORT_TYPE_GLOBAL;
-        output_wrappers(idx).index = global_index;
+        output_wrappers(idx).export_type = export_type;
+        output_wrappers(idx).index = item_index;
         output_wrappers(idx).name_start = name_start;
         output_wrappers(idx).name_length = name_length;
         lower_state.output_wrapper_count = idx + 1;
@@ -2024,8 +2054,306 @@ lower_binding_expr := {expr_idx: i32, input_len: i32} => (
     else if binding_extract_state.export_mask < 0 || binding_extract_state.wrap_mask < 0 || binding_extract_state.target_mask < 0 then LowerBindingResult::InputError
     else if binding_should_materialize{} == 0 then LowerBindingResult::Ok
     else (
-        value_lookup := resolve_lowered_value_expr{expr_idx, input_len};
-        value_lookup |> match {
+        if expr_idx >= 0 && expr_idx < MAX_NODES then (
+            if NodeKind::Function(_) := nodes(expr_idx).kind then (
+                if binding_extract_state.export_mask == 0 then LowerBindingResult::Ok else (
+                    function_index := emit_function_entry{
+                        binding_extract_state.name_start,
+                        binding_extract_state.name_length
+                    };
+                    if function_index < 0 then LowerBindingResult::OutputError else (
+                        mut emit_ok := 1;
+                        if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_JS} == 1 then (
+                            emit_ok = emit_export_entry{
+                                OUTPUT_TARGET_JS,
+                                OUTPUT_EXPORT_TYPE_FUNCTION,
+                                function_index,
+                                binding_extract_state.name_start,
+                                binding_extract_state.name_length
+                            };
+                        ) else (
+                            {}
+                        );
+                        if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_WASM} == 1 then (
+                            emit_ok = emit_export_entry{
+                                OUTPUT_TARGET_WASM,
+                                OUTPUT_EXPORT_TYPE_FUNCTION,
+                                function_index,
+                                binding_extract_state.name_start,
+                                binding_extract_state.name_length
+                            };
+                        ) else (
+                            {}
+                        );
+                        if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_WGSL} == 1 then (
+                            emit_ok = emit_export_entry{
+                                OUTPUT_TARGET_WGSL,
+                                OUTPUT_EXPORT_TYPE_FUNCTION,
+                                function_index,
+                                binding_extract_state.name_start,
+                                binding_extract_state.name_length
+                            };
+                        ) else (
+                            {}
+                        );
+                        if emit_ok == 0 then LowerBindingResult::OutputError
+                        else (
+                            wrapper_source_target := resolve_wrapper_source_target{};
+                            wrapper_source_target |> match {
+                                WrapperSourceTarget::Missing => (
+                                    LowerBindingResult::Ok
+                                ),
+                                WrapperSourceTarget::Target(source_target_tag) => (
+                                    if emit_ok == 1 && target_mask_has{binding_extract_state.wrap_mask, TARGET_MASK_JS} == 1 && source_target_tag != OUTPUT_TARGET_JS then (
+                                        emit_ok = emit_wrapper_entry{
+                                            source_target_tag,
+                                            OUTPUT_TARGET_JS,
+                                            OUTPUT_EXPORT_TYPE_FUNCTION,
+                                            function_index,
+                                            binding_extract_state.name_start,
+                                            binding_extract_state.name_length
+                                        };
+                                    ) else (
+                                        {}
+                                    );
+                                    if emit_ok == 1 && target_mask_has{binding_extract_state.wrap_mask, TARGET_MASK_WASM} == 1 && source_target_tag != OUTPUT_TARGET_WASM then (
+                                        emit_ok = emit_wrapper_entry{
+                                            source_target_tag,
+                                            OUTPUT_TARGET_WASM,
+                                            OUTPUT_EXPORT_TYPE_FUNCTION,
+                                            function_index,
+                                            binding_extract_state.name_start,
+                                            binding_extract_state.name_length
+                                        };
+                                    ) else (
+                                        {}
+                                    );
+                                    if emit_ok == 1 && target_mask_has{binding_extract_state.wrap_mask, TARGET_MASK_WGSL} == 1 && source_target_tag != OUTPUT_TARGET_WGSL then (
+                                        emit_ok = emit_wrapper_entry{
+                                            source_target_tag,
+                                            OUTPUT_TARGET_WGSL,
+                                            OUTPUT_EXPORT_TYPE_FUNCTION,
+                                            function_index,
+                                            binding_extract_state.name_start,
+                                            binding_extract_state.name_length
+                                        };
+                                    ) else (
+                                        {}
+                                    );
+                                    if emit_ok == 1 then LowerBindingResult::Ok else LowerBindingResult::OutputError
+                                ),
+                                else => LowerBindingResult::OutputError
+                            }
+                        )
+                    )
+                )
+            ) else (
+                value_lookup := resolve_lowered_value_expr{expr_idx, input_len};
+                value_lookup |> match {
+                LoweredValueLookup::InputError => LowerBindingResult::InputError,
+                LoweredValueLookup::OutputError => LowerBindingResult::OutputError,
+                LoweredValueLookup::Missing => LowerBindingResult::Unimplemented,
+                LoweredValueLookup::Scalar(value) => (
+                    explicit_type_tag := binding_extract_state.value_type_tag;
+                    value_type_tag := if explicit_type_tag != INPUT_VALUE_TYPE_UNKNOWN then explicit_type_tag
+                        else if value.value_type_tag != INPUT_VALUE_TYPE_UNKNOWN then value.value_type_tag
+                        else default_scalar_type_tag(value.value_tag);
+                    global_type_tag := resolve_output_global_type_tag{value.value_tag, value_type_tag};
+                    global_index := emit_global_entry{
+                        binding_extract_state.name_start,
+                        binding_extract_state.name_length,
+                        global_type_tag,
+                        value.value_tag,
+                        value.value_i32,
+                        -1
+                    };
+                    if global_index < 0 then LowerBindingResult::OutputError else (
+                        mut emit_ok := 1;
+                        if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_JS} == 1 then (
+                            emit_ok = emit_export_entry{
+                                OUTPUT_TARGET_JS,
+                                OUTPUT_EXPORT_TYPE_GLOBAL,
+                                global_index,
+                                binding_extract_state.name_start,
+                                binding_extract_state.name_length
+                            };
+                        ) else (
+                            {}
+                        );
+                        if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_WASM} == 1 then (
+                            emit_ok = emit_export_entry{
+                                OUTPUT_TARGET_WASM,
+                                OUTPUT_EXPORT_TYPE_GLOBAL,
+                                global_index,
+                                binding_extract_state.name_start,
+                                binding_extract_state.name_length
+                            };
+                        ) else (
+                            {}
+                        );
+                        if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_WGSL} == 1 then (
+                            emit_ok = emit_export_entry{
+                                OUTPUT_TARGET_WGSL,
+                                OUTPUT_EXPORT_TYPE_GLOBAL,
+                                global_index,
+                                binding_extract_state.name_start,
+                                binding_extract_state.name_length
+                            };
+                        ) else (
+                            {}
+                        );
+                        if emit_ok == 0 then LowerBindingResult::OutputError
+                        else (
+                            wrapper_source_target := resolve_wrapper_source_target{};
+                            wrapper_source_target |> match {
+                                WrapperSourceTarget::Missing => (
+                                    LowerBindingResult::Ok
+                                ),
+                                WrapperSourceTarget::Target(source_target_tag) => (
+                                    if emit_ok == 1 && target_mask_has{binding_extract_state.wrap_mask, TARGET_MASK_JS} == 1 && source_target_tag != OUTPUT_TARGET_JS then (
+                                        emit_ok = emit_wrapper_entry{
+                                            source_target_tag,
+                                            OUTPUT_TARGET_JS,
+                                            OUTPUT_EXPORT_TYPE_GLOBAL,
+                                            global_index,
+                                            binding_extract_state.name_start,
+                                            binding_extract_state.name_length
+                                        };
+                                    ) else (
+                                        {}
+                                    );
+                                    if emit_ok == 1 && target_mask_has{binding_extract_state.wrap_mask, TARGET_MASK_WASM} == 1 && source_target_tag != OUTPUT_TARGET_WASM then (
+                                        emit_ok = emit_wrapper_entry{
+                                            source_target_tag,
+                                            OUTPUT_TARGET_WASM,
+                                            OUTPUT_EXPORT_TYPE_GLOBAL,
+                                            global_index,
+                                            binding_extract_state.name_start,
+                                            binding_extract_state.name_length
+                                        };
+                                    ) else (
+                                        {}
+                                    );
+                                    if emit_ok == 1 && target_mask_has{binding_extract_state.wrap_mask, TARGET_MASK_WGSL} == 1 && source_target_tag != OUTPUT_TARGET_WGSL then (
+                                        emit_ok = emit_wrapper_entry{
+                                            source_target_tag,
+                                            OUTPUT_TARGET_WGSL,
+                                            OUTPUT_EXPORT_TYPE_GLOBAL,
+                                            global_index,
+                                            binding_extract_state.name_start,
+                                            binding_extract_state.name_length
+                                        };
+                                    ) else (
+                                        {}
+                                    );
+                                    if emit_ok == 1 then LowerBindingResult::Ok else LowerBindingResult::OutputError
+                                ),
+                                else => LowerBindingResult::OutputError
+                            }
+                        )
+                    )
+                ),
+                LoweredValueLookup::ValueRef(value_ref) => (
+                    global_index := emit_global_entry{
+                        binding_extract_state.name_start,
+                        binding_extract_state.name_length,
+                        OUTPUT_GLOBAL_TYPE_INFER,
+                        VALUE_TAG_UNKNOWN,
+                        0,
+                        value_ref
+                    };
+                    if global_index < 0 then LowerBindingResult::OutputError else (
+                        mut emit_ok := 1;
+                        if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_JS} == 1 then (
+                            emit_ok = emit_export_entry{
+                                OUTPUT_TARGET_JS,
+                                OUTPUT_EXPORT_TYPE_GLOBAL,
+                                global_index,
+                                binding_extract_state.name_start,
+                                binding_extract_state.name_length
+                            };
+                        ) else (
+                            {}
+                        );
+                        if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_WASM} == 1 then (
+                            emit_ok = emit_export_entry{
+                                OUTPUT_TARGET_WASM,
+                                OUTPUT_EXPORT_TYPE_GLOBAL,
+                                global_index,
+                                binding_extract_state.name_start,
+                                binding_extract_state.name_length
+                            };
+                        ) else (
+                            {}
+                        );
+                        if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_WGSL} == 1 then (
+                            emit_ok = emit_export_entry{
+                                OUTPUT_TARGET_WGSL,
+                                OUTPUT_EXPORT_TYPE_GLOBAL,
+                                global_index,
+                                binding_extract_state.name_start,
+                                binding_extract_state.name_length
+                            };
+                        ) else (
+                            {}
+                        );
+                        if emit_ok == 0 then LowerBindingResult::OutputError
+                        else (
+                            wrapper_source_target := resolve_wrapper_source_target{};
+                            wrapper_source_target |> match {
+                                WrapperSourceTarget::Missing => (
+                                    LowerBindingResult::Ok
+                                ),
+                                WrapperSourceTarget::Target(source_target_tag) => (
+                                    if emit_ok == 1 && target_mask_has{binding_extract_state.wrap_mask, TARGET_MASK_JS} == 1 && source_target_tag != OUTPUT_TARGET_JS then (
+                                        emit_ok = emit_wrapper_entry{
+                                            source_target_tag,
+                                            OUTPUT_TARGET_JS,
+                                            OUTPUT_EXPORT_TYPE_GLOBAL,
+                                            global_index,
+                                            binding_extract_state.name_start,
+                                            binding_extract_state.name_length
+                                        };
+                                    ) else (
+                                        {}
+                                    );
+                                    if emit_ok == 1 && target_mask_has{binding_extract_state.wrap_mask, TARGET_MASK_WASM} == 1 && source_target_tag != OUTPUT_TARGET_WASM then (
+                                        emit_ok = emit_wrapper_entry{
+                                            source_target_tag,
+                                            OUTPUT_TARGET_WASM,
+                                            OUTPUT_EXPORT_TYPE_GLOBAL,
+                                            global_index,
+                                            binding_extract_state.name_start,
+                                            binding_extract_state.name_length
+                                        };
+                                    ) else (
+                                        {}
+                                    );
+                                    if emit_ok == 1 && target_mask_has{binding_extract_state.wrap_mask, TARGET_MASK_WGSL} == 1 && source_target_tag != OUTPUT_TARGET_WGSL then (
+                                        emit_ok = emit_wrapper_entry{
+                                            source_target_tag,
+                                            OUTPUT_TARGET_WGSL,
+                                            OUTPUT_EXPORT_TYPE_GLOBAL,
+                                            global_index,
+                                            binding_extract_state.name_start,
+                                            binding_extract_state.name_length
+                                        };
+                                    ) else (
+                                        {}
+                                    );
+                                    if emit_ok == 1 then LowerBindingResult::Ok else LowerBindingResult::OutputError
+                                ),
+                                else => LowerBindingResult::OutputError
+                            }
+                        )
+                    )
+                ),
+                else => LowerBindingResult::OutputError
+            }
+            )
+        ) else (
+            value_lookup := resolve_lowered_value_expr{expr_idx, input_len};
+            value_lookup |> match {
             LoweredValueLookup::InputError => LowerBindingResult::InputError,
             LoweredValueLookup::OutputError => LowerBindingResult::OutputError,
             LoweredValueLookup::Missing => LowerBindingResult::Unimplemented,
@@ -2048,6 +2376,7 @@ lower_binding_expr := {expr_idx: i32, input_len: i32} => (
                     if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_JS} == 1 then (
                         emit_ok = emit_export_entry{
                             OUTPUT_TARGET_JS,
+                            OUTPUT_EXPORT_TYPE_GLOBAL,
                             global_index,
                             binding_extract_state.name_start,
                             binding_extract_state.name_length
@@ -2058,6 +2387,7 @@ lower_binding_expr := {expr_idx: i32, input_len: i32} => (
                     if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_WASM} == 1 then (
                         emit_ok = emit_export_entry{
                             OUTPUT_TARGET_WASM,
+                            OUTPUT_EXPORT_TYPE_GLOBAL,
                             global_index,
                             binding_extract_state.name_start,
                             binding_extract_state.name_length
@@ -2068,6 +2398,7 @@ lower_binding_expr := {expr_idx: i32, input_len: i32} => (
                     if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_WGSL} == 1 then (
                         emit_ok = emit_export_entry{
                             OUTPUT_TARGET_WGSL,
+                            OUTPUT_EXPORT_TYPE_GLOBAL,
                             global_index,
                             binding_extract_state.name_start,
                             binding_extract_state.name_length
@@ -2087,6 +2418,7 @@ lower_binding_expr := {expr_idx: i32, input_len: i32} => (
                                     emit_ok = emit_wrapper_entry{
                                         source_target_tag,
                                         OUTPUT_TARGET_JS,
+                                        OUTPUT_EXPORT_TYPE_GLOBAL,
                                         global_index,
                                         binding_extract_state.name_start,
                                         binding_extract_state.name_length
@@ -2098,6 +2430,7 @@ lower_binding_expr := {expr_idx: i32, input_len: i32} => (
                                     emit_ok = emit_wrapper_entry{
                                         source_target_tag,
                                         OUTPUT_TARGET_WASM,
+                                        OUTPUT_EXPORT_TYPE_GLOBAL,
                                         global_index,
                                         binding_extract_state.name_start,
                                         binding_extract_state.name_length
@@ -2109,6 +2442,7 @@ lower_binding_expr := {expr_idx: i32, input_len: i32} => (
                                     emit_ok = emit_wrapper_entry{
                                         source_target_tag,
                                         OUTPUT_TARGET_WGSL,
+                                        OUTPUT_EXPORT_TYPE_GLOBAL,
                                         global_index,
                                         binding_extract_state.name_start,
                                         binding_extract_state.name_length
@@ -2137,6 +2471,7 @@ lower_binding_expr := {expr_idx: i32, input_len: i32} => (
                     if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_JS} == 1 then (
                         emit_ok = emit_export_entry{
                             OUTPUT_TARGET_JS,
+                            OUTPUT_EXPORT_TYPE_GLOBAL,
                             global_index,
                             binding_extract_state.name_start,
                             binding_extract_state.name_length
@@ -2147,6 +2482,7 @@ lower_binding_expr := {expr_idx: i32, input_len: i32} => (
                     if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_WASM} == 1 then (
                         emit_ok = emit_export_entry{
                             OUTPUT_TARGET_WASM,
+                            OUTPUT_EXPORT_TYPE_GLOBAL,
                             global_index,
                             binding_extract_state.name_start,
                             binding_extract_state.name_length
@@ -2157,6 +2493,7 @@ lower_binding_expr := {expr_idx: i32, input_len: i32} => (
                     if emit_ok == 1 && target_mask_has{binding_extract_state.export_mask, TARGET_MASK_WGSL} == 1 then (
                         emit_ok = emit_export_entry{
                             OUTPUT_TARGET_WGSL,
+                            OUTPUT_EXPORT_TYPE_GLOBAL,
                             global_index,
                             binding_extract_state.name_start,
                             binding_extract_state.name_length
@@ -2176,6 +2513,7 @@ lower_binding_expr := {expr_idx: i32, input_len: i32} => (
                                     emit_ok = emit_wrapper_entry{
                                         source_target_tag,
                                         OUTPUT_TARGET_JS,
+                                        OUTPUT_EXPORT_TYPE_GLOBAL,
                                         global_index,
                                         binding_extract_state.name_start,
                                         binding_extract_state.name_length
@@ -2187,6 +2525,7 @@ lower_binding_expr := {expr_idx: i32, input_len: i32} => (
                                     emit_ok = emit_wrapper_entry{
                                         source_target_tag,
                                         OUTPUT_TARGET_WASM,
+                                        OUTPUT_EXPORT_TYPE_GLOBAL,
                                         global_index,
                                         binding_extract_state.name_start,
                                         binding_extract_state.name_length
@@ -2198,6 +2537,7 @@ lower_binding_expr := {expr_idx: i32, input_len: i32} => (
                                     emit_ok = emit_wrapper_entry{
                                         source_target_tag,
                                         OUTPUT_TARGET_WGSL,
+                                        OUTPUT_EXPORT_TYPE_GLOBAL,
                                         global_index,
                                         binding_extract_state.name_start,
                                         binding_extract_state.name_length
@@ -2214,11 +2554,13 @@ lower_binding_expr := {expr_idx: i32, input_len: i32} => (
             ),
             else => LowerBindingResult::OutputError
         }
+        )
     )
 );
 
 finalize_output_payload := {} => (
     if lower_state.output_global_count == 0
+        && lower_state.output_function_count == 0
         && lower_state.output_export_count == 0
         && lower_state.output_wrapper_count == 0
         && lower_state.output_inline_binding_count == 0
@@ -2229,6 +2571,7 @@ finalize_output_payload := {} => (
         1
     ) else (
         lower_state.output_len = lower_state.output_global_count
+            + lower_state.output_function_count
             + lower_state.output_export_count
             + lower_state.output_wrapper_count
             + lower_state.output_inline_binding_count
@@ -2433,6 +2776,7 @@ run_lower_context := {root: i32, binding_count: i32, input_len: i32} => (
     lower_state.header_ok = 0;
     lower_state.output_len = 0;
     lower_state.output_global_count = 0;
+    lower_state.output_function_count = 0;
     lower_state.output_export_count = 0;
     lower_state.output_wrapper_count = 0;
     lower_state.output_inline_binding_count = 0;
@@ -2500,6 +2844,7 @@ run_lower_context := {root: i32, binding_count: i32, input_len: i32} => (
         lower_state.header_ok = 0;
         lower_state.output_len = 0;
         lower_state.output_global_count = 0;
+        lower_state.output_function_count = 0;
         lower_state.output_export_count = 0;
         lower_state.output_wrapper_count = 0;
         lower_state.output_inline_binding_count = 0;
@@ -2576,6 +2921,10 @@ run_lower_context := {root: i32, binding_count: i32, input_len: i32} => (
     lower_state.output_global_count
 );
 
+(export wasm) get_lower_output_function_count := {} => (
+    lower_state.output_function_count
+);
+
 (export wasm) get_lower_output_export_count := {} => (
     lower_state.output_export_count
 );
@@ -2622,6 +2971,14 @@ run_lower_context := {root: i32, binding_count: i32, input_len: i32} => (
 
 (export wasm) get_lower_output_global_value_ref := (idx: i32) => (
     if idx < 0 || idx >= lower_state.output_global_count then -1 else output_globals(idx).value_ref
+);
+
+(export wasm) get_lower_output_function_name_start := (idx: i32) => (
+    if idx < 0 || idx >= lower_state.output_function_count then -1 else output_functions(idx).name_start
+);
+
+(export wasm) get_lower_output_function_name_length := (idx: i32) => (
+    if idx < 0 || idx >= lower_state.output_function_count then -1 else output_functions(idx).name_length
 );
 
 (export wasm) get_lower_output_export_target_tag := (idx: i32) => (

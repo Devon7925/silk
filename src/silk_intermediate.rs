@@ -7,8 +7,8 @@ use wasmtime::{Config, Engine, Instance, Memory, Module, Store};
 
 use crate::diagnostics::{Diagnostic, SourceSpan};
 use crate::intermediate::{
-    self, IntermediateExport, IntermediateExportType, IntermediateGlobal, IntermediateKind,
-    IntermediateResult, IntermediateType, IntermediateWrap,
+    self, IntermediateExport, IntermediateExportType, IntermediateFunction, IntermediateGlobal,
+    IntermediateKind, IntermediateResult, IntermediateType, IntermediateWrap,
 };
 use crate::interpret::{self, Context};
 use crate::loader;
@@ -104,7 +104,7 @@ pub(crate) fn lower_context(
         ));
     }
 
-    match lower_with_wasm(source) {
+    match lower_with_wasm_with_context(source, Some(context)) {
         Ok(Some(intermediate)) => Ok((intermediate, IntermediateLoweringBackend::SilkWasm)),
         Ok(None) => {
             if wasm_intermediate_strict_mode() {
@@ -134,6 +134,13 @@ fn wasm_intermediate_strict_mode() -> bool {
 }
 
 fn lower_with_wasm(source: &str) -> Result<Option<IntermediateResult>, Diagnostic> {
+    lower_with_wasm_with_context(source, None)
+}
+
+fn lower_with_wasm_with_context(
+    source: &str,
+    context: Option<&Context>,
+) -> Result<Option<IntermediateResult>, Diagnostic> {
     if fs::metadata(INTERMEDIATE_SOURCE_PATH).is_err() {
         return Ok(None);
     }
@@ -191,7 +198,8 @@ fn lower_with_wasm(source: &str) -> Result<Option<IntermediateResult>, Diagnosti
 
     match status {
         LOWER_STATUS_OK => {
-            let lowered = decode_lowered_output(&mut store, &instance, source.as_bytes())?;
+            let lowered =
+                decode_lowered_output(&mut store, &instance, source.as_bytes(), context)?;
             Ok(Some(lowered))
         }
         LOWER_STATUS_UNIMPLEMENTED => Ok(None),
@@ -544,12 +552,44 @@ fn copy_named_memory(
     Ok(())
 }
 
+fn function_lookup_from_context(context: &Context) -> HashMap<String, IntermediateFunction> {
+    let lowered = intermediate::context_to_intermediate(context);
+    let mut lookup = HashMap::new();
+
+    for export in &lowered.exports {
+        if !matches!(export.export_type, IntermediateExportType::Function) {
+            continue;
+        }
+        if let Some(function) = lowered.functions.get(export.index) {
+            lookup
+                .entry(export.name.clone())
+                .or_insert_with(|| function.clone());
+        }
+    }
+
+    for wrap in &lowered.wrappers {
+        if !matches!(wrap.export_type, IntermediateExportType::Function) {
+            continue;
+        }
+        if let Some(function) = lowered.functions.get(wrap.index) {
+            lookup
+                .entry(wrap.name.clone())
+                .or_insert_with(|| function.clone());
+        }
+    }
+
+    lookup
+}
+
 fn decode_lowered_output(
     store: &mut Store<()>,
     instance: &Instance,
     input_bytes: &[u8],
+    context: Option<&Context>,
 ) -> Result<IntermediateResult, Diagnostic> {
     let global_count = call_required_i32_export(instance, store, "get_lower_output_global_count")?;
+    let function_count =
+        call_required_i32_export(instance, store, "get_lower_output_function_count")?;
     let export_count = call_required_i32_export(instance, store, "get_lower_output_export_count")?;
     let wrapper_count =
         call_required_i32_export(instance, store, "get_lower_output_wrapper_count")?;
@@ -560,6 +600,7 @@ fn decode_lowered_output(
         call_required_i32_export(instance, store, "get_lower_output_value_field_count")?;
 
     if global_count < 0
+        || function_count < 0
         || export_count < 0
         || wrapper_count < 0
         || inline_binding_count < 0
@@ -567,11 +608,16 @@ fn decode_lowered_output(
         || value_field_count < 0
     {
         return Err(Diagnostic::new(format!(
-            "Silk intermediate returned negative output counts (globals={global_count}, exports={export_count}, wrappers={wrapper_count}, inline_bindings={inline_binding_count}, values={value_count}, value_fields={value_field_count})"
+            "Silk intermediate returned negative output counts (globals={global_count}, functions={function_count}, exports={export_count}, wrappers={wrapper_count}, inline_bindings={inline_binding_count}, values={value_count}, value_fields={value_field_count})"
         )));
     }
 
-    if global_count == 0 && export_count == 0 && wrapper_count == 0 && inline_binding_count == 0 {
+    if global_count == 0
+        && function_count == 0
+        && export_count == 0
+        && wrapper_count == 0
+        && inline_binding_count == 0
+    {
         return Ok(IntermediateResult {
             functions: Vec::new(),
             globals: Vec::new(),
@@ -743,6 +789,48 @@ fn decode_lowered_output(
         globals.push(IntermediateGlobal { name, ty, value });
     }
 
+    let mut functions = Vec::with_capacity(function_count as usize);
+    if function_count > 0 {
+        let get_function_name_start =
+            required_i32_to_i32_export(instance, store, "get_lower_output_function_name_start")?;
+        let get_function_name_length = required_i32_to_i32_export(
+            instance,
+            store,
+            "get_lower_output_function_name_length",
+        )?;
+        let function_lookup = context
+            .map(function_lookup_from_context)
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    "Silk intermediate output includes function rows, but lowering context was not provided",
+                )
+            })?;
+
+        for idx in 0..function_count {
+            let name_start = get_function_name_start
+                .call(&mut *store, idx)
+                .map_err(|err| {
+                    Diagnostic::new(format!(
+                        "Intermediate call `get_lower_output_function_name_start` failed: {err}"
+                    ))
+                })?;
+            let name_length = get_function_name_length
+                .call(&mut *store, idx)
+                .map_err(|err| {
+                    Diagnostic::new(format!(
+                        "Intermediate call `get_lower_output_function_name_length` failed: {err}"
+                    ))
+                })?;
+            let name = decode_name_from_input(input_bytes, name_start, name_length)?;
+            let function = function_lookup.get(&name).ok_or_else(|| {
+                Diagnostic::new(format!(
+                    "Silk intermediate function `{name}` was not found in Rust lowering context"
+                ))
+            })?;
+            functions.push(function.clone());
+        }
+    }
+
     let get_export_target_tag =
         required_i32_to_i32_export(instance, store, "get_lower_output_export_target_tag")?;
     let get_export_type_tag =
@@ -797,10 +885,12 @@ fn decode_lowered_output(
                 globals.len()
             )));
         }
-        if matches!(export_type, IntermediateExportType::Function) {
-            return Err(Diagnostic::new(
-                "Silk intermediate output includes function exports, but function decoding is not implemented yet",
-            ));
+        if matches!(export_type, IntermediateExportType::Function) && item_index >= functions.len()
+        {
+            return Err(Diagnostic::new(format!(
+                "Silk intermediate output export {idx} references missing function index {item_index} (function count {})",
+                functions.len()
+            )));
         }
         exports.push(IntermediateExport {
             target,
@@ -881,10 +971,12 @@ fn decode_lowered_output(
                 globals.len()
             )));
         }
-        if matches!(export_type, IntermediateExportType::Function) {
-            return Err(Diagnostic::new(
-                "Silk intermediate output includes function wrappers, but function decoding is not implemented yet",
-            ));
+        if matches!(export_type, IntermediateExportType::Function) && item_index >= functions.len()
+        {
+            return Err(Diagnostic::new(format!(
+                "Silk intermediate output wrapper {idx} references missing function index {item_index} (function count {})",
+                functions.len()
+            )));
         }
         wrappers.push(IntermediateWrap {
             source_target,
@@ -965,7 +1057,7 @@ fn decode_lowered_output(
     }
 
     Ok(IntermediateResult {
-        functions: Vec::new(),
+        functions,
         globals,
         exports,
         wrappers,
@@ -2049,16 +2141,56 @@ mod tests {
     }
 
     #[test]
-    fn wasm_stage_reports_unimplemented_for_function_exports() {
+    fn wasm_stage_lowers_function_exports() {
         if !wasm_stage_available() {
             return;
         }
         let source = "(export wasm) id := (x: i32) => x; id";
-        let lowered = lower_with_wasm(source).expect("wasm lowering should run");
-        assert!(
-            lowered.is_none(),
-            "function exports should still report unimplemented for now"
+        let context = interpreted_context(source);
+        let (lowered, backend) =
+            lower_context(&context, source).expect("lower_context should succeed");
+        assert_eq!(backend, IntermediateLoweringBackend::SilkWasm);
+
+        assert_eq!(lowered.functions.len(), 1);
+        assert_eq!(lowered.globals.len(), 0);
+        assert_eq!(lowered.exports.len(), 1);
+        assert_eq!(lowered.wrappers.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+
+        assert_eq!(lowered.exports[0].target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.exports[0].name, "id");
+        assert_eq!(
+            lowered.exports[0].export_type,
+            IntermediateExportType::Function
         );
+        assert_eq!(lowered.exports[0].index, 0);
+    }
+
+    #[test]
+    fn wasm_stage_lowers_wrapped_function_exports() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "(export wasm) (wrap js) id := (x: i32) => x; id";
+        let context = interpreted_context(source);
+        let (lowered, backend) =
+            lower_context(&context, source).expect("lower_context should succeed");
+        assert_eq!(backend, IntermediateLoweringBackend::SilkWasm);
+
+        assert_eq!(lowered.functions.len(), 1);
+        assert_eq!(lowered.globals.len(), 0);
+        assert_eq!(lowered.exports.len(), 1);
+        assert_eq!(lowered.wrappers.len(), 1);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+
+        assert_eq!(lowered.wrappers[0].source_target, TargetLiteral::WasmTarget);
+        assert_eq!(lowered.wrappers[0].wrap_target, TargetLiteral::JSTarget);
+        assert_eq!(lowered.wrappers[0].name, "id");
+        assert_eq!(
+            lowered.wrappers[0].export_type,
+            IntermediateExportType::Function
+        );
+        assert_eq!(lowered.wrappers[0].index, 0);
     }
 
     #[test]

@@ -17,9 +17,9 @@ stays aligned across parser/interpreter/intermediate stages.
 
 ## Versions
 
-- `intermediate_stage_version() -> 9`
+- `intermediate_stage_version() -> 10`
 - `intermediate_payload_version() -> 6`
-- `intermediate_output_version() -> 5`
+- `intermediate_output_version() -> 6`
 
 ## Input ABI (AST, chainable)
 
@@ -39,6 +39,7 @@ Lower call:
 Lowered output is written into struct slot arrays:
 
 - `(export wasm) mut output_globals: Box({OutputGlobalSlot; ...})`
+- `(export wasm) mut output_functions: Box({OutputFunctionSlot; ...})`
 - `(export wasm) mut output_exports: Box({OutputExportSlot; ...})`
 - `(export wasm) mut output_wrappers: Box({OutputWrapperSlot; ...})`
 - `(export wasm) mut output_inline_bindings: Box({OutputInlineBindingSlot; ...})`
@@ -48,12 +49,14 @@ Lowered output is written into struct slot arrays:
 Host reads counts and fields through getters:
 
 - `get_lower_output_global_count()`
+- `get_lower_output_function_count()`
 - `get_lower_output_export_count()`
 - `get_lower_output_wrapper_count()`
 - `get_lower_output_inline_binding_count()`
 - `get_lower_output_value_count()`
 - `get_lower_output_value_field_count()`
 - `get_lower_output_global_*`
+- `get_lower_output_function_*`
 - `get_lower_output_export_*`
 - `get_lower_output_wrapper_*`
 - `get_lower_output_inline_binding_*`
@@ -102,7 +105,9 @@ Error code export:
   - For inline literal bindings with only `(wrap ...)`, the stage emits no globals/exports/wrappers.
 - Wrappers are emitted for multi-target exports when a wrap target is present.
   - Source target selection is deterministic from the export mask priority (`js`, then `wasm`, then `wgsl`).
-- The stage still reports `unimplemented` for unsupported value shapes (for example function exports/wrappers and non-data/non-struct mutable globals).
+- Function exports/wrappers are now emitted through dedicated function slots.
+  - Current host bridge resolves function bodies from the interpreted Rust context by exported/wrapped function name while retaining wasm-stage ownership of export/wrapper routing.
+- The stage still reports `unimplemented` for unsupported value shapes (for example non-data/non-struct mutable globals).
   - Array-repeat lowering for non-scalar empty repeats still falls back when element type cannot be inferred.
 - Bindings with unsupported pattern extraction are now treated as `unimplemented` instead of hard parse failure, preserving fallback behavior.
 
@@ -122,6 +127,7 @@ The stage exposes state getters for header/body/output counters, including:
 Output rows are read through:
 
 - `get_lower_output_global_*`
+- `get_lower_output_function_*`
 - `get_lower_output_export_*`
 - `get_lower_output_wrapper_*`
 - `get_lower_output_inline_binding_*`
