@@ -1501,7 +1501,7 @@ fn decode_output_value_inner(
             let mut struct_fields = Vec::with_capacity(item_count);
             let mut array_items = Vec::with_capacity(item_count);
             let mut field_names = Vec::with_capacity(item_count);
-            let mut item_types = Vec::with_capacity(item_count);
+            let mut item_types: Vec<Option<IntermediateType>> = Vec::with_capacity(item_count);
 
             for field in &value_fields[item_start..item_end] {
                 let name = decode_output_value_field_name(
@@ -1518,15 +1518,18 @@ fn decode_output_value_inner(
                     memo,
                     visiting,
                 )?;
-                let value_ty = infer_intermediate_type_from_value(&value)?;
+                let value_ty = infer_intermediate_type_from_value(&value).ok();
                 struct_fields.push((Identifier::new(name.clone()), value.clone()));
                 array_items.push(value);
                 field_names.push(name);
                 item_types.push(value_ty);
             }
 
-            let homogeneous = if let Some(first) = item_types.first() {
-                item_types.iter().skip(1).all(|ty| ty == first)
+            let homogeneous = if let Some(Some(first)) = item_types.first() {
+                item_types
+                    .iter()
+                    .skip(1)
+                    .all(|ty| ty.as_ref() == Some(first))
             } else {
                 false
             };
@@ -1534,7 +1537,10 @@ fn decode_output_value_inner(
             if !item_types.is_empty() && homogeneous && is_tuple_field_names(&field_names) {
                 IntermediateKind::ArrayLiteral {
                     items: array_items,
-                    element_type: item_types[0].clone(),
+                    element_type: item_types[0]
+                        .as_ref()
+                        .expect("homogeneous tuple struct element type")
+                        .clone(),
                     field_names: normalize_field_names(field_names),
                 }
             } else {
@@ -3260,6 +3266,39 @@ mod tests {
             lowered.inline_bindings.get("base"),
             Some(IntermediateKind::Struct(_))
         ));
+    }
+
+    #[test]
+    fn wasm_stage_skips_inline_struct_type_alias_bindings() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "Range := { value = i32, min = i32, max = i32 }; (export wasm) out := 1; out";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert_eq!(lowered.functions.len(), 0);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+        assert_eq!(lowered.wrappers.len(), 0);
+        assert!(!lowered.inline_bindings.contains_key("Range"));
+        assert!(!lowered.inline_bindings.contains_key("out"));
+    }
+
+    #[test]
+    fn wasm_stage_skips_inline_aliases_to_struct_type_aliases() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "Range := { value = i32, min = i32, max = i32 }; RangeAlias := Range; (export wasm) out := 1; out";
+        let lowered = lower_with_wasm(source)
+            .expect("wasm lowering should run")
+            .expect("wasm lowering should produce a result");
+
+        assert!(!lowered.inline_bindings.contains_key("Range"));
+        assert!(!lowered.inline_bindings.contains_key("RangeAlias"));
+        assert!(!lowered.inline_bindings.contains_key("out"));
     }
 
     #[test]

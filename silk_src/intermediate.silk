@@ -608,6 +608,81 @@ string_ref_is_boolean_type := (value: StringRef) => (
     then 1 else 0
 );
 
+binding_expr_is_type_like := {expr_idx: i32, input_len: i32} => (
+    if expr_idx < 0 || expr_idx >= MAX_NODES then 0
+    else (
+        nodes(expr_idx).kind |> match {
+            NodeKind::IntrinsicType(_) => 1,
+            NodeKind::BoxType(_) => 1,
+            NodeKind::EnumType(_) => 1,
+            NodeKind::FunctionType(_) => 1,
+            NodeKind::AttachImplementation(_) => 1,
+            NodeKind::Function(_) => 1,
+            NodeKind::Identifier(id) => (
+                if string_ref_is_u8(id.name) == 1
+                    || string_ref_is_i32(id.name) == 1
+                    || string_ref_is_boolean_type(id.name) == 1
+                    || lookup_known_type_alias{id.name.start, id.name.length, input_len}
+                        != INPUT_VALUE_TYPE_UNKNOWN
+                then 1
+                else if safe_name_bounds{id.name.start, id.name.length, input_len} == 1
+                    && id.name.length > 0
+                    && input(id.name.start) >= 'A'
+                    && input(id.name.start) <= 'Z'
+                then 1
+                else 0
+            ),
+            NodeKind::TypePropertyAccess(info) => binding_expr_is_type_like{info.object, input_len},
+            NodeKind::Struct(info) => (
+                if info.fields == -1 then 0
+                else (
+                    mut current := info.fields;
+                    mut ok := 1;
+                    mut saw_any := 0;
+                    while current != -1 && ok == 1 do (
+                        if current < 0 || current >= MAX_LIST_NODES then (
+                            ok = 0;
+                        ) else (
+                            field_node := list_nodes(current).value;
+                            if field_node < 0 || field_node >= MAX_NODES then (
+                                ok = 0;
+                            ) else if NodeKind::Binding(field_binding) := nodes(field_node).kind then (
+                                if binding_expr_is_type_like{field_binding.expr, input_len} == 0 then (
+                                    ok = 0;
+                                ) else (
+                                    saw_any = 1;
+                                    current = list_nodes(current).next;
+                                )
+                            ) else (
+                                ok = 0;
+                            )
+                        );
+                        {}
+                    );
+                    if ok == 1 && saw_any == 1 then 1 else 0
+                )
+            ),
+            NodeKind::ArrayRepeat(info) => (
+                if binding_expr_is_type_like{info.value, input_len} == 0 then 0
+                else (
+                    resolve_scalar_value_expr{info.count, input_len} |> match {
+                        ScalarValueLookup::Value(count_value) => (
+                            if count_value.value_tag == VALUE_TAG_NUMBER && count_value.value_i32 >= 0 then 1 else 0
+                        ),
+                        else => 0
+                    }
+                )
+            ),
+            NodeKind::FunctionCall(info) => (
+                if binding_expr_is_type_like{info.function, input_len} == 1
+                    && binding_expr_is_type_like{info.argument, input_len} == 1
+                then 1 else 0
+            ),
+            else => 0
+        }
+    )
+);
+
 target_mask_from_target_literal := (target: TargetLiteral) => (
     target |> match {
         TargetLiteral::JSTarget => TARGET_MASK_JS,
@@ -3080,45 +3155,53 @@ update_known_scalar_alias_for_binding := {expr_idx: i32, input_len: i32} => (
 update_known_value_alias_for_binding := {expr_idx: i32, input_len: i32} => (
     if safe_name_bounds{binding_extract_state.name_start, binding_extract_state.name_length, input_len} == 0 then 0
     else (
-        value_lookup := resolve_lowered_value_expr{expr_idx, input_len};
-        value_lookup |> match {
-            LoweredValueLookup::InputError => 0,
-            LoweredValueLookup::OutputError => 0,
-            LoweredValueLookup::Missing => (
-                clear_known_value_alias{
-                    binding_extract_state.name_start,
-                    binding_extract_state.name_length,
-                    input_len
-                }
-            ),
-            LoweredValueLookup::Scalar(value) => (
-                explicit_type_tag := binding_extract_state.value_type_tag;
-                resolved_type_tag := if explicit_type_tag != INPUT_VALUE_TYPE_UNKNOWN then explicit_type_tag
-                    else if value.value_type_tag != INPUT_VALUE_TYPE_UNKNOWN then value.value_type_tag
-                    else default_scalar_type_tag(value.value_tag);
-                set_known_value_alias{
-                    binding_extract_state.name_start,
-                    binding_extract_state.name_length,
-                    value.value_tag,
-                    value.value_i32,
-                    resolved_type_tag,
-                    -1,
-                    input_len
-                }
-            ),
-            LoweredValueLookup::ValueRef(value_ref) => (
-                set_known_value_alias{
-                    binding_extract_state.name_start,
-                    binding_extract_state.name_length,
-                    VALUE_TAG_UNKNOWN,
-                    0,
-                    INPUT_VALUE_TYPE_UNKNOWN,
-                    value_ref,
-                    input_len
-                }
-            ),
-            else => 0
-        }
+        if binding_expr_is_type_like{expr_idx, input_len} == 1 then (
+            clear_known_value_alias{
+                binding_extract_state.name_start,
+                binding_extract_state.name_length,
+                input_len
+            }
+        ) else (
+            value_lookup := resolve_lowered_value_expr{expr_idx, input_len};
+            value_lookup |> match {
+                LoweredValueLookup::InputError => 0,
+                LoweredValueLookup::OutputError => 0,
+                LoweredValueLookup::Missing => (
+                    clear_known_value_alias{
+                        binding_extract_state.name_start,
+                        binding_extract_state.name_length,
+                        input_len
+                    }
+                ),
+                LoweredValueLookup::Scalar(value) => (
+                    explicit_type_tag := binding_extract_state.value_type_tag;
+                    resolved_type_tag := if explicit_type_tag != INPUT_VALUE_TYPE_UNKNOWN then explicit_type_tag
+                        else if value.value_type_tag != INPUT_VALUE_TYPE_UNKNOWN then value.value_type_tag
+                        else default_scalar_type_tag(value.value_tag);
+                    set_known_value_alias{
+                        binding_extract_state.name_start,
+                        binding_extract_state.name_length,
+                        value.value_tag,
+                        value.value_i32,
+                        resolved_type_tag,
+                        -1,
+                        input_len
+                    }
+                ),
+                LoweredValueLookup::ValueRef(value_ref) => (
+                    set_known_value_alias{
+                        binding_extract_state.name_start,
+                        binding_extract_state.name_length,
+                        VALUE_TAG_UNKNOWN,
+                        0,
+                        INPUT_VALUE_TYPE_UNKNOWN,
+                        value_ref,
+                        input_len
+                    }
+                ),
+                else => 0
+            }
+        )
     )
 );
 
@@ -3269,7 +3352,7 @@ emit_inline_binding_for_binding := {expr_idx: i32, input_len: i32} => (
     if binding_should_materialize{} == 1 then (
         1
     ) else (
-        if resolve_scalar_type_expr{expr_idx, input_len} != INPUT_VALUE_TYPE_UNKNOWN then (
+        if binding_expr_is_type_like{expr_idx, input_len} == 1 then (
             1
         ) else (
             resolve_function_alias_expr{expr_idx, input_len} |> match {

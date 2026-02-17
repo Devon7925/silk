@@ -113,6 +113,13 @@ Error code export:
   - With a type hint (for example `: i32`), the stage now materializes the global while preserving the expression tree value.
 - Non-materialized scalar bindings are emitted in `inline_bindings` as literal `IntermediateKind` values.
   - Example: `base := 42; (export wasm) answer := base` now lowers `base` into the inline-binding output table while still lowering `answer` as a global/export.
+- Non-materialized type-like bindings are no longer emitted as inline/value aliases.
+  - The stage now classifies intrinsic/struct/array/function-style type expressions and clears value aliases for those bindings.
+  - Example: `Range := { value = i32, min = i32, max = i32 }` is treated as a type alias and is skipped in `inline_bindings`.
+  - Alias chains that stay type-like (for example `RangeAlias := Range`) are also skipped.
+- Host decode for struct value rows now tolerates fields whose intermediate type cannot be inferred.
+  - Tuple-struct to array promotion only happens when all field types can be inferred and are homogeneous.
+  - This prevents decode failures from non-runtime/type-like shapes that still pass through value rows.
 - Wrap annotations no longer force an `unimplemented` result when no export source exists.
   - For inline literal bindings with only `(wrap ...)`, the stage emits no globals/exports/wrappers.
 - Wrappers are emitted for multi-target exports when a wrap target is present.
