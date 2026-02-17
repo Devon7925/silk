@@ -132,6 +132,11 @@ Error code export:
 - Function-call expressions are now preserved as structured intermediate call nodes when the callee resolves to an emitted function slot.
   - Example: `(export wasm) id := (x: i32) => x; value := id 7` now lowers `value` to `IntermediateKind::FunctionCall`.
   - The stage still does not evaluate calls; it only preserves the call structure and argument expression.
+- Function-call lowering now supports non-exported function bindings by lazily emitting function slots for known function aliases when calls are lowered.
+  - Example: `id := (x: i32) => x; (export wasm) out: i32 := id 7` now lowers through the Silk intermediate path without requiring `id` to be exported.
+- Function alias discovery now includes a pre-collection pass across bindings, which enables forward function references for intermediate lowering.
+  - Example: `(export wasm) out: i32 := id 7; id := (x: i32) => x` now lowers as a function-call global value instead of falling back.
+- Host-side function decode now resolves emitted function rows from context-level function lookup, not only export/wrap names, so lazily-emitted function rows can be decoded.
 - Materialized globals backed by function-call value refs currently require an explicit type hint.
   - Example: `(export wasm) out: i32 := id 7` lowers, while omitting `: i32` still falls back.
 - Binary operation expressions now lower to intrinsic-operation intermediate nodes instead of forcing fallback.

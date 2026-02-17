@@ -207,6 +207,26 @@ pub fn context_to_intermediate(context: &Context) -> IntermediateResult {
     }
 }
 
+pub fn context_function_lookup(context: &Context) -> HashMap<String, IntermediateFunction> {
+    let mut builder = IntermediateBuilder::new(context.clone());
+    builder.collect_type_aliases(context);
+    builder.collect_bindings(context);
+
+    let mut lookup = HashMap::new();
+    if let Some(scope) = context.bindings.last() {
+        for identifier in scope.keys() {
+            if let Some(index) = builder.resolve_function_index(identifier)
+                && let Some(function) = builder.functions.get(index)
+            {
+                lookup
+                    .entry(identifier.name.clone())
+                    .or_insert_with(|| function.clone());
+            }
+        }
+    }
+    lookup
+}
+
 fn lower_lvalue(target: LValue, builder: &mut IntermediateBuilder) -> IntermediateLValue {
     match target {
         LValue::Identifier(identifier, span) => IntermediateLValue::Identifier(identifier, span),

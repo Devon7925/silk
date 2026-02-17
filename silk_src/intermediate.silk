@@ -2434,11 +2434,34 @@ find_output_function_index_by_name := {name_start: i32, name_length: i32, input_
     )
 );
 
+find_or_emit_output_function_index_by_name := {name_start: i32, name_length: i32, input_len: i32} => (
+    if safe_name_bounds{name_start, name_length, input_len} == 0 then VALUE_REF_LOOKUP_INPUT_ERROR
+    else (
+        existing := find_output_function_index_by_name{name_start, name_length, input_len};
+        if existing == VALUE_REF_LOOKUP_INPUT_ERROR then (
+            VALUE_REF_LOOKUP_INPUT_ERROR
+        ) else if existing >= 0 then (
+            existing
+        ) else (
+            function_lookup := lookup_known_function_alias{name_start, name_length, input_len};
+            function_lookup |> match {
+                FunctionAliasLookup::InputError => VALUE_REF_LOOKUP_INPUT_ERROR,
+                FunctionAliasLookup::Missing => VALUE_REF_LOOKUP_MISSING,
+                FunctionAliasLookup::Present => (
+                    emitted := emit_function_entry{name_start, name_length};
+                    if emitted < 0 then VALUE_REF_LOOKUP_OUTPUT_ERROR else emitted
+                ),
+                else => VALUE_REF_LOOKUP_INPUT_ERROR
+            }
+        )
+    )
+);
+
 resolve_output_function_index_expr := {expr_idx: i32, input_len: i32} => (
     if expr_idx < 0 || expr_idx >= MAX_NODES then VALUE_REF_LOOKUP_INPUT_ERROR
     else (
         nodes(expr_idx).kind |> match {
-            NodeKind::Identifier(id) => find_output_function_index_by_name{
+            NodeKind::Identifier(id) => find_or_emit_output_function_index_by_name{
                 id.name.start,
                 id.name.length,
                 input_len
@@ -3997,6 +4020,57 @@ count_bindings_in_root := (root: i32) => (
     )
 );
 
+precollect_known_function_aliases := {root: i32, binding_count: i32, input_len: i32} => (
+    mut pass := 0;
+    mut ok := 1;
+    while pass < binding_count && ok == 1 do (
+        if root < 0 || root >= MAX_NODES then (
+            ok = 0;
+        ) else if NodeKind::Block(list) := nodes(root).kind then (
+            mut idx := 0;
+            mut current := list.head;
+            while idx < list.count && current != -1 && ok == 1 do (
+                node_idx := list_nodes(current).value;
+                if node_idx < 0 || node_idx >= MAX_NODES then (
+                    ok = 0;
+                ) else if NodeKind::Binding(binding) := nodes(node_idx).kind then (
+                    if resolve_binding_pattern{binding.pattern, input_len} == 1 then (
+                        if update_known_function_alias_for_binding{binding.expr, input_len} == 0 then (
+                            ok = 0;
+                        ) else (
+                            {}
+                        )
+                    ) else (
+                        {}
+                    )
+                ) else (
+                    {}
+                );
+                current = list_nodes(current).next;
+                idx = idx + 1;
+                {}
+            );
+        ) else (
+            if NodeKind::Binding(binding) := nodes(root).kind then (
+                if resolve_binding_pattern{binding.pattern, input_len} == 1 then (
+                    if update_known_function_alias_for_binding{binding.expr, input_len} == 0 then (
+                        ok = 0;
+                    ) else (
+                        {}
+                    )
+                ) else (
+                    {}
+                )
+            ) else (
+                {}
+            )
+        );
+        pass = pass + 1;
+        {}
+    );
+    if ok == 1 then 1 else 0
+);
+
 parse_body_records := {root: i32, binding_count: i32, input_len: i32} => (
     mut idx := 0;
     mut parsed_bindings := 0;
@@ -4006,7 +4080,9 @@ parse_body_records := {root: i32, binding_count: i32, input_len: i32} => (
     mut lowering_unimplemented := 0;
     reset_binding_lookup_state{};
 
-    if root < 0 || root >= MAX_NODES then (
+    if precollect_known_function_aliases{root, binding_count, input_len} == 0 then (
+        body_ok = 0;
+    ) else if root < 0 || root >= MAX_NODES then (
         body_ok = 0;
     ) else if NodeKind::Block(list) := nodes(root).kind then (
         mut current := list.head;

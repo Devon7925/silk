@@ -569,32 +569,7 @@ fn copy_named_memory(
 }
 
 fn function_lookup_from_context(context: &Context) -> HashMap<String, IntermediateFunction> {
-    let lowered = intermediate::context_to_intermediate(context);
-    let mut lookup = HashMap::new();
-
-    for export in &lowered.exports {
-        if !matches!(export.export_type, IntermediateExportType::Function) {
-            continue;
-        }
-        if let Some(function) = lowered.functions.get(export.index) {
-            lookup
-                .entry(export.name.clone())
-                .or_insert_with(|| function.clone());
-        }
-    }
-
-    for wrap in &lowered.wrappers {
-        if !matches!(wrap.export_type, IntermediateExportType::Function) {
-            continue;
-        }
-        if let Some(function) = lowered.functions.get(wrap.index) {
-            lookup
-                .entry(wrap.name.clone())
-                .or_insert_with(|| function.clone());
-        }
-    }
-
-    lookup
+    intermediate::context_function_lookup(context)
 }
 
 fn decode_lowered_output(
@@ -3083,6 +3058,80 @@ mod tests {
                 ));
             }
             other => panic!("expected inline function call output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wasm_stage_lowers_function_call_to_non_exported_function_binding() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "id := (x: i32) => x; (export wasm) out: i32 := id 7; out";
+        let context = interpreted_context(source);
+        let (lowered, backend) =
+            lower_context(&context, source).expect("lower_context should succeed");
+        assert_eq!(backend, IntermediateLoweringBackend::SilkWasm);
+
+        assert_eq!(lowered.functions.len(), 1);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+        assert_eq!(lowered.wrappers.len(), 0);
+        assert_eq!(lowered.inline_bindings.len(), 0);
+
+        assert!(lowered.exports.iter().any(|export| {
+            export.name == "out"
+                && export.target == TargetLiteral::WasmTarget
+                && export.export_type == IntermediateExportType::Global
+                && export.index == 0
+        }));
+
+        let out_global = lowered
+            .globals
+            .iter()
+            .find(|global| global.name == "out")
+            .expect("missing `out` global");
+        match &out_global.value {
+            IntermediateKind::FunctionCall { function, argument } => {
+                assert_eq!(*function, 0);
+                assert!(matches!(
+                    argument.as_ref(),
+                    IntermediateKind::Literal(ExpressionLiteral::Number(7))
+                ));
+            }
+            other => panic!("expected function call output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wasm_stage_lowers_function_call_with_forward_function_reference() {
+        if !wasm_stage_available() {
+            return;
+        }
+        let source = "(export wasm) out: i32 := id 7; id := (x: i32) => x; out";
+        let context = interpreted_context(source);
+        let (lowered, backend) =
+            lower_context(&context, source).expect("lower_context should succeed");
+        assert_eq!(backend, IntermediateLoweringBackend::SilkWasm);
+
+        assert_eq!(lowered.functions.len(), 1);
+        assert_eq!(lowered.globals.len(), 1);
+        assert_eq!(lowered.exports.len(), 1);
+        assert_eq!(lowered.wrappers.len(), 0);
+
+        let out_global = lowered
+            .globals
+            .iter()
+            .find(|global| global.name == "out")
+            .expect("missing `out` global");
+        match &out_global.value {
+            IntermediateKind::FunctionCall { function, argument } => {
+                assert_eq!(*function, 0);
+                assert!(matches!(
+                    argument.as_ref(),
+                    IntermediateKind::Literal(ExpressionLiteral::Number(7))
+                ));
+            }
+            other => panic!("expected function call output, got {other:?}"),
         }
     }
 

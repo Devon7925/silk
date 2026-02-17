@@ -961,7 +961,9 @@ fn compile_silk_interpreter_wasm() -> Result<Vec<u8>, Diagnostic> {
 
     let mut context = interpret::intrinsic_context_with_files_bootstrap(file_map);
     let program_context = interpret::interpret_program_for_context(ast, &mut context)?;
-    let (intermediate, _) = crate::silk_intermediate::lower_context(&program_context, &source)?;
+    // Bootstrap interpreter.wasm without re-entering the wasm intermediate path.
+    // This mirrors compile_silk_intermediate_wasm and avoids OnceLock recursion.
+    let intermediate = crate::intermediate::context_to_intermediate(&program_context);
     wasm::compile_exports(&intermediate)
 }
 
