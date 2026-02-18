@@ -6,7 +6,7 @@ mod intermediate;
 mod interpret;
 mod js;
 mod loader;
-pub mod parsing;
+pub mod syntax;
 mod silk_intermediate;
 mod silk_interpreter;
 mod silk_parser;
@@ -27,7 +27,7 @@ pub mod test_support {
 
 pub use diagnostics::{Diagnostic, SourceSpan};
 
-pub fn parse_block(source: &str) -> Result<parsing::Expression, Diagnostic> {
+pub fn parse_block(source: &str) -> Result<syntax::Expression, Diagnostic> {
     silk_parser::parse_block(source)
 }
 
@@ -84,7 +84,7 @@ pub fn compile(
     }
 
     let intermediate_start = Instant::now();
-    let (intermediate, intermediate_backend) =
+    let (mut intermediate, mut intermediate_backend) =
         silk_intermediate::lower_context(&program_context, &root_source)?;
     if timings_enabled {
         eprintln!(
@@ -99,14 +99,30 @@ pub fn compile(
     if intermediate
         .exports
         .iter()
-        .any(|e| matches!(e.target, parsing::TargetLiteral::WasmTarget))
+        .any(|e| matches!(e.target, syntax::TargetLiteral::WasmTarget))
         || intermediate
             .wrappers
             .iter()
-            .any(|w| matches!(w.wrap_target, parsing::TargetLiteral::WasmTarget))
+            .any(|w| matches!(w.wrap_target, syntax::TargetLiteral::WasmTarget))
     {
         let wasm_start = Instant::now();
-        let content = wasm::compile_exports(&intermediate)?;
+        let content = match wasm::compile_exports(&intermediate) {
+            Ok(content) => content,
+            Err(err) => {
+                if intermediate_backend
+                    == silk_intermediate::IntermediateLoweringBackend::SilkWasm
+                {
+                    intermediate = intermediate::context_to_intermediate(&program_context);
+                    intermediate_backend = silk_intermediate::IntermediateLoweringBackend::RustFallback;
+                    if timings_enabled {
+                        eprintln!("SILK_TIMINGS lower_intermediate_fallback=rust");
+                    }
+                    wasm::compile_exports(&intermediate)?
+                } else {
+                    return Err(err);
+                }
+            }
+        };
         if timings_enabled {
             eprintln!(
                 "SILK_TIMINGS compile_wasm_ms={:.2}",
@@ -123,26 +139,42 @@ pub fn compile(
     if intermediate
         .exports
         .iter()
-        .any(|e| matches!(e.target, parsing::TargetLiteral::JSTarget))
+        .any(|e| matches!(e.target, syntax::TargetLiteral::JSTarget))
         || intermediate
             .wrappers
             .iter()
-            .any(|w| matches!(w.wrap_target, parsing::TargetLiteral::JSTarget))
+            .any(|w| matches!(w.wrap_target, syntax::TargetLiteral::JSTarget))
         || intermediate.wrappers.iter().any(|w| {
             matches!(
                 (w.wrap_target.clone(), w.source_target.clone()),
                 (
-                    parsing::TargetLiteral::WasmTarget,
-                    parsing::TargetLiteral::JSTarget
+                    syntax::TargetLiteral::WasmTarget,
+                    syntax::TargetLiteral::JSTarget
                 ) | (
-                    parsing::TargetLiteral::WasmTarget,
-                    parsing::TargetLiteral::WgslTarget
+                    syntax::TargetLiteral::WasmTarget,
+                    syntax::TargetLiteral::WgslTarget
                 )
             )
         })
     {
         let js_start = Instant::now();
-        let content = js::compile_exports(&intermediate)?;
+        let content = match js::compile_exports(&intermediate) {
+            Ok(content) => content,
+            Err(err) => {
+                if intermediate_backend
+                    == silk_intermediate::IntermediateLoweringBackend::SilkWasm
+                {
+                    intermediate = intermediate::context_to_intermediate(&program_context);
+                    intermediate_backend = silk_intermediate::IntermediateLoweringBackend::RustFallback;
+                    if timings_enabled {
+                        eprintln!("SILK_TIMINGS lower_intermediate_fallback=rust");
+                    }
+                    js::compile_exports(&intermediate)?
+                } else {
+                    return Err(err);
+                }
+            }
+        };
         if timings_enabled {
             eprintln!(
                 "SILK_TIMINGS compile_js_ms={:.2}",
@@ -159,10 +191,25 @@ pub fn compile(
     if intermediate
         .exports
         .iter()
-        .any(|e| matches!(e.target, parsing::TargetLiteral::WgslTarget))
+        .any(|e| matches!(e.target, syntax::TargetLiteral::WgslTarget))
     {
         let wgsl_start = Instant::now();
-        let content = wgsl::compile_exports(&intermediate)?;
+        let content = match wgsl::compile_exports(&intermediate) {
+            Ok(content) => content,
+            Err(err) => {
+                if intermediate_backend
+                    == silk_intermediate::IntermediateLoweringBackend::SilkWasm
+                {
+                    intermediate = intermediate::context_to_intermediate(&program_context);
+                    if timings_enabled {
+                        eprintln!("SILK_TIMINGS lower_intermediate_fallback=rust");
+                    }
+                    wgsl::compile_exports(&intermediate)?
+                } else {
+                    return Err(err);
+                }
+            }
+        };
         if timings_enabled {
             eprintln!(
                 "SILK_TIMINGS compile_wgsl_ms={:.2}",
@@ -185,3 +232,4 @@ pub fn compile(
 
     Ok(artifacts)
 }
+

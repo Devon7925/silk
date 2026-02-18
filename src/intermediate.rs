@@ -4,7 +4,7 @@ use std::rc::Rc;
 use crate::{
     SourceSpan,
     interpret::{self, BindingContext, Context, PreserveBehavior, TraitPropSource},
-    parsing::{
+    syntax::{
         BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingPattern, DivergeExpressionType,
         Expression, ExpressionKind, ExpressionLiteral, Identifier, IntrinsicType, LValue,
         TargetLiteral, UnaryIntrinsicOperator,
@@ -295,16 +295,16 @@ pub fn expression_to_intermediate(
                 let span = expr.span;
                 match expr.kind {
                     ExpressionKind::IntrinsicOperation(op) => match op {
-                        crate::parsing::IntrinsicOperation::Binary(left, right, operator) => {
+                        crate::syntax::IntrinsicOperation::Binary(left, right, operator) => {
                             stack.push(Frame::FinishIntrinsicBinary(operator));
                             stack.push(Frame::Enter(right.as_ref().clone()));
                             stack.push(Frame::Enter(left.as_ref().clone()));
                         }
-                        crate::parsing::IntrinsicOperation::Unary(operand, operator) => {
+                        crate::syntax::IntrinsicOperation::Unary(operand, operator) => {
                             stack.push(Frame::FinishIntrinsicUnary(operator));
                             stack.push(Frame::Enter(operand.as_ref().clone()));
                         }
-                        crate::parsing::IntrinsicOperation::InlineAssembly { target, code } => {
+                        crate::syntax::IntrinsicOperation::InlineAssembly { target, code } => {
                             let ExpressionKind::Literal(ExpressionLiteral::String(bytes)) =
                                 &code.kind
                             else {
@@ -2606,3 +2606,4 @@ fn enum_variant_info(enum_type: &Expression, variant: &Identifier) -> Option<(us
         None
     }
 }
+

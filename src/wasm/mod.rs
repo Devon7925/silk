@@ -25,7 +25,7 @@ use crate::{
         IntermediateIntrinsicOperation, IntermediateKind, IntermediateLValue, IntermediateResult,
         IntermediateType,
     },
-    parsing::{
+    syntax::{
         BinaryIntrinsicOperator, BindingPattern, DivergeExpressionType, ExpressionLiteral,
         Identifier, TargetLiteral, UnaryIntrinsicOperator,
     },
@@ -4005,3 +4005,4 @@ fn collect_break_values(expr: &IntermediateKind) -> Vec<IntermediateKind> {
 
     values
 }
+

@@ -1,4 +1,4 @@
-use silk::parsing::{ExpressionKind, ExpressionLiteral};
+use silk::syntax::{ExpressionKind, ExpressionLiteral};
 use silk::test_support::evaluate_text_to_expression;
 
 #[test]
@@ -24,3 +24,4 @@ fn nested_mutation() {
         other => panic!("Expected numeric literal, got {:?}", other),
     };
 }
+

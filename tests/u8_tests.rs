@@ -1,4 +1,4 @@
-use silk::parsing::{ExpressionKind, ExpressionLiteral};
+use silk::syntax::{ExpressionKind, ExpressionLiteral};
 use silk::test_support::evaluate_text_to_expression;
 
 fn evaluate_text_to_number(program: &str) -> i32 {
@@ -34,3 +34,4 @@ fn test_u8_comparisons() {
     let program = "".to_string() + "is_even := (value: u8) => ( value == 2 );\n" + "is_even(2)";
     assert_eq!(evaluate_text_to_bool(&program), true);
 }
+

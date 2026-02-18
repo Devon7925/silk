@@ -1,6 +1,6 @@
 use std::fs;
 
-use silk::parsing::{ExpressionKind, ExpressionLiteral};
+use silk::syntax::{ExpressionKind, ExpressionLiteral};
 use silk::test_support::evaluate_files_to_expression;
 
 #[test]
@@ -153,3 +153,4 @@ fn use_imported_root_type_can_be_boxed() {
         other => panic!("Unexpected value: {:?}", other),
     }
 }
+

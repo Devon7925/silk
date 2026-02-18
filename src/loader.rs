@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{diagnostics::Diagnostic, parsing::Expression};
+use crate::{diagnostics::Diagnostic, syntax::Expression};
 
 pub(crate) fn normalize_path(path: &str) -> String {
     let mut normalized = path.replace('\\', "/");
@@ -25,3 +25,4 @@ pub(crate) fn build_parsed_files(
 pub(crate) fn parse_source_block(source: &str) -> Result<Expression, Diagnostic> {
     crate::silk_parser::parse_block(source)
 }
+

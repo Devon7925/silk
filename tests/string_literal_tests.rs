@@ -1,4 +1,4 @@
-use silk::parsing::{ExpressionKind, ExpressionLiteral};
+use silk::syntax::{ExpressionKind, ExpressionLiteral};
 use silk::test_support::evaluate_text_to_expression;
 
 #[test]
@@ -58,3 +58,4 @@ fn test_string_literal_index_out_of_range() {
         err.message
     );
 }
+

@@ -1,5 +1,5 @@
 use silk::parse_block;
-use silk::parsing::{BindingPattern, ExpressionKind, Identifier};
+use silk::syntax::{BindingPattern, ExpressionKind, Identifier};
 
 #[test]
 fn for_loop_desugars_with_identifier_iterator() {
@@ -78,3 +78,4 @@ fn for_loop_parses_iterator_call_expression() {
     };
     assert_eq!(operator, "+");
 }
+

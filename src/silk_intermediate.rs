@@ -13,7 +13,7 @@ use crate::intermediate::{
 };
 use crate::interpret::{self, Context};
 use crate::loader;
-use crate::parsing::{
+use crate::syntax::{
     BinaryIntrinsicOperator, DivergeExpressionType, ExpressionLiteral, Identifier, TargetLiteral,
     UnaryIntrinsicOperator,
 };
@@ -114,7 +114,9 @@ pub(crate) fn lower_context(
     context: &Context,
     source: &str,
 ) -> Result<(IntermediateResult, IntermediateLoweringBackend), Diagnostic> {
-    if std::env::var_os("SILK_DISABLE_WASM_INTERMEDIATE").is_some() {
+    if std::env::var_os("SILK_DISABLE_WASM_INTERMEDIATE").is_some()
+        || std::env::var_os("SILK_ENABLE_WASM_INTERMEDIATE").is_none()
+    {
         return Ok((
             intermediate::context_to_intermediate(context),
             IntermediateLoweringBackend::RustFallback,
@@ -461,21 +463,11 @@ fn compile_silk_intermediate_wasm() -> Result<Vec<u8>, Diagnostic> {
         Diagnostic::new(format!("Failed to read {INTERMEDIATE_SOURCE_PATH}: {err}"))
     })?;
 
-    let (ast, remaining) = crate::parsing::parse_block(&source)?;
-    ensure_no_trailing_input(
-        &source,
-        remaining,
-        "Unexpected trailing input while compiling the intermediate source",
-    )?;
+    let ast = crate::silk_parser::parse_block(&source)?;
 
     let types_source = fs::read_to_string(TYPES_SOURCE_PATH)
         .map_err(|err| Diagnostic::new(format!("Failed to read {TYPES_SOURCE_PATH}: {err}")))?;
-    let (types_ast, types_remaining) = crate::parsing::parse_block(&types_source)?;
-    ensure_no_trailing_input(
-        &types_source,
-        types_remaining,
-        "Unexpected trailing input while compiling the intermediate types source",
-    )?;
+    let types_ast = crate::silk_parser::parse_block(&types_source)?;
 
     let mut file_map = HashMap::new();
     file_map.insert(
@@ -489,28 +481,6 @@ fn compile_silk_intermediate_wasm() -> Result<Vec<u8>, Diagnostic> {
     // Bootstrap note: this stage still uses Rust lowering to compile the silk intermediate module.
     let intermediate = intermediate::context_to_intermediate(&program_context);
     wasm::compile_exports(&intermediate)
-}
-
-fn ensure_no_trailing_input(
-    source: &str,
-    remaining: &str,
-    message: &str,
-) -> Result<(), Diagnostic> {
-    let leftover = remaining.trim_start();
-    if leftover.is_empty() {
-        return Ok(());
-    }
-
-    let token_len = leftover
-        .chars()
-        .take_while(|ch| !ch.is_whitespace())
-        .map(|ch| ch.len_utf8())
-        .sum::<usize>()
-        .max(1);
-    let start = source.len().saturating_sub(leftover.len());
-    let span = SourceSpan::new(start, token_len);
-
-    Err(Diagnostic::new(message).with_span(span))
 }
 
 fn write_input_payload(
@@ -3437,3 +3407,4 @@ mod tests {
         }
     }
 }
+

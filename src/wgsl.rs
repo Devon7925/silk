@@ -6,7 +6,7 @@ use crate::{
         IntermediateBinding, IntermediateExportType, IntermediateIntrinsicOperation,
         IntermediateKind, IntermediateLValue, IntermediateResult, IntermediateType,
     },
-    parsing::{
+    syntax::{
         BinaryIntrinsicOperator, BindingPattern, ExpressionLiteral, Identifier, TargetLiteral,
     },
 };
@@ -1195,3 +1195,4 @@ pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diag
 
     Ok(output)
 }
+

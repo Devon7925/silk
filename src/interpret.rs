@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::{
     diagnostics::{Diagnostic, SourceSpan},
     loader,
-    parsing::{
+    syntax::{
         BinaryIntrinsicOperator, Binding, BindingAnnotation, BindingAnnotationLiteral,
         BindingPattern, DivergeExpressionType, Expression, ExpressionKind, ExpressionLiteral,
         Identifier, IntrinsicOperation, IntrinsicType, LValue, TargetLiteral,
@@ -9070,12 +9070,8 @@ fn add_builtin_library(context: &mut Context) {
 }
 
 fn add_builtin_library_bootstrap(context: &mut Context) {
-    let (expression, remaining) =
-        crate::parsing::parse_block(BUILTIN_LIBRARY).expect("Failed to parse builtin library");
-    assert!(
-        remaining.trim().is_empty(),
-        "Parser did not consume entire builtin library"
-    );
+    let expression = crate::silk_parser::parse_block_with_bootstrap_wasm(BUILTIN_LIBRARY)
+        .expect("Failed to parse builtin library");
     context.bindings.push(HashMap::new());
     interpret_library_expression(expression, context).expect("Failed to interpret builtin library");
     alias_builtin_bindings(context);
@@ -11191,3 +11187,4 @@ fn uniquify_expression(expr: Expression, context: &Context) -> Expression {
     let scopes = ScopeStack::from_context(context);
     uniquify_expression_iter(expr, scopes, context)
 }
+

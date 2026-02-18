@@ -1,7 +1,7 @@
 use crate::{
     diagnostics::{Diagnostic, SourceSpan},
     intermediate::{IntermediateBinding, IntermediateKind, IntermediateType},
-    parsing::{ExpressionLiteral, Identifier},
+    syntax::{ExpressionLiteral, Identifier},
 };
 
 use super::encoder::{HeapType, MemArg, RefType, ValType};
@@ -808,3 +808,4 @@ pub(super) struct WasmExports {
     pub(super) functions: Vec<WasmFunctionExport>,
     pub(super) globals: Vec<WasmGlobalExport>,
 }
+

@@ -1,4 +1,4 @@
-use silk::parsing::{ExpressionKind, ExpressionLiteral};
+use silk::syntax::{ExpressionKind, ExpressionLiteral};
 use silk::test_support::evaluate_text_to_expression;
 
 fn evaluate_text_to_bool(program: &str) -> bool {
@@ -91,3 +91,4 @@ fn test_boolean_operator_chaining() {
     assert_eq!(evaluate_text_to_bool("true ^ true ^ true"), true);
     assert_eq!(evaluate_text_to_bool("true ^ false ^ false"), true);
 }
+

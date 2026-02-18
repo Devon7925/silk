@@ -9,7 +9,7 @@ use wasmtime::{Config, Engine, Instance, Memory, Module, Store};
 use crate::diagnostics::{Diagnostic, SourceSpan};
 use crate::interpret;
 use crate::loader;
-use crate::parsing::{BindingPattern, Expression, ExpressionKind, ExpressionLiteral, Identifier};
+use crate::syntax::{BindingPattern, Expression, ExpressionKind, ExpressionLiteral, Identifier};
 use crate::wasm;
 
 const VALUE_NUMBER: i32 = 0;
@@ -938,22 +938,12 @@ fn compile_silk_interpreter_wasm() -> Result<Vec<u8>, Diagnostic> {
     let source = fs::read_to_string(path)
         .map_err(|err| Diagnostic::new(format!("Failed to read {path}: {err}")))?;
 
-    let (ast, remaining) = crate::parsing::parse_block(&source)?;
-    ensure_no_trailing_input(
-        &source,
-        remaining,
-        "Unexpected trailing input while compiling the interpreter source",
-    )?;
+    let ast = crate::silk_parser::parse_block(&source)?;
 
     let types_path = "silk_src/types.silk";
     let types_source = fs::read_to_string(types_path)
         .map_err(|err| Diagnostic::new(format!("Failed to read {types_path}: {err}")))?;
-    let (types_ast, types_remaining) = crate::parsing::parse_block(&types_source)?;
-    ensure_no_trailing_input(
-        &types_source,
-        types_remaining,
-        "Unexpected trailing input while compiling the interpreter types source",
-    )?;
+    let types_ast = crate::silk_parser::parse_block(&types_source)?;
 
     let mut file_map = HashMap::new();
     file_map.insert(loader::normalize_path(path), ast.clone());
@@ -965,28 +955,6 @@ fn compile_silk_interpreter_wasm() -> Result<Vec<u8>, Diagnostic> {
     // This mirrors compile_silk_intermediate_wasm and avoids OnceLock recursion.
     let intermediate = crate::intermediate::context_to_intermediate(&program_context);
     wasm::compile_exports(&intermediate)
-}
-
-fn ensure_no_trailing_input(
-    source: &str,
-    remaining: &str,
-    message: &str,
-) -> Result<(), Diagnostic> {
-    let leftover = remaining.trim_start();
-    if leftover.is_empty() {
-        return Ok(());
-    }
-
-    let token_len = leftover
-        .chars()
-        .take_while(|ch| !ch.is_whitespace())
-        .map(|ch| ch.len_utf8())
-        .sum::<usize>()
-        .max(1);
-    let start = source.len().saturating_sub(leftover.len());
-    let span = SourceSpan::new(start, token_len);
-
-    Err(Diagnostic::new(message).with_span(span))
 }
 
 fn parse_error(source: &str, pos: i32) -> Diagnostic {
@@ -1130,3 +1098,4 @@ mod tests {
         ));
     }
 }
+

@@ -7,6 +7,7 @@ const decoder = new TextDecoder();
 const encoder = new TextEncoder();
 
 const WASM_CACHE_DIR = join(ROOT_DIR, "tmp", "wasm_cache");
+const BUILD_INPUT_PATHS = ["Cargo.toml", "Cargo.lock", "src", "silk_src"] as const;
 
 async function ensureWasmCacheDir() {
   await Deno.mkdir(WASM_CACHE_DIR, { recursive: true });
@@ -49,6 +50,43 @@ async function fileStat(path: string) {
   } catch {
     return null;
   }
+}
+
+async function newestPathMtimeMs(path: string): Promise<number> {
+  try {
+    const stat = await Deno.stat(path);
+    let latest = stat.mtime?.getTime() ?? 0;
+    if (stat.isDirectory) {
+      for await (const entry of Deno.readDir(path)) {
+        if (
+          entry.name === ".git" || entry.name === "target" ||
+          entry.name === "node_modules"
+        ) {
+          continue;
+        }
+        const childPath = join(path, entry.name);
+        const childLatest = await newestPathMtimeMs(childPath);
+        if (childLatest > latest) {
+          latest = childLatest;
+        }
+      }
+    }
+    return latest;
+  } catch {
+    return 0;
+  }
+}
+
+async function newestBuildInputMtimeMs() {
+  let latest = 0;
+  for (const relativePath of BUILD_INPUT_PATHS) {
+    const absolutePath = join(ROOT_DIR, relativePath);
+    const inputLatest = await newestPathMtimeMs(absolutePath);
+    if (inputLatest > latest) {
+      latest = inputLatest;
+    }
+  }
+  return latest;
 }
 
 type RunCommandOptions = {
@@ -121,15 +159,20 @@ async function ensureSilkBinary() {
       fileStat(releasePath),
       fileStat(debugPath),
     ]);
-    if (releaseStat && debugStat) {
-      const releaseTime = releaseStat.mtime?.getTime() ?? 0;
-      const debugTime = debugStat.mtime?.getTime() ?? 0;
+    const sourceMtime = await newestBuildInputMtimeMs();
+    const releaseTime = releaseStat?.mtime?.getTime() ?? 0;
+    const debugTime = debugStat?.mtime?.getTime() ?? 0;
+
+    const releaseFresh = !!releaseStat && releaseTime >= sourceMtime;
+    const debugFresh = !!debugStat && debugTime >= sourceMtime;
+
+    if (releaseFresh && debugFresh) {
       return debugTime > releaseTime ? debugPath : releasePath;
     }
-    if (debugStat) {
+    if (debugFresh) {
       return debugPath;
     }
-    if (releaseStat) {
+    if (releaseFresh) {
       return releasePath;
     }
 
@@ -146,6 +189,15 @@ async function ensureSilkBinary() {
       stderr: "piped",
     });
     if (buildDebug.code !== 0) {
+      if (releaseStat && debugStat) {
+        return debugTime > releaseTime ? debugPath : releasePath;
+      }
+      if (debugStat) {
+        return debugPath;
+      }
+      if (releaseStat) {
+        return releasePath;
+      }
       const combined = [
         buildRelease.stderr,
         buildRelease.stdout,

@@ -1,4 +1,4 @@
-use silk::parsing::{ExpressionKind, ExpressionLiteral};
+use silk::syntax::{ExpressionKind, ExpressionLiteral};
 use silk::test_support::evaluate_text_to_expression;
 
 #[test]
@@ -137,3 +137,4 @@ fn match_supports_literal_patterns_inside_enum_payloads() {
         other => panic!("Expected numeric literal, got {:?}", other),
     }
 }
+

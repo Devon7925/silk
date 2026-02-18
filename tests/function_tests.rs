@@ -1,4 +1,4 @@
-use silk::parsing::{ExpressionKind, ExpressionLiteral};
+use silk::syntax::{ExpressionKind, ExpressionLiteral};
 use silk::test_support::evaluate_text_to_expression;
 
 #[test]
@@ -68,3 +68,4 @@ fn return_exits_function_early() {
         other => panic!("Expected numeric literal, got {:?}", other),
     }
 }
+

@@ -1,4 +1,4 @@
-use silk::parsing::{ExpressionKind, ExpressionLiteral};
+use silk::syntax::{ExpressionKind, ExpressionLiteral};
 use silk::test_support::evaluate_text_to_expression;
 
 #[test]
@@ -22,3 +22,4 @@ fn array_indexing_with_mutable_update() {
         other => panic!("Expected array index expression, got {:?}", other),
     }
 }
+

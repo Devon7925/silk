@@ -6,7 +6,7 @@ use crate::{
         IntermediateExportType, IntermediateKind, IntermediateLValue, IntermediateResult,
         IntermediateType, IntermediateWrap,
     },
-    parsing::{BinaryIntrinsicOperator, BindingPattern, ExpressionLiteral, TargetLiteral},
+    syntax::{BinaryIntrinsicOperator, BindingPattern, ExpressionLiteral, TargetLiteral},
 };
 
 pub fn compile_exports(intermediate: &IntermediateResult) -> Result<String, Diagnostic> {
@@ -1161,3 +1161,4 @@ fn collect_bound_identifiers(expr: &IntermediateKind, ids: &mut HashSet<String>)
         _ => {}
     }
 }
+

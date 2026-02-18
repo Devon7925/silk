@@ -1,4 +1,4 @@
-use silk::parsing::{ExpressionKind, ExpressionLiteral};
+use silk::syntax::{ExpressionKind, ExpressionLiteral};
 use silk::test_support::evaluate_text_to_expression;
 
 fn evaluate_text_to_number(program: &str) -> i32 {
@@ -90,3 +90,4 @@ fn if_requires_branch_type_compatibility_for_unit_and_scalar() {
         "if branches with unit/scalar mismatch should be rejected",
     );
 }
+

@@ -1,5 +1,5 @@
 use silk::parse_block;
-use silk::parsing::{Expression, ExpressionKind, ExpressionLiteral};
+use silk::syntax::{Expression, ExpressionKind, ExpressionLiteral};
 use silk::test_support::{Context, interpret_program, intrinsic_context};
 
 fn evaluate_text_to_simplified_expression(
@@ -226,3 +226,4 @@ fn with_is_not_reserved_keyword() {
 
     assert_final_number(result, 5);
 }
+
