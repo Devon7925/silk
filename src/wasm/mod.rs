@@ -2203,6 +2203,24 @@ fn collect_boxed_store_leaves(
     Ok(results)
 }
 
+fn ensure_boxed_store_leaf_fields(
+    store_fields: Vec<(IntermediateKind, WasmType, i32)>,
+) -> Result<Vec<(IntermediateKind, WasmType, i32)>, Diagnostic> {
+    let mut flattened = Vec::new();
+    for (field_expr, field_type, field_offset) in store_fields {
+        if matches!(field_type, WasmType::U8 | WasmType::I32 | WasmType::Box { .. }) {
+            flattened.push((field_expr, field_type, field_offset));
+        } else {
+            flattened.extend(collect_boxed_store_leaves(
+                &field_expr,
+                &field_type,
+                field_offset,
+            )?);
+        }
+    }
+    Ok(flattened)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_expression(
     expr: &IntermediateKind,
@@ -2573,10 +2591,12 @@ fn emit_expression(
                                             )
                                             .with_span(SourceSpan::default())
                                         })?;
-                                        let store_fields = collect_boxed_store_leaves(
-                                            value.as_ref(),
-                                            &field_type,
-                                            field_offset,
+                                        let store_fields = ensure_boxed_store_leaf_fields(
+                                            collect_boxed_store_leaves(
+                                                value.as_ref(),
+                                                &field_type,
+                                                field_offset,
+                                            )?,
                                         )?;
                                         tasks.push(EmitTask::Eval(full_target_expr));
                                         for (field_expr, field_type, field_offset) in
@@ -2697,10 +2717,12 @@ fn emit_expression(
                                             )
                                             .with_span(SourceSpan::default())
                                         })?;
-                                        let store_fields = collect_boxed_store_leaves(
-                                            value.as_ref(),
-                                            &field_type,
-                                            offset,
+                                        let store_fields = ensure_boxed_store_leaf_fields(
+                                            collect_boxed_store_leaves(
+                                                value.as_ref(),
+                                                &field_type,
+                                                offset,
+                                            )?,
                                         )?;
                                         tasks.push(EmitTask::Eval(full_target_expr));
                                         for (field_expr, field_type, field_offset) in
@@ -2719,13 +2741,9 @@ fn emit_expression(
                                                         memory_index,
                                                     ))
                                                 }
-                                                _ => {
-                                                    return Err(Diagnostic::new(
-                                                        "Boxed struct assignment only supports i32 or u8 fields"
-                                                            .to_string(),
-                                                    )
-                                                    .with_span(SourceSpan::default()));
-                                                }
+                                                _ => unreachable!(
+                                                    "ensure_boxed_store_leaf_fields should emit only leaf field types"
+                                                ),
                                             };
                                             tasks.push(EmitTask::Instr(field_store));
                                             tasks.push(EmitTask::EvalWithType {
@@ -2816,10 +2834,12 @@ fn emit_expression(
                                             )
                                             .with_span(SourceSpan::default())
                                         })?;
-                                        let store_fields = collect_boxed_store_leaves(
-                                            value.as_ref(),
-                                            &field_type,
-                                            field_offset,
+                                        let store_fields = ensure_boxed_store_leaf_fields(
+                                            collect_boxed_store_leaves(
+                                                value.as_ref(),
+                                                &field_type,
+                                                field_offset,
+                                            )?,
                                         )?;
                                         tasks.push(EmitTask::Eval(full_target_expr));
                                         for (field_expr, field_type, field_offset) in
@@ -2838,13 +2858,9 @@ fn emit_expression(
                                                         memory_index,
                                                     ))
                                                 }
-                                                _ => {
-                                                    return Err(Diagnostic::new(
-                                                        "Boxed array assignment only supports i32 or u8 fields"
-                                                            .to_string(),
-                                                    )
-                                                    .with_span(SourceSpan::default()));
-                                                }
+                                                _ => unreachable!(
+                                                    "ensure_boxed_store_leaf_fields should emit only leaf field types"
+                                                ),
                                             };
                                             tasks.push(EmitTask::Instr(field_store));
                                             tasks.push(EmitTask::EvalWithType {
@@ -3021,8 +3037,13 @@ fn emit_expression(
                                     )
                                     .with_span(SourceSpan::default())
                                 })?;
-                                let store_fields =
-                                    collect_boxed_store_leaves(value.as_ref(), &element_type, 0)?;
+                                let store_fields = ensure_boxed_store_leaf_fields(
+                                    collect_boxed_store_leaves(
+                                        value.as_ref(),
+                                        &element_type,
+                                        0,
+                                    )?,
+                                )?;
                                 tasks.push(EmitTask::Eval(full_target_expr));
                                 for (field_expr, field_type, field_offset) in
                                     store_fields.into_iter().rev()
@@ -3034,13 +3055,9 @@ fn emit_expression(
                                         WasmType::I32 | WasmType::Box { .. } => {
                                             Instruction::I32Store(memarg(0, 2, memory_index))
                                         }
-                                        _ => {
-                                            return Err(Diagnostic::new(
-                                                "Boxed struct array assignment only supports i32 or u8 fields"
-                                                    .to_string(),
-                                            )
-                                            .with_span(SourceSpan::default()));
-                                        }
+                                        _ => unreachable!(
+                                            "ensure_boxed_store_leaf_fields should emit only leaf field types"
+                                        ),
                                     };
                                     tasks.push(EmitTask::Instr(field_store));
                                     tasks.push(EmitTask::EvalWithType {

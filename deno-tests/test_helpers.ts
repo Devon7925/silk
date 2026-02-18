@@ -42,6 +42,15 @@ async function fileExists(path: string) {
   }
 }
 
+async function fileStat(path: string) {
+  try {
+    const stat = await Deno.stat(path);
+    return stat.isFile ? stat : null;
+  } catch {
+    return null;
+  }
+}
+
 type RunCommandOptions = {
   cwd?: string;
   stdout?: "null" | "piped";
@@ -108,13 +117,20 @@ async function ensureSilkBinary() {
     const exeName = Deno.build.os === "windows" ? "silk.exe" : "silk";
     const releasePath = join(ROOT_DIR, "target", "release", exeName);
     const debugPath = join(ROOT_DIR, "target", "debug", exeName);
-    try {
-      const stat = await Deno.stat(releasePath);
-      if (stat.isFile) {
-        return releasePath;
-      }
-    } catch {
-      // Build below.
+    const [releaseStat, debugStat] = await Promise.all([
+      fileStat(releasePath),
+      fileStat(debugPath),
+    ]);
+    if (releaseStat && debugStat) {
+      const releaseTime = releaseStat.mtime?.getTime() ?? 0;
+      const debugTime = debugStat.mtime?.getTime() ?? 0;
+      return debugTime > releaseTime ? debugPath : releasePath;
+    }
+    if (debugStat) {
+      return debugPath;
+    }
+    if (releaseStat) {
+      return releasePath;
     }
 
     const buildRelease = await runCommand("cargo", ["build", "--release", "--quiet"], {
